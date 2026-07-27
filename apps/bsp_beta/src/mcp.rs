@@ -142,6 +142,8 @@ struct RuntimeTools<'a> {
     loop_state: &'a mut AppLoopState,
     map: McpMap,
     capture_sequence: u64,
+    /// Phase 07: Active evidence request key (if pending).
+    evidence_key: Option<renderer::api::bsp::BspEvidenceRequestKey>,
 }
 
 impl ToolBackend for RuntimeTools<'_> {
@@ -244,6 +246,63 @@ impl ToolBackend for RuntimeTools<'_> {
     fn point_contents(&mut self, point: Vec3) -> Result<Value, String> {
         Ok(self.map.point_contents(point))
     }
+
+    /// Phase 07: Request a BSP stats evidence report.
+    fn stats(&mut self, all_visible: bool) -> Result<Value, String> {
+        use renderer::api::bsp::BspEvidenceVisibility;
+
+        let visibility = if all_visible {
+            BspEvidenceVisibility::AllVisible
+        } else {
+            BspEvidenceVisibility::NormalPvs
+        };
+
+        let corpus = self.map.info(self.loop_state.camera.get_position())
+            .get("faces")
+            .and_then(|v| v.as_u64())
+            .map(|f| format!("mcp-bsp-{f}-faces"))
+            .unwrap_or_else(|| "mcp-bsp-unknown".to_string());
+
+        let key = self.renderer
+            .request_bsp_frame_evidence(corpus, "mcp-stats".to_string(), visibility)
+            .map_err(|e| format!("evidence request failed: {e}"))?;
+        self.evidence_key = Some(key);
+
+        // Render frames until evidence is ready
+        for _ in 0..CAPTURE_POLL_FRAMES {
+            render_app_frame(
+                self.renderer,
+                self.scene,
+                self.loop_state,
+                CAPTURE_WIDTH,
+                CAPTURE_HEIGHT,
+                true,
+            )
+            .map_err(|error| format!("render stats frame: {error}"))?;
+
+            match self.renderer.take_bsp_frame_evidence(key) {
+                renderer::api::bsp::BspEvidenceStatus::Sealed(report) => {
+                    self.evidence_key = None;
+                    return Ok(serde_json::to_value(&report)
+                        .map_err(|e| format!("serialize report: {e}"))?);
+                }
+                renderer::api::bsp::BspEvidenceStatus::RejectedNoMount => {
+                    self.evidence_key = None;
+                    return Err("no active BSP mount".to_string());
+                }
+                renderer::api::bsp::BspEvidenceStatus::MissingReport => {
+                    self.evidence_key = None;
+                    return Err("evidence report missing".to_string());
+                }
+                renderer::api::bsp::BspEvidenceStatus::Pending => {
+                    // Continue polling
+                }
+            }
+        }
+
+        self.evidence_key = None;
+        Err(format!("stats report not ready after {CAPTURE_POLL_FRAMES} frames"))
+    }
 }
 
 /// Serve MCP requests until stdin reaches EOF.
@@ -261,6 +320,7 @@ pub(super) fn serve(
         loop_state,
         map,
         capture_sequence: 0,
+        evidence_key: None,
     };
     serve_io(stdin.lock(), stdout.lock(), &mut tools)
 }
@@ -270,6 +330,8 @@ trait ToolBackend {
     fn capture(&mut self, path: Option<PathBuf>) -> Result<Value, String>;
     fn get_info(&mut self) -> Result<Value, String>;
     fn point_contents(&mut self, point: Vec3) -> Result<Value, String>;
+    /// Phase 07: Request a BSP draw evidence report.
+    fn stats(&mut self, all_visible: bool) -> Result<Value, String>;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -495,6 +557,15 @@ fn call_tool(params: Option<&Value>, backend: &mut impl ToolBackend) -> Result<V
                 finite_f32("z", raw.z)?,
             ))
         }
+        "stats" => {
+            #[derive(Deserialize, Default)]
+            #[serde(default)]
+            struct StatsParams {
+                all_visible: bool,
+            }
+            let params: StatsParams = decode_arguments(arguments)?;
+            backend.stats(params.all_visible)
+        }
         _ => Err(format!("unknown tool: {name}")),
     };
 
@@ -594,6 +665,17 @@ fn tool_descriptors() -> Vec<Value> {
                 "additionalProperties": false,
             },
         }),
+        json!({
+            "name": "stats",
+            "description": "Request a bounded post-command evidence report for BSP static-world draws (batch count, draw call count, triangle count, material count, atlas bytes, frame time).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "all_visible": { "type": "boolean", "description": "Use all-visible visibility mode (default: false, normal PVS)." },
+                },
+                "additionalProperties": false,
+            },
+        }),
     ]
 }
 
@@ -652,6 +734,10 @@ mod tests {
         fn point_contents(&mut self, point: Vec3) -> Result<Value, String> {
             Ok(json!({ "solid": point.x < 0.0, "leaf": 2 }))
         }
+
+        fn stats(&mut self, _all_visible: bool) -> Result<Value, String> {
+            Ok(json!({ "batch_count": 10, "draw_call_count": 10 }))
+        }
     }
 
     fn run(input: &str, tools: &mut FakeTools) -> Vec<Value> {
@@ -686,7 +772,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             names,
-            ["set_camera", "capture", "get_info", "point_contents"]
+            ["set_camera", "capture", "get_info", "point_contents", "stats"]
         );
     }
 

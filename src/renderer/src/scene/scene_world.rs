@@ -179,6 +179,13 @@ pub struct SceneWorld {
     /// the mount through every ownership transition.
     #[cfg(feature = "bsp")]
     pub(crate) bsp_mount: Option<crate::api::bsp::PublishedBspMount>,
+    /// Phase 07: Pending evidence request data for the next submission build.
+    /// Stored as (corpus_identity, request_identity, visibility).
+    #[cfg(feature = "bsp")]
+    pub(crate) pending_evidence_data: Option<(String, String, crate::api::bsp::BspEvidenceVisibility)>,
+    /// Phase 07: Frame number for the pending evidence request.
+    #[cfg(feature = "bsp")]
+    pub(crate) pending_evidence_frame: u32,
 }
 
 impl Default for SceneWorld {
@@ -205,6 +212,10 @@ impl SceneWorld {
             enable_frustum_culling: true,
             #[cfg(feature = "bsp")]
             bsp_mount: None,
+            #[cfg(feature = "bsp")]
+            pending_evidence_data: None,
+            #[cfg(feature = "bsp")]
+            pending_evidence_frame: 0,
         }
     }
 
@@ -684,7 +695,16 @@ impl SceneWorld {
 
         #[cfg(feature = "bsp")]
         if let Some(ref mount) = self.bsp_mount {
-            self.collect_bsp_draw_items_from_mount(mount, &mut submission, frustum.as_ref());
+            let evidence_active = self.evidence_active();
+            let all_visible = evidence_active && self.pending_evidence_data.as_ref()
+                .map(|(_, _, vis)| matches!(vis, crate::api::bsp::BspEvidenceVisibility::AllVisible))
+                .unwrap_or(false);
+            self.collect_bsp_draw_items_from_mount(mount, &mut submission, frustum.as_ref(), evidence_active, all_visible);
+        }
+        // Phase 07: Clear the pending evidence request after submission build.
+        #[cfg(feature = "bsp")]
+        {
+            self.pending_evidence_data = None;
         }
 
         let Some(root_id) = self.root else {
@@ -709,11 +729,16 @@ impl SceneWorld {
         mount: &crate::api::bsp::PublishedBspMount,
         submission: &mut RenderSubmission,
         frustum: Option<&Frustum>,
+        evidence_active: bool,
+        all_visible: bool,
     ) {
         use crate::scene::bsp_visibility::{
             classify_bsp_visibility, mounted_visibility_decision, VisibilityDecision,
         };
-        use crate::scene::render_submission::BspSubmissionFailure;
+        use crate::scene::render_submission::{
+            BspBatchSemanticIdentity, BspEvidenceCollector, BspSubmissionFailure,
+        };
+        use crate::api::bsp::BspCanonicalDigest;
 
         let state = &mount.state;
         let diagnostics = classify_bsp_visibility(&state.mounted_batches, state);
@@ -728,18 +753,94 @@ impl SceneWorld {
             diagnostics.invalid_membership,
         );
 
+        // Phase 07: Populate evidence collector if a request is pending.
+        if evidence_active {
+            let (corpus, req_id, visibility) = self.pending_evidence_data.as_ref().unwrap();
+            let arena_id = mount.state.arena_id;
+            let request = crate::api::bsp::BspEvidenceRequest {
+                corpus_identity: corpus.clone(),
+                request_identity: req_id.clone(),
+                visibility: *visibility,
+                key: crate::api::bsp::BspEvidenceRequestKey(0),
+            };
+            let mut collector = BspEvidenceCollector::new(&request, arena_id, self.pending_evidence_frame);
+
+            // Derive atlas bytes from upload demand.
+            collector.atlas_bytes = mount.state.mounted_batches.first()
+                .map(|_| 0u64)
+                .unwrap_or(0);
+
+            // Populate neutral identities from canonical mounted batches.
+            for (batch_index, mounted) in state.mounted_batches.iter().enumerate() {
+                let batch = &mounted.render;
+                let key = &batch.key;
+                let digest = BspCanonicalDigest::compute(
+                    key.render_class,
+                    key.material_identity,
+                    key.lightmap_page,
+                    &key.style_ids,
+                    key.model_index,
+                    &batch.face_indices,
+                );
+                let identity = BspBatchSemanticIdentity {
+                    batch_index,
+                    canonical_digest: digest.0,
+                    face_count: batch.face_indices.len() as u32,
+                    source_faces: batch.face_indices.clone(),
+                    model_index: key.model_index,
+                    is_static: key.model_index == 0 && !batch.is_inline_model,
+                };
+                if identity.is_static {
+                    collector.neutral_identities.push(identity.clone());
+                    collector.mounted_identities.push(identity);
+                } else {
+                    collector.inline_batch_count += 1;
+                    collector.inline_face_count += batch.face_indices.len() as u32;
+                }
+            }
+
+            collector.pvs_eligible = diagnostics.pvs_eligible;
+            collector.pvs_culled = diagnostics.pvs_culled;
+
+            *submission.bsp_evidence_collector.borrow_mut() = Some(collector);
+        }
+
         for (batch_index, mounted) in state.mounted_batches.iter().enumerate() {
+            let batch = &mounted.render;
+            let model_index = mounted.render.model_index;
+            let is_static = model_index == 0 && !batch.is_inline_model;
+
+            // Compute canonical digest for this batch (needed for evidence and identity).
+            let canonical_digest = BspCanonicalDigest::compute(
+                batch.key.render_class,
+                batch.key.material_identity,
+                batch.key.lightmap_page,
+                &batch.key.style_ids,
+                batch.key.model_index,
+                &batch.face_indices,
+            );
+
             // --- PVS Classification ---
-            let pvs_decision = mounted_visibility_decision(mounted, state);
+            let pvs_decision = if all_visible && is_static {
+                // All-visible override: treat static PVS-eligible batches as visible.
+                VisibilityDecision::Visible
+            } else {
+                mounted_visibility_decision(mounted, state)
+            };
+
             match pvs_decision {
                 VisibilityDecision::PvsCulled => {
+                    if evidence_active && is_static {
+                        if let Some(ref mut collector) = *submission.bsp_evidence_collector.borrow_mut() {
+                            collector.cull_decisions.push((batch_index, crate::scene::render_submission::BspCullReason::PvsCulled));
+                        }
+                    }
                     continue;
                 }
                 VisibilityDecision::Visible => {}
             }
 
             // --- Inline model frustum cull ---
-            let batch = &mounted.render;
             let batch_transform = if batch.is_inline_model {
                 state
                     .inline_model_transforms
@@ -774,7 +875,6 @@ impl SceneWorld {
                 .copied()
                 .unwrap_or(0);
             let source_face_count = mounted.render.face_indices.len() as u32;
-            let model_index = mounted.render.model_index;
 
             // Mesh slot zero is the explicit no-mesh sentinel. BSP material
             // slot zero is cache-issued for the first real material and must
@@ -794,21 +894,42 @@ impl SceneWorld {
                 if submission.bsp_failure.is_none() {
                     submission.bsp_failure = Some(failure);
                 }
+                // Evidence: record failure for static batches.
+                if evidence_active && is_static {
+                    if let Some(ref mut collector) = *submission.bsp_evidence_collector.borrow_mut() {
+                        collector.failures.push(crate::api::bsp::BspEvidenceFailure::MissingDescriptor { batch_index });
+                    }
+                }
                 continue;
             }
 
-            submission
-                .bsp_draw_items
-                .push(crate::scene::render_submission::BspFrameDrawItem {
-                    mesh_id,
-                    bsp_material_id,
-                    transform: batch_transform,
-                    batch_index,
-                    source_face_first,
-                    source_face_count,
-                    pipeline_class: None,
-                    model_index,
-                });
+            let item = crate::scene::render_submission::BspFrameDrawItem {
+                mesh_id,
+                bsp_material_id,
+                transform: batch_transform,
+                batch_index,
+                source_face_first,
+                source_face_count,
+                pipeline_class: None,
+                model_index,
+                canonical_digest: canonical_digest.0,
+            };
+
+            // Evidence: record submitted identity.
+            if evidence_active && is_static {
+                if let Some(ref mut collector) = *submission.bsp_evidence_collector.borrow_mut() {
+                    collector.submitted_identities.push(BspBatchSemanticIdentity {
+                        batch_index,
+                        canonical_digest: canonical_digest.0,
+                        face_count: source_face_count,
+                        source_faces: mounted.render.face_indices.clone(),
+                        model_index,
+                        is_static: true,
+                    });
+                }
+            }
+
+            submission.bsp_draw_items.push(item);
             submission.culling_stats.submitted_draw_items += 1;
         }
     }
@@ -1432,6 +1553,28 @@ impl SceneWorld {
     #[cfg(feature = "bsp")]
     pub(crate) fn has_bsp_mount(&self) -> bool {
         self.bsp_mount.is_some()
+    }
+
+    /// Phase 07: Store a pending evidence request for population during the next
+    /// [`build_submission`] call.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn set_bsp_evidence_request(
+        &mut self,
+        corpus_identity: String,
+        request_identity: String,
+        visibility: crate::api::bsp::BspEvidenceVisibility,
+        frame_number: u32,
+    ) {
+        self.pending_evidence_data = Some((corpus_identity, request_identity, visibility));
+        self.pending_evidence_frame = frame_number;
+    }
+
+    /// Returns true if there's active evidence data (non-empty corpus).
+    #[cfg(feature = "bsp")]
+    fn evidence_active(&self) -> bool {
+        self.pending_evidence_data.as_ref()
+            .map(|(corpus, _, _)| !corpus.is_empty())
+            .unwrap_or(false)
     }
 
     /// Update BSP PVS for the current camera position.

@@ -1636,7 +1636,7 @@ unsafe fn record_geometry_draw_sequence_impl(
     #[cfg(feature = "bsp")]
     if !submission.bsp_draw_items.is_empty() {
         update_bsp_frame_values_for_slot(data_cache, frame_index, submission.bsp_frame_values)?;
-        record_bsp_opaque_draw_sequence_impl(
+        let opaque_result = record_bsp_opaque_draw_sequence_impl(
             device,
             vulkan_cache,
             data_cache,
@@ -1646,7 +1646,33 @@ unsafe fn record_geometry_draw_sequence_impl(
             &submission.bsp_draw_items,
             frame_index,
             bsp_command_diags,
-        )?;
+        );
+        // Phase 07: Record evidence outcomes for opaque draws.
+        if let Ok(mut collector_opt) = submission.bsp_evidence_collector.try_borrow_mut() {
+            if let Some(ref mut collector) = *collector_opt {
+                match &opaque_result {
+                    Ok(()) => {
+                        for item in &submission.bsp_draw_items {
+                            if item.model_index == 0 {
+                                use crate::scene::render_submission::BspRecordedOutcome;
+                                collector.recorded_outcomes.push(BspRecordedOutcome::Recorded {
+                                    batch_index: item.batch_index,
+                                    digest: item.canonical_digest,
+                                });
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        use crate::api::bsp::BspEvidenceFailure;
+                        collector.failures.push(BspEvidenceFailure::RecordingFailure {
+                            batch_index: 0,
+                            reason: e.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        opaque_result?;
     }
 
     #[cfg(feature = "bsp")]
@@ -1655,18 +1681,33 @@ unsafe fn record_geometry_draw_sequence_impl(
     let mut transparent_draws = collect_transparent_draws(&draw_lists);
     sort_transparent_draws(&mut transparent_draws, scene_data.cam_pos);
     #[cfg(feature = "bsp")]
-    record_transparent_draw_sequence_impl(
-        device,
-        vulkan_cache,
-        data_cache,
-        scene_desc,
-        cmd_buffer,
-        next_submit_serial,
-        frame_index,
-        default_joint_desc,
-        &transparent_draws,
-        bsp_command_diags,
-    )?;
+    {
+        let transparent_result = record_transparent_draw_sequence_impl(
+            device,
+            vulkan_cache,
+            data_cache,
+            scene_desc,
+            cmd_buffer,
+            next_submit_serial,
+            frame_index,
+            default_joint_desc,
+            &transparent_draws,
+            bsp_command_diags,
+        );
+        // Phase 07: Record failure for transparent draws if needed.
+        if let Err(ref e) = &transparent_result {
+            if let Ok(mut collector_opt) = submission.bsp_evidence_collector.try_borrow_mut() {
+                if let Some(ref mut collector) = *collector_opt {
+                    use crate::api::bsp::BspEvidenceFailure;
+                    collector.failures.push(BspEvidenceFailure::RecordingFailure {
+                        batch_index: 0,
+                        reason: e.clone(),
+                    });
+                }
+            }
+        }
+        transparent_result?;
+    }
     #[cfg(not(feature = "bsp"))]
     record_transparent_draw_sequence_impl_non_bsp(
         device,
@@ -1676,6 +1717,16 @@ unsafe fn record_geometry_draw_sequence_impl(
         default_joint_desc,
         &transparent_draws,
     );
+
+    // Phase 07: Seal evidence in the collector (mark as recorded-complete).
+    #[cfg(feature = "bsp")]
+    {
+        if let Ok(mut collector_opt) = submission.bsp_evidence_collector.try_borrow_mut() {
+            if let Some(ref mut collector) = *collector_opt {
+                collector.frame_time_ms = 0.0; // populated at final seal time
+            }
+        }
+    }
 
     device.cmd_end_rendering(cmd_buffer);
     Ok(())

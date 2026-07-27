@@ -36,6 +36,12 @@ pub struct CliArgs {
     pub import_mode: Option<ImportMode>,
     /// Companion textures directory for PBR discovery.
     pub textures_dir: Option<PathBuf>,
+    /// Phase 07: Request a stats evidence report after mount (headless mode).
+    pub stats: bool,
+    /// Phase 07: Use all-visible visibility for evidence (valid only with --stats).
+    pub all_visible: bool,
+    /// Phase 07: Corpus identity for evidence report.
+    pub corpus_identity: Option<String>,
 }
 
 /// Import mode for CLI — mutually exclusive --strict and --development.
@@ -147,6 +153,9 @@ impl Default for CliArgs {
             wad_path: None,
             import_mode: None,
             textures_dir: None,
+            stats: false,
+            all_visible: false,
+            corpus_identity: None,
         }
     }
 }
@@ -229,6 +238,19 @@ pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<C
                 opts.textures_dir = Some(PathBuf::from(value));
                 i += 2;
             }
+            "--stats" => {
+                opts.stats = true;
+                i += 1;
+            }
+            "--all-visible" => {
+                opts.all_visible = true;
+                i += 1;
+            }
+            "--corpus" => {
+                let value = next_value(&args, i, "--corpus")?;
+                opts.corpus_identity = Some(value.to_string());
+                i += 2;
+            }
             other => return Err(CliError::UnknownArgument(other.to_string())),
         }
     }
@@ -273,6 +295,9 @@ fn print_usage() {
     eprintln!("  --lit <path>           Path to .lit colored-light companion file");
     eprintln!("  --wad <path>           Path to WAD file for texture resolution");
     eprintln!("  --textures <dir>       Textures directory for PBR companion discovery");
+    eprintln!("  --stats                Print draw evidence report after mount (headless)");
+    eprintln!("  --all-visible          Use all-visible evidence mode (with --stats)");
+    eprintln!("  --corpus <name>        Corpus identity for evidence report");
     eprintln!();
 }
 

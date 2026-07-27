@@ -307,3 +307,96 @@ fn bsp_lifecycle_tests_exist() {
     // The #[ignore] GPU tests above are the actual lifecycle validation.
     assert!(true);
 }
+
+// ── Phase 07: Evidence lifecycle compile-time tests ─────────────────
+
+#[cfg(feature = "bsp")]
+#[test]
+fn evidence_request_lifecycle_rejects_duplicate() {
+    // Test that requesting a second evidence before the first completes returns an error.
+    // This is a compile-time smoke test; full lifecycle requires GPU.
+    use renderer::api::bsp::BspEvidenceVisibility;
+    let config = RendererConfig {
+        app_name: "evidence-lifecycle-test".to_string(),
+        headless: true,
+        preload_startup_scene: false,
+        ..RendererConfig::default()
+    };
+    let mut renderer = match Renderer::new_headless(config) {
+        Ok(r) => r,
+        Err(_) => {
+            eprintln!("Skipping evidence lifecycle test — no Vulkan device");
+            return;
+        }
+    };
+
+    let key1 = renderer
+        .request_bsp_frame_evidence(
+            "corpus".into(),
+            "req1".into(),
+            BspEvidenceVisibility::NormalPvs,
+        )
+        .expect("first evidence request");
+
+    let err = renderer
+        .request_bsp_frame_evidence(
+            "corpus2".into(),
+            "req2".into(),
+            BspEvidenceVisibility::NormalPvs,
+        )
+        .expect_err("duplicate request must be rejected");
+
+    assert!(
+        err.to_string().contains("already pending"),
+        "expected 'already pending' error, got: {err}"
+    );
+
+    // Taking with wrong key returns MissingReport.
+    let status = renderer.take_bsp_frame_evidence(renderer::api::bsp::BspEvidenceRequestKey(999));
+    assert!(matches!(status, renderer::api::bsp::BspEvidenceStatus::MissingReport));
+
+    // Take the real key — if we haven't rendered, it should be Pending or MissingReport.
+    let _ = renderer.take_bsp_frame_evidence(key1);
+}
+
+#[cfg(feature = "bsp")]
+#[test]
+fn evidence_take_without_mount_returns_rejected() {
+    use renderer::api::bsp::BspEvidenceVisibility;
+    let config = RendererConfig {
+        app_name: "evidence-no-mount-test".to_string(),
+        headless: true,
+        preload_startup_scene: false,
+        ..RendererConfig::default()
+    };
+    let mut renderer = match Renderer::new_headless(config) {
+        Ok(r) => r,
+        Err(_) => {
+            eprintln!("Skipping evidence no-mount test — no Vulkan device");
+            return;
+        }
+    };
+
+    let key = renderer
+        .request_bsp_frame_evidence(
+            "corpus".into(),
+            "req".into(),
+            BspEvidenceVisibility::NormalPvs,
+        )
+        .expect("evidence request");
+
+    // Render one frame without BSP mount — should produce RejectedNoMount.
+    let mut scene = Scene::new();
+    let _ = renderer.render_scene_headless(&mut scene);
+
+    let status = renderer.take_bsp_frame_evidence(key);
+    match status {
+        renderer::api::bsp::BspEvidenceStatus::RejectedNoMount => {}
+        renderer::api::bsp::BspEvidenceStatus::Sealed(report) => {
+            assert!(!report.eligible, "report without mount should not be eligible");
+        }
+        other => {
+            panic!("expected RejectedNoMount or Sealed(ineligible), got: {other:?}");
+        }
+    }
+}

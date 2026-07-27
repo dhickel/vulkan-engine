@@ -80,6 +80,10 @@ use crate::rendergraph::RenderGraph;
 use crate::scene::debug_scenarios;
 use crate::scene::render_submission::RenderSubmission;
 use crate::scene::scene_world::SceneWorld;
+#[cfg(feature = "bsp")]
+use crate::api::bsp::{
+    BspEvidenceRequest, BspEvidenceRequestKey, BspEvidenceStatus,
+};
 use crate::vulkan::vk_debug::{discard_frame_capture, finalize_frame_capture, PendingFrameCapture};
 use crate::vulkan::vk_descriptor::*;
 #[cfg(feature = "csm")]
@@ -183,6 +187,18 @@ pub struct VkRenderCore {
     /// awaiting GPU fence completion.
     #[cfg(feature = "bsp")]
     pub(crate) bsp_retirement_queue: GpuRetirementQueue<crate::data::retirement::BspRetirementClosure>,
+    /// Phase 07: Pending BSP evidence request (set before submission build, consumed during recording).
+    #[cfg(feature = "bsp")]
+    pub(crate) bsp_evidence_request: Option<(BspEvidenceRequestKey, BspEvidenceRequest)>,
+    /// Phase 07: Sealed BSP evidence report (populated after geometry recording).
+    #[cfg(feature = "bsp")]
+    pub(crate) bsp_evidence_report: Option<(BspEvidenceRequestKey, BspEvidenceStatus)>,
+    /// Phase 07: Frame number that fulfilled the evidence request.
+    #[cfg(feature = "bsp")]
+    pub(crate) bsp_evidence_frame_number: u32,
+    /// Phase 07: Monotonic request key counter.
+    #[cfg(feature = "bsp")]
+    pub(crate) bsp_evidence_next_key: u64,
     pub(crate) gpu_timing: GpuTimingState,
     frame_timing_snapshot: DebugTimingSnapshot,
     pub(crate) due_frame_captures: Vec<DueFrameCapture>,
@@ -1486,6 +1502,14 @@ impl VkRenderCore {
             bounds_retirement_queue: GpuRetirementQueue::new(),
             #[cfg(feature = "bsp")]
             bsp_retirement_queue: GpuRetirementQueue::new(),
+            #[cfg(feature = "bsp")]
+            bsp_evidence_request: None,
+            #[cfg(feature = "bsp")]
+            bsp_evidence_report: None,
+            #[cfg(feature = "bsp")]
+            bsp_evidence_frame_number: 0,
+            #[cfg(feature = "bsp")]
+            bsp_evidence_next_key: 1,
             gpu_timing,
             frame_timing_snapshot: DebugTimingSnapshot::default(),
             due_frame_captures: Vec::new(),
@@ -1693,6 +1717,14 @@ impl VkRenderCore {
             bounds_retirement_queue: GpuRetirementQueue::new(),
             #[cfg(feature = "bsp")]
             bsp_retirement_queue: GpuRetirementQueue::new(),
+            #[cfg(feature = "bsp")]
+            bsp_evidence_request: None,
+            #[cfg(feature = "bsp")]
+            bsp_evidence_report: None,
+            #[cfg(feature = "bsp")]
+            bsp_evidence_frame_number: 0,
+            #[cfg(feature = "bsp")]
+            bsp_evidence_next_key: 1,
             gpu_timing,
             frame_timing_snapshot: DebugTimingSnapshot::default(),
             due_frame_captures: Vec::new(),

@@ -1784,9 +1784,362 @@ pub struct BspUploadRequest {
     pub _resource_bytes: Vec<u8>,
 }
 
+// ── Phase 07: Runtime Draw Evidence ─────────────────────────────────────
+
+/// Opaque identity for a single evidence request, returned by
+/// [`Renderer::request_bsp_frame_evidence`].
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BspEvidenceRequestKey(pub u64);
+
+/// Request for a single bounded evidence report.
+///
+/// Carries caller-supplied semantic identity and visibility mode.
+/// The renderer assigns a request key and frame number at collection time.
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone)]
+pub struct BspEvidenceRequest {
+    /// Caller-supplied semantic corpus identity (e.g., map name).
+    pub corpus_identity: String,
+    /// Caller-supplied opaque request identity for correlation.
+    pub request_identity: String,
+    /// Visibility mode for this request.
+    pub visibility: BspEvidenceVisibility,
+    /// Opaque key assigned by the renderer.
+    pub(crate) key: BspEvidenceRequestKey,
+}
+
+/// In-flight BSP evidence collector, carried from submission to recording.
+/// Re-exported from render_submission for internal use.
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone)]
+pub struct BspEvidenceCollector(pub(crate) crate::scene::render_submission::BspEvidenceCollector);
+
+#[cfg(feature = "bsp")]
+impl BspEvidenceCollector {
+    /// Seal the inner collector into a report.
+    pub fn seal(self) -> BspFrameEvidence {
+        self.0.seal()
+    }
+}
+
+/// Visibility mode for an evidence request.
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum BspEvidenceVisibility {
+    /// Normal PVS culling as configured on the mount.
+    NormalPvs,
+    /// All PVS-eligible static batches are treated as visible for this request
+    /// only. Does not alter the mount's production PVS state.
+    AllVisible,
+}
+
+/// A canonical digest over immutable batch identity fields.
+///
+/// Encoding order (big-endian, tag-prefixed):
+///   domain tag: [0xB5, 0x50] ("BSP0" truncated)
+///   version: 1u8
+///   render_class: u8
+///   material_identity: u64 LE
+///   lightmap_page: u32 LE
+///   style_ids: [u8; 4]
+///   model_index: u32 LE
+///   face_count: u32 LE
+///   source_face_indices: [u32 LE; face_count]
+#[cfg(feature = "bsp")]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct BspCanonicalDigest(pub u64);
+
+#[cfg(feature = "bsp")]
+impl std::fmt::Display for BspCanonicalDigest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
+}
+
+#[cfg(feature = "bsp")]
+impl BspCanonicalDigest {
+    /// Maximum number of face indices included in the digest. Additional faces are excluded
+    /// and cause truncation.
+    pub const MAX_DIGEST_FACES: usize = 256;
+
+    /// Compute the canonical digest from a batch key and ordered face indices.
+    /// Only the first `MAX_DIGEST_FACES` face indices contribute; exceeding this
+    /// count sets the truncation flag in the caller's boundary.
+    pub fn compute(
+        render_class: u8,
+        material_identity: u64,
+        lightmap_page: u32,
+        style_ids: &[u8; 4],
+        model_index: u32,
+        face_indices: &[u32],
+    ) -> Self {
+        let face_count = (face_indices.len().min(Self::MAX_DIGEST_FACES)) as u32;
+        let mut buf = Vec::with_capacity(2 + 1 + 1 + 8 + 4 + 4 + 4 + 4 + face_count as usize * 4);
+        buf.extend_from_slice(&[0xB5, 0x50]); // domain tag
+        buf.push(1u8); // version
+        buf.push(render_class);
+        buf.extend_from_slice(&material_identity.to_le_bytes());
+        buf.extend_from_slice(&lightmap_page.to_le_bytes());
+        buf.extend_from_slice(style_ids);
+        buf.extend_from_slice(&model_index.to_le_bytes());
+        buf.extend_from_slice(&face_count.to_le_bytes());
+        for &fi in face_indices.iter().take(Self::MAX_DIGEST_FACES) {
+            buf.extend_from_slice(&fi.to_le_bytes());
+        }
+        Self(fnv1a_64(&buf))
+    }
+}
+
+/// A single batch entry in a boundary collection.
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BspEvidenceBatchEntry {
+    pub batch_index: usize,
+    pub digest: BspCanonicalDigest,
+    pub face_count: u32,
+    /// First `MAX_SOURCE_FACES` source face indices in ascending order.
+    pub source_faces: Vec<u32>,
+}
+
+/// Evidence at one pipeline boundary (neutral, mounted, submitted, recorded).
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct BspEvidenceBoundary {
+    /// Number of static-world batches observed at this boundary.
+    pub batch_count: u32,
+    /// Total draw call count (recorded boundary only).
+    pub draw_call_count: u32,
+    /// Total triangle count across all recorded draws (recorded boundary only).
+    pub triangle_count: u64,
+    /// Total material count observed.
+    pub material_count: u32,
+    /// Aggregate canonical digest over all batches at this boundary.
+    pub aggregate_digest: BspCanonicalDigest,
+    /// Bounded sorted static-world batch entries. Truncation indicated by
+    /// `truncated` field when capacity is exceeded.
+    pub batch_entries: Vec<BspEvidenceBatchEntry>,
+    /// Set when any retained collection reached its capacity.
+    pub truncated: bool,
+}
+
+/// Typed evidence failure.
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum BspEvidenceFailure {
+    /// Neutral/mounted digest mismatch.
+    IdentityMismatch {
+        batch_index: usize,
+        neutral_digest: BspCanonicalDigest,
+        mounted_digest: BspCanonicalDigest,
+    },
+    /// A static-world batch was not model_index 0.
+    NonStaticModel { batch_index: usize, model_index: u32 },
+    /// Stale or missing mesh at record time.
+    StaleMesh { batch_index: usize },
+    /// Stale or missing material at record time.
+    StaleMaterial { batch_index: usize },
+    /// Missing descriptor at record time.
+    MissingDescriptor { batch_index: usize },
+    /// Missing or incompatible pipeline.
+    PipelineFailure { batch_index: usize },
+    /// Buffer/reference mark failure.
+    BufferFailure { batch_index: usize },
+    /// Prior submission failure carried into recording.
+    PriorSubmissionFailure { batch_index: usize, reason: String },
+    /// Frame-slot validation failure.
+    FrameSlotFailure { batch_index: usize },
+    /// Generic recording failure with sanitized message.
+    RecordingFailure { batch_index: usize, reason: String },
+    /// Request/frame mismatch.
+    RequestFrameMismatch { expected: u32, actual: u32 },
+    /// Missing active BSP mount.
+    NoActiveMount,
+    /// Duplicate pending request.
+    DuplicateRequest,
+    /// Wrong request key on take.
+    WrongRequestKey,
+}
+
+/// Maximum static-world batch entries retained per boundary.
+pub const BSP_EVIDENCE_MAX_BATCH_ENTRIES: usize = 256;
+
+/// Maximum source faces retained per batch entry.
+pub const BSP_EVIDENCE_MAX_SOURCE_FACES: usize = 256;
+
+/// Maximum failure entries retained in a report.
+pub const BSP_EVIDENCE_MAX_FAILURES: usize = 64;
+
+/// A sealed post-command evidence report.
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BspFrameEvidence {
+    /// Caller-supplied semantic corpus identity.
+    pub corpus_identity: String,
+    /// Caller-supplied opaque request identity.
+    pub request_identity: String,
+    /// Published mount/lease arena identity (from Phase 04/06 boundary).
+    pub arena_id: Option<u64>,
+    /// Renderer logical frame that fulfilled this request.
+    pub frame_number: u32,
+    /// Visibility mode used for this request.
+    pub visibility_mode: BspEvidenceVisibility,
+    /// Neutral (pre-GPU) static-world boundary.
+    pub neutral: BspEvidenceBoundary,
+    /// Mounted (post-upload) static-world boundary.
+    pub mounted: BspEvidenceBoundary,
+    /// Submitted (post-scene-commit) static-world boundary.
+    pub submitted: BspEvidenceBoundary,
+    /// Recorded (post-command) static-world boundary.
+    pub recorded: BspEvidenceBoundary,
+    /// Inline-model summary counts.
+    pub inline_batch_count: u32,
+    pub inline_face_count: u32,
+    /// PVS cull summary.
+    pub pvs_eligible: u32,
+    pub pvs_culled: u32,
+    /// Total atlas bytes at mount time.
+    pub atlas_bytes: u64,
+    /// Frame CPU time in milliseconds.
+    pub frame_time_ms: f32,
+    /// Typed failures observed during collection.
+    pub failures: Vec<BspEvidenceFailure>,
+    /// Whether the report is eligible for acceptance (no failures, no truncation).
+    pub eligible: bool,
+}
+
+/// Outcome of a `take_bsp_frame_evidence` call.
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum BspEvidenceStatus {
+    /// A completed, sealed report.
+    Sealed(BspFrameEvidence),
+    /// Request is still pending (no matching frame rendered yet).
+    Pending,
+    /// No matching request exists (stale, wrong key, or already consumed).
+    MissingReport,
+    /// Request was rejected due to no active BSP mount.
+    RejectedNoMount,
+}
+
+/// FNV-1a 64-bit hash.
+#[cfg(feature = "bsp")]
+fn fnv1a_64(data: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in data {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Phase 07: Canonical digest tests ───────────────────────────────
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn canonical_digest_deterministic() {
+        let d1 = BspCanonicalDigest::compute(0, 1, 0, &[0, 255, 255, 255], 0, &[0, 1, 2]);
+        let d2 = BspCanonicalDigest::compute(0, 1, 0, &[0, 255, 255, 255], 0, &[0, 1, 2]);
+        assert_eq!(d1, d2, "same inputs must produce same digest");
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn canonical_digest_sensitive_to_render_class() {
+        let d1 = BspCanonicalDigest::compute(0, 1, 0, &[0, 255, 255, 255], 0, &[0]);
+        let d2 = BspCanonicalDigest::compute(1, 1, 0, &[0, 255, 255, 255], 0, &[0]);
+        assert_ne!(d1, d2, "different render_class must produce different digest");
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn canonical_digest_sensitive_to_material_identity() {
+        let d1 = BspCanonicalDigest::compute(0, 1, 0, &[0, 255, 255, 255], 0, &[0]);
+        let d2 = BspCanonicalDigest::compute(0, 2, 0, &[0, 255, 255, 255], 0, &[0]);
+        assert_ne!(d1, d2, "different material_identity must produce different digest");
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn canonical_digest_sensitive_to_face_indices() {
+        let d1 = BspCanonicalDigest::compute(0, 1, 0, &[0, 255, 255, 255], 0, &[0, 1]);
+        let d2 = BspCanonicalDigest::compute(0, 1, 0, &[0, 255, 255, 255], 0, &[1, 0]);
+        assert_ne!(d1, d2, "different face order must produce different digest");
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn canonical_digest_sensitive_to_model_index() {
+        let d1 = BspCanonicalDigest::compute(0, 1, 0, &[0, 255, 255, 255], 0, &[0]);
+        let d2 = BspCanonicalDigest::compute(0, 1, 0, &[0, 255, 255, 255], 1, &[0]);
+        assert_ne!(d1, d2, "different model_index must produce different digest");
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn canonical_digest_sensitive_to_style_ids() {
+        let d1 = BspCanonicalDigest::compute(0, 1, 0, &[0, 255, 255, 255], 0, &[0]);
+        let d2 = BspCanonicalDigest::compute(0, 1, 0, &[1, 255, 255, 255], 0, &[0]);
+        assert_ne!(d1, d2, "different style_ids must produce different digest");
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn canonical_digest_truncates_long_face_lists() {
+        let faces: Vec<u32> = (0..500).collect();
+        let d = BspCanonicalDigest::compute(0, 1, 0, &[0, 255, 255, 255], 0, &faces);
+        // Should not panic; digest is still computed with first MAX_DIGEST_FACES
+        assert_ne!(d.0, 0, "digest should be non-zero even with truncated faces");
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn evidence_request_key_unique() {
+        let k1 = BspEvidenceRequestKey(1);
+        let k2 = BspEvidenceRequestKey(2);
+        assert_ne!(k1, k2);
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn evidence_boundary_default_is_empty() {
+        let b = BspEvidenceBoundary::default();
+        assert_eq!(b.batch_count, 0);
+        assert_eq!(b.draw_call_count, 0);
+        assert!(!b.truncated);
+        assert!(b.batch_entries.is_empty());
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn evidence_status_variants_exist() {
+        let _sealed = BspEvidenceStatus::Sealed(BspFrameEvidence {
+            corpus_identity: "test".into(),
+            request_identity: "test".into(),
+            arena_id: None,
+            frame_number: 0,
+            visibility_mode: BspEvidenceVisibility::NormalPvs,
+            neutral: BspEvidenceBoundary::default(),
+            mounted: BspEvidenceBoundary::default(),
+            submitted: BspEvidenceBoundary::default(),
+            recorded: BspEvidenceBoundary::default(),
+            inline_batch_count: 0,
+            inline_face_count: 0,
+            pvs_eligible: 0,
+            pvs_culled: 0,
+            atlas_bytes: 0,
+            frame_time_ms: 0.0,
+            failures: vec![],
+            eligible: true,
+        });
+        let _pending = BspEvidenceStatus::Pending;
+        let _missing = BspEvidenceStatus::MissingReport;
+        let _rejected = BspEvidenceStatus::RejectedNoMount;
+    }
 
     #[cfg(feature = "bsp")]
     fn material_fixture_extracted() -> bsp::extract::ExtractedBsp {

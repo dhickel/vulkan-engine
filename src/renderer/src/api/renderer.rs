@@ -1285,6 +1285,26 @@ impl Renderer {
         }
 
         self.clear_resize_skip_state();
+
+        // Phase 07: Thread evidence request to scene before building submission.
+        #[cfg(feature = "bsp")]
+        {
+            if let Some(ref evidence_req) = self.runtime.core.bsp_evidence_request {
+                scene.set_bsp_evidence_request(
+                    evidence_req.1.corpus_identity.clone(),
+                    evidence_req.1.request_identity.clone(),
+                    evidence_req.1.visibility,
+                    frame_number,
+                );
+            } else {
+                scene.set_bsp_evidence_request(
+                    String::new(), String::new(),
+                    crate::api::bsp::BspEvidenceVisibility::NormalPvs,
+                    frame_number,
+                );
+            }
+        }
+
         let submission = build_submission_with_camera_view(scene, view);
         let viewport_size = self.viewport_size();
         let hooks_enabled = self.pre_render_hook.is_some() || self.post_render_hook.is_some();
@@ -1345,6 +1365,26 @@ impl Renderer {
         };
         self.last_hook_report = hook_report.into_inner();
         let backend_outcome = backend_result.map_err(renderer_error_from_backend)?;
+
+        // Phase 07: After rendering, check for sealed evidence report from the recording pipeline.
+        #[cfg(feature = "bsp")]
+        {
+            let evidence_collected = submission.bsp_evidence_collector.borrow_mut().take();
+            if let Some(collector) = evidence_collected {
+                let report = collector.seal();
+                let request_key = self.runtime.core.bsp_evidence_request.as_ref()
+                    .map(|(key, _)| *key)
+                    .unwrap_or(crate::api::bsp::BspEvidenceRequestKey(0));
+                self.runtime.core.bsp_evidence_report = Some((request_key, crate::api::bsp::BspEvidenceStatus::Sealed(report)));
+                self.runtime.core.bsp_evidence_frame_number = frame_number;
+                // Consume the request since evidence was collected.
+                self.runtime.core.bsp_evidence_request = None;
+            } else if self.runtime.core.bsp_evidence_request.is_some() {
+                // Request was pending but no evidence was collected (e.g., no BSP mount active).
+                let (key, _) = self.runtime.core.bsp_evidence_request.take().unwrap();
+                self.runtime.core.bsp_evidence_report = Some((key, crate::api::bsp::BspEvidenceStatus::RejectedNoMount));
+            }
+        }
 
         self.record_frame_capture_statuses();
 
@@ -1497,6 +1537,61 @@ impl Renderer {
         self.assets()
             .prepare_bsp_mount(extracted)
             .map_err(|e| RendererError::InvalidState(format!("BSP upload failed: {e}")))
+    }
+
+    /// Request a single bounded post-command evidence report for BSP static-world draws.
+    ///
+    /// Available only with the `bsp` feature. Returns an opaque request key that must be
+    /// passed to [`Self::take_bsp_frame_evidence`] to retrieve the sealed report.
+    ///
+    /// Only one pending request is allowed; a second request is rejected.
+    /// The report is populated during the next frame that renders a BSP mount.
+    #[cfg(feature = "bsp")]
+    pub fn request_bsp_frame_evidence(
+        &mut self,
+        corpus_identity: String,
+        request_identity: String,
+        visibility: crate::api::bsp::BspEvidenceVisibility,
+    ) -> Result<crate::api::bsp::BspEvidenceRequestKey, RendererError> {
+        let core = &mut self.runtime.core;
+        if core.bsp_evidence_request.is_some() {
+            return Err(RendererError::InvalidState(
+                "a BSP evidence request is already pending".to_string(),
+            ));
+        }
+        let key = crate::api::bsp::BspEvidenceRequestKey(core.bsp_evidence_next_key);
+        core.bsp_evidence_next_key = core.bsp_evidence_next_key.wrapping_add(1);
+        let request = crate::api::bsp::BspEvidenceRequest {
+            corpus_identity,
+            request_identity,
+            visibility,
+            key,
+        };
+        core.bsp_evidence_request = Some((key, request));
+        core.bsp_evidence_report = None;
+        Ok(key)
+    }
+
+    /// Retrieve the sealed evidence report for a previously submitted request.
+    ///
+    /// Available only with the `bsp` feature. The request key must match the one returned
+    /// by [`Self::request_bsp_frame_evidence`]. Each request can be taken only once;
+    /// subsequent calls return [`BspEvidenceStatus::MissingReport`].
+    #[cfg(feature = "bsp")]
+    pub fn take_bsp_frame_evidence(
+        &mut self,
+        key: crate::api::bsp::BspEvidenceRequestKey,
+    ) -> crate::api::bsp::BspEvidenceStatus {
+        let core = &mut self.runtime.core;
+        match core.bsp_evidence_report.take() {
+            Some((report_key, status)) if report_key == key => status,
+            Some((report_key, status)) => {
+                // Wrong key — put it back
+                core.bsp_evidence_report = Some((report_key, status));
+                crate::api::bsp::BspEvidenceStatus::MissingReport
+            }
+            None => crate::api::bsp::BspEvidenceStatus::MissingReport,
+        }
     }
 
     /// Emit a lifecycle event into the bus. Does NOT drain — the caller must

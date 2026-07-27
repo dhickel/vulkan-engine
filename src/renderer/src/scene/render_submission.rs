@@ -189,6 +189,221 @@ pub struct BspFrameDrawItem {
     pub pipeline_class: Option<crate::data::data_cache::VkPipelineType>,
     /// Model index (0 = worldspawn).
     pub model_index: u32,
+    /// Phase 07: Canonical digest of the batch's immutable identity for evidence.
+    pub canonical_digest: u64,
+}
+
+// ── Phase 07: Evidence carrier types ────────────────────────────────────
+
+/// By-value semantic identity of a BSP batch, computed from immutable batch data only.
+/// Used for evidence boundary comparisons and recorded-outcome tracking.
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BspBatchSemanticIdentity {
+    pub batch_index: usize,
+    pub canonical_digest: u64,
+    pub face_count: u32,
+    pub source_faces: Vec<u32>,
+    pub model_index: u32,
+    pub is_static: bool,
+}
+
+/// Phase 07: In-flight BSP evidence collector, carried through submission building
+/// and populated during command recording. Sealed into a [`BspFrameEvidence`] report.
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone)]
+pub struct BspEvidenceCollector {
+    pub corpus_identity: String,
+    pub request_identity: String,
+    pub visibility_mode: crate::api::bsp::BspEvidenceVisibility,
+    pub arena_id: Option<u64>,
+    pub frame_number: u32,
+    /// Neutral static-world identities (from canonical mount records).
+    pub neutral_identities: Vec<BspBatchSemanticIdentity>,
+    /// Mounted static-world identities (must match neutral for eligibility).
+    pub mounted_identities: Vec<BspBatchSemanticIdentity>,
+    /// Cull decisions: batch_index -> reason. Only present for culled static batches.
+    pub cull_decisions: Vec<(usize, BspCullReason)>,
+    /// Submitted identities (batches admitted after PVS/visibility).
+    pub submitted_identities: Vec<BspBatchSemanticIdentity>,
+    /// Recorded outcomes: batch_index + digest + outcome tag.
+    pub recorded_outcomes: Vec<BspRecordedOutcome>,
+    /// Inline model summary counts.
+    pub inline_batch_count: u32,
+    pub inline_face_count: u32,
+    /// PVS diagnostics.
+    pub pvs_eligible: u32,
+    pub pvs_culled: u32,
+    /// Atlas bytes at mount time.
+    pub atlas_bytes: u64,
+    /// Frame CPU time in ms (populated at seal time).
+    pub frame_time_ms: f32,
+    /// Typed failures.
+    pub failures: Vec<crate::api::bsp::BspEvidenceFailure>,
+    /// Whether the collector has been sealed.
+    pub sealed: bool,
+}
+
+/// A single recorded outcome for a BSP draw.
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone)]
+pub enum BspRecordedOutcome {
+    Recorded { batch_index: usize, digest: u64 },
+    Culled { batch_index: usize, reason: BspCullReason },
+    Failed { batch_index: usize, digest: u64, failure: crate::api::bsp::BspEvidenceFailure },
+}
+
+#[cfg(feature = "bsp")]
+impl BspEvidenceCollector {
+    /// Create a new evidence collector from a request.
+    pub fn new(
+        request: &crate::api::bsp::BspEvidenceRequest,
+        arena_id: Option<u64>,
+        frame_number: u32,
+    ) -> Self {
+        Self {
+            corpus_identity: request.corpus_identity.clone(),
+            request_identity: request.request_identity.clone(),
+            visibility_mode: request.visibility,
+            arena_id,
+            frame_number,
+            neutral_identities: Vec::new(),
+            mounted_identities: Vec::new(),
+            cull_decisions: Vec::new(),
+            submitted_identities: Vec::new(),
+            recorded_outcomes: Vec::new(),
+            inline_batch_count: 0,
+            inline_face_count: 0,
+            pvs_eligible: 0,
+            pvs_culled: 0,
+            atlas_bytes: 0,
+            frame_time_ms: 0.0,
+            failures: Vec::new(),
+            sealed: false,
+        }
+    }
+
+    /// Check if neutral and mounted static-world identities match.
+    pub fn neutral_mounted_match(&self) -> bool {
+        if self.neutral_identities.len() != self.mounted_identities.len() {
+            return false;
+        }
+        self.neutral_identities
+            .iter()
+            .zip(self.mounted_identities.iter())
+            .all(|(n, m)| n.canonical_digest == m.canonical_digest
+                && n.batch_index == m.batch_index
+                && n.face_count == m.face_count)
+    }
+
+    /// Seal the collector into a [`BspFrameEvidence`] report.
+    pub fn seal(mut self) -> crate::api::bsp::BspFrameEvidence {
+        use crate::api::bsp::{
+            BspCanonicalDigest, BspEvidenceBatchEntry, BspEvidenceBoundary,
+            BspEvidenceFailure, BspFrameEvidence, BSP_EVIDENCE_MAX_BATCH_ENTRIES,
+            BSP_EVIDENCE_MAX_FAILURES, BSP_EVIDENCE_MAX_SOURCE_FACES,
+        };
+
+        self.sealed = true;
+        let failures: Vec<BspEvidenceFailure> = self.failures.iter()
+            .take(BSP_EVIDENCE_MAX_FAILURES)
+            .cloned()
+            .collect();
+        let truncated = self.failures.len() > BSP_EVIDENCE_MAX_FAILURES;
+        let eligible = failures.is_empty() && !truncated && self.neutral_mounted_match();
+
+        let build_boundary = |identities: &[BspBatchSemanticIdentity]| -> BspEvidenceBoundary {
+            let batch_count = identities.len() as u32;
+            let mut aggregate = 0u64;
+            let material_ids: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+            let entries_truncated = identities.len() > BSP_EVIDENCE_MAX_BATCH_ENTRIES;
+            let batch_entries: Vec<BspEvidenceBatchEntry> = identities
+                .iter()
+                .take(BSP_EVIDENCE_MAX_BATCH_ENTRIES)
+                .map(|id| {
+                    aggregate ^= id.canonical_digest;
+                    BspEvidenceBatchEntry {
+                        batch_index: id.batch_index,
+                        digest: BspCanonicalDigest(id.canonical_digest),
+                        face_count: id.face_count,
+                        source_faces: id.source_faces.iter()
+                            .take(BSP_EVIDENCE_MAX_SOURCE_FACES)
+                            .copied()
+                            .collect(),
+                    }
+                })
+                .collect();
+            BspEvidenceBoundary {
+                batch_count,
+                draw_call_count: batch_count,
+                triangle_count: 0,
+                material_count: material_ids.len() as u32,
+                aggregate_digest: BspCanonicalDigest(aggregate),
+                batch_entries,
+                truncated: entries_truncated,
+            }
+        };
+
+        let neutral = build_boundary(&self.neutral_identities);
+        let mounted = build_boundary(&self.mounted_identities);
+        let submitted = build_boundary(&self.submitted_identities);
+
+        // Recorded gets additional draw/triangle counts from outcomes.
+        let recorded_batch_count = self.recorded_outcomes.len() as u32;
+        let recorded_draw_calls = self.recorded_outcomes.iter()
+            .filter(|o| matches!(o, BspRecordedOutcome::Recorded { .. }))
+            .count() as u32;
+        let mut recorded_aggregate = 0u64;
+        let recorded_truncated = self.recorded_outcomes.len() > BSP_EVIDENCE_MAX_BATCH_ENTRIES;
+        let recorded_entries: Vec<BspEvidenceBatchEntry> = self.recorded_outcomes.iter()
+            .take(BSP_EVIDENCE_MAX_BATCH_ENTRIES)
+            .filter_map(|outcome| {
+                match outcome {
+                    BspRecordedOutcome::Recorded { batch_index, digest } => {
+                        recorded_aggregate ^= digest;
+                        Some(BspEvidenceBatchEntry {
+                            batch_index: *batch_index,
+                            digest: BspCanonicalDigest(*digest),
+                            face_count: 0,
+                            source_faces: Vec::new(),
+                        })
+                    }
+                    BspRecordedOutcome::Culled { .. } => None,
+                    BspRecordedOutcome::Failed { .. } => None,
+                }
+            })
+            .collect();
+
+        let recorded = BspEvidenceBoundary {
+            batch_count: recorded_batch_count,
+            draw_call_count: recorded_draw_calls,
+            triangle_count: 0,
+            material_count: 0,
+            aggregate_digest: BspCanonicalDigest(recorded_aggregate),
+            batch_entries: recorded_entries,
+            truncated: recorded_truncated,
+        };
+
+        BspFrameEvidence {
+            corpus_identity: self.corpus_identity,
+            request_identity: self.request_identity,
+            arena_id: self.arena_id,
+            frame_number: self.frame_number,
+            visibility_mode: self.visibility_mode,
+            neutral,
+            mounted,
+            submitted,
+            recorded,
+            inline_batch_count: self.inline_batch_count,
+            inline_face_count: self.inline_face_count,
+            pvs_eligible: self.pvs_eligible,
+            pvs_culled: self.pvs_culled,
+            atlas_bytes: self.atlas_bytes,
+            frame_time_ms: self.frame_time_ms,
+            failures,
+            eligible,
+        }
+    }
 }
 
 /// BSP frame-varying values captured from the scene snapshot for this submission.
@@ -248,6 +463,10 @@ pub struct RenderSubmission {
     /// Fixed capacity; truncation is explicitly logged.
     #[cfg(feature = "bsp")]
     pub bsp_command_diags: Vec<BspCommandDiag>,
+    /// Phase 07: Evidence collector for runtime draw evidence (one-shot, opt-in).
+    /// Wrapped in `RefCell` so recording can populate outcomes via shared reference.
+    #[cfg(feature = "bsp")]
+    pub bsp_evidence_collector: std::cell::RefCell<Option<BspEvidenceCollector>>,
 }
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
@@ -286,6 +505,8 @@ impl RenderSubmission {
             bsp_diagnostics: BspSubmissionDiagnostics::default(),
             #[cfg(feature = "bsp")]
             bsp_command_diags: Vec::new(),
+            #[cfg(feature = "bsp")]
+            bsp_evidence_collector: std::cell::RefCell::new(None),
         }
     }
 

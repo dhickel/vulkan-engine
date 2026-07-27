@@ -628,6 +628,56 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
             .map_err(AppError::Renderer)?;
     }
 
+    // ── Phase 07: Stats evidence request (before capture/smoke) ────────
+    if args.stats {
+        use renderer::api::bsp::BspEvidenceVisibility;
+        let visibility = if args.all_visible {
+            BspEvidenceVisibility::AllVisible
+        } else {
+            BspEvidenceVisibility::NormalPvs
+        };
+        let corpus = args.corpus_identity.clone()
+            .unwrap_or_else(|| "bsp-beta-headless".to_string());
+        let stats_key = renderer
+            .request_bsp_frame_evidence(corpus, "headless-stats".to_string(), visibility)
+            .map_err(|e| AppError::RendererInit(renderer::RendererError::InvalidState(
+                format!("evidence request: {e}")
+            )))?;
+
+        // Render until evidence is sealed.
+        for _attempt in 0..16 {
+            render_app_frame(&mut renderer, &mut scene, &mut loop_state, 1920, 1080, true)
+                .map_err(AppError::Renderer)?;
+            match renderer.take_bsp_frame_evidence(stats_key) {
+                renderer::api::bsp::BspEvidenceStatus::Sealed(report) => {
+                    let serialized = serde_json::to_string_pretty(&report)
+                        .map_err(|e| AppError::RendererInit(
+                            renderer::RendererError::InvalidState(format!("serialize report: {e}"))
+                        ))?;
+                    println!("{serialized}");
+                    if !report.eligible {
+                        log::warn!("Stats report is not eligible for acceptance");
+                        std::process::exit(1);
+                    }
+                    return Ok(());
+                }
+                renderer::api::bsp::BspEvidenceStatus::RejectedNoMount => {
+                    log::error!("Stats request rejected: no active BSP mount");
+                    std::process::exit(1);
+                }
+                renderer::api::bsp::BspEvidenceStatus::MissingReport => {
+                    log::error!("Stats report missing");
+                    std::process::exit(1);
+                }
+                renderer::api::bsp::BspEvidenceStatus::Pending => {
+                    // Continue rendering
+                }
+            }
+        }
+        log::error!("Stats report not ready after bounded frame attempts");
+        std::process::exit(1);
+    }
+
     // ── Capture ────────────────────────────────────────────────────────
     if args.capture_frames > 0 {
         let capture_dir = PathBuf::from(format!(

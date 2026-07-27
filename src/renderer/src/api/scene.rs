@@ -1234,6 +1234,21 @@ impl Scene {
         self.world.has_bsp_mount()
     }
 
+    /// Phase 07: Set a pending BSP evidence request for the next submission build.
+    ///
+    /// The request is consumed during [`Scene::build_submission`]. Only call this
+    /// immediately before rendering when an evidence request is active.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn set_bsp_evidence_request(
+        &mut self,
+        corpus_identity: String,
+        request_identity: String,
+        visibility: crate::api::bsp::BspEvidenceVisibility,
+        frame_number: u32,
+    ) {
+        self.world.set_bsp_evidence_request(corpus_identity, request_identity, visibility, frame_number);
+    }
+
     /// Clear the BSP mount, returning to non-BSP rendering.
     ///
     /// This compatibility helper uses the same scene-detachment boundary as
