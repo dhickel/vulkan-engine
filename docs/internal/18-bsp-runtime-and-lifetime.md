@@ -337,8 +337,28 @@ BSP draws are recorded before the geometry dynamic-rendering scope ends. `record
 | Malformed or dimension-mismatched PBR PNG | rejected during upload planning before GPU allocation |
 | Content hash mismatch on restore | restore cancelled, active state preserved |
 | Source hash mismatch on restore | `ContentHashMismatch` error |
+| Generated face has no lightmap data (strict) | `BSP-MISSING-REQUIRED-LIGHTMAP` at extraction boundary; blocks strict runtime path ([#58](https://github.com/dhickel/vulkan-engine/issues/58)) |
+| GPU upload rollback after material registration | descriptor pool double-free SIGSEGV ([#61](https://github.com/dhickel/vulkan-engine/issues/61)) |
+| Planned mesh bounds consumed by `mem::take` before batch record construction | `cannot compute bounds for empty batch mesh` ([#62](https://github.com/dhickel/vulkan-engine/issues/62)) |
+| Material handle at slot zero rejected as null sentinel | `MountedBspBatch received a null material handle` ([#63](https://github.com/dhickel/vulkan-engine/issues/63)) |
+| Scene mount detached without renderer retirement queue | stale handle invalidation incomplete ([#59](https://github.com/dhickel/vulkan-engine/issues/59)) |
+| Committed bridge token consumed without active teardown receipt | generic bridge unload/replacement not atomic ([#60](https://github.com/dhickel/vulkan-engine/issues/60)) |
 
-## 17. Cross-Module Links
+## 17. Known Blocked Issues (2026-07-26)
+
+The following open issues block the BSP beta gate. All are documented in `.internal-dev/bugs/` and mirrored on GitHub:
+
+| issue | local report | effect |
+|-------|-------------|--------|
+| [#57](https://github.com/dhickel/vulkan-engine/issues/57) | `bsp-generator-static-batch-ceiling` | Static batch ceiling not enforced across frozen corpus |
+| [#58](https://github.com/dhickel/vulkan-engine/issues/58) | `bsp-generated-strict-missing-lightmap` | Strict extraction fails on generated faces |
+| [#59](https://github.com/dhickel/vulkan-engine/issues/59) | `bsp-runtime-mount-retirement-handoff-missing` | No fence-aware renderer retirement for BSP mounts |
+| [#60](https://github.com/dhickel/vulkan-engine/issues/60) | `bsp-runtime-active-bridge-teardown-missing` | No active bridge teardown receipt after commit |
+| [#61](https://github.com/dhickel/vulkan-engine/issues/61) | `bsp-upload-rollback-descriptor-pool-double-free` | SIGSEGV on GPU upload rollback |
+| [#62](https://github.com/dhickel/vulkan-engine/issues/62) | `bsp-upload-bounds-lost-after-mesh-transfer` | Mesh bounds consumed before batch record construction |
+| [#63](https://github.com/dhickel/vulkan-engine/issues/63) | `bsp-mounted-batch-rejects-first-material-slot` | Slot zero rejected as null sentinel |
+
+## 18. Cross-Module Links
 
 - Parser crate: `src/bsp/src/lib.rs`, `src/bsp/src/extract.rs`, `src/bsp/src/world.rs`
 - Coordinator: `src/bsp_runtime/src/coordinator.rs`, `src/bsp_runtime/src/candidate.rs`
@@ -351,7 +371,7 @@ BSP draws are recorded before the geometry dynamic-rendering scope ends. `record
 - Descriptor ABI guards: `src/renderer/tests/descriptor_abi.rs`
 - App entrypoint: `apps/bsp_beta/src/main.rs`
 
-## 18. See Also
+## 19. See Also
 
 - [BSP Acceptance Spec](../../.internal-dev/specifications/bsp-acceptance.md)
 - [BSP Compatibility Spec](../../.internal-dev/specifications/bsp-compatibility.md)

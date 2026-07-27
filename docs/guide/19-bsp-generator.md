@@ -204,7 +204,9 @@ All 12 frozen configurations (8 nominal seeds + 4 boundary configs) compile warn
 cargo test -p bsp_generator --test corpus_execution
 ```
 
-## Limitations (Beta)
+## Limitations (Beta) and Known Issues
+
+### Generator Design Limitations
 
 - Single-layer Cartesian only (no ramps, stairs, multi-floor)
 - Axis-aligned rectangular rooms only
@@ -213,6 +215,20 @@ cargo test -p bsp_generator --test corpus_execution
 - No liquid volumes, monster placement, puzzle logic
 - Single theme (CC0 Stone Beta)
 - No runtime regeneration — the `.map` is generated offline
+
+### Runtime Blockers (Open GitHub Issues)
+
+The generator itself passes all tests, but the end-to-end pipeline from generated `.map` → compiled `.bsp` → runtime mount is blocked:
+
+| issue | effect |
+|-------|--------|
+| [#57](https://github.com/dhickel/vulkan-engine/issues/57) | Static batch ceiling not enforced across frozen corpus |
+| [#58](https://github.com/dhickel/vulkan-engine/issues/58) | Strict extraction fails on generated faces (missing lightmap) |
+| [#61](https://github.com/dhickel/vulkan-engine/issues/61) | GPU upload rollback crashes (SIGSEGV) |
+| [#62](https://github.com/dhickel/vulkan-engine/issues/62) | Planned mesh bounds lost after GPU transfer |
+| [#63](https://github.com/dhickel/vulkan-engine/issues/63) | First material slot rejected as null |
+
+Development-mode authorization (`--development`) can reach upload preflight (6 batches for nominal M1 seed 0) but cannot complete GPU mount until #61–#63 are resolved.
 
 ## Integration with Applications
 

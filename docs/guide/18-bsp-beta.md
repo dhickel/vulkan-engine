@@ -15,7 +15,7 @@ Rust developers building applications that include compiled Quake-format BSP map
   ```
 - **Compiler toolchain**: The engine does NOT bundle a BSP compiler. You must supply `ericw-tools 2.0.0-alpha3` (or a pinned compatible version) on your build host. The approved executables are `qbsp`, `vis`, and `light`.
 - **Fixture rights**: All `.map` sources, palettes, and compiled `.bsp` files must be your own work or licensed for redistribution (CC0 or project license). The engine includes **zero** copyrighted id Software content.
-- **Dungeon generator**: A procedural dungeon generator is specified but not yet implemented. See the [dungeon generation specification](../../.internal-dev/specifications/bsp-dungeon-generation.md) for frozen M1/M2 bounds, construction parameters, and the generator authorization gate.
+- **Dungeon generator**: A procedural dungeon generator is implemented in `src/bsp_generator/` and targets the frozen M1/M2 bounds. See the [BSP Generator Guide](19-bsp-generator.md) for usage and the [dungeon generation specification](../../.internal-dev/specifications/bsp-dungeon-generation.md) for the frozen contract. **Beta gate status: NO-GO** — strict extraction and GPU mount paths are blocked by open GitHub issues #57–#63.
 
 ## Package Layout
 
@@ -342,14 +342,39 @@ The following BSP formats produce `BSP-UNSUPPORTED-DIALECT` errors and will neve
 | Quake 3 / IBSP BSP46 | `"IBSP"` | distinct product |
 | Valve/Source VBSP | varied | distinct product |
 
-## Limitations (Beta)
+## Limitations (Beta) and Known Issues
 
-- **Dungeon generator not yet implemented**: The dungeon generation specification (`bsp-dungeon-generation.md`) freezes M1/M2 bounds, construction parameters, and output ceilings. A dedicated generator sprint must follow Phase 09.
-- **No redistributable visible-face fixture**: A real local `start.bsp` has produced visible, stable headless and live-Wayland evidence, but it is third-party content and is not checked in. The compiler-evidence fixture `dungeon-evidence-bsp2.bsp` (41 faces, BSP2) proves face-visible BSP2 compilation but is a small technical proof, not a visual-calibration fixture.
-- **Render-to-texture deferred**: BSP surfaces render into the main color/depth targets using a dedicated BSP pipeline. Off-screen render targets are not yet supported.
+### Blocked Paths (Open GitHub Issues)
+
+These issues block the beta gate and must be resolved before sign-off:
+
+| issue | summary | effect |
+|-------|---------|--------|
+| [#57](https://github.com/dhickel/vulkan-engine/issues/57) | Static batch ceiling not enforced across frozen corpus | Batch/draw budget compliance unproven |
+| [#58](https://github.com/dhickel/vulkan-engine/issues/58) | Strict extraction fails on generated faces (missing lightmap) | Strict runtime path blocked |
+| [#59](https://github.com/dhickel/vulkan-engine/issues/59) | Renderer mount retirement missing fence-aware queue | Stale handle invalidation incomplete |
+| [#60](https://github.com/dhickel/vulkan-engine/issues/60) | Committed bridge has no active teardown receipt | Generic bridge unload/replacement not atomic |
+| [#61](https://github.com/dhickel/vulkan-engine/issues/61) | GPU upload rollback crashes with SIGSEGV (descriptor pool double-free) | Development GPU mount blocked |
+| [#62](https://github.com/dhickel/vulkan-engine/issues/62) | Planned mesh bounds lost after GPU transfer | Canonical batch record construction fails |
+| [#63](https://github.com/dhickel/vulkan-engine/issues/63) | First material slot (0,0) rejected as null sentinel | Development mount blocked |
+
+**Current workaround**: Development-mode authorization (`--development`) bypasses strict extraction and allows the runtime path to reach preflight. A fresh nominal M1 seed-0 package reaches 364 renderable faces and 6 neutral/upload-preflight batches, but GPU mount fails at #61.
+
+### Unavailable Evidence (Requires GPU/WSI Environment)
+
+- **Visual acceptance**: Project-owned 1280×720 headless captures with frozen settings — not yet produced.
+- **Reference renderer calibration**: SSIM comparison against vkQuake — requires reference renderer installation.
+- **Live WSI matrix**: Resize, minimize/restore, surface-loss recovery — requires live GPU + windowing system.
+- **M1/M2 runtime performance budgets**: Timed parse/extract/upload/reload measurements on face-visible fixtures — not yet measured.
+
+### Beta Design Limitations
+
+- **No redistributable visible-face fixture**: Third-party `start.bsp` headless captures exist but are not checked in. The `dungeon-evidence-bsp2.bsp` fixture (41 faces, BSP2) proves face-visible BSP2 compilation but is a small technical proof, not a visual-calibration fixture.
+- **Render-to-texture deferred**: BSP surfaces render into the main color/depth targets. Off-screen render targets are not yet supported.
 - **Dynamic entity transforms**: Inline brush model transforms update through `BspMountState` per-batch transform maps. Full entity-to-scene-node mapping for external models is partially implemented.
 - **Physics world colliders**: World trimesh collision from clipnodes is pending; point-contents and hull traces are functional.
-- **Open arches only**: Doors (`func_door`, `func_button`, `func_plat`) are excluded from initial dungeon generator output. All generated room connections use open arches with no moving geometry or trigger wiring.
+- **Open arches only**: Doors (`func_door`, `func_button`, `func_plat`) are excluded from generator output. All generated room connections use open arches with no moving geometry or trigger wiring.
+- **Single-layer Cartesian only**: No ramps, stairs, multi-floor, diagonal rooms, or curved corridors.
 
 ## See Also
 

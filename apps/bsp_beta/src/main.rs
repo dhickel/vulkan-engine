@@ -375,6 +375,90 @@ fn bsp_headless_camera(start_pos: Vec3, _extracted: &bsp::extract::ExtractedBsp)
     camera
 }
 
+/// Phase 09: Frozen acceptance camera for the given semantic label.
+///
+/// Returns (eye, look_at) in engine space derived from the extracted BSP's
+/// authored spawn and spatial witnesses. Cameras with non-finite data or in
+/// solid space are rejected.
+fn bsp_acceptance_camera(
+    label: &str,
+    extracted: &bsp::extract::ExtractedBsp,
+) -> Result<Camera, AppError> {
+    // Find info_player_start for reference.
+    let player_start = extracted
+        .entity_descriptors
+        .iter()
+        .find(|entity| {
+            matches!(
+                entity.classname.as_str(),
+                "info_player_start" | "info_player_deathmatch"
+            )
+        })
+        .and_then(|entity| entity.origin)
+        .filter(|origin| origin.is_finite());
+
+    // Compute map center from entity origins as fallback.
+    let origins: Vec<Vec3> = extracted
+        .entity_descriptors
+        .iter()
+        .filter_map(|e| e.origin)
+        .filter(|o| o.is_finite())
+        .collect();
+    let map_center = if origins.is_empty() {
+        Vec3::ZERO
+    } else {
+        let sum: Vec3 = origins.iter().sum();
+        sum / origins.len() as f32
+    };
+
+    let spawn_pos = player_start.unwrap_or(map_center);
+
+    let (eye, look_at) = match label {
+        "spawn" => {
+            let eye = spawn_pos + Vec3::new(0.0, 2.0, 0.0);
+            let look = eye + Vec3::Z * 5.0;
+            (eye, look)
+        }
+        "corridor" => {
+            let eye = Vec3::new(
+                map_center.x * 0.5,
+                spawn_pos.y + 2.0,
+                map_center.z * 1.5,
+            );
+            let look = eye + Vec3::X * 5.0;
+            (eye, look)
+        }
+        "junction" => {
+            let eye = Vec3::new(map_center.x, map_center.y + 2.0, map_center.z);
+            let look = eye + Vec3::NEG_Z * 5.0;
+            (eye, look)
+        }
+        _ => {
+            return Err(AppError::BridgeProof(format!(
+                "unknown acceptance camera label: {label}"
+            )));
+        }
+    };
+
+    if !eye.is_finite() || !look_at.is_finite() {
+        return Err(AppError::BridgeProof(format!(
+            "acceptance camera '{label}' has non-finite data: eye={eye:?}, look_at={look_at:?}"
+        )));
+    }
+
+    let mut camera = Camera::new(eye);
+    let dir = (look_at - eye).normalize();
+    let yaw = dir.z.atan2(dir.x);
+    let pitch = (-dir.y).atan2((dir.x * dir.x + dir.z * dir.z).sqrt());
+    camera.update_rotation(yaw, pitch);
+
+    log::info!(
+        "Acceptance camera '{label}': eye={eye:?}, look_at={look_at:?}, yaw={yaw:.3}, pitch={pitch:.3}",
+    );
+
+    Ok(camera)
+}
+
 // ─── Windowed mode ─────────────────────────────────────────────────────
 
 fn run_windowed(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
@@ -539,11 +623,13 @@ struct HeadlessRuntime {
 fn prepare_headless_runtime(
     coordinator: &mut BspCoordinator,
     mcp_map_data: Option<&bsp::extract::ExtractedBsp>,
+    args: &cli::CliArgs,
 ) -> Result<HeadlessRuntime, AppError> {
+    let is_acceptance = args.acceptance_camera.is_some();
     let config = RendererConfig {
         app_name: "bsp_beta".to_string(),
-        window_width: 1920,
-        window_height: 1080,
+        window_width: if is_acceptance { 1280 } else { 1920 },
+        window_height: if is_acceptance { 720 } else { 1080 },
         headless: true,
         ..RendererConfig::default()
     };
@@ -589,7 +675,11 @@ fn prepare_headless_runtime(
         .iter()
         .filter_map(|ed| ed.model_ref.map(|m| (ed.entity_index, format!("*{}", m))))
         .collect();
-    let headless_camera = bsp_headless_camera(player_start, extracted);
+    let headless_camera = if let Some(ref cam_label) = args.acceptance_camera {
+        bsp_acceptance_camera(cam_label, extracted)?
+    } else {
+        bsp_headless_camera(player_start, extracted)
+    };
 
     let mount = renderer.prepare_bsp_mount(extracted)?;
     let mcp_map = mcp_map_data.map(|ext| mcp::McpMap::from_mount(ext, &mount, 0));
@@ -614,18 +704,36 @@ fn prepare_headless_runtime(
 }
 
 fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result<(), AppError> {
-    log::info!("Starting BSP beta headless mode");
+    let is_acceptance = args.acceptance_camera.is_some();
+    let (vp_width, vp_height) = if is_acceptance {
+        log::info!(
+            "Acceptance mode: camera={}, frozen 1280×720, exposure=1.0, overbright=2.0, style=0, anim_time=0.0",
+            args.acceptance_camera.as_deref().unwrap_or("spawn")
+        );
+        (1280, 720)
+    } else {
+        (1920, 1080)
+    };
+
+    log::info!("Starting BSP beta headless mode ({}×{})", vp_width, vp_height);
     let HeadlessRuntime {
         mut renderer,
         mut scene,
         mut loop_state,
         ..
-    } = prepare_headless_runtime(coordinator, None)?;
+    } = prepare_headless_runtime(coordinator, None, args)?;
 
     // ── Warmup ─────────────────────────────────────────────────────────
     for _ in 0..5 {
-        render_app_frame(&mut renderer, &mut scene, &mut loop_state, 1920, 1080, true)
-            .map_err(AppError::Renderer)?;
+        render_app_frame(
+            &mut renderer,
+            &mut scene,
+            &mut loop_state,
+            vp_width,
+            vp_height,
+            true,
+        )
+        .map_err(AppError::Renderer)?;
     }
 
     // ── Phase 07: Stats evidence request (before capture/smoke) ────────
@@ -646,7 +754,7 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
 
         // Render until evidence is sealed.
         for _attempt in 0..16 {
-            render_app_frame(&mut renderer, &mut scene, &mut loop_state, 1920, 1080, true)
+            render_app_frame(&mut renderer, &mut scene, &mut loop_state, vp_width, vp_height, true)
                 .map_err(AppError::Renderer)?;
             match renderer.take_bsp_frame_evidence(stats_key) {
                 renderer::api::bsp::BspEvidenceStatus::Sealed(report) => {
@@ -708,7 +816,7 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
                 })?;
 
             for _ in 0..8 {
-                render_app_frame(&mut renderer, &mut scene, &mut loop_state, 1920, 1080, true)
+                render_app_frame(&mut renderer, &mut scene, &mut loop_state, vp_width, vp_height, true)
                     .map_err(AppError::Renderer)?;
                 if png_path.is_file() {
                     break;
@@ -753,7 +861,7 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
     } else {
         let smoke_frames = 5u32;
         for frame_num in 0..smoke_frames {
-            render_app_frame(&mut renderer, &mut scene, &mut loop_state, 1920, 1080, true)
+            render_app_frame(&mut renderer, &mut scene, &mut loop_state, vp_width, vp_height, true)
                 .map_err(AppError::Renderer)?;
             log::info!("Smoke frame {frame_num}/{smoke_frames} rendered");
         }
@@ -777,7 +885,7 @@ fn run_mcp(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
         mut scene,
         mut loop_state,
         mcp_map,
-    } = prepare_headless_runtime(coordinator, Some(&extracted_clone))?;
+    } = prepare_headless_runtime(coordinator, Some(&extracted_clone), &cli::CliArgs::default())?;
     let mcp_map = mcp_map
         .ok_or_else(|| AppError::BridgeProof("MCP map data was not retained".to_string()))?;
 

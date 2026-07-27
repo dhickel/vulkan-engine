@@ -65,6 +65,7 @@ fn cli_preserves_struct_values() {
         stats: false,
         all_visible: false,
         corpus_identity: None,
+        acceptance_camera: None,
     };
 
     let cloned = original.clone();

@@ -338,6 +338,22 @@ fn load_bsp_map(
 }
 ```
 
+## Beta Status (2026-07-26)
+
+The BSP beta gate is **NO-GO**. The following open issues block beta sign-off:
+
+| issue | summary |
+|-------|--------|
+| [#57](https://github.com/dhickel/vulkan-engine/issues/57) | Static batch ceiling not enforced across frozen corpus |
+| [#58](https://github.com/dhickel/vulkan-engine/issues/58) | Strict extraction fails on generated faces (missing lightmap) |
+| [#59](https://github.com/dhickel/vulkan-engine/issues/59) | Renderer mount retirement missing fence-aware queue |
+| [#60](https://github.com/dhickel/vulkan-engine/issues/60) | Committed bridge has no active teardown receipt |
+| [#61](https://github.com/dhickel/vulkan-engine/issues/61) | GPU upload rollback crashes (SIGSEGV) |
+| [#62](https://github.com/dhickel/vulkan-engine/issues/62) | Planned mesh bounds lost after GPU transfer |
+| [#63](https://github.com/dhickel/vulkan-engine/issues/63) | First material slot (0,0) rejected as null sentinel |
+
+All crate-level tests pass (`bsp`, `bsp_runtime`, `bsp_generator`, `bsp_beta` unit tests). Development-mode authorization can reach upload preflight. Visual acceptance, reference calibration, and live WSI evidence require a GPU/WSI environment and have not yet been produced.
+
 ## See Also
 
 - [Guide: BSP Beta](../guide/18-bsp-beta.md) — app-builder how-to

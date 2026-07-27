@@ -52,6 +52,7 @@ Opt-in features available behind Cargo feature flags. Each chapter documents the
 | # | Chapter | What You'll Learn |
 |---|---------|-------------------|
 | [18](18-bsp-beta.md) | BSP Map Support (Beta) | Load, render, query, and persist Quake 1 BSP maps behind the `bsp` feature gate |
+| [19](19-bsp-generator.md) | BSP Dungeon Generator | Generate procedural Quake-format dungeon `.map` files from seed+config with the `bsp_generator` crate |
 
 ### Part V — Real-World Reference
 

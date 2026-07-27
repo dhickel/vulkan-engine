@@ -42,6 +42,11 @@ pub struct CliArgs {
     pub all_visible: bool,
     /// Phase 07: Corpus identity for evidence report.
     pub corpus_identity: Option<String>,
+    /// Phase 09: Acceptance camera label (spawn, corridor, junction).
+    /// When set, applies frozen capture settings (1280×720, exposure 1.0,
+    /// overbright 2.0, style 0, animation 0.0). Only available in headless
+    /// acceptance mode; rejected in ordinary windowed launches.
+    pub acceptance_camera: Option<String>,
 }
 
 /// Import mode for CLI — mutually exclusive --strict and --development.
@@ -156,6 +161,7 @@ impl Default for CliArgs {
             stats: false,
             all_visible: false,
             corpus_identity: None,
+            acceptance_camera: None,
         }
     }
 }
@@ -251,6 +257,17 @@ pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<C
                 opts.corpus_identity = Some(value.to_string());
                 i += 2;
             }
+            "--acceptance-camera" => {
+                let value = next_value(&args, i, "--acceptance-camera")?;
+                let label = value.to_string();
+                if !matches!(label.as_str(), "spawn" | "corridor" | "junction") {
+                    return Err(CliError::UnknownArgument(format!(
+                        "--acceptance-camera must be spawn, corridor, or junction, got '{label}'"
+                    )));
+                }
+                opts.acceptance_camera = Some(label);
+                i += 2;
+            }
             other => return Err(CliError::UnknownArgument(other.to_string())),
         }
     }
@@ -298,6 +315,7 @@ fn print_usage() {
     eprintln!("  --stats                Print draw evidence report after mount (headless)");
     eprintln!("  --all-visible          Use all-visible evidence mode (with --stats)");
     eprintln!("  --corpus <name>        Corpus identity for evidence report");
+    eprintln!("  --acceptance-camera <label>  Phase 09 frozen camera: spawn|corridor|junction");
     eprintln!();
 }
 
