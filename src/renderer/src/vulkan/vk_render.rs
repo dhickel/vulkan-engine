@@ -443,7 +443,7 @@ pub fn init_caches(
     let default_env = environment_cache
         .import_environment(
             crate::data::environment_import::EnvironmentSource::FaceDirectory {
-                path: "src/renderer/src/assets/sky_maps/sky".into(),
+                path: "src/renderer/src/assets/sky_maps/cc0_dungeon_hdr".into(),
                 pattern: crate::data::environment_import::FacePattern::PxNxPyNyPzNz,
             },
         )

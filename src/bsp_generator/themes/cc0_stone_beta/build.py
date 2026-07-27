@@ -26,7 +26,7 @@ import struct
 import sys
 
 try:
-    from PIL import Image, ImageChops, ImageDraw, ImageFilter
+    from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps, ImageStat
 except ImportError as error:  # pragma: no cover - exercised by build hosts
     raise SystemExit("CC0 Stone Beta generation requires Pillow: pip install Pillow") from error
 
@@ -37,11 +37,16 @@ MASTER_SEED = 0x43433053  # "CC0S" in ASCII
 PNG_SAVE_OPTIONS = {"format": "PNG", "compress_level": 9, "optimize": False}
 
 # name, RGB base, height gain, normal strength, mean gloss
+#
+# The BSP PBR shader converts gloss to roughness with ``1 - gloss``. Keep the
+# stone roles inside the useful 0.30–0.50 gloss band (0.50–0.70 roughness),
+# rather than the old near-black 0.10–0.25 gloss range that blurred specular
+# IBL into an indistinguishable flat wash.
 TEXTURE_DEFS = (
-    ("stone_floor", (91, 70, 51), 0.72, 1.30, 50),
-    ("stone_wall", (126, 128, 124), 0.60, 1.10, 42),
-    ("stone_ceiling", (181, 178, 167), 0.44, 0.92, 47),
-    ("stone_accent", (168, 133, 94), 0.66, 1.20, 67),
+    ("stone_floor", (91, 70, 51), 0.72, 1.30, 100),
+    ("stone_wall", (126, 128, 124), 0.60, 1.10, 96),
+    ("stone_ceiling", (181, 178, 167), 0.44, 0.92, 104),
+    ("stone_accent", (168, 133, 94), 0.66, 1.20, 112),
 )
 
 
@@ -393,14 +398,32 @@ def normal_map(height: Image.Image, strength: float) -> Image.Image:
 
 
 def gloss_map(height: Image.Image, rng: random.Random, mean_gloss: int) -> Image.Image:
-    """Create non-flat gloss variation: recessed/porous stone stays roughest."""
-    broad = height.filter(ImageFilter.GaussianBlur(radius=15))
-    pores = centred(periodic_noise(rng, 64), 0.36)
+    """Create spatially useful 0.30–0.50 stone gloss from the relief field.
+
+    Dark cracks, pores, and high-frequency relief remain rougher while broad,
+    worn stone gets a modestly glossier response.  Autocontrast is intentional:
+    the procedural height fields have role-dependent variance, but the PBR
+    range is an authored material contract rather than an accidental output of
+    a particular height-map contrast level.
+    """
+    broad = height.filter(ImageFilter.GaussianBlur(radius=18))
+    pores = periodic_noise(rng, 64)
     contour = ImageChops.subtract(height, broad, scale=1, offset=128)
-    variation = average(centred(contour, 0.72), pores)
+    worn = ImageOps.autocontrast(broad)
+    relief = ImageOps.autocontrast(contour)
+    pore_detail = ImageOps.autocontrast(pores)
+    variation = ImageOps.autocontrast(average(average(worn, relief), pore_detail))
+
+    # 76/255 ≈ 0.30 and 128/255 ≈ 0.50. A gentle role-specific curve shifts
+    # the average without allowing any texel to leave the authored PBR range.
+    curve = 1.0 + (102 - mean_gloss) / 50.0
     gloss = variation.point(
-        [clamp(mean_gloss + (value - 128) * 0.31) for value in range(256)]
+        [clamp(76 + 52 * ((value / 255.0) ** curve)) for value in range(256)]
     )
+    low, high = gloss.getextrema()
+    deviation = ImageStat.Stat(gloss).var[0] ** 0.5
+    assert 76 <= low <= high <= 128, (low, high)
+    assert deviation >= 8.0, f"gloss variation unexpectedly flat: stddev={deviation:.2f}"
     return Image.merge("RGB", (gloss, gloss, gloss))
 
 

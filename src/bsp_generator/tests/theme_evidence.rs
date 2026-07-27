@@ -59,6 +59,35 @@ fn png_dimensions(path: &Path) -> (u32, u32) {
     (width, height)
 }
 
+/// Measure the first gloss channel through Pillow, which is already a required
+/// dependency of the deterministic theme builder.
+fn gloss_stats(path: &Path) -> (u8, u8, f64) {
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(
+            "from PIL import Image, ImageStat; import sys; ".to_owned()
+                + "im = Image.open(sys.argv[1]).convert('L'); "
+                + "lo, hi = im.getextrema(); "
+                + "print(lo, hi, ImageStat.Stat(im).var[0] ** 0.5)",
+        )
+        .arg(path)
+        .output()
+        .expect("run Pillow gloss statistics");
+    assert!(
+        output.status.success(),
+        "Pillow gloss statistics failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let values = String::from_utf8(output.stdout)
+        .expect("Pillow gloss statistics must be UTF-8")
+        .split_whitespace()
+        .map(str::parse::<f64>)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("Pillow gloss statistics must be numeric");
+    assert_eq!(values.len(), 3, "unexpected Pillow gloss statistics");
+    (values[0] as u8, values[1] as u8, values[2])
+}
+
 // ── Existence & executability ────────────────────────────────────────────
 
 #[test]
@@ -300,6 +329,23 @@ fn each_base_texture_has_norm_and_gloss_at_matching_dimensions() {
         assert_eq!(bh, VISUAL_TEXTURE_DIMENSION, "{name} basecolor height");
         assert_eq!((nw, nh), (bw, bh), "{name} norm dimensions mismatch");
         assert_eq!((gw, gh), (bw, bh), "{name} gloss dimensions mismatch");
+    }
+}
+
+#[test]
+fn gloss_maps_use_the_authored_pbr_range_with_meaningful_variation() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    assert!(run_build(tmp.path()).success());
+    let tex_dir = tmp.path().join("textures");
+
+    for name in &["stone_floor", "stone_wall", "stone_ceiling", "stone_accent"] {
+        let (low, high, std_dev) = gloss_stats(&tex_dir.join(format!("{name}_gloss.png")));
+        assert!(low >= 76, "{name} gloss {low}/255 is below 0.30");
+        assert!(high <= 128, "{name} gloss {high}/255 is above 0.50");
+        assert!(
+            std_dev >= 8.0,
+            "{name} gloss variation is too flat: stddev={std_dev:.2}"
+        );
     }
 }
 

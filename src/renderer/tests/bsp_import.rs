@@ -308,6 +308,16 @@ fn pbr_companion_face_produces_pbr_lightmapped_desc() {
         0
     );
     assert_ne!(
+        desc.surface_params.surface_flags
+            & renderer::api::bsp::bsp_surface_flags::SURF_PBR_NORMAL,
+        0
+    );
+    assert_ne!(
+        desc.surface_params.surface_flags
+            & renderer::api::bsp::bsp_surface_flags::SURF_PBR_GLOSS,
+        0
+    );
+    assert_ne!(
         desc.surface_params.receive_mask & renderer::api::bsp::bsp_surface_flags::RECEIVE_IBL,
         0
     );

@@ -1947,6 +1947,33 @@ mod tests {
 
     #[cfg(feature = "bsp")]
     #[test]
+    fn normal_only_pbr_companion_sets_normal_flag_and_default_gloss() {
+        let mut extracted = stress_extracted(1, 1);
+        extracted.textures[0].pbr_companions.normal = Some(
+            bsp::resources::TextureCompanion::new(
+                "textures/texture_0_norm.png",
+                one_pixel_png([64, 192, 255, 255]),
+            ),
+        );
+
+        let plan = plan_bsp_upload(&extracted).expect("normal-only BSP plan");
+        assert_eq!(plan.textures[0].material_data_rgba, [0, 64, 192, 0]);
+        assert_eq!(
+            plan.textures[0].pbr_flags,
+            bsp_surface_flags::SURF_PBR | bsp_surface_flags::SURF_PBR_NORMAL
+        );
+        assert_ne!(
+            plan.materials[0].surface_uniform.surface_flags & bsp_surface_flags::SURF_PBR_NORMAL,
+            0
+        );
+        assert_eq!(
+            plan.materials[0].surface_uniform.surface_flags & bsp_surface_flags::SURF_PBR_GLOSS,
+            0
+        );
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
     fn legacy_texture_without_companions_keeps_legacy_material_data_and_route() {
         let extracted = stress_extracted(1, 1);
         let plan = plan_bsp_upload(&extracted).expect("legacy BSP plan");
