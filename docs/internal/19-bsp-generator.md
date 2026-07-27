@@ -287,7 +287,7 @@ src/bsp_generator/themes/cc0_stone_beta/
     └── stone_accent_gloss.png
 ```
 
-`build.py` is deterministic — it produces byte-identical WAD, palette, and PNGs on every invocation. The WAD contains five 64×64 miptex entries: `STONE_FLR`, `STONE_WALL`, `STONE_CEIL`, `STONE_ACNT`, and compiler-only `SKIP`. The four visual roles have normal/gloss companions; `SKIP` deliberately does not. The generator's texture constants map to the visual WAD names.
+`build.py` is deterministic — it produces byte-identical WAD, palette, and PNGs on every invocation; Pillow is its only build-time Python dependency. The WAD contains four 1024×1024 visual miptex entries: `stone_floor`, `stone_wall`, `stone_ceiling`, and `stone_accent`, plus the compact compiler-only 64×64 `skip` entry. The four visual roles have matching 1024×1024 base-color, normal, and gloss companions with procedurally authored stone relief; `skip` deliberately has no companions. The generator's texture constants map to the lowercase WAD identities.
 
 ## 12. Validation and Testing
 

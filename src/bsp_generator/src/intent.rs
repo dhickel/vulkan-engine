@@ -73,7 +73,7 @@ pub struct RoutedIntent {
 ///
 /// The approved serializer grammar is Standard Quake (offset/rotation/scale)
 /// per `DECISION-20260726-01`. `u_axis`/`v_axis` fields are removed from the
-/// public IR; serialization uses the canonical `"texture" 0 0 0 1.0 1.0`
+/// public IR; serialization uses the canonical `"texture" 0 0 0 0.25 0.25`
 /// format exclusively.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

@@ -8,6 +8,9 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const VISUAL_TEXTURE_DIMENSION: u32 = 1024;
+const COMPILER_SKIP_DIMENSION: u32 = 64;
+
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 /// Return the absolute path to the `themes/cc0_stone_beta` directory.
@@ -180,8 +183,13 @@ fn wad2_has_valid_header_and_role_plus_compiler_miptex_entries() {
 
         let mip_w = u32::from_le_bytes(wad[fp + 16..fp + 20].try_into().unwrap());
         let mip_h = u32::from_le_bytes(wad[fp + 20..fp + 24].try_into().unwrap());
-        assert_eq!(mip_w, 64, "lump {i} width");
-        assert_eq!(mip_h, 64, "lump {i} height");
+        let expected_dimension = if expected_names[i] == "skip" {
+            COMPILER_SKIP_DIMENSION
+        } else {
+            VISUAL_TEXTURE_DIMENSION
+        };
+        assert_eq!(mip_w, expected_dimension, "lump {i} width");
+        assert_eq!(mip_h, expected_dimension, "lump {i} height");
 
         // All 4 mip offsets should be ≥ 40 (header size) and within lump
         for m in 0..4usize {
@@ -191,6 +199,21 @@ fn wad2_has_valid_header_and_role_plus_compiler_miptex_entries() {
             assert!(
                 (mip_off as usize) < disksize as usize,
                 "lump {i} mip {m} offset {mip_off} beyond lump size {disksize}"
+            );
+        }
+
+        if expected_names[i] != "skip" {
+            let mip0_offset =
+                u32::from_le_bytes(wad[fp + 24..fp + 28].try_into().unwrap()) as usize;
+            let mip0_end = fp + mip0_offset + (mip_w as usize * mip_h as usize);
+            let mip0 = &wad[fp + mip0_offset..mip0_end];
+            assert!(
+                mip0.iter().any(|index| *index != mip0[0]),
+                "{name} mip-0 must retain palette-index detail"
+            );
+            assert!(
+                mip0.iter().all(|index| *index < 224),
+                "{name} stone albedo must not unintentionally use fullbright palette entries"
             );
         }
     }
@@ -273,10 +296,39 @@ fn each_base_texture_has_norm_and_gloss_at_matching_dimensions() {
         let (nw, nh) = png_dimensions(&norm);
         let (gw, gh) = png_dimensions(&gloss);
 
-        assert_eq!(bw, 64, "{name} basecolor width");
-        assert_eq!(bh, 64, "{name} basecolor height");
+        assert_eq!(bw, VISUAL_TEXTURE_DIMENSION, "{name} basecolor width");
+        assert_eq!(bh, VISUAL_TEXTURE_DIMENSION, "{name} basecolor height");
         assert_eq!((nw, nh), (bw, bh), "{name} norm dimensions mismatch");
         assert_eq!((gw, gh), (bw, bh), "{name} gloss dimensions mismatch");
+    }
+}
+
+#[test]
+fn pbr_companions_have_authored_detail_instead_of_flat_png_payloads() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    assert!(run_build(tmp.path()).success());
+    let tex_dir = tmp.path().join("textures");
+
+    for name in &["stone_floor", "stone_wall", "stone_ceiling", "stone_accent"] {
+        let base = tex_dir.join(format!("{name}_basecolor.png"));
+        let normal = tex_dir.join(format!("{name}_norm.png"));
+        let gloss = tex_dir.join(format!("{name}_gloss.png"));
+
+        // A 1024² flat RGB PNG compresses to only a few KiB. These lower
+        // bounds ensure the deterministic generator retained real albedo,
+        // tangent-space normal, and gloss variation in the companion files.
+        assert!(
+            std::fs::metadata(&base).unwrap().len() > 64 * 1024,
+            "{name} basecolor unexpectedly looks flat"
+        );
+        assert!(
+            std::fs::metadata(&normal).unwrap().len() > 8 * 1024,
+            "{name} normal map unexpectedly looks flat"
+        );
+        assert!(
+            std::fs::metadata(&gloss).unwrap().len() > 8 * 1024,
+            "{name} gloss map unexpectedly looks flat"
+        );
     }
 }
 

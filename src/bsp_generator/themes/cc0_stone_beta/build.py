@@ -1,403 +1,530 @@
 #!/usr/bin/env python3
-"""Deterministic CC0 Stone Beta theme asset generator.
+"""Deterministic procedural CC0 Stone Beta theme asset generator.
 
-Generates all theme assets from a fixed seed with zero external dependencies
-beyond the Python stdlib. Two independent runs produce byte-identical output.
+The generator creates every theme asset from fixed seeds; it does not sample or
+transform third-party artwork. The generated pixels and the accompanying WAD,
+palette, and PBR maps are dedicated to CC0 by ``LICENSE``.
 
 Outputs (placed in the target directory, default CWD):
-- palette.lmp              — 256-color Quake-style palette (768 bytes)
-- cc0_stone_beta.wad       — WAD2 archive with 4 role miptex entries plus `skip`
-- theme.toml               — texture role bindings
-- LICENSE                  — CC0-1.0 public domain dedication
-- textures/
-    stone_floor_basecolor.png
-    stone_floor_norm.png
-    stone_floor_gloss.png
-    stone_wall_basecolor.png
-    stone_wall_norm.png
-    stone_wall_gloss.png
-    stone_ceiling_basecolor.png
-    stone_ceiling_norm.png
-    stone_ceiling_gloss.png
-    stone_accent_basecolor.png
-    stone_accent_norm.png
-    stone_accent_gloss.png
+- palette.lmp              — 256-colour project-authored palette (768 bytes)
+- cc0_stone_beta.wad       — WAD2 archive with 1024² visual miptex entries
+                              and one 64² compiler-only ``skip`` miptex
+- textures/<role>_basecolor.png, <role>_norm.png, <role>_gloss.png
+
+Pillow is required to generate and palette-quantise the PNG and WAD images.
 
 Usage:
     python3 build.py [output_directory]
 """
 
+from __future__ import annotations
+
+import math
+from pathlib import Path
+import random
 import struct
-import zlib
-import os
 import sys
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Deterministic RNG
-# ═══════════════════════════════════════════════════════════════════════════
-
-class RNG:
-    """31-bit LCG matching glibc rand() behaviour."""
-
-    def __init__(self, seed):
-        self.state = seed & 0x7FFFFFFF
-
-    def next(self):
-        self.state = (self.state * 1103515245 + 12345) & 0x7FFFFFFF
-        return self.state
-
-    def range(self, lo, hi):
-        """Return a deterministic integer in [lo, hi)."""
-        return lo + (self.next() % (hi - lo))
+try:
+    from PIL import Image, ImageChops, ImageDraw, ImageFilter
+except ImportError as error:  # pragma: no cover - exercised by build hosts
+    raise SystemExit("CC0 Stone Beta generation requires Pillow: pip install Pillow") from error
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# PNG writer (pure-Python, no Pillow dependency)
-# ═══════════════════════════════════════════════════════════════════════════
+TEXTURE_SIZE = 1024
+SKIP_TEXTURE_SIZE = 64
+MASTER_SEED = 0x43433053  # "CC0S" in ASCII
+PNG_SAVE_OPTIONS = {"format": "PNG", "compress_level": 9, "optimize": False}
 
-def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
-    """Return a complete PNG chunk: length + type + data + CRC32."""
-    raw = chunk_type + data
-    length = struct.pack('>I', len(data))
-    crc = struct.pack('>I', zlib.crc32(raw) & 0xFFFFFFFF)
-    return length + raw + crc
-
-
-def make_png_rgb(width: int, height: int, pixels: bytes) -> bytes:
-    """Encode an 8-bit RGB PNG from raw (R,G,B,...) pixel bytes."""
-    sig = b'\x89PNG\r\n\x1a\n'
-    # IHDR: bit depth 8, colour type 2 (RGB)
-    ihdr = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
-    out = sig + _png_chunk(b'IHDR', ihdr)
-    # IDAT: one filter-byte (0=None) per row, then row data
-    row_bytes = width * 3
-    raw = b''
-    for y in range(height):
-        raw += b'\x00'
-        raw += pixels[y * row_bytes : (y + 1) * row_bytes]
-    out += _png_chunk(b'IDAT', zlib.compress(raw))
-    out += _png_chunk(b'IEND', b'')
-    return out
+# name, RGB base, height gain, normal strength, mean gloss
+TEXTURE_DEFS = (
+    ("stone_floor", (91, 70, 51), 0.72, 1.30, 50),
+    ("stone_wall", (126, 128, 124), 0.60, 1.10, 42),
+    ("stone_ceiling", (181, 178, 167), 0.44, 0.92, 47),
+    ("stone_accent", (168, 133, 94), 0.66, 1.20, 67),
+)
 
 
-def make_png_solid(width: int, height: int, r: int, g: int, b: int) -> bytes:
-    """PNG filled with a single RGB colour."""
-    return make_png_rgb(width, height, bytes([r, g, b]) * (width * height))
+def clamp(value: float | int) -> int:
+    return max(0, min(255, int(round(value))))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Palette — 256-entry Quake-style .lmp (768 bytes RGB)
+# Palette
 # ═══════════════════════════════════════════════════════════════════════════
 
 def make_palette() -> bytes:
-    """Return a 768-byte RGB palette with brown/grey ramps and fullbrights."""
-    pal = bytearray()
+    """Return a project-authored 256-entry stone palette.
 
-    # Row  0 (  0- 15): grey ramp  — black → white (16 steps)
-    for i in range(16):
-        v = i * 255 // 15
-        pal.extend([v, v, v])
-
-    # Row  1 ( 16- 31): brown ramp  — dark brown → light tan
-    for i in range(16):
-        r = 60 + i * 120 // 15
-        g = 35 + i * 100 // 15
-        b = 20 + i * 80 // 15
-        pal.extend([r, g, b])
-
-    # Row  2 ( 32- 47): warm beige ramp
-    for i in range(16):
-        r = 160 + i * 80 // 15
-        g = 130 + i * 70 // 15
-        b = 100 + i * 60 // 15
-        pal.extend([r, g, b])
-
-    # Row  3 ( 48- 63): cool grey ramp
-    for i in range(16):
-        v = 32 + i * 200 // 15
-        pal.extend([v, v, v + 10 if v + 10 <= 255 else 255])
-
-    # Rows 4-13 ( 64-223): graduated variation ramps (10 rows × 16 cols)
-    for row in range(10):
-        # Each row sweeps a slightly different hue family
-        base_r = 35 + row * 20
-        base_g = 25 + row * 15
-        base_b = 15 + row * 12
-        for i in range(16):
-            r = min(255, base_r + i * 13)
-            g = min(255, base_g + i * 11)
-            b = min(255, base_b + i * 9)
-            pal.extend([r, g, b])
-
-    # Rows 14-15 (224-255): fullbrights — bright saturated hues
-    for i in range(32):
-        hue = i * 256 // 32
-        if hue < 85:
-            r, g, b = 255, hue * 3, 0
-        elif hue < 170:
-            r, g, b = 255 - (hue - 85) * 3, 255, 0
-        else:
-            r, g, b = 0, 255, (hue - 170) * 3
-        pal.extend([min(255, r), min(255, g), min(255, b)])
-
-    return bytes(pal)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Nearest-neighbour palette quantisation
-# ═══════════════════════════════════════════════════════════════════════════
-
-def quantize(rgb_pixels: bytes, palette: bytes) -> list:
-    """Map every RGB triple to the closest palette index (Euclidean)."""
-    indices = []
-    for i in range(0, len(rgb_pixels), 3):
-        r, g, b = rgb_pixels[i], rgb_pixels[i + 1], rgb_pixels[i + 2]
-        best_idx = 0
-        best_dist = 256 * 256 * 3 + 1
-        for idx in range(256):
-            pr = palette[idx * 3]
-            pg = palette[idx * 3 + 1]
-            pb = palette[idx * 3 + 2]
-            dr = r - pr
-            dg = g - pg
-            db = b - pb
-            dist = dr * dr + dg * dg + db * db
-            if dist < best_dist:
-                best_dist = dist
-                best_idx = idx
-        indices.append(best_idx)
-    return indices
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Mipmap downsampling
-# ═══════════════════════════════════════════════════════════════════════════
-
-def downsample_mip(indices: list, w: int, h: int, palette: bytes) -> list:
-    """Average each 2×2 block in RGB space, then re-quantise to palette."""
-    nw, nh = w // 2, h // 2
-    result = []
-    for y in range(nh):
-        for x in range(nw):
-            i00 = indices[(y * 2) * w + (x * 2)]
-            i01 = indices[(y * 2) * w + (x * 2 + 1)]
-            i10 = indices[(y * 2 + 1) * w + (x * 2)]
-            i11 = indices[(y * 2 + 1) * w + (x * 2 + 1)]
-            r = (palette[i00 * 3]     + palette[i01 * 3]     +
-                 palette[i10 * 3]     + palette[i11 * 3])     // 4
-            g = (palette[i00 * 3 + 1] + palette[i01 * 3 + 1] +
-                 palette[i10 * 3 + 1] + palette[i11 * 3 + 1]) // 4
-            b = (palette[i00 * 3 + 2] + palette[i01 * 3 + 2] +
-                 palette[i10 * 3 + 2] + palette[i11 * 3 + 2]) // 4
-            # Nearest palette match
-            best = 0
-            best_d = 999999
-            for idx in range(256):
-                dr = r - palette[idx * 3]
-                dg = g - palette[idx * 3 + 1]
-                db = b - palette[idx * 3 + 2]
-                d = dr * dr + dg * dg + db * db
-                if d < best_d:
-                    best_d = d
-                    best = idx
-            result.append(best)
-    return result
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# WAD2 builder
-# ═══════════════════════════════════════════════════════════════════════════
-
-def make_miptex(name: str, width: int, height: int,
-                indices: list, palette: bytes) -> bytes:
-    """Build a single Quake miptex lump (header + 4 mip levels)."""
-    assert width == 64 and height == 64, "only 64×64 supported"
-
-    mip0 = bytes(indices)                              # 4096 B
-    mip1_idx = downsample_mip(indices, 64, 64, palette) # 1024 B
-    mip2_idx = downsample_mip(mip1_idx, 32, 32, palette) # 256 B
-    mip3_idx = downsample_mip(mip2_idx, 16, 16, palette) #  64 B
-
-    mip1 = bytes(mip1_idx)
-    mip2 = bytes(mip2_idx)
-    mip3 = bytes(mip3_idx)
-
-    HDR = 40
-    off0 = HDR
-    off1 = off0 + len(mip0)
-    off2 = off1 + len(mip1)
-    off3 = off2 + len(mip2)
-
-    name_bytes = name.encode('ascii')
-    if len(name_bytes) > 15:
-        raise ValueError(f"texture name too long: {name}")
-    name_padded = name_bytes.ljust(16, b'\x00')
-
-    header = struct.pack('<16sIIIIII',
-                         name_padded, width, height,
-                         off0, off1, off2, off3)
-    return header + mip0 + mip1 + mip2 + mip3
-
-
-def make_wad2(entries: list) -> bytes:
-    """Build a WAD2 file from a list of (name, miptex_bytes) tuples.
-
-    WAD2 layout:
-      - Header: magic(4) + numlumps(4 LE) + infotableofs(4 LE)      [12 B]
-      - Lump data: concatenated miptex blobs
-      - Info table: numlumps × 32 B directory entries
+    Entries 0..223 are deliberately arranged as muted stone ramps. Entries
+    224..255 remain vivid fullbrights and are avoided by the generated albedo.
     """
-    num = len(entries)
-    HDR_SIZE = 12
-    ENTRY_SIZE = 32
+    ramps = (
+        ((9, 9, 9), (226, 224, 216)),       # neutral greys
+        ((29, 22, 17), (150, 111, 76)),     # dark floor earth
+        ((47, 33, 22), (183, 132, 86)),     # warm floor stone
+        ((65, 47, 32), (204, 159, 112)),    # weathered brown
+        ((77, 70, 62), (164, 163, 156)),    # charcoal-grey wall
+        ((88, 92, 91), (187, 190, 185)),    # cool wall slate
+        ((109, 105, 96), (208, 204, 190)),  # limestone
+        ((128, 119, 103), (220, 205, 176)), # warm limestone
+        ((46, 54, 50), (119, 133, 119)),    # subdued moss tint
+        ((65, 70, 71), (145, 151, 151)),    # blue-grey stone
+        ((102, 88, 72), (181, 157, 126)),   # accent sandstone
+        ((127, 98, 69), (204, 161, 111)),   # carved warm accent
+        ((144, 137, 123), (224, 218, 202)), # pale ceiling stone
+        ((159, 151, 139), (238, 232, 216)), # light worn highlights
+    )
 
-    lumps = [e[1] for e in entries]
-    lump_start = HDR_SIZE
-    infotableofs = lump_start + sum(len(l) for l in lumps)
+    palette = bytearray()
+    for start, end in ramps:
+        for step in range(16):
+            fraction = step / 15
+            palette.extend(
+                clamp(start[channel] + (end[channel] - start[channel]) * fraction)
+                for channel in range(3)
+            )
 
-    header = struct.pack('<4sii', b'WAD2', num, infotableofs)
+    # Keep the final two rows reserved for fullbright material semantics.
+    for step in range(32):
+        hue = step * 256 // 32
+        if hue < 85:
+            rgb = (255, hue * 3, 0)
+        elif hue < 170:
+            rgb = (255 - (hue - 85) * 3, 255, 0)
+        else:
+            rgb = (0, 255, (hue - 170) * 3)
+        palette.extend(clamp(component) for component in rgb)
 
-    info = b''
-    cur = lump_start
-    for (name, data) in entries:
-        name_bytes = name.encode('ascii')
-        if len(name_bytes) > 15:
+    assert len(palette) == 768
+    return bytes(palette)
+
+
+def palette_image(palette: bytes) -> Image.Image:
+    image = Image.new("P", (1, 1))
+    image.putpalette(palette)
+    return image
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Tileable procedural height fields
+# ═══════════════════════════════════════════════════════════════════════════
+
+def periodic_noise(rng: random.Random, cells: int) -> Image.Image:
+    """Return a tileable smooth noise field with a fixed 1024px period."""
+    values = [rng.randrange(256) for _ in range(cells * cells)]
+    dimension = cells + 1
+    repeated = bytearray(dimension * dimension)
+    for y in range(dimension):
+        source_y = (y % cells) * cells
+        target_y = y * dimension
+        for x in range(dimension):
+            repeated[target_y + x] = values[source_y + (x % cells)]
+
+    # The matching final row/column makes the resampled field periodic at the
+    # texture boundary. Crop the duplicate edge back to the WAD dimensions.
+    source = Image.frombytes("L", (dimension, dimension), bytes(repeated))
+    return source.resize(
+        (TEXTURE_SIZE + 1, TEXTURE_SIZE + 1), Image.Resampling.BICUBIC
+    ).crop((0, 0, TEXTURE_SIZE, TEXTURE_SIZE))
+
+
+def centred(image: Image.Image, gain: float) -> Image.Image:
+    return image.point([clamp(128 + (value - 128) * gain) for value in range(256)])
+
+
+def average(left: Image.Image, right: Image.Image) -> Image.Image:
+    return ImageChops.add(left, right, scale=2)
+
+
+def base_height(rng: random.Random, gains: tuple[float, float, float]) -> Image.Image:
+    """Combine large, medium, and fine periodic noise into a stone field."""
+    large = centred(periodic_noise(rng, 8), gains[0])
+    medium = centred(periodic_noise(rng, 32), gains[1])
+    fine = centred(periodic_noise(rng, 128), gains[2])
+    return average(average(large, medium), fine)
+
+
+def wrapped_line(draw: ImageDraw.ImageDraw, points: list[tuple[int, int]], fill: int, width: int) -> None:
+    """Draw a line and its neighbouring tile copies for seam-safe cracks."""
+    for offset_x in (-TEXTURE_SIZE, 0, TEXTURE_SIZE):
+        for offset_y in (-TEXTURE_SIZE, 0, TEXTURE_SIZE):
+            draw.line(
+                [(x + offset_x, y + offset_y) for x, y in points],
+                fill=fill,
+                width=width,
+                joint="curve",
+            )
+
+
+def wrapped_ellipse(
+    draw: ImageDraw.ImageDraw, x: int, y: int, radius: int, fill: int
+) -> None:
+    for offset_x in (-TEXTURE_SIZE, 0, TEXTURE_SIZE):
+        for offset_y in (-TEXTURE_SIZE, 0, TEXTURE_SIZE):
+            draw.ellipse(
+                (
+                    x - radius + offset_x,
+                    y - radius + offset_y,
+                    x + radius + offset_x,
+                    y + radius + offset_y,
+                ),
+                fill=fill,
+            )
+
+
+def crack_path(rng: random.Random, start: tuple[int, int], segments: int, step: int) -> list[tuple[int, int]]:
+    points = [start]
+    angle = rng.uniform(0.0, math.tau)
+    x, y = start
+    for _ in range(segments):
+        angle += rng.uniform(-0.75, 0.75)
+        distance = rng.randint(step // 2, step)
+        x += int(math.cos(angle) * distance)
+        y += int(math.sin(angle) * distance)
+        points.append((x, y))
+    return points
+
+
+def add_floor_masonry(height: Image.Image, rng: random.Random) -> None:
+    """Lay irregular broad flagstones, recessed grout, and surface chips."""
+    draw = ImageDraw.Draw(height)
+    row_height = 256
+
+    for row, y in enumerate(range(0, TEXTURE_SIZE + 1, row_height)):
+        if y in (0, TEXTURE_SIZE):
+            points = [(0, y), (TEXTURE_SIZE, y)]
+        else:
+            points = [(0, y)]
+            for x in range(96, TEXTURE_SIZE, 96):
+                points.append((x, y + rng.randint(-11, 11)))
+            points.append((TEXTURE_SIZE, y))
+        draw.line(points, fill=42, width=13, joint="curve")
+        draw.line(points, fill=70, width=3, joint="curve")
+
+        if row == 4:
+            continue
+        offset = 58 if row % 2 else 176
+        for x in range(offset, TEXTURE_SIZE, 250):
+            seam_x = x + rng.randint(-24, 24)
+            points = [(seam_x, y), (seam_x + rng.randint(-10, 10), y + row_height)]
+            draw.line(points, fill=45, width=12)
+            draw.line([(px + 4, py) for px, py in points], fill=83, width=2)
+
+    for _ in range(115):
+        points = crack_path(
+            rng,
+            (rng.randrange(TEXTURE_SIZE), rng.randrange(TEXTURE_SIZE)),
+            rng.randint(2, 5),
+            rng.randint(14, 36),
+        )
+        wrapped_line(draw, points, fill=rng.randint(37, 62), width=rng.choice((1, 1, 2)))
+
+    for _ in range(850):
+        wrapped_ellipse(
+            draw,
+            rng.randrange(TEXTURE_SIZE),
+            rng.randrange(TEXTURE_SIZE),
+            rng.choice((1, 1, 2, 3)),
+            rng.randint(72, 112),
+        )
+
+
+def add_wall_masonry(height: Image.Image, rng: random.Random) -> None:
+    """Build weathered ashlar courses with chips and vertical water marks."""
+    draw = ImageDraw.Draw(height)
+    course_height = 146
+
+    for row, y in enumerate(range(0, TEXTURE_SIZE + 1, course_height)):
+        y = min(y, TEXTURE_SIZE)
+        draw.line([(0, y), (TEXTURE_SIZE, y)], fill=49, width=9)
+        draw.line([(0, y + 3), (TEXTURE_SIZE, y + 3)], fill=91, width=2)
+        if row == 7:
+            continue
+        offset = 90 if row % 2 else 235
+        for x in range(offset, TEXTURE_SIZE, 275):
+            seam_x = x + rng.randint(-22, 22)
+            top = y
+            bottom = min(TEXTURE_SIZE, y + course_height)
+            draw.line([(seam_x, top), (seam_x + rng.randint(-6, 6), bottom)], fill=52, width=8)
+            draw.line([(seam_x + 3, top + 4), (seam_x + 3, bottom - 4)], fill=94, width=1)
+
+    for _ in range(320):
+        x = rng.randrange(TEXTURE_SIZE)
+        y = rng.randrange(TEXTURE_SIZE)
+        width = rng.randint(2, 8)
+        height_px = rng.randint(2, 11)
+        draw.ellipse((x - width, y - height_px, x + width, y + height_px), fill=rng.randint(48, 95))
+
+    for _ in range(32):
+        x = rng.randrange(TEXTURE_SIZE)
+        top = rng.randrange(TEXTURE_SIZE)
+        length = rng.randint(35, 190)
+        wrapped_line(
+            draw,
+            [(x, top), (x + rng.randint(-8, 8), top + length)],
+            fill=rng.randint(60, 82),
+            width=rng.choice((1, 2, 3)),
+        )
+
+
+def add_ceiling_roughness(height: Image.Image, rng: random.Random) -> None:
+    """Create rough pale stone with broad slab seams, pores, and fine fractures."""
+    draw = ImageDraw.Draw(height)
+
+    for y in (0, 340, 680, TEXTURE_SIZE):
+        points = [(0, y)]
+        for x in range(128, TEXTURE_SIZE, 128):
+            points.append((x, y + (0 if y in (0, TEXTURE_SIZE) else rng.randint(-18, 18))))
+        points.append((TEXTURE_SIZE, y))
+        draw.line(points, fill=77, width=5, joint="curve")
+
+    for _ in range(95):
+        points = crack_path(
+            rng,
+            (rng.randrange(TEXTURE_SIZE), rng.randrange(TEXTURE_SIZE)),
+            rng.randint(2, 5),
+            rng.randint(17, 48),
+        )
+        wrapped_line(draw, points, fill=rng.randint(66, 92), width=1)
+
+    for _ in range(1_450):
+        wrapped_ellipse(
+            draw,
+            rng.randrange(TEXTURE_SIZE),
+            rng.randrange(TEXTURE_SIZE),
+            rng.choice((1, 1, 2, 2, 3, 4)),
+            rng.randint(84, 119),
+        )
+
+
+def add_accent_carving(height: Image.Image, rng: random.Random) -> None:
+    """Create warm dressed stone with inset borders and worn chisel marks."""
+    draw = ImageDraw.Draw(height)
+    for offset in (0, TEXTURE_SIZE):
+        draw.rectangle((offset - 12, 0, offset + 12, TEXTURE_SIZE), fill=49)
+        draw.rectangle((0, offset - 12, TEXTURE_SIZE, offset + 12), fill=49)
+
+    for y in range(128, TEXTURE_SIZE, 256):
+        for x in range(128, TEXTURE_SIZE, 256):
+            inset = rng.randint(22, 36)
+            draw.rounded_rectangle(
+                (x - 112, y - 112, x + 112, y + 112),
+                radius=18,
+                outline=62,
+                width=10,
+            )
+            draw.rounded_rectangle(
+                (x - 112 + inset, y - 112 + inset, x + 112 - inset, y + 112 - inset),
+                radius=10,
+                outline=92,
+                width=3,
+            )
+
+    for _ in range(310):
+        points = crack_path(
+            rng,
+            (rng.randrange(TEXTURE_SIZE), rng.randrange(TEXTURE_SIZE)),
+            rng.randint(1, 3),
+            rng.randint(10, 28),
+        )
+        wrapped_line(draw, points, fill=rng.randint(45, 73), width=rng.choice((1, 1, 2)))
+
+
+def role_height(name: str, rng: random.Random) -> Image.Image:
+    if name == "stone_floor":
+        height = base_height(rng, (0.68, 0.45, 0.28))
+        add_floor_masonry(height, rng)
+    elif name == "stone_wall":
+        height = base_height(rng, (0.54, 0.40, 0.32))
+        add_wall_masonry(height, rng)
+    elif name == "stone_ceiling":
+        height = base_height(rng, (0.48, 0.35, 0.24))
+        add_ceiling_roughness(height, rng)
+    elif name == "stone_accent":
+        height = base_height(rng, (0.57, 0.38, 0.26))
+        add_accent_carving(height, rng)
+    else:  # pragma: no cover - guarded by TEXTURE_DEFS
+        raise ValueError(f"unknown stone role: {name}")
+    return height
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PBR maps
+# ═══════════════════════════════════════════════════════════════════════════
+
+def colourise(height: Image.Image, rng: random.Random, base: tuple[int, int, int], gain: float) -> Image.Image:
+    """Turn the shared relief map into a restrained, role-specific stone albedo."""
+    mottling = centred(periodic_noise(rng, 16), 0.33)
+    tone = average(centred(height, 0.92), mottling)
+    channel_gains = (gain * 1.06, gain, gain * 0.86)
+    channels = [
+        tone.point(
+            [clamp(base[channel] + (value - 128) * channel_gains[channel]) for value in range(256)]
+        )
+        for channel in range(3)
+    ]
+    return Image.merge("RGB", tuple(channels))
+
+
+def normal_map(height: Image.Image, strength: float) -> Image.Image:
+    """Encode a tangent-space normal map from the procedural height field."""
+    source = height.tobytes()
+    normal = bytearray(TEXTURE_SIZE * TEXTURE_SIZE * 3)
+    destination = 0
+    for y in range(TEXTURE_SIZE):
+        previous_row = ((y - 1) % TEXTURE_SIZE) * TEXTURE_SIZE
+        row = y * TEXTURE_SIZE
+        next_row = ((y + 1) % TEXTURE_SIZE) * TEXTURE_SIZE
+        for x in range(TEXTURE_SIZE):
+            left = row + ((x - 1) % TEXTURE_SIZE)
+            right = row + ((x + 1) % TEXTURE_SIZE)
+            gradient_x = source[right] - source[left]
+            gradient_y = source[next_row + x] - source[previous_row + x]
+            encoded_x = clamp(128 - gradient_x * strength)
+            encoded_y = clamp(128 - gradient_y * strength)
+            normal[destination] = encoded_x
+            normal[destination + 1] = encoded_y
+            # The renderer reconstructs +Z from R/G. Keep B meaningful for
+            # external texture viewers while preserving the tangent-space slope.
+            normal[destination + 2] = clamp(255 - (abs(gradient_x) + abs(gradient_y)) * strength * 0.65)
+            destination += 3
+    return Image.frombytes("RGB", (TEXTURE_SIZE, TEXTURE_SIZE), bytes(normal))
+
+
+def gloss_map(height: Image.Image, rng: random.Random, mean_gloss: int) -> Image.Image:
+    """Create non-flat gloss variation: recessed/porous stone stays roughest."""
+    broad = height.filter(ImageFilter.GaussianBlur(radius=15))
+    pores = centred(periodic_noise(rng, 64), 0.36)
+    contour = ImageChops.subtract(height, broad, scale=1, offset=128)
+    variation = average(centred(contour, 0.72), pores)
+    gloss = variation.point(
+        [clamp(mean_gloss + (value - 128) * 0.31) for value in range(256)]
+    )
+    return Image.merge("RGB", (gloss, gloss, gloss))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# WAD2 writer
+# ═══════════════════════════════════════════════════════════════════════════
+
+def make_miptex(name: str, image: Image.Image, palette: Image.Image) -> bytes:
+    """Build a Quake miptex from an RGB image using four indexed mip levels."""
+    width, height = image.size
+    if width != height or width < 8 or width & (width - 1):
+        raise ValueError(f"{name}: miptex size must be square power-of-two >= 8, got {image.size}")
+
+    mips: list[bytes] = []
+    level = image
+    for _ in range(4):
+        indexed = level.quantize(palette=palette, dither=Image.Dither.NONE)
+        mips.append(indexed.tobytes())
+        level = level.resize((level.width // 2, level.height // 2), Image.Resampling.BOX)
+
+    offsets = []
+    offset = 40
+    for mip in mips:
+        offsets.append(offset)
+        offset += len(mip)
+
+    encoded_name = name.encode("ascii")
+    if len(encoded_name) > 15:
+        raise ValueError(f"texture name too long: {name}")
+    header = struct.pack(
+        "<16sIIIIII",
+        encoded_name.ljust(16, b"\0"),
+        width,
+        height,
+        *offsets,
+    )
+    return header + b"".join(mips)
+
+
+def make_wad2(entries: list[tuple[str, bytes]]) -> bytes:
+    """Build an uncompressed WAD2 archive from named miptex byte blobs."""
+    directory_offset = 12 + sum(len(data) for _, data in entries)
+    header = struct.pack("<4sii", b"WAD2", len(entries), directory_offset)
+    directory = bytearray()
+    file_position = 12
+    for name, data in entries:
+        encoded_name = name.encode("ascii")
+        if len(encoded_name) > 15:
             raise ValueError(f"texture name too long: {name}")
-        name_padded = name_bytes.ljust(16, b'\x00')
-        sz = len(data)
-        # Quake WAD2 lumpinfo_t layout:
-        # filepos, disksize, size, type, compression, pad1, pad2, name[16]
-        info += struct.pack('<iiIBBH16s',
-                            cur,            # filepos
-                            sz,             # disksize
-                            sz,             # size (uncompressed)
-                            0x44,           # type = miptex
-                            0,              # compression = none
-                            0,              # padding
-                            name_padded)
-        cur += sz
-
-    return header + b''.join(lumps) + info
+        directory.extend(
+            struct.pack(
+                "<iiIBBH16s",
+                file_position,
+                len(data),
+                len(data),
+                0x44,  # WAD2 miptex lump
+                0,     # no compression
+                0,
+                encoded_name.ljust(16, b"\0"),
+            )
+        )
+        file_position += len(data)
+    return header + b"".join(data for _, data in entries) + bytes(directory)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Fixed master seed: "CC0S" in ASCII → 0x43_43_30_53
-MASTER_SEED = 0x43433053
+def write_static_files(out_dir: Path) -> None:
+    (out_dir / "theme.toml").write_text(
+        "[roles]\n"
+        "floor = \"stone_floor\"\n"
+        "wall = \"stone_wall\"\n"
+        "ceiling = \"stone_ceiling\"\n"
+        "accent = \"stone_accent\"\n",
+        encoding="utf-8",
+    )
+    (out_dir / "LICENSE").write_text(
+        "CC0 1.0 Universal (CC0 1.0) Public Domain Dedication\n\n"
+        "The person who associated a work with this deed has dedicated the work to the\n"
+        "public domain by waiving all of his or her rights to the work worldwide under\n"
+        "copyright law, including all related and neighboring rights, to the extent\n"
+        "allowed by law.\n\n"
+        "You can copy, modify, distribute and perform the work, even for commercial\n"
+        "purposes, all without asking permission.\n\n"
+        "Full license text: https://creativecommons.org/publicdomain/zero/1.0/legalcode\n\n"
+        "Attribution (not required but appreciated):\n"
+        "  \"CC0 Stone Beta Theme\" generated by the bsp_generator project.\n",
+        encoding="utf-8",
+    )
 
-TEXTURE_DEFS = [
-    # (name,          base-R, base-G, base-B)
-    ('stone_floor',   90,     65,     45),    # dark grey-brown
-    ('stone_wall',    140,    135,    130),   # medium grey
-    ('stone_ceiling', 190,    185,    180),   # light grey
-    ('stone_accent',  200,    170,    140),   # warm beige
-]
 
+def main() -> None:
+    out_dir = Path(sys.argv[1] if len(sys.argv) > 1 else ".")
+    texture_dir = out_dir / "textures"
+    texture_dir.mkdir(parents=True, exist_ok=True)
 
-def main():
-    out_dir = sys.argv[1] if len(sys.argv) > 1 else '.'
-    tex_dir = os.path.join(out_dir, 'textures')
-    os.makedirs(tex_dir, exist_ok=True)
-
-    rng = RNG(MASTER_SEED)
-
-    # ── Palette ────────────────────────────────────────────────────────
     palette = make_palette()
-    with open(os.path.join(out_dir, 'palette.lmp'), 'wb') as f:
-        f.write(palette)
+    (out_dir / "palette.lmp").write_bytes(palette)
+    palette_for_quantisation = palette_image(palette)
 
-    # ── Textures ───────────────────────────────────────────────────────
-    wad_entries = []
+    wad_entries: list[tuple[str, bytes]] = []
+    for index, (name, base_rgb, colour_gain, normal_strength, mean_gloss) in enumerate(TEXTURE_DEFS):
+        role_rng = random.Random(MASTER_SEED + index * 0x9E3779B1)
+        height = role_height(name, role_rng)
+        base = colourise(height, role_rng, base_rgb, colour_gain)
+        normal = normal_map(height, normal_strength)
+        gloss = gloss_map(height, role_rng, mean_gloss)
 
-    for name, base_r, base_g, base_b in TEXTURE_DEFS:
-        # Generate noisy RGB pixels (deterministic via master RNG)
-        pixels = bytearray()
-        for _y in range(64):
-            for _x in range(64):
-                noise = rng.range(-12, 13)
-                r = base_r + noise + rng.range(-3, 4)
-                g = base_g + noise + rng.range(-3, 4)
-                b = base_b + noise + rng.range(-3, 4)
-                pixels.extend([
-                    max(0, min(255, r)),
-                    max(0, min(255, g)),
-                    max(0, min(255, b)),
-                ])
-        pixels = bytes(pixels)
+        base.save(texture_dir / f"{name}_basecolor.png", **PNG_SAVE_OPTIONS)
+        normal.save(texture_dir / f"{name}_norm.png", **PNG_SAVE_OPTIONS)
+        gloss.save(texture_dir / f"{name}_gloss.png", **PNG_SAVE_OPTIONS)
+        wad_entries.append((name, make_miptex(name, base, palette_for_quantisation)))
 
-        # Base-colour PNG
-        png_base = make_png_rgb(64, 64, pixels)
-        with open(os.path.join(tex_dir, f'{name}_basecolor.png'), 'wb') as f:
-            f.write(png_base)
+    # ericw-tools requests the conventional compiler-only `skip` material
+    # while creating hulls. It remains a compact non-rendered 64² miptex.
+    skip = Image.new("RGB", (SKIP_TEXTURE_SIZE, SKIP_TEXTURE_SIZE), (0, 0, 0))
+    wad_entries.append(("skip", make_miptex("skip", skip, palette_for_quantisation)))
+    (out_dir / "cc0_stone_beta.wad").write_bytes(make_wad2(wad_entries))
+    write_static_files(out_dir)
 
-        # Normal map  — flat blue (tangent-space "no detail")
-        png_norm = make_png_solid(64, 64, 128, 128, 255)
-        with open(os.path.join(tex_dir, f'{name}_norm.png'), 'wb') as f:
-            f.write(png_norm)
-
-        # Gloss map  — medium roughness (0.5 linear ≈ 128 sRGB grey)
-        png_gloss = make_png_solid(64, 64, 128, 128, 128)
-        with open(os.path.join(tex_dir, f'{name}_gloss.png'), 'wb') as f:
-            f.write(png_gloss)
-
-        # Quantise to palette for WAD miptex
-        indices = quantize(pixels, palette)
-        miptex = make_miptex(name, 64, 64, indices, palette)
-        wad_entries.append((name, miptex))
-
-    # ericw-tools reserves the conventional `skip` material while building
-    # hulls even when no source face names it. Keep a compiler-only miptex in
-    # the WAD so a clean generated-map compile has no missing-texture warning.
-    # It has no theme role and no renderer companion textures.
-    skip_indices = [0] * (64 * 64)
-    wad_entries.append(('skip', make_miptex('skip', 64, 64, skip_indices, palette)))
-
-    # ── WAD2 archive ───────────────────────────────────────────────────
-    wad_data = make_wad2(wad_entries)
-    with open(os.path.join(out_dir, 'cc0_stone_beta.wad'), 'wb') as f:
-        f.write(wad_data)
-
-    # ── theme.toml ─────────────────────────────────────────────────────
-    theme_toml = (
-        '[roles]\n'
-        'floor = "stone_floor"\n'
-        'wall = "stone_wall"\n'
-        'ceiling = "stone_ceiling"\n'
-        'accent = "stone_accent"\n'
-    )
-    with open(os.path.join(out_dir, 'theme.toml'), 'w') as f:
-        f.write(theme_toml)
-
-    # ── LICENSE ────────────────────────────────────────────────────────
-    license_text = (
-        'CC0 1.0 Universal (CC0 1.0) Public Domain Dedication\n'
-        '\n'
-        'The person who associated a work with this deed has dedicated '
-        'the work to the\n'
-        'public domain by waiving all of his or her rights to the work '
-        'worldwide under\n'
-        'copyright law, including all related and neighboring rights, '
-        'to the extent\n'
-        'allowed by law.\n'
-        '\n'
-        'You can copy, modify, distribute and perform the work, even '
-        'for commercial\n'
-        'purposes, all without asking permission.\n'
-        '\n'
-        'Full license text: '
-        'https://creativecommons.org/publicdomain/zero/1.0/legalcode\n'
-        '\n'
-        'Attribution (not required but appreciated):\n'
-        '  "CC0 Stone Beta Theme" generated by the bsp_generator project.\n'
-    )
-    with open(os.path.join(out_dir, 'LICENSE'), 'w') as f:
-        f.write(license_text)
-
-    print(f'CC0 Stone Beta theme generated in {os.path.abspath(out_dir)}')
+    print(f"CC0 Stone Beta theme generated in {out_dir.resolve()}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

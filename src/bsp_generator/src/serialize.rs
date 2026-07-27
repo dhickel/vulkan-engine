@@ -7,7 +7,7 @@
 //! `DECISION-20260726-01`. Every face line uses the canonical form:
 //!
 //! ```text
-//! ( x y z ) ( x y z ) ( x y z ) "texture" 0 0 0 1.0 1.0
+//! ( x y z ) ( x y z ) ( x y z ) "texture" 0 0 0 0.25 0.25
 //! ```
 //!
 //! Valve 220 bracket axes (`[ 1 0 0 0 ]`) are **not** implemented. The
@@ -23,7 +23,7 @@
 //! | brush order           | by creation index                                   |
 //! | face order per brush  | bottom, top, north, south, west, east               |
 //! | integer formatting    | decimal, no scientific notation                     |
-//! | texture axes          | Standard Quake `0 0 0 1.0 1.0` offset/rotation/scale|
+//! | texture axes          | Standard Quake `0 0 0 0.25 0.25` offset/rotation/scale|
 //! | line endings          | `\n` (LF)                                           |
 //! | terminal newline      | exactly one trailing `\n`                            |
 
@@ -123,7 +123,7 @@ fn emit_face(out: &mut String, face: &BrushFace) {
 
     // Texture name + standard offset/rotation/scale (no explicit axis vectors)
     // Format: "name" x_off y_off rotation x_scale y_scale
-    writeln!(out, "\"{}\" 0 0 0 1.0 1.0", face.texture).unwrap();
+    writeln!(out, "\"{}\" 0 0 0 0.25 0.25", face.texture).unwrap();
 }
 
 fn emit_key_value(out: &mut String, key: &str, value: &str) {
@@ -266,7 +266,7 @@ mod tests {
         let s = serialize(&emission);
         // Every face line should contain standard offset/rotation/scale pattern
         assert!(
-            s.contains("0 0 0 1.0 1.0"),
+            s.contains("0 0 0 0.25 0.25"),
             "missing texture coordinate format"
         );
         // Verify no bracket format remains

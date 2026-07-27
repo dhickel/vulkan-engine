@@ -141,9 +141,9 @@ All failures return `GeneratorError` — never panics, never silently falls back
 
 The beta generator uses the **CC0 Stone Beta** theme — a project-authored, license-clean procedural texture set. Theme assets live in `src/bsp_generator/themes/cc0_stone_beta/` and include:
 
-- `cc0_stone_beta.wad` — WAD2 archive with four visible stone roles and a compiler-only `skip` miptex
-- `palette.lmp` — 768-byte Quake palette
-- `textures/*.png` — PBR companions (normal + gloss for each visible surface role; none for `skip`)
+- `cc0_stone_beta.wad` — WAD2 archive with four distinct 1024×1024 visible stone roles and a 64×64 compiler-only `skip` miptex
+- `palette.lmp` — 768-byte project-authored Quake palette
+- `textures/*.png` — matching 1024×1024 albedo, normal, and gloss companions for each visible surface role; none for `skip`
 - `theme.toml` — texture role bindings (floor, wall, ceiling, accent)
 - `LICENSE` — CC0 public domain dedication
 
@@ -156,7 +156,7 @@ cd src/bsp_generator/themes/cc0_stone_beta
 python3 build.py
 ```
 
-`build.py` is deterministic — it produces byte-identical output on every run.
+`build.py` is deterministic — it produces byte-identical output on every run. It requires Pillow (`pip install Pillow`) and generates only project-authored CC0 procedural pixels.
 
 ## Compilation Pipeline
 

@@ -161,7 +161,7 @@ void main()
 
     // ── 3. Diffuse Lambertian ──────────────────────────────────────
 
-    vec3 color = hasBakedLightmap ? irradiance * albedo * PI_INV : albedo;
+    vec3 color = hasBakedLightmap ? irradiance * albedo * PI_INV : albedo * 3.0;
 
     // ── 4. Fullbright emissive ─────────────────────────────────────
 

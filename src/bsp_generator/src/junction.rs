@@ -36,7 +36,7 @@ const PERMITTED_TEXTURES: [&str; 5] = [
 /// Faces are emitted in canonical order: bottom, top, north, south, west,
 /// east. Callers are responsible for passing a non-empty box. The approved
 /// Standard Quake serializer (`DECISION-20260726-01`) uses `"texture" 0 0 0
-/// 1.0 1.0`; this function stores only the plane points and texture identity.
+/// 0.25 0.25`; this function stores only the plane points and texture identity.
 pub fn make_brush(min: (i32, i32, i32), max: (i32, i32, i32), texture: &str) -> Brush {
     debug_assert!(min.0 < max.0 && min.1 < max.1 && min.2 < max.2);
 

@@ -269,7 +269,7 @@ fn texture_axis_standard_format() {
 
     // Standard format: texture_name x_off y_off rot x_scale y_scale
     assert!(
-        s.contains("0 0 0 1.0 1.0"),
+        s.contains("0 0 0 0.25 0.25"),
         "must use standard offset/scale format"
     );
 

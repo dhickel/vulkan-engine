@@ -165,7 +165,7 @@ void main()
     vec3 kD = vec3(1.0) - kS;
     vec3 color = hasBakedLightmap
         ? bakedIrradiance * albedoSample.rgb * kD * PI_INV
-        : albedoSample.rgb;
+        : albedoSample.rgb * 3.0;
 
     if ((surf.receiveMask & RECEIVE_IBL) != 0u) {
         vec3 reflection = normalize(reflect(-V, N));
