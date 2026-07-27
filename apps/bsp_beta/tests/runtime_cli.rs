@@ -62,6 +62,9 @@ fn cli_preserves_struct_values() {
         wad_path: None,
         import_mode: Some(cli::ImportMode::Development),
         textures_dir: None,
+        stats: false,
+        all_visible: false,
+        corpus_identity: None,
     };
 
     let cloned = original.clone();

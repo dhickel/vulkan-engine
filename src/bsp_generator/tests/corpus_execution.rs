@@ -6,6 +6,10 @@
 //! diagnostics, validates sealed output, verifies budget ceilings, proves
 //! M2 > M1, and records JSON evidence.
 //!
+//! Also exports a transport manifest for downstream strict-runtime harnesses
+//! (see Phase 08 corpus_runtime_evidence.rs). Set `BSP_CORPUS_MANIFEST_OUTPUT`
+//! to a file path to trigger export.
+//!
 //! Requires ericw-tools 2.0.0-alpha3 installed at:
 //!   ~/.local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin/
 //! Tests skip gracefully when tools are absent.
@@ -1124,4 +1128,201 @@ fn days_to_ymd(mut days: i64) -> (i64, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
     let y = if m <= 2 { y + 1 } else { y };
     (y, m as u32, d as u32)
+}
+
+// ── Phase 08: Transport Manifest Export ───────────────────────────────────
+
+/// Build a transport-manifest JSON value for the given metadata and results.
+fn build_transport_manifest_json(
+    entries: &[TransportEntryData],
+    nominal_count: usize,
+    boundary_count: usize,
+) -> serde_json::Value {
+    let per_entry: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            let mut obj = serde_json::json!({
+                "entry_id": e.entry_id,
+                "class": e.class,
+                "seed": e.seed,
+                "config": {
+                    "room_count": e.room_count,
+                    "loop_count": e.loop_count,
+                    "xy_bounds": [e.xy_x, e.xy_y],
+                    "z_span": e.z_span,
+                    "placement_candidates": e.placement_candidates,
+                    "max_placement_attempts": e.max_placement_attempts,
+                    "max_astar_expansions": e.max_astar_expansions,
+                },
+                "profile": {
+                    "name": "ericw-q1-bsp2-generated",
+                    "format": "BSP2",
+                    "compiler": "ericw-tools",
+                    "compiler_version": "2.0.0-alpha3",
+                    "thread_count": 1,
+                    "lit_enabled": true,
+                },
+                "palette_hash": e.palette_hash,
+                "wad_hash": e.wad_hash,
+                "companion_slots": [
+                    {"slot_index": 0, "texture_name": "DNGN01", "pbr_normal": true, "pbr_gloss": true},
+                    {"slot_index": 1, "texture_name": "DNGN02", "pbr_normal": true, "pbr_gloss": true},
+                ],
+                "expected_semantic_members": ["bsp", "lit", "palette", "wad/cc0_stone_beta"],
+                "prerequisite_result": e.prerequisite_result,
+            });
+            if let Some(ref h) = e.map_hash {
+                obj["map_hash"] = serde_json::Value::String(h.clone());
+            }
+            if let Some(ref h) = e.bsp_hash {
+                obj["bsp_hash"] = serde_json::Value::String(h.clone());
+            }
+            if let Some(ref h) = e.lit_hash {
+                obj["lit_hash"] = serde_json::Value::String(h.clone());
+            }
+            obj
+        })
+        .collect();
+
+    serde_json::json!({
+        "schema_version": 1,
+        "phase": "08",
+        "timestamp": chrono_now(),
+        "total_entries": entries.len(),
+        "nominal_count": nominal_count,
+        "boundary_count": boundary_count,
+        "entries": per_entry,
+    })
+}
+
+struct TransportEntryData {
+    entry_id: String,
+    class: String,
+    seed: u64,
+    room_count: u32,
+    loop_count: u32,
+    xy_x: u32,
+    xy_y: u32,
+    z_span: u32,
+    placement_candidates: u32,
+    max_placement_attempts: u32,
+    max_astar_expansions: u32,
+    map_hash: Option<String>,
+    bsp_hash: Option<String>,
+    lit_hash: Option<String>,
+    palette_hash: String,
+    wad_hash: String,
+    prerequisite_result: String,
+}
+
+/// Export the all-12 transport manifest to the path in `BSP_CORPUS_MANIFEST_OUTPUT`.
+///
+/// This is a test-only export gated on an environment variable. The output
+/// contains no transient paths — only durable semantic identities and content
+/// hashes.
+#[test]
+fn export_transport_manifest() {
+    let output_path = match std::env::var("BSP_CORPUS_MANIFEST_OUTPUT") {
+        Ok(p) if !p.is_empty() => PathBuf::from(p),
+        _ => {
+            eprintln!("SKIP: set BSP_CORPUS_MANIFEST_OUTPUT to trigger transport manifest export");
+            return;
+        }
+    };
+
+    let tool_dir = ericw_tools_dir();
+    let tools_available = tools_available(&tool_dir);
+
+    let palette_bytes = std::fs::read(palette_path()).unwrap_or_default();
+    let palette_hash = sha256(&palette_bytes);
+    let wad_bytes = std::fs::read(wad_path()).unwrap_or_default();
+    let wad_hash = sha256(&wad_bytes);
+
+    let entries = corpus_entries();
+    let mut data_entries: Vec<TransportEntryData> = Vec::with_capacity(entries.len());
+
+    for entry in &entries {
+        let prerequisite_result = if !tools_available {
+            "NOT_RUN: ericw-tools unavailable".to_string()
+        } else {
+            "AVAILABLE".to_string()
+        };
+
+        // Try to compute content hashes if tools are available
+        let (map_hash, bsp_hash, lit_hash) = if tools_available {
+            match generate(entry.seed, entry.config.clone()) {
+                Ok((map_text, _meta)) => {
+                    let mh = sha256(map_text.as_bytes());
+                    let staging = unique_tmp(&entry.name);
+                    let map_path = staging.join("generated.map");
+                    std::fs::write(&map_path, &map_text).expect("write .map");
+                    match compile_generated_map(&map_path, &staging, &tool_dir, true) {
+                        Ok((bsp_data, lit_data)) => {
+                            let bh = sha256(&bsp_data);
+                            let lh = lit_data.as_ref().map(|d| sha256(d));
+                            let _ = std::fs::remove_dir_all(&staging);
+                            (Some(mh), Some(bh), lh)
+                        }
+                        Err(e) => {
+                            eprintln!("  compile failed for {}: {}", entry.name, e);
+                            let _ = std::fs::remove_dir_all(&staging);
+                            (Some(mh), None, None)
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  generate failed for {}: {:?}", entry.name, e);
+                    (None, None, None)
+                }
+            }
+        } else {
+            (None, None, None)
+        };
+
+        data_entries.push(TransportEntryData {
+            entry_id: entry.name.to_string(),
+            class: format!("{:?}", entry.class),
+            seed: entry.seed,
+            room_count: entry.config.room_count,
+            loop_count: entry.config.loop_count,
+            xy_x: entry.config.xy_bounds.0,
+            xy_y: entry.config.xy_bounds.1,
+            z_span: entry.config.z_span,
+            placement_candidates: entry.config.placement_candidates,
+            max_placement_attempts: entry.config.max_placement_attempts,
+            max_astar_expansions: entry.config.max_astar_expansions,
+            map_hash,
+            bsp_hash,
+            lit_hash,
+            palette_hash: palette_hash.clone(),
+            wad_hash: wad_hash.clone(),
+            prerequisite_result,
+        });
+    }
+
+    let nominal_count = data_entries
+        .iter()
+        .filter(|e| e.entry_id.starts_with("nominal"))
+        .count();
+    let boundary_count = data_entries
+        .iter()
+        .filter(|e| e.entry_id.starts_with("boundary"))
+        .count();
+
+    let manifest = build_transport_manifest_json(&data_entries, nominal_count, boundary_count);
+
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent).expect("create manifest dir");
+    }
+    std::fs::write(
+        &output_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .expect("write transport manifest");
+    eprintln!(
+        "Transport manifest ({}/{} entries) written to {}",
+        nominal_count + boundary_count,
+        data_entries.len(),
+        output_path.display()
+    );
 }
