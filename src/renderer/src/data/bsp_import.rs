@@ -548,7 +548,13 @@ fn build_material_plan(
             alpha_threshold: 0.5,
             animation_frame: 0,
             animation_time: 0.0,
-            surface_flags: surface_flags_for(Some(surface_class)) | key.pbr_flags,
+            surface_flags: surface_flags_for(Some(surface_class))
+                | key.pbr_flags
+                | if key.lightmap_page == u32::MAX {
+                    bsp_surface_flags::SURF_UNLIT_FALLBACK
+                } else {
+                    0
+                },
             receive_mask: receive_mask_for(Some(surface_class))
                 | if is_pbr {
                     bsp_surface_flags::RECEIVE_IBL
@@ -1558,8 +1564,11 @@ pub fn build_bsp_material_descs(
             _ => BspSurfaceClass::Lightmapped,
         };
 
-        let albedo = albedo_handles
+        let albedo = extracted
+            .face_materials
             .get(fi)
+            .and_then(|material| usize::try_from(material.material_index).ok())
+            .and_then(|texture_index| albedo_handles.get(texture_index))
             .copied()
             .unwrap_or_else(|| BspTextureHandle::new(0, 0));
 
@@ -1601,7 +1610,13 @@ pub fn build_bsp_material_descs(
             alpha_threshold: 0.5,
             animation_frame: 0,
             animation_time: 0.0,
-            surface_flags: surface_flags_for(sc) | pbr_flags,
+            surface_flags: surface_flags_for(sc)
+                | pbr_flags
+                | if !layout.has_data {
+                    bsp_surface_flags::SURF_UNLIT_FALLBACK
+                } else {
+                    0
+                },
             receive_mask: receive_mask_for(sc)
                 | if is_pbr {
                     bsp_surface_flags::RECEIVE_IBL
@@ -1919,6 +1934,62 @@ mod tests {
         assert!(!plan.materials[0].is_pbr);
         assert_eq!(
             plan.materials[0].surface_uniform.surface_flags & bsp_surface_flags::SURF_PBR,
+            0
+        );
+        assert_eq!(
+            plan.materials[0].surface_uniform.surface_flags
+                & bsp_surface_flags::SURF_UNLIT_FALLBACK,
+            0
+        );
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn missing_lightmap_uses_direct_material_fallback_without_rescaling_uv0() {
+        let mut extracted = stress_extracted(1, 1);
+        extracted.textures[0].width = 64;
+        extracted.textures[0].height = 64;
+        extracted.textures[0].albedo = vec![255; 64 * 64 * 4];
+        extracted.textures[0].fullbright_mask = vec![0; 64 * 64];
+        extracted.face_lightmap_layouts[0].has_data = false;
+        extracted.face_lightmap_layouts[0].style_layers.clear();
+        rebuild_test_render_batches(&mut extracted);
+
+        let plan = plan_bsp_upload(&extracted).expect("unlit fallback BSP plan");
+        assert_ne!(
+            plan.materials[0].surface_uniform.surface_flags
+                & bsp_surface_flags::SURF_UNLIT_FALLBACK,
+            0
+        );
+        assert_eq!(
+            plan.batches[0].mesh.vertices[1].uv0,
+            Vec2::new(1.0 / 64.0, 0.0)
+        );
+        assert_eq!(
+            plan.batches[0].mesh.vertices[2].uv0,
+            Vec2::new(0.0, 1.0 / 64.0)
+        );
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn material_desc_uses_face_texture_index_and_marks_unlit_fallback() {
+        let mut extracted = stress_extracted(2, 2);
+        extracted.face_materials[0].material_index = 1;
+        extracted.face_lightmap_layouts[0].has_data = false;
+        extracted.face_lightmap_layouts[0].style_layers.clear();
+
+        let albedo_handles = [BspTextureHandle::new(10, 1), BspTextureHandle::new(11, 1)];
+        let descs = build_bsp_material_descs(
+            &extracted,
+            &albedo_handles,
+            BspTextureHandle::new(12, 1),
+        );
+        let desc = descs[0].as_ref().expect("visible face descriptor");
+
+        assert_eq!(desc.textures.albedo, albedo_handles[1]);
+        assert_ne!(
+            desc.surface_params.surface_flags & bsp_surface_flags::SURF_UNLIT_FALLBACK,
             0
         );
     }

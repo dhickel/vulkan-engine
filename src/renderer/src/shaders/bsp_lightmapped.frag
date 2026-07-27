@@ -83,6 +83,7 @@ const uint SURF_ALPHA_MASK       = 1u << 0;
 const uint SURF_SKY              = 1u << 1;
 const uint SURF_LIQUID           = 1u << 2;
 const uint SURF_FULLBRIGHT       = 1u << 3;
+const uint SURF_UNLIT_FALLBACK   = 1u << 7;
 
 const uint RECEIVE_IBL            = 1u << 8;
 const uint RECEIVE_CSM            = 1u << 9;
@@ -124,32 +125,35 @@ void main()
 
     // ── 2. Lightmap: 4-style weighted sum ──────────────────────────
 
+    bool hasBakedLightmap = (surf.surfaceFlags & SURF_UNLIT_FALLBACK) == 0u;
     vec2 atlasUv = inUV1 * surf.lightmapScaleBias.xy + surf.lightmapScaleBias.zw;
     vec3 lightmapIrradiance = vec3(0.0);
 
-    // Style slot 0
-    if (surf.styleIds.x != 255u) {
-        float intensity = styleIntensity(surf.styleIds.x);
-        vec3 sample0 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase))).rgb;
-        lightmapIrradiance += decodeLightmap(sample0) * intensity;
-    }
-    // Style slot 1
-    if (surf.styleIds.y != 255u) {
-        float intensity = styleIntensity(surf.styleIds.y);
-        vec3 sample1 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 1u))).rgb;
-        lightmapIrradiance += decodeLightmap(sample1) * intensity;
-    }
-    // Style slot 2
-    if (surf.styleIds.z != 255u) {
-        float intensity = styleIntensity(surf.styleIds.z);
-        vec3 sample2 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 2u))).rgb;
-        lightmapIrradiance += decodeLightmap(sample2) * intensity;
-    }
-    // Style slot 3
-    if (surf.styleIds.w != 255u) {
-        float intensity = styleIntensity(surf.styleIds.w);
-        vec3 sample3 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 3u))).rgb;
-        lightmapIrradiance += decodeLightmap(sample3) * intensity;
+    if (hasBakedLightmap) {
+        // Style slot 0
+        if (surf.styleIds.x != 255u) {
+            float intensity = styleIntensity(surf.styleIds.x);
+            vec3 sample0 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase))).rgb;
+            lightmapIrradiance += decodeLightmap(sample0) * intensity;
+        }
+        // Style slot 1
+        if (surf.styleIds.y != 255u) {
+            float intensity = styleIntensity(surf.styleIds.y);
+            vec3 sample1 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 1u))).rgb;
+            lightmapIrradiance += decodeLightmap(sample1) * intensity;
+        }
+        // Style slot 2
+        if (surf.styleIds.z != 255u) {
+            float intensity = styleIntensity(surf.styleIds.z);
+            vec3 sample2 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 2u))).rgb;
+            lightmapIrradiance += decodeLightmap(sample2) * intensity;
+        }
+        // Style slot 3
+        if (surf.styleIds.w != 255u) {
+            float intensity = styleIntensity(surf.styleIds.w);
+            vec3 sample3 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 3u))).rgb;
+            lightmapIrradiance += decodeLightmap(sample3) * intensity;
+        }
     }
 
     // Apply transfer function and overbright once after sum.
@@ -157,8 +161,7 @@ void main()
 
     // ── 3. Diffuse Lambertian ──────────────────────────────────────
 
-    vec3 diffuse = irradiance * albedo * PI_INV;
-    vec3 color = diffuse;
+    vec3 color = hasBakedLightmap ? irradiance * albedo * PI_INV : albedo;
 
     // ── 4. Fullbright emissive ─────────────────────────────────────
 

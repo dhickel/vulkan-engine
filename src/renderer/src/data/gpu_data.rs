@@ -864,6 +864,9 @@ pub mod bsp_surface_flags {
     pub const SURF_PBR_NORMAL: u32 = 1 << 5;
     /// Packed material-data texture contains a gloss map.
     pub const SURF_PBR_GLOSS: u32 = 1 << 6;
+    /// No valid baked-lightmap layout exists, so the surface renders its resolved
+    /// material directly rather than sampling an unrelated atlas texel.
+    pub const SURF_UNLIT_FALLBACK: u32 = 1 << 7;
 
     // Receive masks: control which light sources contribute.
     pub const RECEIVE_IBL: u32 = 1 << 8;

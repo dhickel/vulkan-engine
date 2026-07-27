@@ -162,6 +162,7 @@ Identical six-binding layout as `SceneData`. BSP and PBR paths can share the sam
 - External PBR companions opt opaque/alpha-mask materials into `bsp_pbr.frag`: baked lightmaps remain diffuse irradiance, `roughness = 1 - gloss`, and set 0 prefiltered environment + BRDF LUT provide dielectric specular. Missing normal/gloss channels use flat/fully-rough defaults.
 - `{...}` alpha-mask textures clear alpha and fullbright emission only where palette index 255 occurs; index 255 stays opaque on other texture classes.
 - With no PBR companion, packed material-data bytes reproduce the prior fullbright RGBA upload and the surface stays on `bsp_lightmapped.frag`.
+- A visible face without a valid baked-lightmap layout is marked `SURF_UNLIT_FALLBACK`; the fragment path skips atlas sampling and tone-maps its resolved albedo/material directly rather than sampling an unrelated or uninitialized atlas texel.
 
 ### Pipeline Variants
 

@@ -109,9 +109,9 @@ std140 layout:
 | 40 | `alphaThreshold` | `float` | `f32` | alpha test threshold (default 0.5) |
 | 44 | `animationFrame` | `uint` | `u32` | current animation frame layer |
 | 48 | `animationTime` | `float` | `f32` | engine time ticks (0.1s resolution) |
-| 52 | `surfaceFlags` | `uint` | `u32` | classification flags (SURF_ALPHA_MASK, SURF_SKY, etc.) |
+| 52 | `surfaceFlags` | `uint` | `u32` | classification flags, including `SURF_UNLIT_FALLBACK` when no valid baked-lightmap layout exists |
 | 56 | `receiveMask` | `uint` | `u32` | light receive mask (RECEIVE_IBL, RECEIVE_CSM, etc.) |
-| 60 | `_pad0` | `uint` | `u32` | padding |
+| 60 | `lightmapLayerBase` | `uint` | `u32` | first array layer for the material's four face-local style slots |
 | 64 | `liquidWarpScale` | `float` | `f32` | warp displacement scale |
 | 68 | `liquidFlowSpeed` | `float` | `f32` | flow scroll speed |
 | 72 | `_pad1` | `uvec2` | `[u32;2]` | padding to 80 B |
@@ -142,7 +142,7 @@ std140 layout:
 | BSP sky | set 0 `BspScene`, set 1 `BspMaterial`, set 2 `BspFrameValues` (layout-compatible) | write OFF, LESS | off | back | `mat4 model` + `vertex_buffer_addr`, 80 B, vertex. `bsp_lightmapped.vert(.spv)` + `bsp_sky.frag(.spv)`. No `gl_FragDepth`. |
 | BSP liquid | set 0 `BspScene`, set 1 `BspMaterial`, set 2 `BspFrameValues` | write OFF, LESS | alpha blend | none (two-sided) | Same push constants. `bsp_lightmapped.vert(.spv)` + `bsp_liquid.frag(.spv)`. |
 
-**Frame-varying update rule (frozen)**: In-flight descriptors are never mutated. Frame-local BSP values (style intensities, animation indices, liquid parameters) are written through fresh or frame-rotated set 2 descriptors each frame, not by mutating descriptors that may still be in flight. Static albedo and packed material-data textures use one array layer — per-frame animation changes are communicated via the animationFrame/animationTime uniforms, not by rewriting texture bindings. External PBR companions are decoded and packed before allocation; they add no descriptor binding.
+**Frame-varying update rule (frozen)**: In-flight descriptors are never mutated. Frame-local BSP values (style intensities, animation indices, liquid parameters) are written through fresh or frame-rotated set 2 descriptors each frame, not by mutating descriptors that may still be in flight. Static albedo and packed material-data textures use one array layer — per-frame animation changes are communicated via the animationFrame/animationTime uniforms, not by rewriting texture bindings. External PBR companions are decoded and packed before allocation; they add no descriptor binding. `SURF_UNLIT_FALLBACK` suppresses atlas sampling for a face without a valid lightmap and renders its resolved material path directly.
 
 ### BSP ABI exec guard
 

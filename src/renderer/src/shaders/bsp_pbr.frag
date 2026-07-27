@@ -64,6 +64,7 @@ layout (location = 0) out vec4 outColor;
 const uint SURF_ALPHA_MASK = 1u << 0;
 const uint SURF_PBR_NORMAL = 1u << 5;
 const uint SURF_PBR_GLOSS = 1u << 6;
+const uint SURF_UNLIT_FALLBACK = 1u << 7;
 const uint RECEIVE_IBL = 1u << 8;
 
 const float OVERBRIGHT = 2.0;
@@ -146,8 +147,12 @@ void main()
         : 0.0;
     float perceptualRoughness = clamp(1.0 - gloss, MIN_ROUGHNESS, 1.0);
 
+    bool hasBakedLightmap = (surf.surfaceFlags & SURF_UNLIT_FALLBACK) == 0u;
     vec2 atlasUv = inUV1 * surf.lightmapScaleBias.xy + surf.lightmapScaleBias.zw;
-    vec3 bakedIrradiance = sampleBakedIrradiance(atlasUv);
+    vec3 bakedIrradiance = vec3(0.0);
+    if (hasBakedLightmap) {
+        bakedIrradiance = sampleBakedIrradiance(atlasUv);
+    }
 
     // Dielectric BSP materials are non-metallic. The baked lightmap remains the
     // only diffuse irradiance source and is energy-balanced against specular IBL.
@@ -158,7 +163,9 @@ void main()
     ).rgb;
     vec3 kS = clamp(f0 * brdf.x + brdf.y, vec3(0.0), vec3(1.0));
     vec3 kD = vec3(1.0) - kS;
-    vec3 color = bakedIrradiance * albedoSample.rgb * kD * PI_INV;
+    vec3 color = hasBakedLightmap
+        ? bakedIrradiance * albedoSample.rgb * kD * PI_INV
+        : albedoSample.rgb;
 
     if ((surf.receiveMask & RECEIVE_IBL) != 0u) {
         vec3 reflection = normalize(reflect(-V, N));
