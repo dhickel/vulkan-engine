@@ -48,13 +48,18 @@ verify_cache() {
   [[ -f "$bsp" ]] || return 1
   [[ -f "$manifest" ]] || return 1
 
+  # Check manifest declares a version and it matches current code.
+  local stored_version; stored_version="$(grep '^generator_version' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
+  local current_version; current_version="$(generator_version)"
+  [[ "$stored_version" == "$current_version" ]] || { echo "  $(dim "generator changed ($stored_version → $current_version), rebuilding")"; return 1; }
+
   local stored
-  stored="$(grep '^bsp\.sha256' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
+  stored="$(grep '^bsp\\.sha256' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
   [[ -n "$stored" ]] || return 1
   local actual; actual="$(calc_sha256 "$bsp")"
   [[ "$stored" == "$actual" ]] || return 1
 
-  local stored_pal; stored_pal="$(grep '^palette\.sha256' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
+  local stored_pal; stored_pal="$(grep '^palette\\.sha256' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
   local actual_pal; actual_pal="$(calc_sha256 "$PALETTE_PATH")"
   [[ "$stored_pal" == "$actual_pal" ]] || return 1
 
@@ -62,6 +67,33 @@ verify_cache() {
   [[ "$stored_gen" == "dungeon_gen" ]] || return 1
 
   return 0
+}
+
+generator_version() {
+  # Fingerprint key source files + theme resources. Changes to any of these
+  # trigger automatic cache bust.
+  local files=(
+    "$repo_root/src/bsp_generator/Cargo.toml"
+    "$repo_root/src/bsp/Cargo.toml"
+    "$repo_root/src/bsp_generator/src/emission.rs"
+    "$repo_root/src/bsp_generator/src/junction.rs"
+    "$repo_root/src/bsp_generator/src/intent.rs"
+    "$repo_root/src/bsp_generator/src/config.rs"
+    "$repo_root/src/bsp/src/extract.rs"
+    "$repo_root/src/bsp/src/materials.rs"
+    "$repo_root/src/bsp/src/lightmaps.rs"
+    "$repo_root/src/bsp/src/wad.rs"
+    "$repo_root/src/bsp/src/resources.rs"
+    "$repo_root/src/bsp/src/lumps.rs"
+    "$repo_root/src/bsp/src/geometry.rs"
+    "$WAD_PATH"
+    "$PALETTE_PATH"
+  )
+  local hash_input=""
+  for f in "${files[@]}"; do
+    [[ -f "$f" ]] && hash_input+="$(sha256sum "$f" | awk '{print $1}')"
+  done
+  echo "$hash_input" | sha256sum | awk '{print $1}' | head -c 16
 }
 
 bust_cache() {
@@ -118,6 +150,7 @@ build_cache() {
 generator = "dungeon_gen"
 seed = $seed
 class = "$class"
+generator_version = "$(generator_version)"
 
 [profile]
 profile = "ericw-q1-bsp2-generated"
@@ -198,10 +231,10 @@ run_explorer() {
     return 0
   fi
 
-  local args=(--bsp "$bsp" --palette "$PALETTE_PATH" --wad "$WAD_PATH")
+  local args=("$([[ "$MODE" == "development" ]] && echo "--development" || echo "--strict")")
+  args+=(--bsp "$bsp" --palette "$PALETTE_PATH" --wad "$WAD_PATH")
   [[ -f "$lit" ]] && args+=(--lit "$lit")
   args+=(--textures "$TEXTURES_DIR")
-  [[ "$MODE" == "development" ]] && args+=(--development)
   [[ -n "$CAMERA" ]] && args+=(--acceptance-camera "$CAMERA")
   [[ -n "$STATS" ]] && args+=(--stats)
   [[ -n "$ALL_VISIBLE" ]] && args+=(--all-visible)
