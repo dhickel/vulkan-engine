@@ -634,18 +634,11 @@ impl PreparedBspMount {
 
         // When a resource lease is present, validate every material handle
         // through the surface cache to reject stale, out-of-range, and
-        // wrong-arena handles. Slot zero is valid when cache-issued.
+        // wrong-arena handles. The cache assigns its first material to slot
+        // zero, generation zero, so lease membership is the sole liveness
+        // authority here.
         if let Some(ref lease) = resource_lease {
             for mb in &mounted_batches {
-                // Validate that the material handle has a non-zero slot AND
-                // belongs to this lease's arena. Slot zero is valid when
-                // generation > 0 (cache-issued).
-                if mb.material.slot == 0 && mb.material.generation == 0 {
-                    return Err(format!(
-                        "mounted batch material has null handle {:?}",
-                        mb.material
-                    ));
-                }
                 // The authoritative cache lookup is done at upload time;
                 // here we enforce that the lease records this handle.
                 if !lease.material_handles.contains(&mb.material) {

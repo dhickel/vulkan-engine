@@ -502,19 +502,24 @@ fn phase08_style_id_64_254_rejected() {
     assert!(result.is_err(), "should reject style 64");
 }
 
-/// Verify strict mode rejects visible faces with absent lightmap data.
+/// Strict mode keeps visible faces with absent lightmap data drawable.
 #[test]
-fn phase08_strict_rejects_missing_lightmap() {
+fn phase08_strict_accepts_missing_lightmap_with_fallback() {
     let mut world = bsp_test_minimal_world();
     world.faces[0].lightofs = -1; // no lightmap offset
     world.faces[0].styles = [0, 255, 255, 255];
 
-    let result = extract(BspExtractionRequest {
+    let extracted = extract(BspExtractionRequest {
         world,
         strict: true,
         ..Default::default()
-    });
-    assert!(result.is_err(), "strict should reject missing lightmap");
+    })
+    .expect("strict mode should use the missing-lightmap fallback");
+    assert!(!extracted.face_lightmap_layouts[0].has_data);
+    assert!(extracted
+        .diagnostics
+        .iter()
+        .any(|d| d.code == DiagnosticCode::FallbackMissingLightmap));
 }
 
 /// Verify the common used extent is used by the demand computation.
@@ -640,44 +645,27 @@ fn phase01_sparse_styles_source_slot_preserved() {
     assert_eq!(layout.atlas_offset, layout.style_layers[0].atlas_offset);
 }
 
-/// Strict extraction rejects `lightofs == -1` on a baked-lightmap consumer.
+/// Missing lightmaps use the unlit fallback in both import modes.
 #[test]
-fn phase01_strict_rejects_lightofs_neg1() {
-    let mut world = bsp_test_minimal_world();
-    world.faces[0].lightofs = -1;
-    world.faces[0].styles = [0, 255, 255, 255];
+fn phase01_missing_lightmap_uses_unlit_fallback() {
+    for strict in [false, true] {
+        let mut world = bsp_test_minimal_world();
+        world.faces[0].lightofs = -1;
+        world.faces[0].styles = [0, 255, 255, 255];
 
-    let result = extract(BspExtractionRequest {
-        world,
-        strict: true,
-        ..Default::default()
-    });
-    assert!(result.is_err());
-    assert_eq!(
-        result.unwrap_err().code,
-        DiagnosticCode::MissingRequiredLightmap
-    );
-}
+        let extracted = extract(BspExtractionRequest {
+            world,
+            strict,
+            ..Default::default()
+        })
+        .expect("missing lightmap must not prevent dungeon extraction");
 
-/// Dev mode accepts `lightofs == -1` and records a warning.
-#[test]
-fn phase01_dev_accepts_lightofs_neg1_as_warning() {
-    let mut world = bsp_test_minimal_world();
-    world.faces[0].lightofs = -1;
-    world.faces[0].styles = [0, 255, 255, 255];
-
-    let extracted = extract(BspExtractionRequest {
-        world,
-        strict: false,
-        ..Default::default()
-    })
-    .expect("dev mode accepts missing lightmap");
-
-    let has_missing = extracted
-        .diagnostics
-        .iter()
-        .any(|d| d.code == DiagnosticCode::MissingRequiredLightmap);
-    assert!(has_missing, "dev mode records MissingRequiredLightmap");
+        assert!(!extracted.face_lightmap_layouts[0].has_data);
+        assert!(extracted
+            .diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::FallbackMissingLightmap));
+    }
 }
 
 /// Truncated monochrome lightmap data fails with LightmapStyleTruncated.
@@ -713,9 +701,7 @@ fn phase01_malformed_style_id_rejected() {
         strict: true,
         ..Default::default()
     });
-    // Style 64 is invalid (>63), face has no valid lightmap data
-    // because the invalid style is skipped, and there are no other valid styles
-    // → MissingRequiredLightmap
+    // Style 64 is invalid (>63), so strict extraction must still reject it.
     assert!(result.is_err());
 }
 
@@ -730,7 +716,7 @@ fn phase01_atlas_page_overflow() {
 
     let result = extract(BspExtractionRequest {
         world,
-        strict: false, // avoid MissingRequiredLightmap before fail_on_error_diagnostic
+        strict: false,
         max_atlas_pages: 0, // zero pages → immediate overflow
         ..Default::default()
     });

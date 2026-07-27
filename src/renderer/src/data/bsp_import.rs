@@ -2394,10 +2394,11 @@ mod tests {
         assert!(err.contains("not found in resource lease"));
     }
 
-    /// from_canonical rejects null material (slot 0, gen 0) when a lease is present.
+    /// from_canonical accepts the first cache-issued material handle (slot 0,
+    /// generation 0) when it belongs to the resource lease.
     #[cfg(feature = "bsp")]
     #[test]
-    fn canonical_mount_rejects_null_material_with_lease() {
+    fn canonical_mount_accepts_first_material_handle_with_lease() {
         use crate::api::bsp::{MountedBspBatch, PreparedBspMount, BspResourceLease};
         use crate::api::{MeshHandle, BspMaterialHandle};
         use crate::scene::bsp_visibility::BspMountState;
@@ -2429,10 +2430,10 @@ mod tests {
             arena_id: 1,
             mesh_handles: vec![],
             texture_handles: vec![],
-            material_handles: vec![],
+            material_handles: vec![null_mat],
         };
 
-        let err = PreparedBspMount::from_canonical(
+        let mount = PreparedBspMount::from_canonical(
             mount_state,
             vec![mounted],
             vec![vec![0]],
@@ -2440,7 +2441,7 @@ mod tests {
             None,
             Some(lease),
         )
-        .unwrap_err();
-        assert!(err.contains("null handle"));
+        .expect("the first cache-issued material handle must mount");
+        assert_eq!(mount.batch_materials, vec![null_mat]);
     }
 }

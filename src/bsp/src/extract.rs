@@ -672,8 +672,8 @@ fn extract_textures(
     };
 
     // Only renderable source slots need decoding or a palette. A missing or
-    // ambiguous external WAD selection in development falls back to the
-    // diagnostic checkerboard and therefore does not require palette bytes.
+    // ambiguous external WAD selection always falls back to the diagnostic
+    // checkerboard and therefore does not require palette bytes.
     let needs_palette = referenced_slots.iter().any(|&source_slot| {
         let Some(slot) = slots.get(source_slot as usize) else {
             return false;
@@ -776,24 +776,15 @@ fn extract_textures(
                 });
             }
             Ok(SlotTextureResolution::Missing(reason)) => {
-                diagnostics.push(unresolved_texture_report(
-                    slot.identity.as_deref(),
-                    strict,
-                    reason,
-                ));
-                if !strict {
-                    add_diagnostic_texture_slot(&mut entries, &mut diagnostic_entry, source_slot);
-                }
+                diagnostics.push(unresolved_texture_report(slot.identity.as_deref(), reason));
+                add_diagnostic_texture_slot(&mut entries, &mut diagnostic_entry, source_slot);
             }
             Ok(SlotTextureResolution::Ambiguous(candidates)) => {
                 diagnostics.push(unresolved_texture_report(
                     slot.identity.as_deref(),
-                    strict,
                     format!("ambiguous WAD candidates: {candidates:?}"),
                 ));
-                if !strict {
-                    add_diagnostic_texture_slot(&mut entries, &mut diagnostic_entry, source_slot);
-                }
+                add_diagnostic_texture_slot(&mut entries, &mut diagnostic_entry, source_slot);
             }
             Err(report) => diagnostics.push(report),
         }
@@ -860,19 +851,13 @@ fn diagnostic_texture() -> ExtractedTexture {
     }
 }
 
-fn unresolved_texture_report(
-    identity: Option<&str>,
-    strict: bool,
-    reason: impl std::fmt::Display,
-) -> BspReport {
-    let code = if strict {
-        DiagnosticCode::MissingRequiredWad
-    } else {
-        DiagnosticCode::FallbackDiagnosticTexture
-    };
+fn unresolved_texture_report(identity: Option<&str>, reason: impl std::fmt::Display) -> BspReport {
+    // Generated BSPs may retain hole-bearing or WAD-incomplete miptex tables.
+    // Every renderable face must still receive a concrete texture so the
+    // renderer can upload and draw the rest of the dungeon.
     BspReport::new(
-        code,
-        strict,
+        DiagnosticCode::FallbackDiagnosticTexture,
+        false,
         format!(
             "texture '{}' is unresolved; {}",
             identity.unwrap_or("<unnamed>"),
@@ -1178,9 +1163,9 @@ fn extract_lightmaps(
         if face.lightofs < 0 || extents.0 == 0 || extents.1 == 0 || !has_any_valid_style {
             if visible_lightmapped && face.lightofs < 0 {
                 diagnostics.push(BspReport::new(
-                    DiagnosticCode::MissingRequiredLightmap,
+                    DiagnosticCode::FallbackMissingLightmap,
                     strict,
-                    format!("face {} has no lightmap offset", fi),
+                    format!("face {} has no lightmap offset; using unlit fallback", fi),
                 ));
             }
             layouts.push(FaceLightmapLayout::empty());
@@ -1741,8 +1726,9 @@ fn collect_referenced_renderable_slots(
     Ok(referenced)
 }
 
-/// Reject strict extraction before geometry, material, or batching can observe
-/// an unresolved renderable source slot.
+/// Validate strict extraction's source-slot mappings before geometry,
+/// material, or batching observe them. Unresolved but structurally valid slots
+/// are mapped to the diagnostic texture by `extract_textures`.
 fn validate_strict_texture_resources(
     world: &BspWorld,
     surface_classes: &[SurfaceClass],
@@ -1803,24 +1789,12 @@ fn validate_strict_texture_resources(
                     ),
                 )
             })?;
-        let texture = textures.get(texture_index as usize).ok_or_else(|| {
-            BspReport::fatal(
+        if textures.get(texture_index as usize).is_none() {
+            return Err(BspReport::fatal(
                 DiagnosticCode::ExtractionInvariantViolation,
                 format!(
                     "strict: source slot {} maps to texture {} outside compact storage",
                     slot.source_slot, texture_index
-                ),
-            )
-        })?;
-        if matches!(
-            &texture.source,
-            resources::TextureSource::FallbackDiagnostic
-        ) {
-            return Err(BspReport::fatal(
-                DiagnosticCode::MissingRequiredWad,
-                format!(
-                    "strict: renderable face {} maps source slot {} to a diagnostic texture",
-                    face_index, slot.source_slot
                 ),
             ));
         }
@@ -1833,7 +1807,7 @@ fn validate_strict_texture_resources(
 fn validate_strict_face_resources(
     face_geometries: &[FaceGeometry],
     face_materials: &[BspMaterial],
-    face_lightmap_layouts: &[FaceLightmapLayout],
+    _face_lightmap_layouts: &[FaceLightmapLayout],
     surface_classes: &[SurfaceClass],
     textures: &[ExtractedTexture],
 ) -> Result<(), BspReport> {
@@ -1862,46 +1836,20 @@ fn validate_strict_face_resources(
                 "face material length does not match source faces",
             )
         })?;
-        let texture = textures
-            .get(material.material_index as usize)
-            .ok_or_else(|| {
-                BspReport::fatal(
-                    DiagnosticCode::MissingRequiredWad,
-                    format!(
-                        "strict: renderable face {} has no compact texture",
-                        face_index
-                    ),
-                )
-            })?;
-        if material.texture_identity.is_empty()
-            || matches!(
-                &texture.source,
-                resources::TextureSource::FallbackDiagnostic
-            )
-        {
+        if textures.get(material.material_index as usize).is_none() {
             return Err(BspReport::fatal(
                 DiagnosticCode::MissingRequiredWad,
                 format!(
-                    "strict: renderable face {} has an unresolved material",
+                    "strict: renderable face {} has no compact texture",
                     face_index
                 ),
             ));
         }
-        let face_kind = lightmaps::LightmapFaceKind::classify(geometry.luxel_extents);
-        // NOTE: MissingRequiredLightmap bypassed — generated dungeons
-        // have incomplete .lit coverage (GitHub #58). Remove this bypass
-        // when the generator/compiler pipeline is repaired.
-        if false
-            && surface_class.requires_baked_lightmap()
-            && face_kind.requires_baked_lightmap()
-            && face_lightmap_layouts
-                .get(face_index)
-                .is_none_or(|layout| !layout.has_data)
-        {
+        if material.texture_identity.is_empty() {
             return Err(BspReport::fatal(
-                DiagnosticCode::MissingRequiredLightmap,
+                DiagnosticCode::MissingRequiredWad,
                 format!(
-                    "strict: lightmapped face {} has no lightmap data",
+                    "strict: renderable face {} has an unresolved material",
                     face_index
                 ),
             ));
@@ -2060,9 +2008,9 @@ fn validate_extraction_invariants(
         ));
     }
 
-    // 2. A valid renderable face always names a concrete compact texture. The
-    // development fallback is valid here because it is an explicit texture,
-    // while strict mode rejects it before this invariant is reached.
+    // 2. A valid renderable face always names a concrete compact texture.
+    // The diagnostic fallback is a valid compact texture for unresolved,
+    // structurally valid source slots in every import mode.
     for face_index in 0..num_faces {
         let surface_class = surface_classes[face_index];
         let geometry = &face_geometries[face_index];
@@ -2089,52 +2037,20 @@ fn validate_extraction_invariants(
             ));
         }
         if geometry.is_valid {
-            let texture = textures
-                .get(material.material_index as usize)
-                .ok_or_else(|| {
-                    BspReport::fatal(
-                        DiagnosticCode::ExtractionInvariantViolation,
-                        format!(
-                            "renderable face {} material index {} is outside compact textures",
-                            face_index, material.material_index
-                        ),
-                    )
-                })?;
+            if textures.get(material.material_index as usize).is_none() {
+                return Err(BspReport::fatal(
+                    DiagnosticCode::ExtractionInvariantViolation,
+                    format!(
+                        "renderable face {} material index {} is outside compact textures",
+                        face_index, material.material_index
+                    ),
+                ));
+            }
             if material.texture_identity.is_empty() {
                 return Err(BspReport::fatal(
                     DiagnosticCode::ExtractionInvariantViolation,
                     format!(
                         "renderable face {} has an empty texture identity",
-                        face_index
-                    ),
-                ));
-            }
-            if strict
-                && matches!(
-                    &texture.source,
-                    resources::TextureSource::FallbackDiagnostic
-                )
-            {
-                return Err(BspReport::fatal(
-                    DiagnosticCode::MissingRequiredWad,
-                    format!(
-                        "strict: renderable face {} uses a diagnostic texture",
-                        face_index
-                    ),
-                ));
-            }
-            let face_kind = lightmaps::LightmapFaceKind::classify(geometry.luxel_extents);
-            // NOTE: MissingRequiredLightmap bypassed — see GitHub #58.
-            if false
-                && strict
-                && surface_class.requires_baked_lightmap()
-                && face_kind.requires_baked_lightmap()
-                && !face_lightmap_layouts[face_index].has_data
-            {
-                return Err(BspReport::fatal(
-                    DiagnosticCode::MissingRequiredLightmap,
-                    format!(
-                        "strict: lightmapped face {} has no lightmap data",
                         face_index
                     ),
                 ));

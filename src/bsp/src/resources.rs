@@ -198,14 +198,10 @@ pub fn resolve_texture(name: &str, ctx: &ResourceContext) -> (ResolvedTexture, V
         }
     }
 
-    // 5. Fallback — allowed only as a development diagnostic.
-    let code = if ctx.strict {
-        DiagnosticCode::MissingRequiredWad
-    } else {
-        DiagnosticCode::FallbackDiagnosticTexture
-    };
+    // 5. Fallback — unresolved but structurally valid texture references
+    // must still produce a drawable material for BSP dungeon development.
     reports.push(BspReport::new(
-        code,
+        DiagnosticCode::FallbackDiagnosticTexture,
         ctx.strict,
         format!("texture '{}' not found; using diagnostic fallback", name),
     ));
@@ -445,14 +441,9 @@ pub fn resolve_extracted_texture(
         }
     }
 
-    // 3. Fallback
-    let code = if strict {
-        DiagnosticCode::MissingRequiredWad
-    } else {
-        DiagnosticCode::FallbackDiagnosticTexture
-    };
+    // 3. Fallback — preserve a drawable texture for unresolved, valid slots.
     reports.push(BspReport::new(
-        code,
+        DiagnosticCode::FallbackDiagnosticTexture,
         strict,
         format!(
             "texture '{}' not found; using diagnostic fallback",

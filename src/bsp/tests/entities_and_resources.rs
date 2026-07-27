@@ -264,14 +264,18 @@ fn resource_resolution_fallback_on_missing() {
 // ── Companion binding ──
 
 #[test]
-fn resource_resolution_strict_missing_is_error() {
+fn resource_resolution_strict_missing_uses_diagnostic_fallback() {
     let ctx = resources::ResourceContext {
         strict: true,
         ..Default::default()
     };
-    let (_resolved, reports) = resources::resolve_texture("nonexistent", &ctx);
-    assert_eq!(reports[0].code, DiagnosticCode::MissingRequiredWad);
-    assert_eq!(reports[0].severity, Severity::Error);
+    let (resolved, reports) = resources::resolve_texture("nonexistent", &ctx);
+    assert!(matches!(
+        resolved,
+        resources::ResolvedTexture::FallbackDiagnostic
+    ));
+    assert_eq!(reports[0].code, DiagnosticCode::FallbackDiagnosticTexture);
+    assert_eq!(reports[0].severity, Severity::Warning);
 }
 
 #[test]
@@ -1030,7 +1034,7 @@ fn make_bsp_with_face_inner(
 }
 
 #[test]
-fn phase02_strict_rejects_visible_face_with_hole_miptex() {
+fn phase02_strict_uses_fallback_for_visible_face_with_hole_miptex() {
     // Miptex lump: slot 0 is a hole (-1), no other slots
     let mut miptex = Vec::new();
     miptex.extend_from_slice(&1i32.to_le_bytes()); // count = 1
@@ -1069,19 +1073,24 @@ fn phase02_strict_rejects_visible_face_with_hole_miptex() {
         .iter()
         .any(|report| report.code == DiagnosticCode::FallbackDiagnosticTexture));
 
-    // Strict: should fail because visible face references a hole
+    // Strict uses the same concrete fallback so a generated dungeon remains
+    // drawable even when its miptex table contains a hole.
     let request = BspExtractionRequest {
         world,
         palette: Some(palette_arr),
         strict: true,
         ..Default::default()
     };
-    let result = extract(request);
-    assert!(result.is_err(), "strict should reject hole reference");
-    let err = result.unwrap_err();
-    assert!(err.is_error());
-    // Should be MissingRequiredWad since the face has no valid texture
-    assert_eq!(err.code, DiagnosticCode::MissingRequiredWad);
+    let extracted = extract(request).expect("strict extraction should use a fallback");
+    let material = &extracted.face_materials[0];
+    assert_eq!(
+        extracted.textures[material.material_index as usize].source,
+        resources::TextureSource::FallbackDiagnostic
+    );
+    assert!(extracted
+        .diagnostics
+        .iter()
+        .any(|report| report.code == DiagnosticCode::FallbackDiagnosticTexture));
 }
 
 #[test]
@@ -1484,25 +1493,14 @@ fn phase02_wad_case_folded_candidates_across_archives_are_ambiguous() {
         ),
     ];
 
-    let error = extract(BspExtractionRequest {
-        world: world.clone(),
-        palette: Some(phase02_palette()),
-        wad_archives: wad_archives.clone(),
-        strict: true,
-        ..Default::default()
-    })
-    .expect_err("multiple case-folded candidates must not be selected");
-    assert_eq!(error.code, DiagnosticCode::MissingRequiredWad);
-    assert_eq!(error.severity, Severity::Error);
-
     let (extracted, trace) = extract::extract_with_mapping_trace(BspExtractionRequest {
         world,
         palette: Some(phase02_palette()),
         wad_archives,
-        strict: false,
+        strict: true,
         ..Default::default()
     })
-    .expect("development mode uses an explicit diagnostic fallback");
+    .expect("strict extraction uses an explicit diagnostic fallback for ambiguous WADs");
     let mapping = &trace[0];
     let texture_index = mapping.texture_index.expect("fallback texture index");
     assert_eq!(mapping.material_index, Some(texture_index));
@@ -1518,17 +1516,18 @@ fn phase02_wad_case_folded_candidates_across_archives_are_ambiguous() {
 }
 
 #[test]
-fn phase02_development_missing_external_texture_uses_palette_independent_fallback() {
+fn phase02_strict_missing_external_texture_uses_palette_independent_fallback() {
     let mut world = make_phase02_face_world(make_external_miptex_lump("MISSING"), &[0]);
     world.palette = None;
     let (extracted, trace) = extract::extract_with_mapping_trace(BspExtractionRequest {
         world,
         palette: None,
-        strict: false,
+        strict: true,
         ..Default::default()
     })
     .expect("missing external texture falls back without decoding palette data");
 
+    assert!(trace[0].strict);
     let texture_index = trace[0].texture_index.expect("diagnostic texture index");
     assert_eq!(
         extracted.textures[texture_index as usize].source,

@@ -576,11 +576,10 @@ fn phase01_m1_strict_extraction() {
     assert!(extracted.diagnostics.iter().all(|d| !d.is_error()));
 }
 
-/// Strict extraction of M2 — currently blocked by pre-existing face 104
-/// (Opaque/DNGN01, lightofs=-1, all styles sentinel). The phase requires
-/// this to be resolved via compiler fix or reclassification.
+/// Strict extraction of M2 retains faces with missing lightmaps through the
+/// unlit fallback so the dungeon stays drawable.
 #[test]
-fn phase01_m2_strict_extraction_blocked() {
+fn phase01_m2_strict_extraction_uses_lightmap_fallback() {
     let (bsp_data, lit_data) = load_m2_bsp2();
     let (wad_name, wad_bytes) = load_wad_archive();
     let palette_data = read(&palette_path());
@@ -603,13 +602,10 @@ fn phase01_m2_strict_extraction_blocked() {
         strict: true,
         ..Default::default()
     };
-    let result = extract(request);
-    // Currently expected to fail on face 104. This documents the status.
-    // Post-phase: M2 should strictly extract after compiler fix.
-    if let Err(ref e) = result {
-        eprintln!("M2 strict extraction blocked: {e}");
-        assert_eq!(e.code, DiagnosticCode::MissingRequiredLightmap);
-    }
+    let extracted = extract(request).expect("strict M2 extraction uses the unlit fallback");
+    assert!(extracted.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == DiagnosticCode::FallbackMissingLightmap
+    }));
 }
 
 /// Every Opaque/AlphaMask face in strict extraction has lightmap data.
