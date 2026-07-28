@@ -78,6 +78,7 @@ pub use api::{
     Renderer,
     RendererConfig,
     // Error root
+    CommandError,
     RendererError,
     RendererInputRouting,
     RendererInputSuppression,
@@ -97,5 +98,10 @@ pub use data::camera::{Aabb, Camera, FPSController, Frustum, OrbitCamera, OrbitC
 pub use scene::command::{
     AddNodeCommand, Command, CommandHistory, CommandResult, PlaceAssetCommand, RemoveNodeCommand,
     SceneNodeRemap, SetTransformCommand,
+};
+pub use scene::object_commands::{
+    AttachComponentCommand, DuplicateObjectsCommand, RemoveComponentCommand,
+    RemoveObjectsCommand, ReplaceComponentStateCommand, SetComponentPropertyCommand,
+    SetObjectParentCommand, SetObjectTransformCommand,
 };
 pub use scene::scene_world::SceneWorld;

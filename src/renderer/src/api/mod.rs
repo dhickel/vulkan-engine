@@ -82,3 +82,8 @@ pub use scene::{
     SceneBounds, SceneFragment, SceneFragmentMount, SceneFragmentNode, SceneFragmentNodeId,
     SceneNodeSummary, SceneValidationOptions, SpotLight, SpotLightId,
 };
+pub use crate::scene::object_commands::{
+    AttachComponentCommand, DuplicateObjectsCommand, RemoveComponentCommand,
+    RemoveObjectsCommand, ReplaceComponentStateCommand, SetComponentPropertyCommand,
+    SetObjectParentCommand, SetObjectTransformCommand,
+};
