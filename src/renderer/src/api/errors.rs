@@ -180,6 +180,7 @@ pub enum SceneError {
     MissingAssetId(String),
     BadSerializedParent { node_id: String, parent_id: String },
     DuplicateSerializedNodeId(String),
+    DuplicateSerializedObjectId(String),
     DisconnectedGraph(String),
     AnimationError(AnimationError),
     CommandError(CommandError),
@@ -242,6 +243,9 @@ impl Display for SceneError {
             ),
             Self::DuplicateSerializedNodeId(id) => {
                 write!(f, "duplicate serialized scene node id '{id}'")
+            }
+            Self::DuplicateSerializedObjectId(id) => {
+                write!(f, "duplicate serialized object id '{id}'")
             }
             Self::DisconnectedGraph(msg) => write!(f, "disconnected scene graph: {msg}"),
             Self::AnimationError(err) => write!(f, "animation error: {err}"),

@@ -1805,6 +1805,17 @@ fn scene_world_to_fragment(scene_world: SceneWorld) -> Result<SceneFragment, Ass
                 AssetError::Internal(format!("failed to build scene fragment: {err}"))
             })?;
 
+        // Copy component envelopes from the scene record into the fragment node.
+        if let Some(record) = scene_world.get_node_record(source_node_id) {
+            if let Some(frag_node) = fragment.node_mut(fragment_node_id) {
+                frag_node.components = record
+                    .component_store
+                    .envelopes()
+                    .cloned()
+                    .collect();
+            }
+        }
+
         for child in source_node.children.iter().rev().copied() {
             stack.push((child, Some(fragment_node_id)));
         }

@@ -1,0 +1,104 @@
+{
+  "format_version": 2,
+  "scene_id": "scene.v2_object_components",
+  "root_nodes": [
+    "node.root"
+  ],
+  "nodes": [
+    {
+      "id": "node.root",
+      "parent": null,
+      "name": "Component Root",
+      "transform": {
+        "translation": [0.0, 0.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "asset": null,
+      "components": [
+        {
+          "instance_id": "component.0000000000000000000000000000000000000000000000000000000000000001",
+          "type_key": "test.health",
+          "schema_version": 1,
+          "data": {"value": 100}
+        },
+        {
+          "instance_id": "component.0000000000000000000000000000000000000000000000000000000000000002",
+          "type_key": "test.tags",
+          "schema_version": 1,
+          "data": {"items": ["hero", "player"]}
+        }
+      ]
+    },
+    {
+      "id": "node.child_a",
+      "parent": "node.root",
+      "name": "Child A",
+      "transform": {
+        "translation": [1.0, 0.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "asset": null,
+      "components": [
+        {
+          "instance_id": "component.0000000000000000000000000000000000000000000000000000000000000003",
+          "type_key": "test.health",
+          "schema_version": 1,
+          "data": {"value": 50}
+        }
+      ]
+    },
+    {
+      "id": "node.child_b",
+      "parent": "node.root",
+      "name": "Child B",
+      "transform": {
+        "translation": [-1.0, 0.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "asset": null,
+      "components": []
+    }
+  ],
+  "lights": [
+    {
+      "id": "light.torch",
+      "kind": "point",
+      "position": [2.0, 3.0, 0.0],
+      "color": [1.0, 0.8, 0.6],
+      "intensity": 4.0,
+      "range": 10.0,
+      "components": [
+        {
+          "instance_id": "component.0000000000000000000000000000000000000000000000000000000000000004",
+          "type_key": "test.health",
+          "schema_version": 1,
+          "data": {"value": 0}
+        }
+      ]
+    }
+  ],
+  "directional_lights": [
+    {
+      "id": "directional.sun",
+      "kind": "directional",
+      "direction": [0.3, 1.0, 0.15],
+      "color": [1.0, 0.95, 0.8],
+      "intensity": 2.5,
+      "shadow_config": null,
+      "components": [
+        {
+          "instance_id": "component.0000000000000000000000000000000000000000000000000000000000000005",
+          "type_key": "test.tags",
+          "schema_version": 1,
+          "data": {"items": ["sun", "primary"]}
+        }
+      ]
+    }
+  ],
+  "spot_lights": [],
+  "environment": null,
+  "editor": {}
+}
