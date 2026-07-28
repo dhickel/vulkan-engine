@@ -310,6 +310,33 @@ impl ObjectRecord {
     }
 }
 
+// ── Removal Snapshot Data ──────────────────────────────────────────────
+
+/// Opaque internal representation of a removed subtree for restoration.
+///
+/// Exposed publicly as `crate::object::ObjectRemovalSnapshot::internal`
+/// so callers can hold and restore it, but its fields are crate-private.
+#[derive(Clone, Debug)]
+pub struct RemovalSnapshotData {
+    /// The serialized node subtree root (if this was a node removal).
+    pub(crate) subtree: Option<super::scene_world::RestorableSceneSubtree>,
+    /// Surviving grouped lights whose group parent was in the removed set.
+    /// Maps persistent light ID → (light payload, group parent persistent ID).
+    pub(crate) detached_lights: Vec<DetachedLightSnapshot>,
+}
+
+/// Snapshot of a light that was detached because its group parent was
+/// removed.
+#[derive(Clone, Debug)]
+pub struct DetachedLightSnapshot {
+    pub(crate) kind: engine_events::ObjectKind,
+    pub(crate) persistent_id: engine_events::SceneObjectId,
+    pub(crate) old_group_parent: engine_events::SceneObjectId,
+    pub(crate) point_light: Option<PointLight>,
+    pub(crate) directional_light: Option<DirectionalLight>,
+    pub(crate) spot_light: Option<SpotLight>,
+}
+
 // ── Invariant audit ─────────────────────────────────────────────────────
 
 impl super::scene_world::SceneWorld {

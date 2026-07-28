@@ -10,10 +10,11 @@ use crate::api::assets::{AssetManager, EnvironmentSource};
 use crate::data::handles::{EnvironmentHandle, MeshHandle};
 use crate::data::validation::{ValidationArea, ValidationDiagnostic, ValidationError};
 use crate::object::component::{
-    hydrate_all, hydrate_all_by_key, hydrate_and_store, ComponentKey, ComponentEnvelope,
-    ComponentInstanceId, ComponentRegistry,
+    commit_full_state_replacement, hydrate_all, hydrate_all_by_key, hydrate_and_store,
+    prepare_reference_remap, ComponentKey, ComponentEnvelope, ComponentInstanceId,
+    ComponentRegistry,
 };
-use crate::object::identity::ObjectId;
+use crate::object::identity::{ObjectError, ObjectId};
 use crate::scene::command::{Command, CommandHistory, CommandResult};
 use crate::scene::object_store::{
     ObjectHandle, ObjectRecord,
@@ -26,7 +27,9 @@ use crate::scene::scene_world::{
     SpotLightRefError,
 };
 use crate::scene::SceneNodeId;
-use engine_events::SceneObjectId;
+use engine_events::{
+    ObjectKind, SceneId, SceneObjectId, SceneObjectLifecycleSnapshot,
+};
 
 use crate::data::camera::Aabb;
 use crate::data::mesh_geometry::{MeshDeformation, MeshGeometryDto};
@@ -2159,6 +2162,1071 @@ impl Scene {
             .component_store_mut(node)
             .ok_or_else(|| SceneError::InvalidNode(node))?;
         hydrate_all_by_key(registry, store, key).map_err(SceneError::from)
+    }
+
+    // ── Object enumeration ─────────────────────────────────────────
+
+    /// Enumerate all live objects in stable (kind, slot, generation) order.
+    pub fn objects(&self) -> Vec<ObjectId> {
+        self.world.all_objects()
+    }
+
+    /// Enumerate all objects of a given kind.
+    pub fn objects_of_kind(&self, kind: ObjectKind) -> Vec<ObjectId> {
+        self.world
+            .all_objects()
+            .into_iter()
+            .filter(|id| id.kind() == kind)
+            .collect()
+    }
+
+    /// Build an [`ObjectSummary`] for an object.
+    pub fn object_summary(&self, id: ObjectId) -> Result<crate::object::ObjectSummary, SceneError> {
+        self.validate_object(id)?;
+        use crate::object::ObjectSummary;
+        let persistent_id = self
+            .world
+            .object_persistent_id(id)
+            .unwrap_or_else(|| SceneObjectId::new("object.unknown".to_string()));
+        let name = self.world.object_name(id).unwrap_or_default();
+
+        let (tags, mesh_count, child_count, stable_id, visible, layer) = match id.kind() {
+            ObjectKind::Node => {
+                let node = self
+                    .world
+                    .get_node(SceneNodeId::new(id.slot(), id.generation()))
+                    .ok_or(SceneError::InvalidNode(SceneNodeId::new(
+                        id.slot(),
+                        id.generation(),
+                    )))?;
+                let record = self.world.get_node_record(SceneNodeId::new(
+                    id.slot(),
+                    id.generation(),
+                ));
+                (
+                    node.tags.clone(),
+                    node.meshes.len(),
+                    node.children.len(),
+                    record.and_then(|r| r.stable_id.clone()),
+                    record.and_then(|r| r.visibility.as_ref().map(|v| v.visible)),
+                    record.and_then(|r| r.visibility.as_ref().map(|v| v.layer.clone())),
+                )
+            }
+            ObjectKind::PointLight => {
+                let record = self.world.get_point_light_record(PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                });
+                (
+                    Vec::new(),
+                    0,
+                    0,
+                    record.and_then(|r| r.stable_id.clone()),
+                    Some(true),
+                    None,
+                )
+            }
+            ObjectKind::DirectionalLight => {
+                let record = self.world.get_directional_light_record(
+                    DirectionalLightId {
+                        slot: id.slot(),
+                        generation: id.generation(),
+                    },
+                );
+                (
+                    Vec::new(),
+                    0,
+                    0,
+                    record.and_then(|r| r.stable_id.clone()),
+                    Some(true),
+                    None,
+                )
+            }
+            ObjectKind::SpotLight => {
+                let record =
+                    self.world
+                        .get_spot_light_record(SpotLightId {
+                            slot: id.slot(),
+                            generation: id.generation(),
+                        });
+                (
+                    Vec::new(),
+                    0,
+                    0,
+                    record.and_then(|r| r.stable_id.clone()),
+                    Some(true),
+                    None,
+                )
+            }
+        };
+
+        let group_parent = self.group_parent_persistent(id);
+        let component_count = self
+            .world
+            .object_component_store(id)
+            .map(|s| s.len())
+            .unwrap_or(0);
+
+        Ok(ObjectSummary {
+            id,
+            persistent_id,
+            stable_id,
+            kind: id.kind(),
+            name,
+            tags,
+            mesh_count,
+            child_count,
+            group_parent,
+            visible: visible.unwrap_or(true),
+            layer,
+            component_count,
+        })
+    }
+
+    /// Enumerate all object summaries.
+    pub fn object_summaries(&self) -> Vec<crate::object::ObjectSummary> {
+        self.objects()
+            .into_iter()
+            .filter_map(|id| self.object_summary(id).ok())
+            .collect()
+    }
+
+    /// Validate an ObjectId against this scene.
+    /// Reports WrongScene before kind/slot errors.
+    pub fn validate_object(&self, id: ObjectId) -> Result<(), SceneError> {
+        self.world
+            .resolve_object_with_error(id)
+            .map(|_| ())
+            .map_err(SceneError::Object)
+    }
+
+    // ── Typed ObjectId conversion ───────────────────────────────────
+
+    /// Try to extract a [`SceneNodeId`] from an [`ObjectId`].
+    pub fn try_get_node_id(&self, id: ObjectId) -> Result<SceneNodeId, SceneError> {
+        if id.kind() != ObjectKind::Node {
+            return Err(SceneError::Object(ObjectError::WrongKind {
+                object: id,
+                expected: ObjectKind::Node,
+                actual: id.kind(),
+            }));
+        }
+        let node_id = SceneNodeId::new(id.slot(), id.generation());
+        self.validate_node(node_id)?;
+        Ok(node_id)
+    }
+
+    /// Try to extract a [`PointLightId`] from an [`ObjectId`].
+    pub fn try_get_point_light_id(&self, id: ObjectId) -> Result<PointLightId, SceneError> {
+        if id.kind() != ObjectKind::PointLight {
+            return Err(SceneError::Object(ObjectError::WrongKind {
+                object: id,
+                expected: ObjectKind::PointLight,
+                actual: id.kind(),
+            }));
+        }
+        let pl_id = PointLightId {
+            slot: id.slot(),
+            generation: id.generation(),
+        };
+        self.validate_point_light(pl_id)?;
+        Ok(pl_id)
+    }
+
+    /// Try to extract a [`DirectionalLightId`] from an [`ObjectId`].
+    pub fn try_get_directional_light_id(
+        &self,
+        id: ObjectId,
+    ) -> Result<DirectionalLightId, SceneError> {
+        if id.kind() != ObjectKind::DirectionalLight {
+            return Err(SceneError::Object(ObjectError::WrongKind {
+                object: id,
+                expected: ObjectKind::DirectionalLight,
+                actual: id.kind(),
+            }));
+        }
+        let dl_id = DirectionalLightId {
+            slot: id.slot(),
+            generation: id.generation(),
+        };
+        self.validate_directional_light(dl_id)?;
+        Ok(dl_id)
+    }
+
+    /// Try to extract a [`SpotLightId`] from an [`ObjectId`].
+    pub fn try_get_spot_light_id(&self, id: ObjectId) -> Result<SpotLightId, SceneError> {
+        if id.kind() != ObjectKind::SpotLight {
+            return Err(SceneError::Object(ObjectError::WrongKind {
+                object: id,
+                expected: ObjectKind::SpotLight,
+                actual: id.kind(),
+            }));
+        }
+        let sl_id = SpotLightId {
+            slot: id.slot(),
+            generation: id.generation(),
+        };
+        self.validate_spot_light(sl_id)?;
+        Ok(sl_id)
+    }
+
+    // ── Unified Transform API ───────────────────────────────────────
+
+    /// Get the canonical transform of any object.
+    pub fn get_object_transform(
+        &self,
+        id: ObjectId,
+    ) -> Result<crate::object::ObjectTransform, SceneError> {
+        self.validate_object(id)?;
+        use crate::object::ObjectTransform;
+        match id.kind() {
+            ObjectKind::Node => {
+                let node = self
+                    .world
+                    .get_node(SceneNodeId::new(id.slot(), id.generation()))
+                    .ok_or_else(|| {
+                        SceneError::InvalidNode(SceneNodeId::new(id.slot(), id.generation()))
+                    })?;
+                Ok(ObjectTransform::Node(node.local_transform))
+            }
+            ObjectKind::PointLight => {
+                let pl_id = PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                let light = self
+                    .world
+                    .point_light_entry(pl_id)
+                    .ok_or_else(|| {
+                        SceneError::InvalidPointLight("point light not found".to_string())
+                    })?;
+                Ok(ObjectTransform::PointLight(light.position))
+            }
+            ObjectKind::DirectionalLight => {
+                let dl_id = DirectionalLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                let light = self
+                    .world
+                    .directional_light_entry(dl_id)
+                    .ok_or_else(|| {
+                        SceneError::InvalidDirectionalLight(
+                            "directional light not found".to_string(),
+                        )
+                    })?;
+                let dir = light.direction.normalize();
+                Ok(ObjectTransform::DirectionalLight(dir))
+            }
+            ObjectKind::SpotLight => {
+                let sl_id = SpotLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                let light = self
+                    .world
+                    .spot_light_entry(sl_id)
+                    .ok_or_else(|| {
+                        SceneError::InvalidSpotLight("spot light not found".to_string())
+                    })?;
+                let dir = light.direction.normalize();
+                Ok(ObjectTransform::SpotLight {
+                    position: light.position,
+                    direction: dir,
+                })
+            }
+        }
+    }
+
+    /// Set the transform of any object, validated according to its kind.
+    pub fn set_object_transform(
+        &mut self,
+        id: ObjectId,
+        transform: &Mat4,
+    ) -> Result<(), SceneError> {
+        self.validate_object(id)?;
+        use crate::object::{is_identity_basis_matrix, is_rigid_direction_only, is_rigid_matrix};
+
+        if !transform.is_finite() {
+            return Err(SceneError::InvalidMutation(
+                "transform must contain only finite values".to_string(),
+            ));
+        }
+
+        match id.kind() {
+            ObjectKind::Node => {
+                let node_id = SceneNodeId::new(id.slot(), id.generation());
+                let node = self
+                    .world
+                    .get_node_mut(node_id)
+                    .ok_or(SceneError::InvalidNode(node_id))?;
+                node.local_transform = *transform;
+                self.world.invalidate_derived_state(node_id);
+            }
+            ObjectKind::PointLight => {
+                // Accept only finite affine matrices with identity 3×3 basis.
+                if !is_identity_basis_matrix(transform) {
+                    return Err(SceneError::InvalidMutation(
+                        "point light transform must be translation-only (no scale/shear/rotation)"
+                            .to_string(),
+                    ));
+                }
+                let position = transform.w_axis.truncate();
+                let pl_id = PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                self.update_point_light_position(pl_id, position)?;
+            }
+            ObjectKind::SpotLight => {
+                // Accept only finite rigid transforms.
+                if !is_rigid_matrix(transform) {
+                    return Err(SceneError::InvalidMutation(
+                        "spot light transform must be rigid (no scale/shear/reflection)"
+                            .to_string(),
+                    ));
+                }
+                let position = transform.w_axis.truncate();
+                let direction = crate::object::ObjectTransform::direction_from_rigid(transform);
+                let sl_id = SpotLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                self.update_spot_light_position_direction(sl_id, position, direction)?;
+            }
+            ObjectKind::DirectionalLight => {
+                // Accept only finite rigid zero-translation transforms.
+                if !is_rigid_direction_only(transform) {
+                    return Err(SceneError::InvalidMutation(
+                        "directional light transform must be rigid with zero translation".to_string(),
+                    ));
+                }
+                let direction = crate::object::ObjectTransform::direction_from_rigid(transform);
+                let dl_id = DirectionalLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                self.update_directional_light_direction(dl_id, direction)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Get the local transform of a node.
+    pub fn node_transform(&self, node: SceneNodeId) -> Result<Mat4, SceneError> {
+        self.transform(node)
+    }
+
+    /// Set the local transform of a node.
+    pub fn set_node_transform(
+        &mut self,
+        node: SceneNodeId,
+        transform: Mat4,
+    ) -> Result<(), SceneError> {
+        self.set_transform(node, transform)
+    }
+
+    /// Get the canonical rigid matrix for a point light (translation-only).
+    pub fn point_light_transform(
+        &self,
+        id: PointLightId,
+    ) -> Result<Mat4, SceneError> {
+        self.validate_point_light(id)?;
+        let light = self
+            .world
+            .point_light_entry(id)
+            .ok_or(SceneError::StalePointLight(id))?;
+        Ok(Mat4::from_translation(light.position))
+    }
+
+    /// Set a point light's transform (translation-only, rejects
+    /// scale/shear/rotation).
+    pub fn set_point_light_transform(
+        &mut self,
+        id: PointLightId,
+        transform: Mat4,
+    ) -> Result<(), SceneError> {
+        if !transform.is_finite() {
+            return Err(SceneError::InvalidMutation(
+                "transform must contain only finite values".to_string(),
+            ));
+        }
+        if !crate::object::is_identity_basis_matrix(&transform) {
+            return Err(SceneError::InvalidMutation(
+                "point light transform must be translation-only (no scale/shear/rotation)"
+                    .to_string(),
+            ));
+        }
+        let position = transform.w_axis.truncate();
+        self.update_point_light_position(id, position)
+    }
+
+    /// Get the canonical rigid matrix for a spot light.
+    pub fn spot_light_transform(
+        &self,
+        id: SpotLightId,
+    ) -> Result<Mat4, SceneError> {
+        self.validate_spot_light(id)?;
+        let light = self
+            .world
+            .spot_light_entry(id)
+            .ok_or(SceneError::StaleSpotLight(id))?;
+        let dir = light.direction.normalize();
+        Ok(crate::object::ObjectTransform::rigid_from_position_direction(
+            light.position,
+            dir,
+        ))
+    }
+
+    /// Set a spot light's transform (rigid only).
+    pub fn set_spot_light_transform(
+        &mut self,
+        id: SpotLightId,
+        transform: Mat4,
+    ) -> Result<(), SceneError> {
+        if !transform.is_finite() {
+            return Err(SceneError::InvalidMutation(
+                "transform must contain only finite values".to_string(),
+            ));
+        }
+        if !crate::object::is_rigid_matrix(&transform) {
+            return Err(SceneError::InvalidMutation(
+                "spot light transform must be rigid (no scale/shear/reflection)".to_string(),
+            ));
+        }
+        let position = transform.w_axis.truncate();
+        let direction = crate::object::ObjectTransform::direction_from_rigid(&transform);
+        self.update_spot_light_position_direction(id, position, direction)
+    }
+
+    /// Get the canonical rigid matrix for a directional light.
+    pub fn directional_light_transform(
+        &self,
+        id: DirectionalLightId,
+    ) -> Result<Mat4, SceneError> {
+        self.validate_directional_light(id)?;
+        let light = self
+            .world
+            .directional_light_entry(id)
+            .ok_or(SceneError::StaleDirectionalLight(id))?;
+        let dir = light.direction.normalize();
+        Ok(crate::object::ObjectTransform::rigid_from_direction(dir))
+    }
+
+    /// Set a directional light's transform (rigid direction only).
+    pub fn set_directional_light_transform(
+        &mut self,
+        id: DirectionalLightId,
+        transform: Mat4,
+    ) -> Result<(), SceneError> {
+        if !transform.is_finite() {
+            return Err(SceneError::InvalidMutation(
+                "transform must contain only finite values".to_string(),
+            ));
+        }
+        if !crate::object::is_rigid_direction_only(&transform) {
+            return Err(SceneError::InvalidMutation(
+                "directional light transform must be rigid with zero translation".to_string(),
+            ));
+        }
+        let direction = crate::object::ObjectTransform::direction_from_rigid(&transform);
+        self.update_directional_light_direction(id, direction)
+    }
+
+    // ── Internal helpers for typed light transform updates ──────────
+
+    fn update_point_light_position(
+        &mut self,
+        id: PointLightId,
+        position: Vec3,
+    ) -> Result<(), SceneError> {
+        self.validate_point_light(id)?;
+        let entry = self
+            .world
+            .point_light_entry_mut(id)
+            .ok_or(SceneError::StalePointLight(id))?;
+        entry.0.position = position;
+        Ok(())
+    }
+
+    fn update_spot_light_position_direction(
+        &mut self,
+        id: SpotLightId,
+        position: Vec3,
+        direction: Vec3,
+    ) -> Result<(), SceneError> {
+        if !position.is_finite() {
+            return Err(SceneError::InvalidSpotLight(
+                "position must be finite".into(),
+            ));
+        }
+        if !direction.is_finite() || direction.length_squared() < 1e-6 {
+            return Err(SceneError::InvalidSpotLight(
+                "direction must be finite and non-zero".into(),
+            ));
+        }
+        self.validate_spot_light(id)?;
+        let entry = self
+            .world
+            .spot_light_entry_mut(id)
+            .ok_or(SceneError::StaleSpotLight(id))?;
+        entry.0.position = position;
+        entry.0.direction = direction.normalize();
+        Ok(())
+    }
+
+    fn update_directional_light_direction(
+        &mut self,
+        id: DirectionalLightId,
+        direction: Vec3,
+    ) -> Result<(), SceneError> {
+        if !direction.is_finite() || direction.length_squared() < 1e-6 {
+            return Err(SceneError::InvalidDirectionalLight(
+                "direction must be finite and non-zero".to_string(),
+            ));
+        }
+        self.validate_directional_light(id)?;
+        let entry = self
+            .world
+            .directional_light_entry_mut(id)
+            .ok_or(SceneError::StaleDirectionalLight(id))?;
+        entry.0.direction = direction.normalize();
+        Ok(())
+    }
+
+    // ── Unified Object Parent API ───────────────────────────────────
+
+    /// Get the group parent persistent ID for a light.
+    fn group_parent_persistent(&self, id: ObjectId) -> Option<SceneObjectId> {
+        match id.kind() {
+            ObjectKind::Node => None,
+            ObjectKind::PointLight => self
+                .world
+                .get_point_light_record(PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .and_then(|r| r.light_group_parent.clone()),
+            ObjectKind::DirectionalLight => self
+                .world
+                .get_directional_light_record(DirectionalLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .and_then(|r| r.light_group_parent.clone()),
+            ObjectKind::SpotLight => self
+                .world
+                .get_spot_light_record(SpotLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .and_then(|r| r.light_group_parent.clone()),
+        }
+    }
+
+    /// Set the parent of an object under a unified API.
+    ///
+    /// - Node reparent keeps cycle/root checks (via `reparent_node`).
+    /// - Light regroup accepts `None` or a live node, changes record
+    ///   metadata only; world-space payload is unchanged.
+    pub fn set_object_parent(
+        &mut self,
+        id: ObjectId,
+        parent: crate::object::ObjectParent,
+    ) -> Result<(), SceneError> {
+        self.validate_object(id)?;
+        use crate::object::ObjectParent;
+
+        match id.kind() {
+            ObjectKind::Node => {
+                let node_id = SceneNodeId::new(id.slot(), id.generation());
+                let new_parent = match parent {
+                    ObjectParent::None => None,
+                    ObjectParent::Node(pid) => {
+                        if pid.kind() != ObjectKind::Node {
+                            return Err(SceneError::Object(ObjectError::WrongKind {
+                                object: pid,
+                                expected: ObjectKind::Node,
+                                actual: pid.kind(),
+                            }));
+                        }
+                        self.validate_object(pid)?;
+                        Some(SceneNodeId::new(pid.slot(), pid.generation()))
+                    }
+                };
+                self.reparent_node(node_id, new_parent)?;
+            }
+            ObjectKind::PointLight
+            | ObjectKind::DirectionalLight
+            | ObjectKind::SpotLight => {
+                let new_group_parent = match parent {
+                    ObjectParent::None => None,
+                    ObjectParent::Node(pid) => {
+                        if pid.kind() != ObjectKind::Node {
+                            return Err(SceneError::Object(ObjectError::WrongKind {
+                                object: pid,
+                                expected: ObjectKind::Node,
+                                actual: pid.kind(),
+                            }));
+                        }
+                        self.validate_object(pid)?;
+                        // Get the parent node's persistent ID
+                        self.world
+                            .get_node_record(SceneNodeId::new(pid.slot(), pid.generation()))
+                            .map(|r| r.persistent_id.clone())
+                    }
+                };
+
+                // Update only the record's light_group_parent metadata.
+                match id.kind() {
+                    ObjectKind::PointLight => {
+                        let pl_id = PointLightId {
+                            slot: id.slot(),
+                            generation: id.generation(),
+                        };
+                        if let Some(record) = self.world.get_point_light_record_mut(pl_id) {
+                            record.light_group_parent = new_group_parent;
+                        }
+                    }
+                    ObjectKind::DirectionalLight => {
+                        let dl_id = DirectionalLightId {
+                            slot: id.slot(),
+                            generation: id.generation(),
+                        };
+                        if let Some(record) =
+                            self.world.get_directional_light_record_mut(dl_id)
+                        {
+                            record.light_group_parent = new_group_parent;
+                        }
+                    }
+                    ObjectKind::SpotLight => {
+                        let sl_id = SpotLightId {
+                            slot: id.slot(),
+                            generation: id.generation(),
+                        };
+                        if let Some(record) = self.world.get_spot_light_record_mut(sl_id) {
+                            record.light_group_parent = new_group_parent;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Get the parent of a node.
+    pub fn get_object_parent(
+        &self,
+        id: ObjectId,
+    ) -> Result<crate::object::ObjectParent, SceneError> {
+        self.validate_object(id)?;
+        use crate::object::ObjectParent;
+
+        match id.kind() {
+            ObjectKind::Node => {
+                let node = self
+                    .world
+                    .get_node(SceneNodeId::new(id.slot(), id.generation()))
+                    .ok_or(SceneError::InvalidNode(SceneNodeId::new(
+                        id.slot(),
+                        id.generation(),
+                    )))?;
+                match node.parent {
+                    Some(pid) => {
+                        let oid = self
+                            .world
+                            .object_id_for_node(pid)
+                            .ok_or(SceneError::InvalidNode(pid))?;
+                        Ok(ObjectParent::Node(oid))
+                    }
+                    None => Ok(ObjectParent::None),
+                }
+            }
+            _ => {
+                let group = self.group_parent_persistent(id);
+                match group {
+                    Some(gid) => {
+                        let oid = self
+                            .world
+                            .find_object_by_persistent_id(&gid)
+                            .ok_or(SceneError::Object(ObjectError::InvalidObject(id)))?;
+                        Ok(ObjectParent::Node(oid))
+                    }
+                    None => Ok(ObjectParent::None),
+                }
+            }
+        }
+    }
+
+    // ── Subtree Removal / Restoration ───────────────────────────────
+
+    /// Remove a node subtree, detaching surviving grouped lights whose
+    /// group parent is in the removed subtree. Returns a snapshot that can
+    /// be used to restore the subtree later.
+    pub fn remove_node_subtree(
+        &mut self,
+        node: SceneNodeId,
+    ) -> Result<crate::object::ObjectRemovalSnapshot, SceneError> {
+        self.validate_node(node)?;
+
+        let (subtree, detached_lights) = self
+            .world
+            .prepare_remove_node_subtree(node)
+            .map_err(|e| SceneError::InvalidMutation(e))?;
+
+        let root_oid = self
+            .world
+            .object_id_for_node(node)
+            .ok_or(SceneError::InvalidNode(node))?;
+        let root_persistent = self
+            .world
+            .object_persistent_id(root_oid)
+            .unwrap_or_else(|| SceneObjectId::new("object.unknown".to_string()));
+
+        self.world
+            .commit_remove_node_subtree(node, &detached_lights);
+
+        Ok(crate::object::ObjectRemovalSnapshot {
+            root: root_oid,
+            root_persistent,
+            internal: crate::scene::object_store::RemovalSnapshotData {
+                subtree: Some(subtree),
+                detached_lights,
+            },
+        })
+    }
+
+    /// Restore a previously removed subtree and reattach detached grouped
+    /// lights.
+    pub fn restore_subtree(
+        &mut self,
+        snapshot: crate::object::ObjectRemovalSnapshot,
+    ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
+        use crate::object::{ObjectMutationOutcome, ObjectRemap};
+
+        let data = snapshot.internal;
+        let subtree = data
+            .subtree
+            .ok_or_else(|| SceneError::InvalidMutation("empty removal snapshot".to_string()))?;
+
+        let (new_root_id, _new_ids) =
+            self.world
+                .restore_subtree_with_lights(subtree, &data.detached_lights);
+
+        let new_root_oid = self
+            .world
+            .object_id_for_node(new_root_id)
+            .ok_or(SceneError::InvalidNode(new_root_id))?;
+
+        let new_persistent = self
+            .world
+            .object_persistent_id(new_root_oid)
+            .unwrap_or_else(|| SceneObjectId::new("object.unknown".to_string()));
+
+        let name = self.world.object_name(new_root_oid);
+        let snapshot_event = SceneObjectLifecycleSnapshot {
+            scene: SceneId::new(&self.scene_id),
+            object: new_persistent.clone(),
+            kind: ObjectKind::Node,
+            name,
+            parent: None,
+        };
+
+        Ok(ObjectMutationOutcome {
+            remaps: vec![ObjectRemap {
+                old: snapshot.root,
+                new: new_root_oid,
+                persistent: new_persistent,
+            }],
+            snapshots: vec![snapshot_event],
+            created_roots: vec![new_root_oid],
+        })
+    }
+
+    /// Remove a node subtree and return a mutation outcome (convenience).
+    pub fn remove_node_subtree_with_outcome(
+        &mut self,
+        node: SceneNodeId,
+    ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
+        let snapshot = self.remove_node_subtree(node)?;
+        let root_persistent = snapshot.root_persistent.clone();
+        Ok(crate::object::ObjectMutationOutcome {
+            remaps: vec![crate::object::ObjectRemap {
+                old: snapshot.root,
+                new: snapshot.root,
+                persistent: root_persistent.clone(),
+            }],
+            snapshots: vec![SceneObjectLifecycleSnapshot {
+                scene: SceneId::new(&self.scene_id),
+                object: root_persistent,
+                kind: ObjectKind::Node,
+                name: None,
+                parent: None,
+            }],
+            created_roots: Vec::new(),
+        })
+    }
+
+    // ── Duplication ─────────────────────────────────────────────────
+
+    /// Duplicate a node subtree. Mint new persistent IDs and runtime
+    /// handles. Grouped lights are never implicitly duplicated.
+    pub fn duplicate_node(
+        &mut self,
+        node: SceneNodeId,
+        parent: Option<SceneNodeId>,
+    ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
+        self.validate_node(node)?;
+        if let Some(pid) = parent {
+            self.validate_node(pid)?;
+        }
+
+        let new_node_id = self
+            .world
+            .duplicate_node(node, parent)
+            .map_err(|e| SceneError::InvalidMutation(e))?;
+
+        let new_oid = self
+            .world
+            .object_id_for_node(new_node_id)
+            .ok_or(SceneError::InvalidNode(new_node_id))?;
+
+        let old_oid = self
+            .world
+            .object_id_for_node(node)
+            .ok_or(SceneError::InvalidNode(node))?;
+
+        let new_persistent = self
+            .world
+            .object_persistent_id(new_oid)
+            .unwrap_or_else(|| SceneObjectId::new("object.unknown".to_string()));
+
+        let name = self.world.object_name(new_oid);
+
+        Ok(crate::object::ObjectMutationOutcome {
+            remaps: vec![crate::object::ObjectRemap {
+                old: old_oid,
+                new: new_oid,
+                persistent: new_persistent.clone(),
+            }],
+            snapshots: vec![SceneObjectLifecycleSnapshot {
+                scene: SceneId::new(&self.scene_id),
+                object: new_persistent,
+                kind: ObjectKind::Node,
+                name,
+                parent: None,
+            }],
+            created_roots: vec![new_oid],
+        })
+    }
+
+    /// Duplicate a point light.
+    pub fn duplicate_point_light(
+        &mut self,
+        id: PointLightId,
+    ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
+        self.validate_point_light(id)?;
+
+        let new_id = self
+            .world
+            .duplicate_point_light(id)
+            .map_err(|e| SceneError::InvalidMutation(e))?;
+
+        let old_oid = self
+            .world
+            .object_id_for_point_light(id)
+            .ok_or(SceneError::InvalidPointLight(format!("invalid point light")))?;
+        let new_oid = self
+            .world
+            .object_id_for_point_light(new_id)
+            .ok_or(SceneError::InvalidPointLight(format!("invalid point light")))?;
+
+        let new_persistent = self
+            .world
+            .object_persistent_id(new_oid)
+            .unwrap_or_else(|| SceneObjectId::new("object.unknown".to_string()));
+
+        let name = self.world.object_name(new_oid);
+
+        Ok(crate::object::ObjectMutationOutcome {
+            remaps: vec![crate::object::ObjectRemap {
+                old: old_oid,
+                new: new_oid,
+                persistent: new_persistent.clone(),
+            }],
+            snapshots: vec![SceneObjectLifecycleSnapshot {
+                scene: SceneId::new(&self.scene_id),
+                object: new_persistent,
+                kind: ObjectKind::PointLight,
+                name,
+                parent: None,
+            }],
+            created_roots: vec![new_oid],
+        })
+    }
+
+    /// Duplicate a directional light.
+    pub fn duplicate_directional_light(
+        &mut self,
+        id: DirectionalLightId,
+    ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
+        self.validate_directional_light(id)?;
+
+        let new_id = self
+            .world
+            .duplicate_directional_light(id)
+            .map_err(|e| SceneError::InvalidMutation(e))?;
+
+        let old_oid = self
+            .world
+            .object_id_for_directional_light(id)
+            .ok_or(SceneError::InvalidDirectionalLight(format!(
+                "invalid directional light"
+            )))?;
+        let new_oid = self
+            .world
+            .object_id_for_directional_light(new_id)
+            .ok_or(SceneError::InvalidDirectionalLight(format!(
+                "invalid directional light"
+            )))?;
+
+        let new_persistent = self
+            .world
+            .object_persistent_id(new_oid)
+            .unwrap_or_else(|| SceneObjectId::new("object.unknown".to_string()));
+
+        let name = self.world.object_name(new_oid);
+
+        Ok(crate::object::ObjectMutationOutcome {
+            remaps: vec![crate::object::ObjectRemap {
+                old: old_oid,
+                new: new_oid,
+                persistent: new_persistent.clone(),
+            }],
+            snapshots: vec![SceneObjectLifecycleSnapshot {
+                scene: SceneId::new(&self.scene_id),
+                object: new_persistent,
+                kind: ObjectKind::DirectionalLight,
+                name,
+                parent: None,
+            }],
+            created_roots: vec![new_oid],
+        })
+    }
+
+    /// Duplicate a spot light.
+    pub fn duplicate_spot_light(
+        &mut self,
+        id: SpotLightId,
+    ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
+        self.validate_spot_light(id)?;
+
+        let new_id = self
+            .world
+            .duplicate_spot_light(id)
+            .map_err(|e| SceneError::InvalidMutation(e))?;
+
+        let old_oid = self
+            .world
+            .object_id_for_spot_light(id)
+            .ok_or(SceneError::InvalidSpotLight(format!("invalid spot light")))?;
+        let new_oid = self
+            .world
+            .object_id_for_spot_light(new_id)
+            .ok_or(SceneError::InvalidSpotLight(format!("invalid spot light")))?;
+
+        let new_persistent = self
+            .world
+            .object_persistent_id(new_oid)
+            .unwrap_or_else(|| SceneObjectId::new("object.unknown".to_string()));
+
+        let name = self.world.object_name(new_oid);
+
+        Ok(crate::object::ObjectMutationOutcome {
+            remaps: vec![crate::object::ObjectRemap {
+                old: old_oid,
+                new: new_oid,
+                persistent: new_persistent.clone(),
+            }],
+            snapshots: vec![SceneObjectLifecycleSnapshot {
+                scene: SceneId::new(&self.scene_id),
+                object: new_persistent,
+                kind: ObjectKind::SpotLight,
+                name,
+                parent: None,
+            }],
+            created_roots: vec![new_oid],
+        })
+    }
+
+    /// General object duplication: dispatches by kind.
+    pub fn duplicate_object(
+        &mut self,
+        id: ObjectId,
+    ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
+        self.validate_object(id)?;
+        match id.kind() {
+            ObjectKind::Node => {
+                let node_id = SceneNodeId::new(id.slot(), id.generation());
+                self.duplicate_node(node_id, None)
+            }
+            ObjectKind::PointLight => {
+                let pl_id = PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                self.duplicate_point_light(pl_id)
+            }
+            ObjectKind::DirectionalLight => {
+                let dl_id = DirectionalLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                self.duplicate_directional_light(dl_id)
+            }
+            ObjectKind::SpotLight => {
+                let sl_id = SpotLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                self.duplicate_spot_light(sl_id)
+            }
+        }
+    }
+
+    // ── Component remap during duplication ─────────────────────────
+
+    /// Remap component references using a caller-owned registry and a
+    /// persistent-ID mapping.
+    pub fn remap_object_component_references(
+        &mut self,
+        id: ObjectId,
+        registry: &ComponentRegistry,
+        mapping: &HashMap<SceneObjectId, SceneObjectId>,
+    ) -> Result<(), SceneError> {
+        let store = self
+            .world
+            .object_component_store_mut(id)
+            .ok_or_else(|| {
+                SceneError::Object(ObjectError::InvalidObject(id))
+            })?;
+
+        let keys: Vec<(ComponentKey, ComponentInstanceId)> = store
+            .envelopes()
+            .map(|e| (e.key.clone(), e.instance_id.clone()))
+            .collect();
+
+        for (key, iid) in &keys {
+            if registry.contains(key) {
+                let (envelope, hydrated) = prepare_reference_remap(
+                    registry, store, key, iid, mapping,
+                )?;
+                commit_full_state_replacement(store, envelope, hydrated)?;
+            }
+        }
+
+        Ok(())
     }
 }
 

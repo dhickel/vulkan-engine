@@ -1948,6 +1948,22 @@ impl SceneWorld {
         }
     }
 
+    /// Like [`resolve_object`] but distinguishes WrongScene from other failures.
+    pub(crate) fn resolve_object_with_error(
+        &self,
+        id: ObjectId,
+    ) -> Result<ObjectHandle, crate::object::identity::ObjectError> {
+        use crate::object::identity::ObjectError;
+        if id.provenance() != self.provenance {
+            return Err(ObjectError::WrongScene {
+                object: id,
+                expected_scene: format!("{:?}", self.provenance),
+            });
+        }
+        self.resolve_object(id)
+            .ok_or(ObjectError::InvalidObject(id))
+    }
+
     /// Look up an ObjectId by persistent SceneObjectId.
     pub(crate) fn find_object_by_persistent_id(
         &self,
@@ -2226,6 +2242,80 @@ impl SceneWorld {
         entry.light.as_mut().map(|(_, r)| r)
     }
 
+    /// Direct access to point light slot for transform reads.
+    pub fn point_light_entry(
+        &self,
+        id: PointLightId,
+    ) -> Option<&PointLight> {
+        let entry = self.point_lights.get(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.light.as_ref().map(|(l, _)| l)
+    }
+
+    /// Direct mutable access to point light slot for transform writes.
+    pub(crate) fn point_light_entry_mut(
+        &mut self,
+        id: PointLightId,
+    ) -> Option<&mut (PointLight, ObjectRecord)> {
+        let entry = self.point_lights.get_mut(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.light.as_mut()
+    }
+
+    /// Direct access to directional light slot.
+    pub fn directional_light_entry(
+        &self,
+        id: DirectionalLightId,
+    ) -> Option<&DirectionalLight> {
+        let entry = self.directional_lights.get(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.light.as_ref().map(|(l, _)| l)
+    }
+
+    /// Direct mutable access to directional light slot.
+    pub(crate) fn directional_light_entry_mut(
+        &mut self,
+        id: DirectionalLightId,
+    ) -> Option<&mut (DirectionalLight, ObjectRecord)> {
+        let entry = self.directional_lights.get_mut(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.light.as_mut()
+    }
+
+    /// Direct access to spot light slot.
+    pub fn spot_light_entry(
+        &self,
+        id: SpotLightId,
+    ) -> Option<&SpotLight> {
+        let entry = self.spot_lights.get(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.light.as_ref().map(|(l, _)| l)
+    }
+
+    /// Direct mutable access to spot light slot.
+    pub(crate) fn spot_light_entry_mut(
+        &mut self,
+        id: SpotLightId,
+    ) -> Option<&mut (SpotLight, ObjectRecord)> {
+        let entry = self.spot_lights.get_mut(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.light.as_mut()
+    }
+
+
+
     pub(crate) fn remove_spot_light(&mut self, id: SpotLightId) -> bool {
         let plan = match self.prepare_remove_spot_light(id) {
             Some(p) => p,
@@ -2463,6 +2553,586 @@ impl SceneWorld {
     ) -> Option<&mut crate::object::component::ComponentStore> {
         self.get_node_record_mut(node_id)
             .map(|record| &mut record.component_store)
+    }
+
+    // ── Object enumeration ───────────────────────────────────────────
+
+    /// Return all occupied objects as (ObjectId, ObjectKind, persistent_id, stable_id, name, tags).
+    pub(crate) fn all_objects(&self) -> Vec<ObjectId> {
+        let mut ids: Vec<ObjectId> = Vec::new();
+
+        for (slot, entry) in self.nodes.iter().enumerate() {
+            if entry.node.is_some() {
+                ids.push(ObjectId::from_parts(
+                    self.provenance,
+                    ObjectKind::Node,
+                    slot as u32,
+                    entry.generation,
+                ));
+            }
+        }
+        for (slot, entry) in self.point_lights.iter().enumerate() {
+            if entry.light.is_some() {
+                ids.push(ObjectId::from_parts(
+                    self.provenance,
+                    ObjectKind::PointLight,
+                    slot as u32,
+                    entry.generation,
+                ));
+            }
+        }
+        for (slot, entry) in self.directional_lights.iter().enumerate() {
+            if entry.light.is_some() {
+                ids.push(ObjectId::from_parts(
+                    self.provenance,
+                    ObjectKind::DirectionalLight,
+                    slot as u32,
+                    entry.generation,
+                ));
+            }
+        }
+        for (slot, entry) in self.spot_lights.iter().enumerate() {
+            if entry.light.is_some() {
+                ids.push(ObjectId::from_parts(
+                    self.provenance,
+                    ObjectKind::SpotLight,
+                    slot as u32,
+                    entry.generation,
+                ));
+            }
+        }
+        // Stable sort by kind, then persistent ID
+        ids.sort_by(|a, b| {
+            a.kind()
+                .cmp(&b.kind())
+                .then_with(|| a.slot().cmp(&b.slot()))
+                .then_with(|| a.generation().cmp(&b.generation()))
+        });
+        ids
+    }
+
+    /// Return node name (or stable ID fallback).
+    pub(crate) fn object_name(&self, id: ObjectId) -> Option<String> {
+        match id.kind() {
+            ObjectKind::Node => {
+                let node = self.get_node(SceneNodeId::new(id.slot(), id.generation()))?;
+                Some(if node.name.is_empty() {
+                    node.stable_id.clone().unwrap_or_else(|| format!("Node {}", id.slot()))
+                } else {
+                    node.name.clone()
+                })
+            }
+            ObjectKind::PointLight => {
+                self.get_point_light_record(PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| {
+                    r.stable_id
+                        .clone()
+                        .unwrap_or_else(|| format!("PointLight {}", id.slot()))
+                })
+            }
+            ObjectKind::DirectionalLight => {
+                self.get_directional_light_record(DirectionalLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| {
+                    r.stable_id
+                        .clone()
+                        .unwrap_or_else(|| format!("DirectionalLight {}", id.slot()))
+                })
+            }
+            ObjectKind::SpotLight => {
+                self.get_spot_light_record(SpotLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| {
+                    r.stable_id
+                        .clone()
+                        .unwrap_or_else(|| format!("SpotLight {}", id.slot()))
+                })
+            }
+        }
+    }
+
+    /// Return the persistent ID for an object.
+    pub(crate) fn object_persistent_id(&self, id: ObjectId) -> Option<SceneObjectId> {
+        match id.kind() {
+            ObjectKind::Node => {
+                self.get_node_record(SceneNodeId::new(id.slot(), id.generation()))
+                    .map(|r| r.persistent_id.clone())
+            }
+            ObjectKind::PointLight => {
+                self.get_point_light_record(PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| r.persistent_id.clone())
+            }
+            ObjectKind::DirectionalLight => {
+                self.get_directional_light_record(DirectionalLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| r.persistent_id.clone())
+            }
+            ObjectKind::SpotLight => {
+                self.get_spot_light_record(SpotLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| r.persistent_id.clone())
+            }
+        }
+    }
+
+    /// Return the component store for any object (by immutable reference).
+    pub(crate) fn object_component_store(
+        &self,
+        id: ObjectId,
+    ) -> Option<&crate::object::component::ComponentStore> {
+        match id.kind() {
+            ObjectKind::Node => self
+                .get_node_record(SceneNodeId::new(id.slot(), id.generation()))
+                .map(|r| &r.component_store),
+            ObjectKind::PointLight => {
+                self.get_point_light_record(PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| &r.component_store)
+            }
+            ObjectKind::DirectionalLight => {
+                self.get_directional_light_record(DirectionalLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| &r.component_store)
+            }
+            ObjectKind::SpotLight => {
+                self.get_spot_light_record(SpotLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| &r.component_store)
+            }
+        }
+    }
+
+    /// Return the component store for any object (by mutable reference).
+    pub(crate) fn object_component_store_mut(
+        &mut self,
+        id: ObjectId,
+    ) -> Option<&mut crate::object::component::ComponentStore> {
+        match id.kind() {
+            ObjectKind::Node => self
+                .get_node_record_mut(SceneNodeId::new(id.slot(), id.generation()))
+                .map(|r| &mut r.component_store),
+            ObjectKind::PointLight => {
+                self.get_point_light_record_mut(PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| &mut r.component_store)
+            }
+            ObjectKind::DirectionalLight => {
+                self.get_directional_light_record_mut(DirectionalLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| &mut r.component_store)
+            }
+            ObjectKind::SpotLight => {
+                self.get_spot_light_record_mut(SpotLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| &mut r.component_store)
+            }
+        }
+    }
+
+    /// Return object visibility state.
+    pub(crate) fn object_visible(&self, id: ObjectId) -> Option<bool> {
+        match id.kind() {
+            ObjectKind::Node => self
+                .get_node_record(SceneNodeId::new(id.slot(), id.generation()))
+                .and_then(|r| r.visibility.as_ref())
+                .map(|v| v.visible),
+            _ => Some(true), // Lights are always "visible"
+        }
+    }
+
+    /// Return the layer name for an object (nodes only).
+    pub(crate) fn object_layer(&self, id: ObjectId) -> Option<String> {
+        match id.kind() {
+            ObjectKind::Node => self
+                .get_node_record(SceneNodeId::new(id.slot(), id.generation()))
+                .and_then(|r| r.visibility.as_ref())
+                .map(|v| v.layer.clone()),
+            _ => None,
+        }
+    }
+
+    // ── Subtree removal with light detachment ───────────────────────
+
+    /// Prepare removal of a node subtree, collecting surviving grouped lights
+    /// whose group parent lies in the removed set.
+    pub(crate) fn prepare_remove_node_subtree(
+        &self,
+        node_id: SceneNodeId,
+    ) -> Result<
+        (
+            RestorableSceneSubtree,
+            Vec<crate::scene::object_store::DetachedLightSnapshot>,
+        ),
+        String,
+    > {
+        // Validate
+        self.validate_node_ref(node_id).map_err(|e| format!("{e:?}"))?;
+
+        // Clone subtree
+        let subtree = self
+            .clone_subtree(node_id)
+            .ok_or_else(|| "failed to clone subtree".to_string())?;
+
+        // Collect persistent IDs of all nodes in the subtree
+        let removed_persistent_ids = self.collect_subtree_persistent_ids(&subtree);
+
+        // Find grouped lights whose group parent is in the removed set
+        let detached_lights = self.collect_grouped_lights_for_removal(&removed_persistent_ids);
+
+        Ok((subtree, detached_lights))
+    }
+
+    /// Commit subtree removal, detaching grouped lights before node removal.
+    pub(crate) fn commit_remove_node_subtree(
+        &mut self,
+        node_id: SceneNodeId,
+        detached_lights: &[crate::scene::object_store::DetachedLightSnapshot],
+    ) {
+        // Detach lights from their group parents
+        for dl in detached_lights {
+            match dl.kind {
+                ObjectKind::PointLight => {
+                    if let Some(handle) = self.reverse_index.get(&dl.persistent_id) {
+                        if let ObjectHandle::PointLight(pl_id) = *handle {
+                            if let Some(record) = self.get_point_light_record_mut(pl_id) {
+                                record.light_group_parent = None;
+                            }
+                        }
+                    }
+                }
+                ObjectKind::DirectionalLight => {
+                    if let Some(handle) = self.reverse_index.get(&dl.persistent_id) {
+                        if let ObjectHandle::DirectionalLight(dl_id) = *handle {
+                            if let Some(record) = self.get_directional_light_record_mut(dl_id) {
+                                record.light_group_parent = None;
+                            }
+                        }
+                    }
+                }
+                ObjectKind::SpotLight => {
+                    if let Some(handle) = self.reverse_index.get(&dl.persistent_id) {
+                        if let ObjectHandle::SpotLight(sl_id) = *handle {
+                            if let Some(record) = self.get_spot_light_record_mut(sl_id) {
+                                record.light_group_parent = None;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Remove the node subtree
+        self.remove_node(node_id);
+    }
+
+    /// Collect persistent IDs of all nodes in a subtree.
+    fn collect_subtree_persistent_ids(
+        &self,
+        subtree: &RestorableSceneSubtree,
+    ) -> Vec<SceneObjectId> {
+        let mut ids = vec![subtree.record.persistent_id.clone()];
+        for child in &subtree.children {
+            ids.extend(self.collect_subtree_persistent_ids(child));
+        }
+        ids
+    }
+
+    /// Collect lights whose group parent persistent ID is in `removed_ids`.
+    fn collect_grouped_lights_for_removal(
+        &self,
+        removed_ids: &[SceneObjectId],
+    ) -> Vec<crate::scene::object_store::DetachedLightSnapshot> {
+        use crate::scene::object_store::DetachedLightSnapshot;
+        let removed_set: std::collections::HashSet<&SceneObjectId> =
+            removed_ids.iter().collect();
+        let mut detached = Vec::new();
+
+        for entry in &self.point_lights {
+            if let Some((light, record)) = &entry.light {
+                if let Some(ref parent) = record.light_group_parent {
+                    if removed_set.contains(parent) {
+                        detached.push(DetachedLightSnapshot {
+                            kind: ObjectKind::PointLight,
+                            persistent_id: record.persistent_id.clone(),
+                            old_group_parent: parent.clone(),
+                            point_light: Some(*light),
+                            directional_light: None,
+                            spot_light: None,
+                        });
+                    }
+                }
+            }
+        }
+        for entry in &self.directional_lights {
+            if let Some((light, record)) = &entry.light {
+                if let Some(ref parent) = record.light_group_parent {
+                    if removed_set.contains(parent) {
+                        detached.push(DetachedLightSnapshot {
+                            kind: ObjectKind::DirectionalLight,
+                            persistent_id: record.persistent_id.clone(),
+                            old_group_parent: parent.clone(),
+                            point_light: None,
+                            directional_light: Some(*light),
+                            spot_light: None,
+                        });
+                    }
+                }
+            }
+        }
+        for entry in &self.spot_lights {
+            if let Some((light, record)) = &entry.light {
+                if let Some(ref parent) = record.light_group_parent {
+                    if removed_set.contains(parent) {
+                        detached.push(DetachedLightSnapshot {
+                            kind: ObjectKind::SpotLight,
+                            persistent_id: record.persistent_id.clone(),
+                            old_group_parent: parent.clone(),
+                            point_light: None,
+                            directional_light: None,
+                            spot_light: Some(*light),
+                        });
+                    }
+                }
+            }
+        }
+
+        detached
+    }
+
+    // ── Subtree restoration ─────────────────────────────────────────
+
+    /// Restore a subtree from a snapshot and reattach previously detached
+    /// grouped lights.
+    pub(crate) fn restore_subtree_with_lights(
+        &mut self,
+        subtree: RestorableSceneSubtree,
+        detached_lights: &[crate::scene::object_store::DetachedLightSnapshot],
+    ) -> (SceneNodeId, Vec<ObjectId>) {
+        let new_root = self.restore_subtree(subtree);
+        let new_ids = vec![self
+            .object_id_for_node(new_root)
+            .expect("just-created node must have object ID")];
+
+        // Reattach grouped lights to the restored nodes.
+        // Map old persistent IDs to new ones.
+        let mut persistent_remap: HashMap<SceneObjectId, SceneObjectId> = HashMap::new();
+        self.collect_restored_persistent_map(new_root, &mut persistent_remap);
+
+        for dl in detached_lights {
+            let new_parent = persistent_remap.get(&dl.old_group_parent).cloned();
+            match dl.kind {
+                ObjectKind::PointLight => {
+                    if let Some(handle) = self.reverse_index.get(&dl.persistent_id) {
+                        if let ObjectHandle::PointLight(pl_id) = *handle {
+                            if let Some(record) = self.get_point_light_record_mut(pl_id) {
+                                record.light_group_parent = new_parent.clone();
+                            }
+                        }
+                    }
+                }
+                ObjectKind::DirectionalLight => {
+                    if let Some(handle) = self.reverse_index.get(&dl.persistent_id) {
+                        if let ObjectHandle::DirectionalLight(dl_id) = *handle {
+                            if let Some(record) =
+                                self.get_directional_light_record_mut(dl_id)
+                            {
+                                record.light_group_parent = new_parent.clone();
+                            }
+                        }
+                    }
+                }
+                ObjectKind::SpotLight => {
+                    if let Some(handle) = self.reverse_index.get(&dl.persistent_id) {
+                        if let ObjectHandle::SpotLight(sl_id) = *handle {
+                            if let Some(record) = self.get_spot_light_record_mut(sl_id) {
+                                record.light_group_parent = new_parent.clone();
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        (new_root, new_ids)
+    }
+
+    /// Collect a map from old persistent IDs to new ones after restoration.
+    fn collect_restored_persistent_map(
+        &self,
+        node_id: SceneNodeId,
+        map: &mut HashMap<SceneObjectId, SceneObjectId>,
+    ) {
+        if let Some(record) = self.get_node_record(node_id) {
+            // Restore creates new persistent IDs, so this records the new one.
+            map.insert(record.persistent_id.clone(), record.persistent_id.clone());
+        }
+        if let Some(node) = self.get_node(node_id) {
+            for child_id in node.children.clone() {
+                if self.is_valid_node_id(child_id) {
+                    self.collect_restored_persistent_map(child_id, map);
+                }
+            }
+        }
+    }
+
+    // ── Duplication ──────────────────────────────────────────────────
+
+    /// Duplicate a node subtree, minting new persistent IDs and runtime
+    /// handles.  Grouped lights are never implicitly duplicated.
+    pub(crate) fn duplicate_node(
+        &mut self,
+        node_id: SceneNodeId,
+        parent: Option<SceneNodeId>,
+    ) -> Result<SceneNodeId, String> {
+        self.validate_node_ref(node_id)
+            .map_err(|e| format!("{e:?}"))?;
+
+        let subtree = self
+            .clone_subtree(node_id)
+            .ok_or_else(|| "failed to clone subtree for duplication".to_string())?;
+
+        Ok(self.duplicate_subtree(subtree, parent))
+    }
+
+    /// Recursively duplicate a `RestorableSceneSubtree`, minting new
+    /// persistent IDs for every node.
+    fn duplicate_subtree(
+        &mut self,
+        subtree: RestorableSceneSubtree,
+        parent: Option<SceneNodeId>,
+    ) -> SceneNodeId {
+        let mut new_record = subtree.record.clone();
+        // Mint new persistent ID
+        new_record.persistent_id = crate::scene::object_store::mint_persistent_id();
+        // New stable ID
+        new_record.stable_id = None;
+
+        let mut new_node = subtree.node.clone();
+        new_node.parent = parent;
+        new_node.children.clear();
+        new_node.dirty = true;
+
+        let new_id = self.add_node_with_record(parent, new_node, new_record);
+
+        for child in subtree.children {
+            self.duplicate_subtree(child, Some(new_id));
+        }
+
+        new_id
+    }
+
+    /// Duplicate a point light, minting a new persistent ID. Preserves
+    /// world-space state and grouping.
+    pub(crate) fn duplicate_point_light(
+        &mut self,
+        id: PointLightId,
+    ) -> Result<PointLightId, String> {
+        let entry = self
+            .point_lights
+            .get(id.slot as usize)
+            .ok_or("out of bounds".to_string())?;
+        if entry.generation != id.generation {
+            return Err("generation mismatch".to_string());
+        }
+        let (light, record) = entry
+            .light
+            .clone()
+            .ok_or("vacant".to_string())?;
+
+        let mut new_record = record.clone();
+        new_record.persistent_id = crate::scene::object_store::mint_persistent_id();
+        new_record.stable_id = None;
+
+        Ok(self.add_point_light_with_record(light, new_record))
+    }
+
+    /// Duplicate a directional light.
+    pub(crate) fn duplicate_directional_light(
+        &mut self,
+        id: DirectionalLightId,
+    ) -> Result<DirectionalLightId, String> {
+        let entry = self
+            .directional_lights
+            .get(id.slot as usize)
+            .ok_or("out of bounds".to_string())?;
+        if entry.generation != id.generation {
+            return Err("generation mismatch".to_string());
+        }
+        let (light, record) = entry
+            .light
+            .clone()
+            .ok_or("vacant".to_string())?;
+
+        let mut new_record = record.clone();
+        new_record.persistent_id = crate::scene::object_store::mint_persistent_id();
+        new_record.stable_id = None;
+        // Duplicated directional shadow config starts non-owning
+        new_record.directional_shadow_config = None;
+
+        Ok(self.add_directional_light_with_record(light, new_record))
+    }
+
+    /// Duplicate a spot light.
+    pub(crate) fn duplicate_spot_light(
+        &mut self,
+        id: SpotLightId,
+    ) -> Result<SpotLightId, String> {
+        let entry = self
+            .spot_lights
+            .get(id.slot as usize)
+            .ok_or("out of bounds".to_string())?;
+        if entry.generation != id.generation {
+            return Err("generation mismatch".to_string());
+        }
+        let (light, record) = entry
+            .light
+            .clone()
+            .ok_or("vacant".to_string())?;
+
+        let mut new_record = record.clone();
+        new_record.persistent_id = crate::scene::object_store::mint_persistent_id();
+        new_record.stable_id = None;
+
+        Ok(self.add_spot_light_with_record(light, new_record))
+    }
+
+    /// Clone the component store contents for duplication, copying JSON
+    /// unchanged unless a remap adapter is registered.
+    pub(crate) fn clone_component_store(
+        source: &crate::object::component::ComponentStore,
+    ) -> crate::object::component::ComponentStore {
+        // Just clone the store — envelopes are canonical JSON and copy as-is.
+        // Callers should use `prepare_reference_remap` with a registry if
+        // remapping is needed.
+        source.clone()
     }
 }
 
