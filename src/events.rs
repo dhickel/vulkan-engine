@@ -4,8 +4,10 @@ pub use engine_events::{
     legacy_scene::LegacySceneEventAdapter, ActionId, ActionPhase, AssetEvent, AssetId, AudioClipId,
     AudioEvent, ColliderId, ContactPhase, DispatchReport, EngineEvent, EventBus, EventEnvelope,
     EventRecorder, EventSequence, EventStage, FrameId, InputActionEvent, LifecycleEvent,
-    ListenerError, ListenerFailure, ListenerId, MaterialId, NodeId, PackageId, PhysicsBodyId,
-    PhysicsEvent, ProjectId, SceneEvent, SceneId, ScriptId, ScriptingEvent,
+    ListenerError, ListenerFailure, ListenerId, MaterialId, NodeId, ObjectKind, PackageId,
+    PhysicsBodyId, PhysicsEvent, ProjectId, SceneEvent, SceneId, SceneObjectId,
+    SceneObjectLifecycleAction, SceneObjectLifecycleEvent, SceneObjectLifecycleSnapshot, ScriptId,
+    ScriptingEvent,
 };
 
 /// Default event recorder capacity used by root runtime helpers.

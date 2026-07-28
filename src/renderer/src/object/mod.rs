@@ -378,19 +378,14 @@ impl ObjectLifecycleOutcome {
     /// Each snapshot in [`self.snapshots`] is paired with the provided
     /// `action` and returned as a new event. The outcome is consumed.
     ///
-    /// # Panics (debug only)
-    ///
-    /// In debug builds this method asserts that [`self.snapshots`] is
-    /// non-empty — every successful lifecycle operation must produce at
-    /// least one snapshot.
+    /// The vector preserves the outcome's snapshot order. Mutation paths
+    /// establish that order before constructing the outcome (parents before
+    /// descendants for creation/restore/duplicate and descendants before
+    /// parents for removal), so callers can emit this batch unchanged.
     pub fn into_lifecycle_events(
         self,
         action: SceneObjectLifecycleAction,
     ) -> Vec<SceneObjectLifecycleEvent> {
-        debug_assert!(
-            !self.snapshots.is_empty(),
-            "ObjectLifecycleOutcome must carry at least one snapshot for a successful lifecycle operation"
-        );
         self.snapshots
             .into_iter()
             .map(|snapshot| SceneObjectLifecycleEvent {
@@ -472,8 +467,7 @@ mod tests {
             }],
         };
 
-        let events =
-            outcome.into_lifecycle_events(SceneObjectLifecycleAction::Removed);
+        let events = outcome.into_lifecycle_events(SceneObjectLifecycleAction::Removed);
         assert_eq!(events.len(), 1);
         let event = &events[0];
         assert_eq!(event.action, SceneObjectLifecycleAction::Removed);
@@ -525,17 +519,17 @@ mod tests {
             created_roots: Vec::new(),
         };
 
-        let events = mutation
-            .into_lifecycle_events(SceneObjectLifecycleAction::Duplicated {
-                source: SceneObjectId::new("src"),
-            });
+        let events = mutation.into_lifecycle_events(SceneObjectLifecycleAction::Duplicated {
+            source: SceneObjectId::new("src"),
+        });
         assert_eq!(events.len(), 1);
     }
 
     #[test]
-    #[should_panic(expected = "must carry at least one snapshot")]
-    fn empty_outcome_into_events_panics_in_debug() {
+    fn empty_outcome_into_events_is_empty() {
         let outcome = ObjectLifecycleOutcome::default();
-        let _events = outcome.into_lifecycle_events(SceneObjectLifecycleAction::Created);
+        assert!(outcome
+            .into_lifecycle_events(SceneObjectLifecycleAction::Created)
+            .is_empty());
     }
 }

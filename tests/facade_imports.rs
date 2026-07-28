@@ -57,19 +57,32 @@ fn facade_and_raw_crate_imports_compile() {
     let _: Option<object::ObjectId> = None;
     let _: Option<object::SceneObjectId> = None;
     let _: Option<object::ObjectSummary> = None;
+    let _: Option<object::ObjectCapabilities> = None;
+    let _: Option<object::ComponentEnvelope> = None;
+    let _: Option<object::ComponentRegistry> = None;
+    let _: Option<object::ObjectQueryFilter> = None;
+    let _: Option<object::RayHit> = None;
+    let _: Option<object::Selection> = None;
+    let _: Option<object::SelectionChange> = None;
     let _: fn(&object::ObjectId) -> object::ObjectKind = object::object_kind;
     let _: fn(object::ObjectKind) -> &'static str = object::object_kind_label;
 
     // ── Command facade module ──
     let _: command::CommandHistory = command::CommandHistory::new(32);
     let _: Option<Box<dyn command::Command>> = None;
+    let _: Option<command::CommandResult> = None;
+    let _: Option<command::DuplicateObjectsCommand> = None;
+    let _: Option<command::SetObjectTransformCommand> = None;
 
     // ── Camera facade: EditorCamera ──
     let _: Option<camera::EditorCamera> = None;
     let _: Option<camera::EditorProjection> = None;
 
-    // ── Events facade: legacy adapter ──
+    // ── Events facade: persistent lifecycle and opt-in legacy adapter ──
     let _: events::LegacySceneEventAdapter = events::LegacySceneEventAdapter;
+    let _: Option<events::SceneObjectLifecycleEvent> = None;
+    let _: Option<events::SceneObjectLifecycleSnapshot> = None;
+    let _: Option<events::SceneObjectLifecycleAction> = None;
 
     let mut raw_input_system = raw_input::InputSystem::new();
     raw_input_system.dispatch_frame();
@@ -157,9 +170,14 @@ fn prelude_imports_common_facade_types() {
         _editor_projection: Option<EditorProjection>,
         _object_id: Option<ObjectId>,
         _object_kind: Option<ObjectKind>,
-        _object_summary: Option<ObjectSummary>,
-        _lifecycle_outcome: Option<ObjectLifecycleOutcome>,
-        _mutation_outcome: Option<ObjectMutationOutcome>,
+        _persistent_object_id: Option<SceneObjectId>,
+        _selection: Option<Selection>,
+        _selection_change: Option<SelectionChange>,
+        _query_filter: Option<ObjectQueryFilter>,
+        _ray_hit: Option<RayHit>,
+        _command: Option<Box<dyn Command>>,
+        _command_history: Option<CommandHistory>,
+        _command_result: Option<CommandResult>,
     ) {
     }
 
@@ -167,6 +185,11 @@ fn prelude_imports_common_facade_types() {
         ActionId::new("jump"),
         EventStage::Input,
         FrameId(0),
+        None,
+        None,
+        None,
+        None,
+        None,
         None,
         None,
         None,

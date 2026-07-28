@@ -57,7 +57,7 @@ The event system lives in the standalone `engine_events` crate. It has zero depe
 ```rust
 use engine::prelude::{runtime_event_bus, EventBus};
 
-let mut events = runtime_event_bus();p
+let mut events = runtime_event_bus();
 ```
 
 `runtime_event_bus()` creates a caller-owned `EventBus` with a bounded recorder already attached. Use this bus for all app lifecycle, input action, and subsystem events. Custom apps should **never** interact with the renderer's internal bus.
@@ -105,6 +105,7 @@ pub struct InputActionEvent {
 pub enum SceneEvent {
     NodeCreated { node: NodeId },
     NodeRemoved { node: NodeId },
+    ObjectLifecycle(SceneObjectLifecycleEvent),
     NodeRenamed { node: NodeId, name: String },
     NodeTransformed { node: NodeId },
     AssetPlaced { node: NodeId, asset: AssetId },
@@ -401,8 +402,15 @@ The `engine_events` crate defines durable string ID types used across all subsys
 | `ColliderId` | `string_id!` | Physics colliders (shared with `physics` crate) |
 | `AudioClipId` | `string_id!` | Audio clips (shared with `audio` crate) |
 | `ScriptId` | `string_id!` | Script identity |
+| `SceneObjectId` | `string_id!` | Persistent scene object identity |
 
 All ID types implement `Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash`. They are created via `::new("some.id")` or `::from("some.id")`.
+
+## Scene Object Lifecycle
+
+`SceneEvent::ObjectLifecycle` carries a persistent object snapshot: `SceneId`, `SceneObjectId`, `ObjectKind`, optional display name, and optional persistent parent. It never carries renderer slot or generation handles. Callers convert successful `ObjectLifecycleOutcome` values and choose whether and when to emit them; the scene never owns an event bus.
+
+The conversion preserves mutation ordering: parent-first for create, restore, and duplicate; descendant-first for removal. `LegacySceneEventAdapter` translates node lifecycle values to legacy node events only when the caller explicitly requests it. It never emits to a bus, so new and legacy events are never automatically dual-emitted.
 
 ## Status of Deferred Event Families
 
@@ -412,7 +420,7 @@ The event vocabulary includes contracts for scene, asset, physics, audio, and sc
 |--------|:---:|
 | `LifecycleEvent` | Yes — app start/stop, project/scene load, frame start/end |
 | `InputActionEvent` | Yes — emitted by `InputActionEventEmitter` after `dispatch_frame` |
-| `SceneEvent` | Contract exists; broad scene mutation emission is not yet wired |
+| `SceneEvent` | `ObjectLifecycle` is available for caller-owned explicit emission; broad automatic mutation emission is not wired |
 | `AssetEvent::Package*` | Yes — root runtime emits package load events |
 | `AssetEvent::Asset*` | Contract exists; per-asset async load emission is deferred |
 | `PhysicsEvent` | Via opt-in helpers — `RayHit::to_engine_event()`, `emit_contact_records()` |

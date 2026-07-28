@@ -18,15 +18,9 @@ pub mod prelude {
     pub use crate::camera::{
         Camera, EditorCamera, EditorProjection, FPSController, OrbitCamera, OrbitController,
     };
-    pub use crate::command::{
-        AddNodeCommand, AttachComponentCommand, Command, CommandHistory, DuplicateObjectsCommand,
-        PlaceAssetCommand, RemoveComponentCommand, RemoveNodeCommand, RemoveObjectsCommand,
-        ReplaceComponentStateCommand, SetComponentPropertyCommand, SetObjectParentCommand,
-        SetObjectTransformCommand, SetTransformCommand,
-    };
+    pub use crate::command::{Command, CommandHistory, CommandResult};
     pub use crate::events::{
-        runtime_event_bus, EngineEvent, EventBus, EventStage, FrameId,
-        LegacySceneEventAdapter, RuntimeEventDispatcher,
+        runtime_event_bus, EngineEvent, EventBus, EventStage, FrameId, RuntimeEventDispatcher,
     };
     pub use crate::frame::{
         begin_app_frame, end_app_frame, AppFrameBeginReport, AppFrameEndReport, FixedStepClock,
@@ -36,10 +30,12 @@ pub mod prelude {
         queue_routed_input_event, route_platform_input_to_app, ActionId, InputActionEventEmitter,
         InputEvent, InputSnapshot, InputSystem,
     };
-    pub use crate::object::{object_kind, object_kind_label, ObjectId, ObjectKind, ObjectSummary};
+    pub use crate::object::{
+        object_kind, object_kind_label, ObjectId, ObjectKind, ObjectQueryFilter, RayHit,
+        SceneObjectId, Selection, SelectionChange,
+    };
     pub use crate::render::{
-        camera_view_for_size, CameraView, FrameContext, FrameRenderOutcome,
-        ObjectLifecycleOutcome, ObjectMutationOutcome, Renderer, RendererConfig,
-        RendererInputRouting, RendererInputSuppression, Scene, SceneNodeId,
+        camera_view_for_size, CameraView, FrameContext, FrameRenderOutcome, Renderer,
+        RendererConfig, RendererInputRouting, RendererInputSuppression, Scene, SceneNodeId,
     };
 }

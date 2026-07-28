@@ -124,10 +124,7 @@ mod tests {
         ] {
             let event = make_event(SceneObjectLifecycleAction::Created, kind);
             let legacy = LegacySceneEventAdapter::translate(&event);
-            assert!(
-                legacy.is_empty(),
-                "expected no legacy event for {kind:?}"
-            );
+            assert!(legacy.is_empty(), "expected no legacy event for {kind:?}");
         }
     }
 
@@ -143,5 +140,29 @@ mod tests {
         assert_eq!(legacy.len(), 2);
         assert!(matches!(legacy[0], SceneEvent::NodeCreated { .. }));
         assert!(matches!(legacy[1], SceneEvent::NodeRemoved { .. }));
+    }
+
+    #[test]
+    fn translation_is_opt_in_and_never_emits() {
+        use crate::{EngineEvent, EventBus, EventRecorder, EventStage};
+
+        let event = make_event(SceneObjectLifecycleAction::Created, ObjectKind::Node);
+        let mut bus = EventBus::with_recorder(EventRecorder::bounded(2));
+        bus.emit(
+            EventStage::PostUpdate,
+            None,
+            EngineEvent::Scene(SceneEvent::ObjectLifecycle(event.clone())),
+        );
+
+        let entries: Vec<_> = bus.recorder().unwrap().entries().collect();
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(
+            &entries[0].event,
+            EngineEvent::Scene(SceneEvent::ObjectLifecycle(_))
+        ));
+
+        let legacy = LegacySceneEventAdapter::translate(&event);
+        assert_eq!(legacy.len(), 1);
+        assert!(matches!(legacy[0], SceneEvent::NodeCreated { .. }));
     }
 }
