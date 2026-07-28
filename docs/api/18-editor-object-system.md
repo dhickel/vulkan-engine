@@ -1,486 +1,117 @@
 # Editor Object System — API Reference
 
-## 1. Purpose & Audience
+## Purpose
 
-This chapter documents the unified object identity, query, selection, component, and command system for editor and inspector workflows. It covers the types and APIs that replace per-kind ad-hoc identity with one unforgeable `ObjectId` space spanning nodes, point lights, directional lights, and spot lights.
+The scene object system gives editor and tooling code one runtime identity type for nodes and lights, while retaining the existing typed scene APIs. Use it for object enumeration, selection, queries, component documents, and undoable mutations.
 
-It is aimed at Rust developers building editor tools, inspectors, outliners, and command-backed mutation workflows on the engine's scene facade.
+The public entry points are `engine::object`, `engine::command`, `engine::camera`, and `engine::render::Scene`. `engine::prelude` deliberately includes only the common identity, selection, and query types; import advanced types from their named modules.
 
-## 2. Where This Fits in Engine Flow
+## Identity and object summaries
 
-```
-Object creation / mutation
-  → ObjectId minted (unforgeable, provenance-bound)
-  → ObjectRecord co-located (persistent identity, visibility, collision, components)
-  → Reverse index maintained (persistent_id ↔ ObjectId lookups)
-  → Commands executed through prepare/commit lifecycle
-  → Queries (raycast, volume, pick) consume scene bounds + reverse index
-  → Selection updated deterministically
-```
+`ObjectId` is the runtime-only identity for nodes, point lights, directional lights, and spot lights. Its fields and raw constructors are private. It is `Copy + Eq + Ord + Hash`, has a public `kind()` accessor, and carries a `SceneRuntimeId` provenance token. IDs from different scene worlds compare unequal.
 
-The object system lives in `src/renderer/src/object/` and is re-exported through the renderer facade and the root `engine::object` / `engine::prelude` paths.
-
-## 3. Key Concepts
-
-### ObjectId
-
-`ObjectId` is the unforgeable runtime identity for every scene object (node, point light, directional light, spot light). It is:
-
-- **Private-field**: callers cannot construct IDs from raw parts; only the scene's internal mutation paths can mint them.
-- **Copy + Eq + Ord + Hash**: usable as map keys, set members, and selection entries.
-- **Provenance-bound**: every `ObjectId` carries a `SceneRuntimeId` minted once per `SceneWorld`. Two IDs with different provenance are never equal — preventing cross-scene identity forgery.
-- **Non-serializable**: no `Serialize`/`Deserialize` derives. Runtime-only.
-- **Kind-aware**: `ObjectId::kind()` returns the `ObjectKind` without needing a scene lookup.
+`SceneObjectId` is the durable, dependency-neutral identity. Persist `SceneObjectId`, never `ObjectId`.
 
 ```rust
-use engine::prelude::ObjectId;
+use engine::prelude::{ObjectId, SceneObjectId};
+use engine::render::Scene;
+use glam::Mat4;
 
-fn inspect(id: &ObjectId) {
-    println!("kind={:?} slot={} gen={}", id.kind(), id.slot(), id.generation());
-}
+let mut scene = Scene::new();
+let node = scene.create_node_default(None)?;
+let id: ObjectId = scene.object_id(node)?;
+let persistent: SceneObjectId = scene.object_summary(id)?.persistent_id;
+
+scene.set_object_transform(id, &Mat4::from_translation([1.0, 0.0, 0.0].into()))?;
+assert_eq!(scene.find_object_by_persistent_id(&persistent), Some(id));
+# Ok::<(), engine::render::SceneError>(())
 ```
 
-### ObjectKind
+`Scene::objects`, `objects_of_kind`, `object_summary`, and `object_summaries` expose the unified view. `ObjectSummary` includes the runtime and persistent IDs, kind, display metadata, node mesh/child counts, light grouping, visibility/layer metadata, and component count without exposing slot or generation fields.
 
-`ObjectKind` is the persistent enum defined in `engine_events` (dependency-neutral):
+## Capabilities, transforms, and parenting
+
+`ObjectCapabilities::for_kind(ObjectKind)` declares whether a kind supports transforms, children, grouping, duplication, subtree removal, and persistent identity. Transform capabilities are `FullAffine` (nodes), `TranslationOnly` (point lights), `RigidWithPosition` (spot lights), and `RigidDirectionOnly` (directional lights).
+
+`Scene::get_object_transform` returns an `ObjectTransform`; `set_object_transform` accepts a canonical `Mat4` and validates it for the target kind. The typed `node_*_transform`, `point_light_*_transform`, `spot_light_*_transform`, and `directional_light_*_transform` methods remain available.
+
+`Scene::set_object_parent` accepts `ObjectParent::{None, Node(ObjectId)}`. Nodes use normal scene-graph parenting; lights record a non-inheriting organizational group parent and keep their world-space payload unchanged.
+
+## Queries and picking
+
+All query methods are read-only.
+
+- `Scene::raycast` returns the nearest `RayHit`; `raycast_all` returns deterministic distance-ordered hits.
+- `Scene::query_volume` accepts `VolumeQuery` and returns deterministic `VolumeHit` values.
+- `Scene::screen_to_ray` builds a ray from the last renderer-supplied camera.
+- `Scene::editor_pick(&Ray, EditorProxyPolicy)` returns the nearest eligible `EditorPickResult`, if any.
+
+`EditorPickResult` contains one `object` and an optional AABB hit. It is not a multi-hit result. Directional lights are unbounded and excluded; point and spot lights require an explicit `EditorProxyPolicy` opt-in. `UnknownBoundsPolicy` controls volume-query treatment of conservative-visible objects.
 
 ```rust
-pub enum ObjectKind {
-    Node,
-    PointLight,
-    DirectionalLight,
-    SpotLight,
+use engine::object::{EditorProxyPolicy, ObjectQueryFilter, VolumeQuery};
+
+let ray = scene.screen_to_ray(cursor_x, cursor_y, width, height);
+if let Some(pick) = scene.editor_pick(&ray, EditorProxyPolicy::NodesOnly)? {
+    println!("picked {:?}", pick.object.kind());
 }
+
+let query = VolumeQuery::aabb(aabb)
+    .with_filter(ObjectQueryFilter::kinds([engine::object::ObjectKind::Node]));
+let hits = scene.query_volume(&query);
+# Ok::<(), engine::render::SceneError>(())
 ```
 
-It is used for filtering queries, validating capabilities, and routing typed mutation paths.
+## Caller-owned editor state
 
-### SceneObjectId
+`Selection` is a caller-owned, non-serializable ordered set of `ObjectId`s. Bind it to `scene.provenance_token()` when selection is specific to a scene. `add`, `set`, and `toggle` reject a different provenance; `cleanup_stale` accepts the caller's liveness predicate. `SelectionChange` reports the primary selection before/after and added/removed IDs.
 
-`SceneObjectId` is the persistent, dependency-neutral string identity (`"node.000001"`, `"object.<64 hex>"`) defined in `engine_events`. It survives save/load round-trips and anchors redo-by-persistent-identity in the command system.
+`EditorCamera` is an independent camera model in `engine::camera`. It wraps an `OrbitCamera`, supports perspective and orthographic projections, and supplies view/projection and screen-ray helpers. It is caller-owned; `Scene` neither stores nor updates it.
 
-### ObjectCapabilities
+## Components
 
-Each object kind has a declared capability set via `ObjectCapabilities::for_kind(kind)`:
+Component persistence is canonical-JSON authoritative. `ComponentEnvelope` stores a `ComponentKey`, `ComponentInstanceId`, schema version, and JSON data. Each object record owns a component store; the public scene attachment and hydration methods currently operate on scene nodes.
 
-| Kind | Transform | Children | Grouping | Duplication | Subtree Removal | Persistent ID |
-|------|-----------|----------|----------|-------------|-----------------|---------------|
-| Node | FullAffine | yes | false | yes | yes | yes |
-| PointLight | TranslationOnly | false | true | yes | false | yes |
-| DirectionalLight | RigidDirectionOnly | false | true | yes | false | yes |
-| SpotLight | RigidWithPosition | false | true | yes | false | yes |
+A caller-owned `ComponentRegistry` maps keys to `ComponentAdapter`s. The adapter supplies its current version, one-step migrations, hydration/serialization, property reflection, property edits, and persistent-ID reference remapping. Adapter callbacks are panic-contained. Unknown envelopes remain opaque and preserve their canonical JSON.
 
-### ObjectTransform
+Limits are 256 attachments per object, 1 MiB canonical data per envelope, nesting depth 64, and 32 migration steps. Use `attach_component`, `component_envelopes`, `hydrate_component`, and `hydrate_components` on `Scene`; use `ComponentKey::new` and `ComponentInstanceId::new` to validate IDs.
 
-The unified `ObjectTransform` enum encodes the canonical transform for each kind without caller-level branching:
+## Commands and lifecycle events
 
-```rust
-pub enum ObjectTransform {
-    Node(Mat4),                                // full local matrix
-    PointLight(Vec3),                          // world translation
-    SpotLight { position: Vec3, direction: Vec3 }, // position + direction
-    DirectionalLight(Vec3),                    // normalized direction
-}
-```
+Built-in object commands implement the existing `Command` trait and use `Prepared → Executed → Undone` state. The public command set is:
 
-### ObjectSummary
+- `SetObjectTransformCommand`, `SetObjectParentCommand`
+- `RemoveObjectsCommand`, `DuplicateObjectsCommand`
+- `AttachComponentCommand`, `RemoveComponentCommand`
+- `ReplaceComponentStateCommand`, `SetComponentPropertyCommand`
 
-`ObjectSummary` provides outliner/inspector enumeration without exposing internal slot/generation details:
+Commands resolve redo targets by `SceneObjectId`, not a stale runtime handle. Execute them through `Scene::execute_command`; undo and redo use the same `CommandHistory`.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | `ObjectId` | Runtime identity |
-| `persistent_id` | `SceneObjectId` | Durable identity |
-| `stable_id` | `Option<String>` | Scene-local stable ID |
-| `kind` | `ObjectKind` | Object kind |
-| `name` | `String` | Display name |
-| `tags` | `Vec<String>` | Editor/game tags |
-| `mesh_count` | `usize` | Mesh count (nodes only) |
-| `child_count` | `usize` | Child count (nodes only) |
-| `group_parent` | `Option<SceneObjectId>` | Group parent (lights only) |
-| `visible` | `bool` | Visibility flag |
-| `layer` | `Option<String>` | Layer name |
-| `component_count` | `usize` | Attached component count |
-
-### ObjectMutationOutcome
-
-Every mutation that creates, removes, restores, or duplicates objects returns an `ObjectMutationOutcome`:
-
-- `remaps`: old-to-new `ObjectId` remaps for editor selection remapping.
-- `snapshots`: persistent `SceneObjectLifecycleSnapshot` values for event emission.
-- `created_roots`: new root `ObjectId`s (e.g., for selecting duplicated subtree roots).
-
-Convert to `ObjectLifecycleOutcome` for event emission:
+Object creation, restoration, duplication, and removal can produce `ObjectMutationOutcome`. Convert it to `ObjectLifecycleOutcome` or directly to events, then explicitly emit those events on the caller-owned `EventBus`. Scene mutation never owns a bus and does not automatically emit legacy scene events.
 
 ```rust
-let outcome: ObjectMutationOutcome = scene.remove_node(node_id)?;
-let events = outcome.into_lifecycle_events(SceneObjectLifecycleAction::Removed);
-for event in events {
-    event_bus.emit(EventStage::PostUpdate, Some(frame_id),
-        EngineEvent::Scene(SceneEvent::ObjectLifecycle(event)));
-}
-```
+use engine::command::{CommandHistory, SetObjectTransformCommand};
+use engine::object::{ObjectKind, SceneObjectLifecycleAction};
+use glam::Mat4;
 
-## 4. Queries and Picking
-
-### RayHit
-
-`RayHit` is a rich raycast result:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `object` | `ObjectId` | Hit object |
-| `persistent_id` | `SceneObjectId` | Persistent identity |
-| `kind` | `ObjectKind` | Object kind |
-| `distance` | `f32` | t-value along ray |
-| `point` | `Vec3` | World-space hit point |
-| `normal` | `Option<Vec3>` | Entry-face normal (None if ray started inside) |
-| `is_proxy` | `bool` | Whether the hit used a proxy AABB |
-
-### EditorPickResult
-
-`Scene::editor_pick` casts from screen coordinates using the last camera matrices:
-
-```rust
-pub struct EditorPickResult {
-    pub hits: Vec<RayHit>,
-    pub indeterminate: Vec<ObjectId>,
-}
-```
-
-- `hits` contains objects with known/proxy bounds sorted by distance.
-- `indeterminate` contains conservative-visible objects that could not be precisely tested.
-
-### ObjectQueryFilter
-
-`ObjectQueryFilter` controls which objects participate in queries:
-
-```rust
-pub struct ObjectQueryFilter {
-    pub kind_set: BTreeSet<ObjectKind>,  // empty = all
-    pub visible_only: bool,
-    pub layer: Option<String>,
-    pub tags: Vec<String>,               // objects must have ALL listed tags
-    pub exclude_tags: Vec<String>,        // objects must have NONE of these
-}
-```
-
-### VolumeQuery
-
-Volume queries test objects against spherical, AABB, or frustum volumes and return matching `ObjectId`s with optional distance sorting.
-
-## 5. Selection
-
-`Selection` is a caller-owned ordered set of `ObjectId`s:
-
-- **Non-serializable** — no serde derives.
-- **Provenance-scoped** — cross-scene IDs are rejected.
-- **Ordered insertion** — duplicates are skipped, order is preserved.
-- **Primary selection** — the first entry is the "primary" selection.
-- **Stale cleanup** — `cleanup_stale(predicate)` removes objects no longer in the scene.
-
-```rust
-use engine::prelude::{Selection, SelectionChange};
-
-let mut selection = Selection::new();
-
-// Add objects (deduplicated, order-preserving)
-selection.add(id_a);
-selection.add(id_b);
-
-// Set exact selection (replaces all)
-selection.set_exact(vec![id_b, id_c]);
-
-// Remove objects
-let removed = selection.remove(&[id_a]);
-
-// Clear
-selection.clear();
-
-// Primary
-let primary = selection.primary();
-
-// Iterate
-for id in selection.iter() {
-    // ...
-}
-
-// Cleanup stale
-selection.cleanup_stale(|id| scene.is_valid_object(*id));
-```
-
-### SelectionChange
-
-Each mutation returns a `SelectionChange`:
-
-```rust
-pub struct SelectionChange {
-    pub before_primary: Option<ObjectId>,
-    pub after_primary: Option<ObjectId>,
-    pub added: Vec<ObjectId>,
-    pub removed: Vec<ObjectId>,
-}
-```
-
-## 6. EditorCamera
-
-`EditorCamera` provides a viewpoint-independent editor camera model for inspector and editor tooling. It is re-exported through `engine::prelude`:
-
-```rust
-pub struct EditorCamera {
-    pub position: Vec3,
-    pub target: Vec3,
-    pub fov: f32,         // radians
-    pub near: f32,
-    pub far: f32,
-    pub projection: EditorProjection,
-}
-
-pub enum EditorProjection {
-    Perspective,
-    Orthographic { height: f32 },
-}
-```
-
-## 7. Component System
-
-The component document model (`src/renderer/src/object/component.rs`) provides a canonical-JSON-authoritative multi-instance component store:
-
-### Constraints
-
-| Limit | Value |
-|-------|-------|
-| Attachments per object | ≤ 256 |
-| Envelope data size | ≤ 1 MiB |
-| Nesting depth | ≤ 64 |
-| Migration steps | ≤ 32 |
-
-### ComponentKey and ComponentInstanceId
-
-- `ComponentKey`: typed string key identifying a component type (e.g., `"editor_sample.health"`).
-- `ComponentInstanceId`: per-object instance discriminator (default `"default"`).
-
-### ComponentEnvelope
-
-```rust
-pub struct ComponentEnvelope {
-    pub key: ComponentKey,
-    pub instance_id: ComponentInstanceId,
-    pub schema_version: u32,
-    pub data: serde_json::Value,
-}
-```
-
-### ComponentRegistry and ComponentAdapter
-
-Adapters are registered per `ComponentKey` + schema version:
-
-```rust
-pub trait ComponentAdapter: Send + Sync {
-    fn key(&self) -> &ComponentKey;
-    fn schema_version(&self) -> u32;
-    fn migrate(&self, from_version: u32, data: &Value) -> Result<Value, ComponentError>;
-    fn hydrate(&self, data: &Value) -> Result<Box<dyn Any + Send>, ComponentError>;
-    fn serialize(&self, instance: &dyn Any) -> Result<Value, ComponentError>;
-    fn get_property(&self, instance: &dyn Any, property: &str) -> Result<ComponentPropertyValue, ComponentError>;
-    fn set_property(&self, instance: &mut dyn Any, property: &str, value: &ComponentPropertyValue) -> Result<(), ComponentError>;
-    fn properties(&self) -> Vec<ComponentPropertyDescriptor>;
-}
-```
-
-### ComponentPropertyValue and ComponentPropertyDescriptor
-
-```rust
-pub enum ComponentPropertyValue {
-    Bool(bool),
-    I32(i32),
-    F32(f32),
-    String(String),
-    Vec3([f32; 3]),
-    Vec4([f32; 4]),
-}
-
-pub struct ComponentPropertyDescriptor {
-    pub name: String,
-    pub property_type: ComponentPropertyType,
-    pub default_value: ComponentPropertyValue,
-    pub description: String,
-}
-```
-
-### Core Operations
-
-- `prepare_property_edit` / `prepare_full_state_replacement` / `prepare_reference_remap`: staging operations that validate before commit.
-- `commit_full_state_replacement`: applies a staged full-state replacement.
-- `hydrate_envelope`: deserialize one envelope through its registered adapter.
-- `hydrate_all` / `hydrate_all_by_key`: bulk hydration.
-- `canonical_bytes`: deterministic canonical-JSON serialization (sorted keys).
-- `component_properties`: reflection for inspector UIs.
-- `enforce_limits`: validate attachment count and per-envelope data size.
-
-## 8. Commands
-
-Built-in undoable object commands live in `src/renderer/src/scene/object_commands.rs` and are accessible through the `Command` trait via the scene facade. All commands use a `Prepared → Executed → Undone` state machine:
-
-### Failure Contract
-
-- **Failed execute**: world unchanged, redo stack NOT cleared.
-- **Failed undo**: command stays at undo top.
-- **Failed redo**: command stays at redo top.
-
-All commands use the prepare/commit lifecycle for failure atomicity.
-
-### Built-in Commands
-
-| Command | Description |
-|---------|-------------|
-| `SetObjectTransformCommand` | Set transform for any object kind, anchored by persistent ID |
-| `SetObjectParentCommand` | Reparent node or regroup light |
-| `RemoveObjectCommand` | Remove any object kind (subtree for nodes, ungroup for lights) |
-| `DuplicateObjectCommand` | Duplicate nodes or lights with identity remapping |
-| `CreateObjectCommand` | Create a new object of any kind |
-| `SetObjectNameCommand` | Set display name |
-| `SetObjectTagsCommand` | Replace tag list |
-| `SetComponentPropertyCommand` | Set a single component property on an object |
-| `CommitComponentStateCommand` | Commit a full component state replacement |
-
-### CommandHistory Integration
-
-```rust
-let mut history = CommandHistory::new(128);
-let cmd = Box::new(SetObjectTransformCommand::new(
-    persistent_id, ObjectKind::Node, new_transform,
+let summary = scene.object_summary(id)?;
+let command = Box::new(SetObjectTransformCommand::new(
+    summary.persistent_id,
+    ObjectKind::Node,
+    Mat4::IDENTITY,
 ));
-scene.execute_command(&mut history, cmd)?;
-
-// Undo/redo
-scene.undo_command(&mut history)?;
-scene.redo_command(&mut history)?;
+let mut history = CommandHistory::new(128);
+scene.execute_command(&mut history, command)?;
+# Ok::<(), engine::render::SceneError>(())
 ```
 
-## 9. Code Walkthrough
+## Persistence and compatibility
 
-Snippet Type: Real
+Scene format v2 serializes `ObjectRecord` metadata and component envelopes, never runtime `ObjectId` values. Loading reconstructs runtime IDs and the reverse index while retaining serialized `SceneObjectId` values. V1 loads migrate to v2 and deterministically derive missing persistent IDs. New readers accept v1 and v2; older v1 readers do not understand enriched v2 files.
 
-```rust
-// Create objects through the unified scene API
-use engine::prelude::{ObjectId, ObjectKind, SceneObjectId};
+## See also
 
-// Create a node
-let node_id: ObjectId = scene.create_object(ObjectKind::Node, None, "My Node", None)?;
-
-// Create a point light grouped under a node
-let light_id: ObjectId = scene.create_object(
-    ObjectKind::PointLight,
-    Some(ObjectParent::Node(node_id)),
-    "Torch",
-    None,
-)?;
-
-// Query all objects of a kind
-let summaries: Vec<ObjectSummary> = scene.object_summaries(Some(ObjectKind::Node));
-
-// Find by persistent ID
-if let Some(found) = scene.find_object_by_persistent_id(&SceneObjectId::new("node.000001")) {
-    println!("Found: {:?}", found);
-}
-```
-
-Snippet Type: Real
-
-```rust
-// Raycast picking
-use engine::prelude::{EditorPickResult, Ray};
-
-let ray = Ray::from_screen(
-    cursor_x, cursor_y,
-    screen_width, screen_height,
-    &view_matrix, &projection_matrix,
-);
-
-// Immutable read-only pick
-let result: EditorPickResult = scene.editor_pick(&ray)?;
-
-// Pick using last camera matrices from render_scene
-let result: EditorPickResult = scene.pick_last_camera(cursor_x, cursor_y)?;
-
-for hit in &result.hits {
-    println!("Hit {} at distance {}", hit.persistent_id, hit.distance);
-}
-```
-
-Snippet Type: Real
-
-```rust
-// Volume query
-use engine::prelude::{VolumeQuery, VolumeShape, ObjectQueryFilter};
-
-let filter = ObjectQueryFilter {
-    kind_set: [ObjectKind::Node, ObjectKind::PointLight].into_iter().collect(),
-    visible_only: true,
-    ..Default::default()
-};
-
-let query = VolumeQuery {
-    shape: VolumeShape::Aabb(aabb),
-    filter,
-    sort_by_distance: true,
-};
-
-let hits: Vec<ObjectId> = scene.query_volume(&query)?;
-```
-
-## 10. Best Practices
-
-- Use `SceneObjectId` for durable identity in serialization and editor selection anchors; never persist `ObjectId`.
-- Convert `ObjectMutationOutcome` to lifecycle events at the app's frame boundary, not inside mutation callbacks.
-- Build editor selection remapping from `ObjectMutationOutcome::remaps` after undo/redo/duplicate operations.
-- Use `ObjectCapabilities::for_kind()` to validate operations before attempting them.
-- Keep `Selection` provenance-scoped; call `set_provenance` when switching scenes.
-- Register component adapters early (before scene construction) and never change schema versions without migration paths.
-
-## 11. Gotchas & Failure Modes
-
-- `ObjectId` fields are private — attempting to construct one from raw parts will not compile.
-- Cross-scene identity forgery is impossible because `SceneRuntimeId` comparison rejects IDs from different scenes.
-- Stale `ObjectId` values after removal return `ObjectError::StaleGeneration` or `ObjectError::VacantObject`.
-- `ObjectError::WrongKind` is returned when the object exists but has the wrong `ObjectKind`.
-- `ObjectError::DuplicatePersistentId` is returned when two objects claim the same `SceneObjectId`.
-- `ObjectError::GenerationExhausted` means the slot has exhausted all 2^32 generation values.
-- Component operations fail with typed `ComponentError` variants — never silently corrupt state.
-- Command state machine violations (double-execute, undo without execute) return `CommandError`.
-- Selection mutations that add IDs from a different scene provenance are silently rejected.
-- Volume queries may return empty results when all objects in range are conservative-visible with `UnknownBoundsPolicy::Exclude`.
-
-## 12. Debugging Playbook
-
-- Step 1: inspect `ObjectId` display format (`ObjectId(Node, slot=0, gen=1)`) for stale slot/generation.
-- Step 2: check provenance — `ObjectError::WrongScene` means the object belongs to a different scene.
-- Step 3: verify `ObjectKind` with `id.kind()` before calling kind-specific APIs.
-- Step 4: for command failures, read the `CommandError` message — it includes the persistent ID and operation context.
-- Step 5: for component hydration failures, inspect `ComponentError::HydrationFailed { key, version, message }`.
-- Step 6: for pick/query misses, check `UnknownBoundsPolicy` — conservative-visible objects may be excluded.
-
-## 13. Cross-Module Links
-
-- Object identity kernel: `src/renderer/src/object/identity.rs`
-- Query DTOs: `src/renderer/src/object/query.rs`
-- Selection: `src/renderer/src/object/selection.rs`
-- Component system: `src/renderer/src/object/component.rs`
-- Object store (records + reverse index): `src/renderer/src/scene/object_store.rs`
-- Object commands: `src/renderer/src/scene/object_commands.rs`
-- Root facade re-exports: `src/object.rs`
-- Event contracts: `src/events/src/lib.rs`
-
-## 14. Standard References
-
-- Rust ownership and type-safety: https://doc.rust-lang.org/book/ch04-00-understanding-ownership.html
-- JSON Schema (component validation): https://json-schema.org/
-- Canonical JSON (deterministic serialization): https://datatracker.ietf.org/doc/html/rfc8785
-
-## 15. See Also
-
-- [Scene Graph & Fragment Workflows](03-scene-graph-and-fragment-workflows.md) — scene construction and mutation patterns
-- [Events & Lifecycle](12-events-and-lifecycle.md) — event emission and scene object lifecycle events
-- [Internal Scene Object Lifecycle](../internal/20-scene-object-lifecycle.md) — internal prepare/commit, ObjectRecord, reverse index
-- [App-Owned Loop](15-app-owned-loop.md) — the app-owned frame boundary where lifecycle events should be emitted
+- [Scene Graph & Fragment Workflows](03-scene-graph-and-fragment-workflows.md)
+- [Events & Lifecycle](12-events-and-lifecycle.md)
+- [Internal Scene Object Lifecycle](../internal/20-scene-object-lifecycle.md)
+- [Scene construction guide](../guide/08-scene-construction.md)
