@@ -387,6 +387,33 @@ impl SceneWorld {
         entry.node.as_ref().map(|(_, record)| record)
     }
 
+    /// Replace a node's persistent identity while keeping the reverse index
+    /// synchronized. Load normalization uses this only on an unpublished
+    /// candidate world after validating scene-wide uniqueness.
+    pub(crate) fn replace_node_persistent_id(
+        &mut self,
+        id: SceneNodeId,
+        persistent_id: SceneObjectId,
+    ) -> Result<(), String> {
+        if self.validate_node_ref(id).is_err() {
+            return Err(format!("invalid node handle ({}, {})", id.slot, id.generation));
+        }
+        if let Some(existing) = self.reverse_index.get(&persistent_id) {
+            if *existing != ObjectHandle::Node(id) {
+                return Err(format!("duplicate persistent ID {persistent_id}"));
+            }
+        }
+
+        let record = self
+            .get_node_record_mut(id)
+            .expect("node was validated before persistent-ID replacement");
+        let old_id = std::mem::replace(&mut record.persistent_id, persistent_id.clone());
+        self.reverse_index.remove(&old_id);
+        self.reverse_index
+            .insert(persistent_id, ObjectHandle::Node(id));
+        Ok(())
+    }
+
     /// Get a mutable reference to a node's record.
     pub(crate) fn get_node_record_mut(&mut self, id: SceneNodeId) -> Option<&mut ObjectRecord> {
         let entry = self.nodes.get_mut(id.slot as usize)?;
@@ -436,7 +463,10 @@ impl SceneWorld {
         parent: Option<SceneNodeId>,
         node: SceneNode,
     ) -> SceneNodeId {
-        let record = ObjectRecord::for_new_node(None);
+        // Direct world-side creators (for example command placement) provide
+        // their stable ID on the node. Co-locate it in the record before the
+        // object becomes live so save never has to synthesize identity.
+        let record = ObjectRecord::for_new_node(node.stable_id.clone());
         let plan = self.prepare_create_node(parent, node, record);
         self.commit_create_node(plan)
     }

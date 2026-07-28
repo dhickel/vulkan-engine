@@ -84,6 +84,19 @@ fn save_to_string_includes_object_id_and_components_fields() {
 }
 
 #[test]
+fn component_free_objects_save_with_identity_and_without_empty_components() {
+    let mut scene = Scene::new();
+    scene.set_scene_id("scene.compact");
+    let root = scene.create_node_default(None).unwrap();
+    scene.set_node_name(root, "Root").unwrap();
+
+    let saved: serde_json::Value = serde_json::from_str(&scene.save_to_string().unwrap()).unwrap();
+    let node = &saved["nodes"][0];
+    assert!(node["object_id"].as_str().is_some_and(|id| id.starts_with("object.")));
+    assert!(node.get("components").is_none());
+}
+
+#[test]
 fn v1_scene_validates_through_migration() {
     let v1_json = json!({
         "format_version": 1,
