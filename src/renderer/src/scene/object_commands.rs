@@ -20,10 +20,13 @@ use crate::object::identity::ObjectId;
 use crate::object::{ObjectParent, ObjectRemap};
 use crate::scene::command::Command;
 use crate::scene::object_store::{DetachedLightSnapshot, ObjectHandle, ObjectRecord};
+use crate::scene::render_submission::{
+    MAX_DIRECTIONAL_LIGHTS_GPU, MAX_POINT_LIGHTS_GPU, MAX_SPOT_LIGHTS_GPU,
+};
 use crate::scene::scene_world::{RestorableSceneSubtree, SceneNodeId, SceneWorld};
 use engine_events::{ObjectKind, SceneObjectId};
 use glam::Mat4;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ── Command state machine ───────────────────────────────────────────────
 
@@ -72,7 +75,6 @@ impl Command for SetObjectTransformCommand {
                 ),
             ));
         }
-        self.state = CommandState::Executed;
 
         let current_id = resolve_current_id(world, &self.persistent_id, self.kind)?;
         if !self.new_transform.is_finite() {
@@ -149,6 +151,7 @@ impl Command for SetObjectTransformCommand {
                     crate::object::ObjectTransform::direction_from_rigid(&self.new_transform);
             }
         }
+        self.state = CommandState::Executed;
         Ok(())
     }
 
@@ -158,7 +161,6 @@ impl Command for SetObjectTransformCommand {
                 "SetObjectTransformCommand not in executed state".into(),
             )));
         }
-        self.state = CommandState::Undone;
 
         let current_id = resolve_current_id(world, &self.persistent_id, self.kind)?;
 
@@ -205,6 +207,7 @@ impl Command for SetObjectTransformCommand {
                     crate::object::ObjectTransform::direction_from_rigid(&self.old_transform);
             }
         }
+        self.state = CommandState::Undone;
         Ok(())
     }
 
@@ -257,7 +260,6 @@ impl Command for SetObjectParentCommand {
                 ),
             ));
         }
-        self.state = CommandState::Executed;
 
         let current_id = resolve_current_id(world, &self.persistent_id, self.kind)?;
 
@@ -336,6 +338,7 @@ impl Command for SetObjectParentCommand {
                 record.light_group_parent = self.new_parent_persistent.clone();
             }
         }
+        self.state = CommandState::Executed;
         Ok(())
     }
 
@@ -345,7 +348,6 @@ impl Command for SetObjectParentCommand {
                 "SetObjectParentCommand not in executed state".into(),
             )));
         }
-        self.state = CommandState::Undone;
 
         let current_id = resolve_current_id(world, &self.persistent_id, self.kind)?;
 
@@ -387,6 +389,7 @@ impl Command for SetObjectParentCommand {
                 record.light_group_parent = self.old_parent_persistent.clone();
             }
         }
+        self.state = CommandState::Undone;
         Ok(())
     }
 
@@ -422,8 +425,10 @@ pub struct RemoveObjectsCommand {
     spot_light_snapshots: HashMap<SceneObjectId, crate::api::scene::SpotLight>,
     /// Light records for restoration.
     light_records: HashMap<SceneObjectId, ObjectRecord>,
-    /// Set of all persistent IDs in removed node subtrees (for remaps).
-    removed_subtree_ids: Vec<ObjectId>,
+    /// Runtime IDs for each removed node subtree, preserved for complete restore remaps.
+    removed_subtree_ids: HashMap<SceneObjectId, Vec<ObjectId>>,
+    /// Runtime IDs for explicitly removed lights, preserved for restore remaps.
+    removed_light_ids: HashMap<SceneObjectId, ObjectId>,
     /// Remaps populated after restore.
     remaps: Vec<ObjectRemap>,
     state: CommandState,
@@ -440,7 +445,8 @@ impl RemoveObjectsCommand {
             directional_light_snapshots: HashMap::new(),
             spot_light_snapshots: HashMap::new(),
             light_records: HashMap::new(),
-            removed_subtree_ids: Vec::new(),
+            removed_subtree_ids: HashMap::new(),
+            removed_light_ids: HashMap::new(),
             remaps: Vec::new(),
             state: CommandState::Prepared,
         }
@@ -456,7 +462,46 @@ impl Command for RemoveObjectsCommand {
                 ),
             ));
         }
-        self.state = CommandState::Executed;
+
+        if self.source_persistent_ids.len() != self.source_kinds.len() {
+            return Err(SceneError::InvalidMutation(
+                "remove source IDs and kinds must have matching lengths".into(),
+            ));
+        }
+        let mut seen = HashSet::with_capacity(self.source_persistent_ids.len());
+        let mut selected_nodes = Vec::new();
+        for (persistent_id, kind) in self
+            .source_persistent_ids
+            .iter()
+            .zip(self.source_kinds.iter())
+        {
+            if !seen.insert(persistent_id) {
+                return Err(SceneError::InvalidMutation(format!(
+                    "duplicate removal source {persistent_id}"
+                )));
+            }
+            let object = resolve_current_id(world, persistent_id, *kind)?;
+            if *kind == ObjectKind::Node {
+                selected_nodes.push(SceneNodeId::new(object.slot(), object.generation()));
+            }
+        }
+        for (index, node) in selected_nodes.iter().enumerate() {
+            let subtree = world.subtree_node_ids_preorder(*node);
+            if selected_nodes
+                .iter()
+                .enumerate()
+                .any(|(other_index, other)| {
+                    other_index != index
+                        && subtree.iter().any(|id| {
+                            id.slot() == other.slot && id.generation() == other.generation
+                        })
+                })
+            {
+                return Err(SceneError::InvalidMutation(
+                    "cannot remove both a node and one of its descendants".into(),
+                ));
+            }
+        }
 
         // Phase 1: Snapshot everything.
         let mut node_snapshots_temp: Vec<(
@@ -486,7 +531,8 @@ impl Command for RemoveObjectsCommand {
 
                     // Collect subtree IDs for remap before removal.
                     let subtree_ids = world.subtree_node_ids_preorder(node_id);
-                    self.removed_subtree_ids.extend(subtree_ids);
+                    self.removed_subtree_ids
+                        .insert(persistent_id.clone(), subtree_ids);
 
                     let (subtree, detached) = world
                         .prepare_remove_node_subtree(node_id)
@@ -510,6 +556,7 @@ impl Command for RemoveObjectsCommand {
                     let plan = world.prepare_remove_point_light(pl_id).ok_or_else(|| {
                         SceneError::InvalidMutation("point light not found".into())
                     })?;
+                    self.removed_light_ids.insert(persistent_id.clone(), handle);
                     self.point_light_snapshots
                         .insert(persistent_id.clone(), plan.light);
                     self.light_records
@@ -534,6 +581,7 @@ impl Command for RemoveObjectsCommand {
                                 "directional light not found".into(),
                             )
                         })?;
+                    self.removed_light_ids.insert(persistent_id.clone(), handle);
                     self.directional_light_snapshots
                         .insert(persistent_id.clone(), plan.light);
                     self.light_records
@@ -554,6 +602,7 @@ impl Command for RemoveObjectsCommand {
                     let plan = world.prepare_remove_spot_light(sl_id).ok_or_else(|| {
                         SceneError::InvalidMutation("spot light not found".into())
                     })?;
+                    self.removed_light_ids.insert(persistent_id.clone(), handle);
                     self.spot_light_snapshots
                         .insert(persistent_id.clone(), plan.light);
                     self.light_records
@@ -609,6 +658,7 @@ impl Command for RemoveObjectsCommand {
             }
         }
 
+        self.state = CommandState::Executed;
         Ok(())
     }
 
@@ -618,7 +668,45 @@ impl Command for RemoveObjectsCommand {
                 "RemoveObjectsCommand not in executed state".into(),
             )));
         }
-        self.state = CommandState::Undone;
+
+        let point_restores = self.point_light_snapshots.len();
+        let directional_restores = self.directional_light_snapshots.len();
+        let spot_restores = self.spot_light_snapshots.len();
+        if world.active_point_light_count() + point_restores > MAX_POINT_LIGHTS_GPU
+            || world.active_directional_light_count() + directional_restores
+                > MAX_DIRECTIONAL_LIGHTS_GPU
+            || world.active_spot_light_count() + spot_restores > MAX_SPOT_LIGHTS_GPU
+        {
+            return Err(SceneError::InvalidMutation(
+                "restoring removed objects would exceed a scene light cap".into(),
+            ));
+        }
+        for subtree in self.node_snapshots.values() {
+            world
+                .validate_restore_subtree(subtree)
+                .map_err(SceneError::InvalidMutation)?;
+        }
+        for persistent_id in self.point_light_snapshots.keys() {
+            if world.find_object_by_persistent_id(persistent_id).is_some() {
+                return Err(SceneError::InvalidMutation(format!(
+                    "cannot restore point light {persistent_id}: persistent ID already exists"
+                )));
+            }
+        }
+        for persistent_id in self.directional_light_snapshots.keys() {
+            if world.find_object_by_persistent_id(persistent_id).is_some() {
+                return Err(SceneError::InvalidMutation(format!(
+                    "cannot restore directional light {persistent_id}: persistent ID already exists"
+                )));
+            }
+        }
+        for persistent_id in self.spot_light_snapshots.keys() {
+            if world.find_object_by_persistent_id(persistent_id).is_some() {
+                return Err(SceneError::InvalidMutation(format!(
+                    "cannot restore spot light {persistent_id}: persistent ID already exists"
+                )));
+            }
+        }
 
         let mut new_remaps: Vec<ObjectRemap> = Vec::new();
 
@@ -626,8 +714,15 @@ impl Command for RemoveObjectsCommand {
         for persistent_id in &self.source_persistent_ids {
             if let Some(subtree) = self.node_snapshots.get(persistent_id) {
                 let subtree = subtree.clone();
-                let old_ids: Vec<ObjectId> =
-                    self.removed_subtree_ids.clone(); // pre-removal IDs
+                let old_ids = self
+                    .removed_subtree_ids
+                    .get(persistent_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        SceneError::InvalidMutation(
+                            "missing node remap snapshot during restore".into(),
+                        )
+                    })?;
                 let restored_root = world.restore_subtree(subtree);
                 let new_ids: Vec<ObjectId> = world.subtree_node_ids_preorder(restored_root);
 
@@ -704,12 +799,11 @@ impl Command for RemoveObjectsCommand {
                                 new_id.generation,
                             )
                         });
-                    let old = ObjectId::from_parts(
-                        world.provenance(),
-                        ObjectKind::PointLight,
-                        0,
-                        0,
-                    );
+                    let old = *self.removed_light_ids.get(persistent_id).ok_or_else(|| {
+                        SceneError::InvalidMutation(
+                            "missing point-light remap snapshot during restore".into(),
+                        )
+                    })?;
                     new_remaps.push(ObjectRemap {
                         old,
                         new: new_oid,
@@ -732,12 +826,11 @@ impl Command for RemoveObjectsCommand {
                                 new_id.generation,
                             )
                         });
-                    let old = ObjectId::from_parts(
-                        world.provenance(),
-                        ObjectKind::DirectionalLight,
-                        0,
-                        0,
-                    );
+                    let old = *self.removed_light_ids.get(persistent_id).ok_or_else(|| {
+                        SceneError::InvalidMutation(
+                            "missing directional-light remap snapshot during restore".into(),
+                        )
+                    })?;
                     new_remaps.push(ObjectRemap {
                         old,
                         new: new_oid,
@@ -759,8 +852,11 @@ impl Command for RemoveObjectsCommand {
                                 new_id.generation,
                             )
                         });
-                    let old =
-                        ObjectId::from_parts(world.provenance(), ObjectKind::SpotLight, 0, 0);
+                    let old = *self.removed_light_ids.get(persistent_id).ok_or_else(|| {
+                        SceneError::InvalidMutation(
+                            "missing spot-light remap snapshot during restore".into(),
+                        )
+                    })?;
                     new_remaps.push(ObjectRemap {
                         old,
                         new: new_oid,
@@ -771,6 +867,7 @@ impl Command for RemoveObjectsCommand {
         }
 
         self.remaps = new_remaps;
+        self.state = CommandState::Undone;
         Ok(())
     }
 
@@ -830,14 +927,53 @@ impl Command for DuplicateObjectsCommand {
                 ),
             ));
         }
-        self.state = CommandState::Executed;
 
-        // Resolve parent node.
+        if self.source_persistent_ids.len() != self.source_kinds.len() {
+            return Err(SceneError::InvalidMutation(
+                "duplicate source IDs and kinds must have matching lengths".into(),
+            ));
+        }
+        let mut seen = HashSet::with_capacity(self.source_persistent_ids.len());
+        let mut point_count = 0_usize;
+        let mut directional_count = 0_usize;
+        let mut spot_count = 0_usize;
+        for (persistent_id, kind) in self
+            .source_persistent_ids
+            .iter()
+            .zip(self.source_kinds.iter())
+        {
+            if !seen.insert(persistent_id) {
+                return Err(SceneError::InvalidMutation(format!(
+                    "duplicate source object {persistent_id}"
+                )));
+            }
+            resolve_current_id(world, persistent_id, *kind)?;
+            match kind {
+                ObjectKind::PointLight => point_count += 1,
+                ObjectKind::DirectionalLight => directional_count += 1,
+                ObjectKind::SpotLight => spot_count += 1,
+                ObjectKind::Node => {}
+            }
+        }
+        if world.active_point_light_count() + point_count > MAX_POINT_LIGHTS_GPU
+            || world.active_directional_light_count() + directional_count
+                > MAX_DIRECTIONAL_LIGHTS_GPU
+            || world.active_spot_light_count() + spot_count > MAX_SPOT_LIGHTS_GPU
+        {
+            return Err(SceneError::InvalidMutation(
+                "duplicating objects would exceed a scene light cap".into(),
+            ));
+        }
+
+        // Resolve and validate the optional destination parent before any mutation.
         let parent_node = self
             .parent_persistent_id
             .as_ref()
-            .and_then(|pp| world.find_object_by_persistent_id(pp))
-            .map(|h| SceneNodeId::new(h.slot(), h.generation()));
+            .map(|persistent_id| {
+                resolve_current_id(world, persistent_id, ObjectKind::Node)
+                    .map(|id| SceneNodeId::new(id.slot(), id.generation()))
+            })
+            .transpose()?;
 
         self.created_persistent_ids.clear();
         self.created_roots.clear();
@@ -1001,6 +1137,7 @@ impl Command for DuplicateObjectsCommand {
             }
         }
 
+        self.state = CommandState::Executed;
         Ok(())
     }
 
@@ -1010,7 +1147,6 @@ impl Command for DuplicateObjectsCommand {
                 "DuplicateObjectsCommand not in executed state".into(),
             )));
         }
-        self.state = CommandState::Undone;
 
         // Remove everything we created.
         for persistent_id in &self.created_persistent_ids {
@@ -1043,6 +1179,7 @@ impl Command for DuplicateObjectsCommand {
                 }
             }
         }
+        self.state = CommandState::Undone;
         Ok(())
     }
 
@@ -1083,7 +1220,6 @@ impl Command for AttachComponentCommand {
                 ),
             ));
         }
-        self.state = CommandState::Executed;
 
         let handle = world
             .find_object_by_persistent_id(&self.node_persistent_id)
@@ -1097,6 +1233,7 @@ impl Command for AttachComponentCommand {
         world
             .attach_component(node_id, self.envelope.clone())
             .map_err(SceneError::from)?;
+        self.state = CommandState::Executed;
         Ok(())
     }
 
@@ -1106,7 +1243,6 @@ impl Command for AttachComponentCommand {
                 "AttachComponentCommand not in executed state".into(),
             )));
         }
-        self.state = CommandState::Undone;
 
         let handle = world
             .find_object_by_persistent_id(&self.node_persistent_id)
@@ -1126,6 +1262,7 @@ impl Command for AttachComponentCommand {
                     "component instance not found for undo".into(),
                 )
             })?;
+        self.state = CommandState::Undone;
         Ok(())
     }
 
@@ -1170,7 +1307,6 @@ impl Command for RemoveComponentCommand {
                 ),
             ));
         }
-        self.state = CommandState::Executed;
 
         let handle = world
             .find_object_by_persistent_id(&self.node_persistent_id)
@@ -1190,6 +1326,7 @@ impl Command for RemoveComponentCommand {
                 ))
             })?;
         self.removed_envelope = Some(removed);
+        self.state = CommandState::Executed;
         Ok(())
     }
 
@@ -1199,7 +1336,6 @@ impl Command for RemoveComponentCommand {
                 "RemoveComponentCommand not in executed state".into(),
             )));
         }
-        self.state = CommandState::Undone;
 
         let handle = world
             .find_object_by_persistent_id(&self.node_persistent_id)
@@ -1215,6 +1351,7 @@ impl Command for RemoveComponentCommand {
                 .attach_component(node_id, envelope.clone())
                 .map_err(SceneError::from)?;
         }
+        self.state = CommandState::Undone;
         Ok(())
     }
 
@@ -1272,7 +1409,6 @@ impl Command for ReplaceComponentStateCommand {
                 ),
             ));
         }
-        self.state = CommandState::Executed;
 
         let handle = world
             .find_object_by_persistent_id(&self.node_persistent_id)
@@ -1298,6 +1434,7 @@ impl Command for ReplaceComponentStateCommand {
             self.new_hydrated.clone(),
         )
         .map_err(SceneError::from)?;
+        self.state = CommandState::Executed;
         Ok(())
     }
 
@@ -1307,7 +1444,6 @@ impl Command for ReplaceComponentStateCommand {
                 "ReplaceComponentStateCommand not in executed state".into(),
             )));
         }
-        self.state = CommandState::Undone;
 
         let handle = world
             .find_object_by_persistent_id(&self.node_persistent_id)
@@ -1328,6 +1464,7 @@ impl Command for ReplaceComponentStateCommand {
             // next access.
             store.replace(old_env.clone()).map_err(SceneError::from)?;
         }
+        self.state = CommandState::Undone;
         Ok(())
     }
 
@@ -1387,7 +1524,6 @@ impl Command for SetComponentPropertyCommand {
                 ),
             ));
         }
-        self.state = CommandState::Executed;
 
         let handle = world
             .find_object_by_persistent_id(&self.node_persistent_id)
@@ -1413,6 +1549,7 @@ impl Command for SetComponentPropertyCommand {
             self.new_hydrated.clone(),
         )
         .map_err(SceneError::from)?;
+        self.state = CommandState::Executed;
         Ok(())
     }
 
@@ -1422,7 +1559,6 @@ impl Command for SetComponentPropertyCommand {
                 "SetComponentPropertyCommand not in executed state".into(),
             )));
         }
-        self.state = CommandState::Undone;
 
         let handle = world
             .find_object_by_persistent_id(&self.node_persistent_id)
@@ -1440,6 +1576,7 @@ impl Command for SetComponentPropertyCommand {
         if let Some(ref old_env) = self.old_envelope {
             store.replace(old_env.clone()).map_err(SceneError::from)?;
         }
+        self.state = CommandState::Undone;
         Ok(())
     }
 

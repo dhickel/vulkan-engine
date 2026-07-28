@@ -62,6 +62,55 @@ fn add_point_light(
     (id, persistent)
 }
 
+struct ExternalFailureCommand {
+    fail_undo: bool,
+    fail_redo: bool,
+    executions: u8,
+}
+
+impl ExternalFailureCommand {
+    fn failing_undo() -> Self {
+        Self {
+            fail_undo: true,
+            fail_redo: false,
+            executions: 0,
+        }
+    }
+
+    fn failing_redo() -> Self {
+        Self {
+            fail_undo: false,
+            fail_redo: true,
+            executions: 0,
+        }
+    }
+}
+
+impl Command for ExternalFailureCommand {
+    fn execute(&mut self, _world: &mut renderer::SceneWorld) -> Result<(), SceneError> {
+        if self.fail_redo && self.executions > 0 {
+            return Err(SceneError::CommandError(
+                CommandError::CommandExecutionFailed("injected redo failure".into()),
+            ));
+        }
+        self.executions += 1;
+        Ok(())
+    }
+
+    fn undo(&mut self, _world: &mut renderer::SceneWorld) -> Result<(), SceneError> {
+        if self.fail_undo {
+            return Err(SceneError::CommandError(CommandError::UndoFailed(
+                "injected undo failure".into(),
+            )));
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> &str {
+        "external_failure"
+    }
+}
+
 fn make_test_envelope() -> ComponentEnvelope {
     use serde_json::json;
     let key = ComponentKey::new("test.component").unwrap();
@@ -590,6 +639,41 @@ fn redo_failure_keeps_command_on_redo_stack() {
     let result = history.redo(scene.world_mut());
     assert!(result.is_err());
     assert!(history.can_redo());
+}
+
+#[test]
+fn external_command_failures_preserve_history_stack_positions() {
+    let mut scene = make_scene();
+    let mut history = make_history(8);
+
+    history
+        .execute(
+            Box::new(ExternalFailureCommand::failing_undo()),
+            scene.world_mut(),
+        )
+        .unwrap();
+    assert!(history.can_undo());
+    assert!(!history.can_redo());
+    assert!(history.undo(scene.world_mut()).is_err());
+    assert!(history.can_undo(), "failed undo must remain at undo top");
+    assert!(!history.can_redo());
+
+    let mut redo_history = make_history(8);
+    redo_history
+        .execute(
+            Box::new(ExternalFailureCommand::failing_redo()),
+            scene.world_mut(),
+        )
+        .unwrap();
+    redo_history.undo(scene.world_mut()).unwrap();
+    assert!(!redo_history.can_undo());
+    assert!(redo_history.can_redo());
+    assert!(redo_history.redo(scene.world_mut()).is_err());
+    assert!(!redo_history.can_undo());
+    assert!(
+        redo_history.can_redo(),
+        "failed redo must remain at redo top"
+    );
 }
 
 // ── Persistent identity resolution across handle changes ────────────────

@@ -3025,6 +3025,23 @@ impl SceneWorld {
 
     /// Restore a subtree from a snapshot and reattach previously detached
     /// grouped lights. Validation completes before any node or relation changes.
+    /// Validate that every persistent ID in a subtree is absent before a
+    /// restore commit. Command undo uses this during its all-or-nothing
+    /// preflight; restore itself remains infallible once this succeeds.
+    pub(crate) fn validate_restore_subtree(
+        &self,
+        subtree: &RestorableSceneSubtree,
+    ) -> Result<(), String> {
+        for persistent_id in self.collect_subtree_persistent_ids(subtree) {
+            if self.reverse_index.contains_key(&persistent_id) {
+                return Err(format!(
+                    "cannot restore subtree: persistent ID {persistent_id} already exists"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn restore_subtree_with_lights(
         &mut self,
         subtree: RestorableSceneSubtree,
@@ -3078,16 +3095,9 @@ impl SceneWorld {
         subtree: &RestorableSceneSubtree,
         detached_lights: &[crate::scene::object_store::DetachedLightSnapshot],
     ) -> Result<(), String> {
+        self.validate_restore_subtree(subtree)?;
         let subtree_ids = self.collect_subtree_persistent_ids(subtree);
         let subtree_set: std::collections::HashSet<&SceneObjectId> = subtree_ids.iter().collect();
-
-        for persistent_id in &subtree_ids {
-            if self.reverse_index.contains_key(persistent_id) {
-                return Err(format!(
-                    "cannot restore subtree: persistent ID {persistent_id} already exists"
-                ));
-            }
-        }
         for detached in detached_lights {
             if !subtree_set.contains(&detached.old_group_parent) {
                 return Err(format!(
