@@ -4,18 +4,29 @@
 //! paths without taking ownership away from those crates.
 
 pub mod camera;
+pub mod command;
 pub mod events;
 pub mod frame;
 pub mod input;
 pub mod launch;
+pub mod object;
 pub mod render;
 pub mod runtime;
 
 /// Common imports for beginner app/runtime code.
 pub mod prelude {
-    pub use crate::camera::{Camera, FPSController, OrbitCamera, OrbitController};
+    pub use crate::camera::{
+        Camera, EditorCamera, EditorProjection, FPSController, OrbitCamera, OrbitController,
+    };
+    pub use crate::command::{
+        AddNodeCommand, AttachComponentCommand, Command, CommandHistory, DuplicateObjectsCommand,
+        PlaceAssetCommand, RemoveComponentCommand, RemoveNodeCommand, RemoveObjectsCommand,
+        ReplaceComponentStateCommand, SetComponentPropertyCommand, SetObjectParentCommand,
+        SetObjectTransformCommand, SetTransformCommand,
+    };
     pub use crate::events::{
-        runtime_event_bus, EngineEvent, EventBus, EventStage, FrameId, RuntimeEventDispatcher,
+        runtime_event_bus, EngineEvent, EventBus, EventStage, FrameId,
+        LegacySceneEventAdapter, RuntimeEventDispatcher,
     };
     pub use crate::frame::{
         begin_app_frame, end_app_frame, AppFrameBeginReport, AppFrameEndReport, FixedStepClock,
@@ -25,8 +36,10 @@ pub mod prelude {
         queue_routed_input_event, route_platform_input_to_app, ActionId, InputActionEventEmitter,
         InputEvent, InputSnapshot, InputSystem,
     };
+    pub use crate::object::{object_kind, object_kind_label, ObjectId, ObjectKind, ObjectSummary};
     pub use crate::render::{
-        camera_view_for_size, CameraView, FrameContext, FrameRenderOutcome, Renderer,
-        RendererConfig, RendererInputRouting, RendererInputSuppression, Scene, SceneNodeId,
+        camera_view_for_size, CameraView, FrameContext, FrameRenderOutcome,
+        ObjectLifecycleOutcome, ObjectMutationOutcome, Renderer, RendererConfig,
+        RendererInputRouting, RendererInputSuppression, Scene, SceneNodeId,
     };
 }

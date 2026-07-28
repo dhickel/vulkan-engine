@@ -99,6 +99,7 @@ pub use data::camera::{
     OrbitCamera, OrbitController, Ray,
 };
 pub use object::selection::SelectionChange;
+pub use object::{ObjectLifecycleOutcome, ObjectMutationOutcome, ObjectSummary};
 pub use scene::command::{
     AddNodeCommand, Command, CommandHistory, CommandResult, PlaceAssetCommand, RemoveNodeCommand,
     SceneNodeRemap, SetTransformCommand,

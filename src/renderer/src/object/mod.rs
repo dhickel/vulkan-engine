@@ -369,3 +369,173 @@ pub struct ObjectLifecycleOutcome {
     pub remaps: Vec<ObjectRemap>,
     pub snapshots: Vec<SceneObjectLifecycleSnapshot>,
 }
+
+impl ObjectLifecycleOutcome {
+    /// Convert this outcome into a batch of [`SceneObjectLifecycleEvent`]s
+    /// with the given [`SceneObjectLifecycleAction`] applied to every
+    /// snapshot.
+    ///
+    /// Each snapshot in [`self.snapshots`] is paired with the provided
+    /// `action` and returned as a new event. The outcome is consumed.
+    ///
+    /// # Panics (debug only)
+    ///
+    /// In debug builds this method asserts that [`self.snapshots`] is
+    /// non-empty — every successful lifecycle operation must produce at
+    /// least one snapshot.
+    pub fn into_lifecycle_events(
+        self,
+        action: SceneObjectLifecycleAction,
+    ) -> Vec<SceneObjectLifecycleEvent> {
+        debug_assert!(
+            !self.snapshots.is_empty(),
+            "ObjectLifecycleOutcome must carry at least one snapshot for a successful lifecycle operation"
+        );
+        self.snapshots
+            .into_iter()
+            .map(|snapshot| SceneObjectLifecycleEvent {
+                action: action.clone(),
+                snapshot,
+            })
+            .collect()
+    }
+
+    /// Returns `true` when the outcome has at least one snapshot —
+    /// i.e., the operation was a meaningful lifecycle change.
+    pub fn has_snapshots(&self) -> bool {
+        !self.snapshots.is_empty()
+    }
+}
+
+impl ObjectMutationOutcome {
+    /// Convert this mutation outcome into an [`ObjectLifecycleOutcome`],
+    /// dropping the `created_roots` field.
+    pub fn into_lifecycle_outcome(self) -> ObjectLifecycleOutcome {
+        ObjectLifecycleOutcome {
+            remaps: self.remaps,
+            snapshots: self.snapshots,
+        }
+    }
+
+    /// Shortcut: convert to lifecycle events directly.
+    pub fn into_lifecycle_events(
+        self,
+        action: SceneObjectLifecycleAction,
+    ) -> Vec<SceneObjectLifecycleEvent> {
+        self.into_lifecycle_outcome().into_lifecycle_events(action)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_events::{SceneId, SceneObjectId};
+
+    fn make_snapshot(kind: ObjectKind, object_id: &str) -> SceneObjectLifecycleSnapshot {
+        SceneObjectLifecycleSnapshot {
+            scene: SceneId::new("test-scene"),
+            object: SceneObjectId::new(object_id),
+            kind,
+            name: Some("TestObject".into()),
+            parent: None,
+        }
+    }
+
+    #[test]
+    fn lifecycle_outcome_into_events_assigns_action() {
+        let outcome = ObjectLifecycleOutcome {
+            remaps: Vec::new(),
+            snapshots: vec![
+                make_snapshot(ObjectKind::Node, "obj-a"),
+                make_snapshot(ObjectKind::Node, "obj-b"),
+            ],
+        };
+
+        let events = outcome.into_lifecycle_events(SceneObjectLifecycleAction::Created);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].action, SceneObjectLifecycleAction::Created);
+        assert_eq!(events[1].action, SceneObjectLifecycleAction::Created);
+        assert_eq!(events[0].snapshot.object.as_str(), "obj-a");
+        assert_eq!(events[1].snapshot.object.as_str(), "obj-b");
+    }
+
+    #[test]
+    fn lifecycle_outcome_preserves_snapshot_fields() {
+        let outcome = ObjectLifecycleOutcome {
+            remaps: Vec::new(),
+            snapshots: vec![SceneObjectLifecycleSnapshot {
+                scene: SceneId::new("scene-42"),
+                object: SceneObjectId::new("obj-x"),
+                kind: ObjectKind::SpotLight,
+                name: Some("MainSpot".into()),
+                parent: Some(SceneObjectId::new("parent-node")),
+            }],
+        };
+
+        let events =
+            outcome.into_lifecycle_events(SceneObjectLifecycleAction::Removed);
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.action, SceneObjectLifecycleAction::Removed);
+        assert_eq!(event.snapshot.scene.as_str(), "scene-42");
+        assert_eq!(event.snapshot.object.as_str(), "obj-x");
+        assert_eq!(event.snapshot.kind, ObjectKind::SpotLight);
+        assert_eq!(event.snapshot.name.as_deref(), Some("MainSpot"));
+        assert_eq!(
+            event.snapshot.parent.as_ref().map(|p| p.as_str()),
+            Some("parent-node")
+        );
+    }
+
+    #[test]
+    fn lifecycle_outcome_has_snapshots_detects_populated() {
+        let empty = ObjectLifecycleOutcome::default();
+        assert!(!empty.has_snapshots());
+
+        let populated = ObjectLifecycleOutcome {
+            remaps: Vec::new(),
+            snapshots: vec![make_snapshot(ObjectKind::Node, "obj-1")],
+        };
+        assert!(populated.has_snapshots());
+    }
+
+    #[test]
+    fn mutation_outcome_converts_to_lifecycle_outcome() {
+        let mutation = ObjectMutationOutcome {
+            remaps: vec![ObjectRemap {
+                old: ObjectId::test(1, ObjectKind::Node, 0, 1),
+                new: ObjectId::test(1, ObjectKind::Node, 0, 2),
+                persistent: SceneObjectId::new("obj-new"),
+            }],
+            snapshots: vec![make_snapshot(ObjectKind::Node, "obj-new")],
+            created_roots: vec![ObjectId::test(1, ObjectKind::Node, 0, 2)],
+        };
+
+        let lifecycle = mutation.into_lifecycle_outcome();
+        assert_eq!(lifecycle.remaps.len(), 1);
+        assert_eq!(lifecycle.snapshots.len(), 1);
+        assert!(lifecycle.has_snapshots());
+    }
+
+    #[test]
+    fn mutation_outcome_into_lifecycle_events_shortcut() {
+        let mutation = ObjectMutationOutcome {
+            remaps: Vec::new(),
+            snapshots: vec![make_snapshot(ObjectKind::DirectionalLight, "dir-1")],
+            created_roots: Vec::new(),
+        };
+
+        let events = mutation
+            .into_lifecycle_events(SceneObjectLifecycleAction::Duplicated {
+                source: SceneObjectId::new("src"),
+            });
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "must carry at least one snapshot")]
+    fn empty_outcome_into_events_panics_in_debug() {
+        let outcome = ObjectLifecycleOutcome::default();
+        let _events = outcome.into_lifecycle_events(SceneObjectLifecycleAction::Created);
+    }
+}

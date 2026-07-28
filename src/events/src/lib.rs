@@ -11,6 +11,8 @@
 //! events in emission order. Listener failures are collected and dispatch
 //! continues for later listeners and events.
 
+pub mod legacy_scene;
+
 use std::any::Any;
 use std::cell::Cell;
 use std::collections::VecDeque;

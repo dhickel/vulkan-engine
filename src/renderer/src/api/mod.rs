@@ -44,6 +44,7 @@ pub use crate::object::query::{
 };
 pub use crate::object::selection::{Selection, SelectionChange};
 pub use crate::object::ObjectId;
+pub use crate::object::{ObjectLifecycleOutcome, ObjectMutationOutcome, ObjectSummary};
 pub use crate::scene::SceneNodeId;
 pub use assets::{
     AssetManager, EnvironmentSource, EnvironmentState, FacePattern, PbrMaterialDesc,
