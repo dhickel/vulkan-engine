@@ -1326,14 +1326,19 @@ impl Renderer {
             }
         }
 
-        let mut submission = build_submission_with_camera_view(scene, view);
+        // Extensions are consumed exactly once, before submission construction.
+        // Invalid override batches fail before any backend frame work begins.
+        let extensions = std::mem::take(&mut self.frame_extensions);
+        scene.update_camera(view.view, view.projection, view.position);
+        #[allow(unused_mut)]
+        let mut submission = scene
+            .build_submission_with_transform_overrides(&extensions.transform_overrides)
+            .map_err(RendererError::InvalidState)?;
 
-        // Transfer frame extensions into the submission.
         #[cfg(feature = "debug-draw")]
         {
-            submission.debug_lines = std::mem::take(&mut self.frame_extensions.debug_lines);
+            submission.debug_lines = extensions.debug_lines;
         }
-        let _ = std::mem::take(&mut self.frame_extensions.transform_overrides);
         debug_assert!(self.frame_extensions.is_empty());
 
         let viewport_size = self.viewport_size();

@@ -2759,7 +2759,12 @@ impl DebugLinesRecording<'_> {
             .lock()
             .map_err(|e| format!("allocator lock: {e}"))?;
         self.debug_lines
-            .upload_lines(self.device, &allocator, &self.submission.debug_lines)?;
+            .upload_lines(
+                self.device,
+                &allocator,
+                self.frame.index,
+                &self.submission.debug_lines,
+            )?;
         drop(allocator);
 
         // Record draw.

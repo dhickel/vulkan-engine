@@ -13,19 +13,20 @@
 //! Default capacity is 64K lines (128K vertices). The buffer silently
 //! discards lines beyond capacity rather than reallocating.
 
-use glam::{Vec3, Vec4};
+use glam::Vec3;
+use std::collections::VecDeque;
 
 /// Default maximum lines stored per frame.
 const DEFAULT_CAPACITY_LINES: usize = 65536;
 
 /// Ring buffer of debug-line segments.
 ///
-/// Owns a fixed-capacity `Vec` used as a ring buffer. `push_line` appends
-/// until the buffer is full; overflowing lines are silently dropped.
+/// Owns a fixed-capacity ring. Once full, newly pushed lines replace the
+/// oldest line so the current frame always contains the most recent diagnostics.
 pub struct DebugDrawState {
-    lines: Vec<(Vec3, Vec3, Vec3)>,
+    lines: VecDeque<(Vec3, Vec3, Vec3)>,
     capacity: usize,
-    len: usize,
+    overflow_count: u64,
 }
 
 impl DebugDrawState {
@@ -36,22 +37,26 @@ impl DebugDrawState {
 
     /// Create a ring buffer with `capacity` lines (2× vertices).
     pub fn with_capacity(capacity: usize) -> Self {
-        let lines = Vec::with_capacity(capacity);
         Self {
-            lines,
+            lines: VecDeque::with_capacity(capacity),
             capacity,
-            len: 0,
+            overflow_count: 0,
         }
     }
 
     /// Append a world-space line segment.
     ///
-    /// Lines beyond capacity are silently discarded.
+    /// When the ring is full, the oldest segment is replaced.
     pub fn push_line(&mut self, from: Vec3, to: Vec3, color: Vec3) {
-        if self.len < self.capacity {
-            self.lines.push((from, to, color));
-            self.len += 1;
+        if self.capacity == 0 {
+            self.overflow_count += 1;
+            return;
         }
+        if self.lines.len() == self.capacity {
+            self.lines.pop_front();
+            self.overflow_count += 1;
+        }
+        self.lines.push_back((from, to, color));
     }
 
     /// Append a world-space axis-aligned bounding box as 12 line segments.
@@ -139,17 +144,21 @@ impl DebugDrawState {
     /// Clear accumulated lines for a new frame.
     pub fn clear(&mut self) {
         self.lines.clear();
-        self.len = 0;
     }
 
     /// Number of lines currently stored.
     pub fn len(&self) -> usize {
-        self.len
+        self.lines.len()
+    }
+
+    /// Number of lines displaced because the fixed-capacity ring was full.
+    pub fn overflow_count(&self) -> u64 {
+        self.overflow_count
     }
 
     /// Returns `true` when no lines are stored.
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.lines.is_empty()
     }
 
     /// Maximum line capacity.
@@ -157,21 +166,38 @@ impl DebugDrawState {
         self.capacity
     }
 
-    /// Borrow the stored lines as an immutable slice.
-    pub fn lines_slice(&self) -> &[(Vec3, Vec3, Vec3)] {
-        &self.lines[..self.len]
-    }
-
-    /// Consume the state and return all lines.
+    /// Consume the state and return all lines in insertion order.
     pub fn take_lines(&mut self) -> Vec<(Vec3, Vec3, Vec3)> {
-        let taken = std::mem::take(&mut self.lines);
-        self.len = 0;
-        taken
+        self.lines.drain(..).collect()
     }
 }
 
 impl Default for DebugDrawState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ring_keeps_newest_lines_and_clear_is_frame_local() {
+        let mut debug = DebugDrawState::with_capacity(2);
+        debug.push_line(Vec3::ZERO, Vec3::X, Vec3::X);
+        debug.push_line(Vec3::ZERO, Vec3::Y, Vec3::Y);
+        debug.push_line(Vec3::ZERO, Vec3::Z, Vec3::Z);
+
+        assert_eq!(debug.len(), 2);
+        assert_eq!(debug.overflow_count(), 1);
+        let lines = debug.take_lines();
+        assert_eq!(lines[0].1, Vec3::Y);
+        assert_eq!(lines[1].1, Vec3::Z);
+        assert!(debug.is_empty());
+
+        debug.push_cross(Vec3::ZERO, 1.0, Vec3::X, Vec3::Y, Vec3::Z);
+        debug.clear();
+        assert!(debug.is_empty());
     }
 }

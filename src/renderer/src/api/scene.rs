@@ -2188,6 +2188,13 @@ impl Scene {
         self.world.build_submission()
     }
 
+    pub(crate) fn build_submission_with_transform_overrides(
+        &mut self,
+        overrides: &std::collections::HashMap<SceneNodeId, glam::Mat4>,
+    ) -> Result<RenderSubmission, String> {
+        self.world.build_submission_with_transform_overrides(overrides)
+    }
+
     fn validate_node(&self, node: SceneNodeId) -> Result<(), SceneError> {
         self.world
             .validate_node_ref(node)

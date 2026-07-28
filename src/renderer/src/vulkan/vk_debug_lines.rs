@@ -19,8 +19,9 @@ use glam::{Mat4, Vec3};
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub(crate) struct DebugLineGpuVertex {
     pub position: [f32; 3],
+    pub _position_pad: f32,
     pub color: [f32; 3],
-    pub _pad: [f32; 2], // align to 32 bytes (matches shader vec3+vec3 padded layout)
+    pub _color_pad: f32,
 }
 
 impl DebugLineGpuVertex {
@@ -28,13 +29,15 @@ impl DebugLineGpuVertex {
         [
             Self {
                 position: from.to_array(),
+                _position_pad: 0.0,
                 color: color.to_array(),
-                _pad: [0.0; 2],
+                _color_pad: 0.0,
             },
             Self {
                 position: to.to_array(),
+                _position_pad: 0.0,
                 color: color.to_array(),
-                _pad: [0.0; 2],
+                _color_pad: 0.0,
             },
         ]
     }
@@ -72,9 +75,10 @@ impl DebugLinePushConsts {
 pub(crate) const DEFAULT_MAX_DEBUG_LINES: usize = 65536;
 
 pub(crate) struct VkDebugLines {
-    /// Host-visible buffer for per-frame vertex upload. Ring-overwritten each frame.
-    pub vertex_buffer: Option<VkBuffer>,
-    /// Cached device address for the vertex buffer (valid while the buffer exists).
+    /// One host-visible buffer per frame slot. A slot is reused only after its
+    /// fence signals, so uploading never overwrites vertices an in-flight frame reads.
+    pub vertex_buffers: Vec<Option<VkBuffer>>,
+    /// Cached address for the currently recording frame slot's buffer.
     pub vertex_buffer_address: vk::DeviceAddress,
     /// Maximum vertex capacity for the current buffer.
     pub max_vertices: u32,
@@ -86,7 +90,7 @@ impl VkDebugLines {
     pub fn new(max_lines: usize) -> Self {
         let max_vertices = (max_lines * 2).max(2) as u32;
         Self {
-            vertex_buffer: None,
+            vertex_buffers: Vec::new(),
             vertex_buffer_address: vk::DeviceAddress::default(),
             max_vertices,
             written_vertices: 0,
@@ -110,6 +114,7 @@ impl VkDebugLines {
         &mut self,
         device: &ash::Device,
         allocator: &vk_mem::Allocator,
+        frame_index: u32,
         lines: &[(Vec3, Vec3, Vec3)],
     ) -> Result<u32, String> {
         let line_count = lines.len();
@@ -124,14 +129,16 @@ impl VkDebugLines {
         }
 
         let size_bytes = clamped as u64 * DebugLineGpuVertex::size_bytes() as u64;
-        let needs_realloc = self
-            .vertex_buffer
+        let slot = frame_index as usize;
+        if self.vertex_buffers.len() <= slot {
+            self.vertex_buffers.resize_with(slot + 1, || None);
+        }
+        let needs_realloc = self.vertex_buffers[slot]
             .as_ref()
-            .map_or(true, |buf| buf.size < size_bytes);
+            .is_none_or(|buffer| buffer.size < size_bytes);
 
         if needs_realloc {
-            // Destroy old buffer if present.
-            if let Some(mut old) = self.vertex_buffer.take() {
+            if let Some(mut old) = self.vertex_buffers[slot].take() {
                 old.destroy(device, allocator);
             }
 
@@ -139,15 +146,14 @@ impl VkDebugLines {
                 allocator,
                 size_bytes,
                 vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::VERTEX_BUFFER,
-                vk_mem::MemoryUsage::Auto,
+                vk_mem::MemoryUsage::AutoPreferHost,
             )?;
-
-            let addr_info = vk::BufferDeviceAddressInfo::default().buffer(new_buffer.buffer);
-            self.vertex_buffer_address = unsafe { device.get_buffer_device_address(&addr_info) };
-            self.vertex_buffer = Some(new_buffer);
+            self.vertex_buffers[slot] = Some(new_buffer);
         }
 
-        let buffer = self.vertex_buffer.as_mut().unwrap();
+        let buffer = self.vertex_buffers[slot].as_mut().expect("buffer allocated above");
+        let addr_info = vk::BufferDeviceAddressInfo::default().buffer(buffer.buffer);
+        self.vertex_buffer_address = unsafe { device.get_buffer_device_address(&addr_info) };
 
         // Map, write, unmap.
         unsafe {
@@ -214,10 +220,25 @@ impl VkDebugLines {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::DebugLineGpuVertex;
+
+    #[test]
+    fn vertex_layout_matches_std430_vec3_offsets() {
+        let vertex = DebugLineGpuVertex::new(glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z)[0];
+        let base = (&vertex as *const DebugLineGpuVertex) as usize;
+        assert_eq!((&vertex.position as *const [f32; 3]) as usize - base, 0);
+        assert_eq!((&vertex.color as *const [f32; 3]) as usize - base, 16);
+        assert_eq!(DebugLineGpuVertex::size_bytes(), 32);
+    }
+}
+
 impl VkDestroyable for VkDebugLines {
     fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {
-        if let Some(ref mut buf) = self.vertex_buffer {
-            buf.destroy(device, allocator);
+        for buffer in self.vertex_buffers.iter_mut().flatten() {
+            buffer.destroy(device, allocator);
         }
+        self.vertex_buffers.clear();
     }
 }

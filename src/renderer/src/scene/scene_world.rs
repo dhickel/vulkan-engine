@@ -25,8 +25,8 @@ use crate::scene::object_store::{
     RemovePointLightPlan, RemoveSpotLightPlan, SceneNodeRemovalSnapshot,
 };
 use crate::scene::render_submission::{
-    FrameDirectionalLight, FrameDrawItem, FramePointLight, FrameSpotLight, RenderSubmission,
-    MAX_DIRECTIONAL_LIGHTS_GPU, MAX_POINT_LIGHTS_GPU, MAX_SPOT_LIGHTS_GPU,
+    CullingStats, FrameDirectionalLight, FrameDrawItem, FramePointLight, FrameSpotLight,
+    RenderSubmission, MAX_DIRECTIONAL_LIGHTS_GPU, MAX_POINT_LIGHTS_GPU, MAX_SPOT_LIGHTS_GPU,
 };
 use engine_events::{ObjectKind, SceneObjectId};
 use glam::{Mat4, Vec3};
@@ -899,6 +899,49 @@ impl SceneWorld {
         }
     }
 
+    pub(crate) fn build_submission_with_transform_overrides(
+        &mut self,
+        overrides: &HashMap<SceneNodeId, Mat4>,
+    ) -> Result<RenderSubmission, String> {
+        for (&node_id, &transform) in overrides {
+            if !self.is_valid_node_id(node_id) {
+                return Err(format!("invalid or stale transform override for node {node_id:?}"));
+            }
+            if !transform.is_finite() {
+                return Err(format!("non-finite transform override for node {node_id:?}"));
+            }
+        }
+        if overrides.is_empty() {
+            return Ok(self.build_submission());
+        }
+
+        // Reuse the normal submission path for lights and BSP data, but replace
+        // its canonical-node draw list with frame-local transforms and culling.
+        // The canonical scene and its cached derived values remain untouched.
+        let culling_enabled = self.enable_frustum_culling;
+        self.enable_frustum_culling = false;
+        let mut submission = self.build_submission();
+        self.enable_frustum_culling = culling_enabled;
+        submission.draw_items.clear();
+        submission.bounds_references.clear();
+        submission.culling_stats = CullingStats::default();
+
+        let frustum = culling_enabled.then(|| {
+            Frustum::from_view_projection(&(self.camera.projection * self.camera.view))
+        });
+        if let Some(root_id) = self.root.filter(|id| self.is_valid_node_id(*id)) {
+            self.collect_draw_items_with_overrides(
+                root_id,
+                Mat4::IDENTITY,
+                overrides,
+                &mut submission,
+                frustum.as_ref(),
+            );
+        }
+
+        Ok(submission)
+    }
+
     pub(crate) fn build_submission(&mut self) -> RenderSubmission {
         let mut submission = RenderSubmission::new(self.camera, 400);
         submission.skybox_env_id = self.skybox_env_id;
@@ -1496,6 +1539,58 @@ impl SceneWorld {
         for child in node.children.iter().copied() {
             if self.is_valid_node_id(child) {
                 self.collect_draw_items_culled(child, submission, Some(frustum));
+            }
+        }
+    }
+
+    /// Frame-local traversal used by transform overrides. It deliberately
+    /// recomputes bounds from transient effective world transforms instead of
+    /// touching the scene's canonical world/bounds caches.
+    fn collect_draw_items_with_overrides(
+        &self,
+        node_id: SceneNodeId,
+        parent_world: Mat4,
+        overrides: &HashMap<SceneNodeId, Mat4>,
+        submission: &mut RenderSubmission,
+        frustum: Option<&Frustum>,
+    ) {
+        let Some(node) = self.get_node(node_id) else {
+            return;
+        };
+        let world = overrides
+            .get(&node_id)
+            .copied()
+            .unwrap_or_else(|| parent_world * node.local_transform);
+        let node_bounds = node_bounds_for_world_transform(node, world);
+        let visible = match (frustum, node_bounds) {
+            (Some(frustum), Some(SceneBounds::Known(bounds) | SceneBounds::Proxy(bounds))) => {
+                submission.culling_stats.known_nodes_tested += 1;
+                frustum.intersects_aabb(&bounds)
+            }
+            (Some(_), Some(SceneBounds::ConservativeVisible(reason))) => {
+                submission.culling_stats.conservative_nodes_by_reason[reason as usize] += 1;
+                true
+            }
+            _ => true,
+        };
+
+        if visible {
+            for mesh_id in node.meshes.iter().copied() {
+                submission.push_draw_item(FrameDrawItem {
+                    mesh_id,
+                    transform: world,
+                });
+            }
+        }
+        for child_id in node.children.iter().copied() {
+            if self.is_valid_node_id(child_id) {
+                self.collect_draw_items_with_overrides(
+                    child_id,
+                    world,
+                    overrides,
+                    submission,
+                    frustum,
+                );
             }
         }
     }
@@ -3679,6 +3774,36 @@ fn aabb_intersects_aabb(a: &Aabb, b: &Aabb) -> bool {
 
 // ── Bounds traversal helpers (general vs editor) ─────────────────────
 
+/// Compute culling bounds from a frame-local effective world transform.
+fn node_bounds_for_world_transform(node: &SceneNode, world: Mat4) -> Option<SceneBounds> {
+    if let Some(proxy) = node.local_proxy_bounds {
+        return proxy.transformed(&world).map(SceneBounds::Proxy);
+    }
+
+    let mut local_union: Option<Aabb> = None;
+    for entry in &node.mesh_bounds {
+        match entry.bounds {
+            SceneBounds::Known(bounds) | SceneBounds::Proxy(bounds)
+                if bounds.is_finite() && bounds.is_ordered() => {
+                match local_union {
+                    Some(ref mut union) => {
+                        union.extend_to_enclose(&bounds);
+                    }
+                    None => local_union = Some(bounds),
+                }
+            }
+            SceneBounds::Known(_) | SceneBounds::Proxy(_) | SceneBounds::ConservativeVisible(_) => {
+                return Some(SceneBounds::ConservativeVisible(
+                    BoundsUnknownReason::MissingGeometry,
+                ));
+            }
+        }
+    }
+    local_union
+        .and_then(|bounds| bounds.transformed(&world))
+        .map(SceneBounds::Known)
+}
+
 /// Compute a world-space AABB for general queries (raycast, volume).
 ///
 /// Only returns `Known` and explicit `Proxy` bounds. Does **not** create
@@ -4295,6 +4420,45 @@ mod tests {
             }],
             ..SceneNode::default()
         }
+    }
+
+    #[test]
+    fn frame_extensions_overrides_propagate_without_mutating_canonical_state() {
+        let mut scene = SceneWorld::new();
+        let root = scene.add_node(
+            None,
+            node_with_mesh_and_transform(1, make_unit_known(), Mat4::IDENTITY),
+        );
+        let child = scene.add_node(
+            Some(root),
+            node_with_mesh_and_transform(
+                2,
+                make_unit_known(),
+                Mat4::from_translation(Vec3::X),
+            ),
+        );
+        scene.set_root(root);
+        scene.enable_frustum_culling = false;
+        let canonical_root = scene.get_node(root).unwrap().local_transform;
+        let canonical_child = scene.get_node(child).unwrap().local_transform;
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(root, Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0)));
+        let submission = scene
+            .build_submission_with_transform_overrides(&overrides)
+            .expect("valid override batch");
+
+        assert_eq!(submission.draw_items.len(), 2);
+        assert_eq!(
+            submission.draw_items[0].transform.w_axis.truncate(),
+            Vec3::new(10.0, 0.0, 0.0)
+        );
+        assert_eq!(
+            submission.draw_items[1].transform.w_axis.truncate(),
+            Vec3::new(11.0, 0.0, 0.0)
+        );
+        assert_eq!(scene.get_node(root).unwrap().local_transform, canonical_root);
+        assert_eq!(scene.get_node(child).unwrap().local_transform, canonical_child);
     }
 
     // -- Exact local AABB under translation --

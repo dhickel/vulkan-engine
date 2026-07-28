@@ -562,6 +562,9 @@ impl Drop for VkRenderCore {
 
             self.transfer.destroy(&self.device, allocator);
 
+            #[cfg(feature = "debug-draw")]
+            self.debug_lines.destroy(&self.device, allocator);
+
             for slot in self.gpu_timing.slots.iter() {
                 self.device.destroy_query_pool(slot.query_pool, None);
             }

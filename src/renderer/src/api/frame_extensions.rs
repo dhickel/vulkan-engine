@@ -18,7 +18,9 @@
 use std::collections::HashMap;
 
 use crate::scene::SceneNodeId;
-use glam::{Mat4, Vec3};
+use glam::Mat4;
+#[cfg(feature = "debug-draw")]
+use glam::Vec3;
 
 /// Immutable per-frame extension payload consumed by the renderer.
 ///
