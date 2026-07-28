@@ -18,11 +18,12 @@ fn facade_and_raw_crate_imports_compile() {
     let _: f32 = time_instance.time_scale();
 
     // ── Axis types from the prelude ──
-    let _contrib = AxisContributor::new(ActionId::new("move.right"), 1.0);
-    let _compound = CompoundAxis::new(vec![_contrib.clone()]);
-    let _axis2d = Axis2D::new(
-        CompoundAxis::new(vec![AxisContributor::new(ActionId::new("x"), 1.0)]),
-        CompoundAxis::new(vec![AxisContributor::new(ActionId::new("y"), 1.0)]),
+    let _contrib: Result<AxisContributor, input::AxisError> =
+        AxisContributor::new(ActionId::new("move.right"), 1.0);
+    let _compound: Result<CompoundAxis, input::AxisError> = CompoundAxis::new(Vec::new());
+    let _axis2d: Result<Axis2D, input::AxisError> = Axis2D::new(
+        CompoundAxis::new(Vec::new()).unwrap(),
+        CompoundAxis::new(Vec::new()).unwrap(),
         0.1,
     );
 

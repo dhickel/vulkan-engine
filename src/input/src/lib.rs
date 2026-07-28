@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub mod axis;
 
-pub use axis::{Axis2D, AxisContributor, CompoundAxis};
+pub use axis::{Axis2D, AxisContributor, AxisError, CompoundAxis};
 
 use serde::{Deserialize, Serialize};
 use winit::event::{ElementState, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
@@ -233,6 +233,19 @@ impl ActionStateStore {
         for state in self.states.values_mut() {
             state.just_pressed = false;
             state.just_released = false;
+        }
+    }
+
+    fn clear_all(&mut self) {
+        for contribution in self.contributions.values_mut() {
+            contribution.value = 0.0;
+            contribution.active = false;
+        }
+        for state in self.states.values_mut() {
+            if state.value > 0.0 {
+                state.just_released = true;
+            }
+            state.value = 0.0;
         }
     }
 
@@ -711,12 +724,15 @@ impl InputSystem {
                         self.snapshot.keys_just_released.insert(code);
                     }
                     self.snapshot.keys_down.clear();
+                    self.snapshot.modifiers = ModifiersState::empty();
+                    self.ingest_modifiers = ModifiersState::empty();
                     for &button in &self.snapshot.buttons_down {
                         self.snapshot.buttons_just_released.insert(button);
                     }
                     self.snapshot.buttons_down.clear();
                     self.snapshot.mouse_delta = (0.0, 0.0);
                     self.snapshot.scroll_delta_lines = 0.0;
+                    self.action_state.clear_all();
                 }
             }
         }
@@ -2453,11 +2469,14 @@ trigger = { key = "KeyW", mouse_button = "Left" }
     fn focus_loss_clears_raw_snapshot_keys_buttons_and_delta() {
         let mut system = InputSystem::new();
 
+        system.queue_event(InputEvent::ModifiersChanged {
+            modifiers: ModifiersState::SHIFT,
+        });
         system.queue_event(InputEvent::Key {
             code: KeyCode::KeyW,
             state: ElementState::Pressed,
             repeat: false,
-            modifiers: ModifiersState::empty(),
+            modifiers: ModifiersState::SHIFT,
         });
         system.queue_event(InputEvent::MouseButton {
             button: MouseButton::Left,
@@ -2469,6 +2488,7 @@ trigger = { key = "KeyW", mouse_button = "Left" }
         system.dispatch_frame();
 
         assert!(system.snapshot().key_down(KeyCode::KeyW));
+        assert!(system.snapshot().modifiers().shift_key());
         assert!(system.snapshot().mouse_button_down(MouseButton::Left));
         assert_eq!(system.snapshot().mouse_delta(), (5.0, -3.0));
         assert_eq!(system.snapshot().scroll_delta_lines(), 2.0);
@@ -2479,8 +2499,11 @@ trigger = { key = "KeyW", mouse_button = "Left" }
 
         assert!(!system.snapshot().key_down(KeyCode::KeyW));
         assert!(system.snapshot().key_just_released(KeyCode::KeyW));
+        assert!(!system.snapshot().modifiers().shift_key());
         assert!(!system.snapshot().mouse_button_down(MouseButton::Left));
-        assert!(system.snapshot().mouse_button_just_released(MouseButton::Left));
+        assert!(system
+            .snapshot()
+            .mouse_button_just_released(MouseButton::Left));
         assert_eq!(system.snapshot().mouse_delta(), (0.0, 0.0));
         assert_eq!(system.snapshot().scroll_delta_lines(), 0.0);
     }

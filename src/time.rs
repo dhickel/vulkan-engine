@@ -80,6 +80,8 @@ pub struct Time {
     fixed_clock: FixedStepClock,
     fixed_delta: Duration,
     time_scale: f32,
+    next_frame_index: u64,
+    pending_frame_index: Option<u64>,
     last_update: TimeUpdate,
 }
 
@@ -100,6 +102,8 @@ impl Time {
             }),
             fixed_delta,
             time_scale: config.time_scale,
+            next_frame_index: 0,
+            pending_frame_index: None,
             last_update: TimeUpdate {
                 unscaled_delta: Duration::ZERO,
                 scaled_delta: Duration::ZERO,
@@ -127,6 +131,8 @@ impl Time {
             }),
             fixed_delta,
             time_scale: config.time_scale,
+            next_frame_index: 0,
+            pending_frame_index: None,
             last_update: TimeUpdate {
                 unscaled_delta: Duration::ZERO,
                 scaled_delta: Duration::ZERO,
@@ -146,12 +152,14 @@ impl Time {
     /// This is typically called by `begin_app_frame_with_time` rather than
     /// directly by the app loop.
     pub fn tick(&mut self) -> FrameInfo {
-        self.frame_clock.tick()
+        let frame = self.frame_clock.tick();
+        self.record_tick(frame)
     }
 
     /// Tick the frame clock at a specific instant (for tests).
     pub fn tick_at(&mut self, now: Instant) -> FrameInfo {
-        self.frame_clock.tick_at(now)
+        let frame = self.frame_clock.tick_at(now);
+        self.record_tick(frame)
     }
 
     /// Advance the fixed-step accumulator by a delta and produce a time update.
@@ -165,6 +173,11 @@ impl Time {
     pub fn advance(&mut self, unscaled_delta: Duration) -> TimeUpdate {
         let scaled_delta = duration_mul_f32(unscaled_delta, self.time_scale);
         let fixed_update = self.fixed_clock.update(scaled_delta);
+        let frame_index = self.pending_frame_index.take().unwrap_or_else(|| {
+            let index = self.next_frame_index;
+            self.next_frame_index = self.next_frame_index.saturating_add(1);
+            index
+        });
 
         self.last_update = TimeUpdate {
             unscaled_delta,
@@ -174,7 +187,7 @@ impl Time {
             alpha: fixed_update.alpha,
             remainder: fixed_update.accumulated,
             dropped_time: fixed_update.dropped_time,
-            frame_index: self.frame_clock.next_index().saturating_sub(1),
+            frame_index,
             scale: self.time_scale,
         };
 
@@ -224,14 +237,24 @@ impl Time {
             Err(TimeError::InvalidScale)
         }
     }
+
+    fn record_tick(&mut self, frame: FrameInfo) -> FrameInfo {
+        self.pending_frame_index = Some(frame.index);
+        self.next_frame_index = frame.index.saturating_add(1);
+        frame
+    }
 }
 
 fn duration_mul_f32(duration: Duration, scale: f32) -> Duration {
     if scale <= 0.0 {
         return Duration::ZERO;
     }
-    let secs = duration.as_secs_f64() * scale as f64;
-    Duration::from_secs_f64(secs.max(0.0))
+    let seconds = duration.as_secs_f64() * scale as f64;
+    if !seconds.is_finite() || seconds >= Duration::MAX.as_secs_f64() {
+        Duration::MAX
+    } else {
+        Duration::from_secs_f64(seconds)
+    }
 }
 
 #[cfg(test)]
@@ -319,6 +342,29 @@ mod tests {
         assert_eq!(update.fixed_step_count, 2);
         assert_eq!(update.remainder, Duration::ZERO);
         assert_eq!(update.dropped_time, Duration::ZERO);
+    }
+
+    #[test]
+    fn direct_advance_assigns_monotonic_frame_indices() {
+        let mut time = Time::new(time_config()).unwrap();
+
+        assert_eq!(time.advance(Duration::from_millis(1)).frame_index, 0);
+        assert_eq!(time.advance(Duration::from_millis(1)).frame_index, 1);
+    }
+
+    #[test]
+    fn changing_scale_does_not_change_the_fixed_quantum() {
+        let mut time = Time::new(time_config()).unwrap();
+        assert_eq!(
+            time.advance(Duration::from_millis(16)).fixed_delta,
+            Duration::from_millis(16)
+        );
+
+        time.set_time_scale(0.5).unwrap();
+        let update = time.advance(Duration::from_millis(32));
+        assert_eq!(update.fixed_delta, Duration::from_millis(16));
+        assert_eq!(update.scaled_delta, Duration::from_millis(16));
+        assert_eq!(update.fixed_step_count, 1);
     }
 
     #[test]

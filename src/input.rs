@@ -10,7 +10,7 @@ use winit::window::Window;
 pub use input::priority_bands;
 pub use input::{
     editor_ui_capture_layer, ActionBinding, ActionId, ActionMap, ActionMapLayer, Axis2D,
-    AxisContributor, BindingModifiers, BindingTrigger, CaptureLayer, CompoundAxis,
+    AxisContributor, AxisError, BindingModifiers, BindingTrigger, CaptureLayer, CompoundAxis,
     FrameInputSnapshot, InputChord, InputConsume, InputContext, InputDebugFrame,
     InputDebugSnapshot, InputDevice, InputEvent, InputLayer, InputRuntime, InputSnapshot,
     InputSystem, LayerDescriptor, LayerHandle, LayerId, LayerPriority, LayerSpec,

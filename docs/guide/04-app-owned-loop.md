@@ -99,6 +99,8 @@ Every piece of runtime state lives in the app:
 | `camera` | `Camera` | Position, orientation, pitch, yaw. Mutable by the FPS controller. |
 | `fps_controller` | `FPSController` | Mouse-look sensitivity + movement speed. Reads `InputSnapshot`, writes to `Camera`. |
 
+For loops that need runtime scale/pause semantics, replace the compatible `FrameClock` + `FixedStepClock` pair with one caller-owned `engine::time::Time` and use `begin_app_frame_with_time`. `Time` preserves the fixed quantum while scaling only accumulator input; it does not become renderer-owned state. This checkpoint intentionally retains the lower-level compatible pair so the documented source remains an exact match for `examples/guide_app/src/main.rs`.
+
 ## Input Action Bindings
 
 > Provenance: `CP-04-INPUT` — Full Match

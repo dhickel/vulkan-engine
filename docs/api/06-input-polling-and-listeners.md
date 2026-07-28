@@ -26,6 +26,7 @@ Direct crate flow:
 - App-owned lifecycle bridge: `engine::events::RuntimeEventDispatcher` can drain input and emit
   frame lifecycle events on the same caller-owned `EventBus`.
 - Action mapping: bind semantic actions (`"move.forward"`) to chords (keys/buttons + modifiers).
+- Compound digital axes: build a validated `CompoundAxis` from finite weighted action contributors, then use `Axis2D` to apply an optional radial dead zone and rescale the remaining unit-circle magnitude. Evaluate it once from the dispatched snapshot per app frame.
 - Input profiles: `ActionMap` load/save uses strict `version = 1` TOML with `trigger` + `modifiers`.
 - Camera controls: `Renderer::install_default_fps_input()` installs the built-in WASD/mouse-look layer for the **renderer compatibility path**. Apps that own input should install an action layer in their own `InputSystem`, update a root `Camera` with `FPSController`, collision-correct app state, then pass a `CameraView` into the renderer. See [15-app-owned-loop.md](15-app-owned-loop.md).
 
@@ -151,7 +152,9 @@ with a caller-assigned `BindingInstanceId` when they need multi-source aggregati
 - If `dispatch_frame()` never runs (implicitly through renderer frame prep), snapshots will not advance.
 - If two systems must both process input, keep them in the same priority group.
 - If a high-priority layer consumes events unexpectedly, lower layers will appear "dead".
-- `mouse_delta` and `just_*` states are transient and valid only for the current frame.
+- `mouse_delta` and `just_*` states are transient and valid only for the current frame. Sample pointer delta once per app frame; do not replay it in each fixed simulation step.
+- `CursorFocus { entered: false }` deterministically clears held keyboard and mouse state, modifiers, pointer/scroll deltas, action contributions, and corresponding release edges.
+- Compound-axis configuration rejects non-finite weights, non-finite/reversed ranges, and dead zones outside `0.0..1.0`.
 - Profile load is strict: unsupported keys, malformed triggers, or unknown fields are hard errors.
 - The renderer facade does not auto-load an input profile path from `RendererConfig`; profile TOML is app-owned setup code.
 - Modifier-release ordering is tracked per-binding. Releasing a modifier before releasing the bound key no longer leaves the action stuck active — the system tracks each binding's press/release independently via `BindingInstanceId` and recomputes the aggregate action value after every event.

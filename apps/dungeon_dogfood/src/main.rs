@@ -345,17 +345,7 @@ fn run() -> Result<(), AppError> {
     let fps_move_speed = fps_controller.move_speed();
 
     // Compound digital movement axes: stable intent computed once per app frame.
-    let movement_axis = Axis2D::new(
-        CompoundAxis::new(vec![
-            AxisContributor::new(ActionId::new("move.right"), 1.0),
-            AxisContributor::new(ActionId::new("move.left"), -1.0),
-        ]),
-        CompoundAxis::new(vec![
-            AxisContributor::new(ActionId::new("move.backward"), 1.0),
-            AxisContributor::new(ActionId::new("move.forward"), -1.0),
-        ]),
-        0.1,
-    );
+    let movement_axis = movement_axis();
     let mut camera_yaw: f32 = 0.0;
 
     let mut action_events = InputActionEventEmitter::new();
@@ -512,6 +502,24 @@ fn install_app_fps_input(input: &mut InputSystem) -> FPSController {
     );
 
     FPSController::new(0.002, 1.0)
+}
+
+fn movement_axis() -> Axis2D {
+    let contributor = |action, weight| {
+        AxisContributor::new(ActionId::new(action), weight)
+            .expect("dogfood movement axis uses finite contributor weights")
+    };
+    let horizontal = CompoundAxis::new(vec![
+        contributor("move.right", 1.0),
+        contributor("move.left", -1.0),
+    ])
+    .expect("dogfood movement axis uses the valid default range");
+    let forward = CompoundAxis::new(vec![
+        contributor("move.backward", 1.0),
+        contributor("move.forward", -1.0),
+    ])
+    .expect("dogfood movement axis uses the valid default range");
+    Axis2D::new(horizontal, forward, 0.1).expect("dogfood movement axis uses a valid dead zone")
 }
 
 fn log_dispatch_failures(report: DispatchReport, context: &str) {
@@ -1224,17 +1232,7 @@ fn run_headless(
     let fps_controller = install_app_fps_input(&mut app_input);
     let fps_sensitivity = fps_controller.sensitivity();
     let fps_move_speed = fps_controller.move_speed();
-    let movement_axis = Axis2D::new(
-        CompoundAxis::new(vec![
-            AxisContributor::new(ActionId::new("move.right"), 1.0),
-            AxisContributor::new(ActionId::new("move.left"), -1.0),
-        ]),
-        CompoundAxis::new(vec![
-            AxisContributor::new(ActionId::new("move.backward"), 1.0),
-            AxisContributor::new(ActionId::new("move.forward"), -1.0),
-        ]),
-        0.1,
-    );
+    let movement_axis = movement_axis();
     let mut camera_yaw: f32 = 0.0;
     let mut action_events = InputActionEventEmitter::new();
     let mut time = Time::new(TimeConfig {

@@ -479,6 +479,29 @@ mod tests {
     }
 
     #[test]
+    fn begin_app_frame_with_time_dispatches_and_advances_the_same_frame() {
+        let mut input = InputSystem::new();
+        add_jump_action(&mut input);
+        input.queue_event(crate::input::InputEvent::Key {
+            code: KeyCode::Space,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        let mut action_events = InputActionEventEmitter::new();
+        let mut events = EventBus::new();
+        let mut time = crate::time::Time::new(crate::time::TimeConfig::default()).unwrap();
+
+        let report =
+            begin_app_frame_with_time(&mut input, &mut action_events, &mut events, &mut time);
+
+        assert!(input.snapshot().action_pressed(&ActionId::new("jump")));
+        assert_eq!(report.action_events_emitted, 1);
+        assert_eq!(time.update().frame_index, report.frame.index);
+        assert_eq!(time.update().unscaled_delta, report.frame.delta);
+    }
+
+    #[test]
     fn end_app_frame_emits_frame_ended() {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let seen_listener = Arc::clone(&seen);

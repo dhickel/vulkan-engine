@@ -97,6 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - `route_platform_input_to_app` preserves renderer platform/UI side effects and queues only uncaptured app input into the caller-owned `InputSystem`.
 - `begin_app_frame` ticks the caller-owned `FrameClock`, dispatches input, emits input action events, drains the input stage, and emits/drains `FrameStarted`.
+- `begin_app_frame_with_time` is the scaled-time variant: it performs that same single input/event boundary, then advances the caller-owned `Time`. `Time` composes the frame and fixed clocks; `time_scale` is finite and non-negative, zero pauses only scaled simulation, and the fixed quantum never changes when scale changes.
 - `end_app_frame` emits/drains `FrameEnded` for the same frame index.
 - `camera_view_for_size` sanitizes zero viewport dimensions before constructing the renderer-owned `CameraView` DTO.
 - `apps/dungeon_dogfood` is the full real-app proof for this path: it uses the root `engine` helpers while keeping gameplay, collision, camera, audio telemetry, and events app-owned.
