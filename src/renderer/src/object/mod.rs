@@ -15,6 +15,9 @@ pub use engine_events::{
 // Renderer runtime types
 pub use identity::ObjectId;
 
+// Re-export ObjectHandle from scene internals for test validation.
+pub use crate::scene::object_store::ObjectHandle;
+
 /// Records a remapping from an old runtime [`ObjectId`] to a new one,
 /// anchored to a persistent [`SceneObjectId`].
 #[derive(Clone, Debug, Eq, PartialEq)]

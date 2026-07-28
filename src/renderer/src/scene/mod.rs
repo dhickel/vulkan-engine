@@ -7,6 +7,7 @@
 pub mod bsp_visibility;
 pub mod command;
 pub mod debug_scenarios;
+pub mod object_store;
 pub mod render_submission;
 pub mod scene_world;
 

@@ -11,10 +11,20 @@ use engine_events::{ObjectKind, SceneObjectId};
 pub(crate) struct SceneRuntimeId(u64);
 
 impl SceneRuntimeId {
-    /// Test-only constructor. Real minting will be added in Phase 02.
+    /// Internal constructor used during SceneWorld construction.
+    pub(crate) fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    /// Test-only constructor.
     #[cfg(test)]
     pub(crate) fn test(id: u64) -> Self {
         Self(id)
+    }
+
+    /// Access the raw provenance token.
+    pub(crate) fn raw(&self) -> u64 {
+        self.0
     }
 }
 

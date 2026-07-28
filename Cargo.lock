@@ -3217,6 +3217,7 @@ dependencies = [
  "russimp-sys-ng",
  "serde",
  "serde_json",
+ "sha2",
  "toml",
  "vk-mem",
  "winit",
