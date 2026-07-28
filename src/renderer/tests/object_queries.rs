@@ -7,7 +7,8 @@ use glam::{Mat4, Vec3};
 use renderer::{
     object::{
         ObjectKind,
-        query::{EditorProxyPolicy, UnknownBoundsPolicy, VolumeQuery},
+        query::{EditorProxyPolicy, ObjectQueryFilter, UnknownBoundsPolicy, VolumeQuery},
+        selection::Selection,
     },
     Aabb, DirectionalLight, MeshBoundsEntry, PointLight, Ray, Scene, SceneBounds, SceneNodeId,
     SpotLight,
@@ -52,6 +53,25 @@ fn raycast_hits_single_node() {
     assert_eq!(hit.kind, ObjectKind::Node);
     assert!(hit.distance > 4.0 && hit.distance < 6.0);
     assert!(!hit.is_proxy);
+}
+
+#[test]
+fn raycast_normalizes_direction_and_preserves_world_distance() {
+    let (scene, _) = build_scene_with_cube(
+        Mat4::from_translation(Vec3::new(0.0, 0.0, -5.0)),
+        SceneBounds::Known(cube_aabb()),
+        None,
+    );
+    let hit = scene
+        .raycast(&Ray {
+            origin: Vec3::ZERO,
+            direction: Vec3::new(0.0, 0.0, -2.0),
+        })
+        .expect("valid ray")
+        .expect("hit");
+
+    assert!((hit.distance - 4.5).abs() < 1e-5);
+    assert_eq!(hit.normal, Some(Vec3::Z));
 }
 
 #[test]
@@ -194,6 +214,96 @@ fn volume_query_includes_lights() {
     let hits = scene.query_volume(&query);
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].kind, ObjectKind::PointLight);
+}
+
+#[test]
+fn volume_query_filter_excludes_kinds() {
+    let mut scene = Scene::new();
+    let node = scene.create_node_default(None).expect("node");
+    scene
+        .add_mesh_with_bounds(node, renderer::MeshHandle::new(1, 0), SceneBounds::Known(cube_aabb()))
+        .expect("mesh");
+    scene
+        .create_point_light(PointLight {
+            position: Vec3::new(1.0, 0.0, 0.0),
+            color: Vec3::ONE,
+            intensity: 10.0,
+            range: 5.0,
+        })
+        .expect("create light");
+
+    let query = VolumeQuery::aabb(Aabb::from_min_max(
+        Vec3::new(-2.0, -2.0, -2.0),
+        Vec3::new(2.0, 2.0, 2.0),
+    ))
+    .with_filter(ObjectQueryFilter::kinds([ObjectKind::Node]));
+
+    let hits = scene.query_volume(&query);
+    // Only the node, not the point light.
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].kind, ObjectKind::Node);
+}
+
+#[test]
+fn general_raycast_excludes_editor_helper_proxies() {
+    // Create an empty node (no mesh, no proxy bounds).
+    let mut scene = Scene::new();
+    let empty = scene.create_node_default(None).expect("empty node");
+    scene
+        .set_transform(empty, Mat4::from_translation(Vec3::new(0.0, 0.0, -5.0)))
+        .expect("set transform");
+
+    // General raycast should NOT return hits for empty nodes (editor proxies are
+    // only for editor_pick).
+    let ray = Ray {
+        origin: Vec3::new(0.0, 0.0, 0.0),
+        direction: Vec3::new(0.0, 0.0, -1.0),
+    };
+    let hits = scene.raycast_all(&ray).expect("valid ray");
+    // Empty node has no known bounds → no hit in general query.
+    assert!(
+        hits.is_empty(),
+        "general raycast must not hit editor helper proxies for empty nodes"
+    );
+}
+
+#[test]
+fn editor_pick_still_hits_empty_node() {
+    let mut scene = Scene::new();
+    let empty = scene.create_node_default(None).expect("empty node");
+    scene
+        .set_transform(empty, Mat4::from_translation(Vec3::new(0.0, 0.0, -5.0)))
+        .expect("set transform");
+
+    // Editor pick SHOULD hit the empty node (it uses editor helper proxies).
+    let ray = Ray {
+        origin: Vec3::new(0.0, 0.0, 0.0),
+        direction: Vec3::new(0.0, 0.0, -1.0),
+    };
+    let hit = scene
+        .editor_pick(&ray, EditorProxyPolicy::NodesOnly)
+        .expect("valid ray");
+    assert!(
+        hit.is_some(),
+        "editor pick should hit empty nodes via helper proxies"
+    );
+}
+
+#[test]
+fn selection_rejects_wrong_scene_object_id() {
+    let mut scene = Scene::new();
+    let prov = scene.provenance_token();
+    let mut sel = Selection::with_provenance(prov);
+    // A fresh scene's own ObjectId passes provenance check.
+    let node = scene.create_node_default(None).expect("node");
+    let ok_id = scene.object_id(node).unwrap();
+    assert!(sel.add(ok_id).is_ok());
+    sel.clear();
+    // A different scene's ObjectId must fail.
+    let mut scene2 = Scene::new();
+    let node2 = scene2.create_node_default(None).expect("node2");
+    let wrong_id = scene2.object_id(node2).unwrap();
+    assert!(sel.add(wrong_id).is_err());
 }
 
 // ── Editor pick ────────────────────────────────────────────────────────

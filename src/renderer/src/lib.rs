@@ -98,6 +98,7 @@ pub use data::camera::{
     Aabb, AabbRayHit, Camera, EditorCamera, EditorProjection, FPSController, Frustum,
     OrbitCamera, OrbitController, Ray,
 };
+pub use object::selection::SelectionChange;
 pub use scene::command::{
     AddNodeCommand, Command, CommandHistory, CommandResult, PlaceAssetCommand, RemoveNodeCommand,
     SceneNodeRemap, SetTransformCommand,

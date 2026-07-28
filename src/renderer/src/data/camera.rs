@@ -47,12 +47,13 @@ impl Ray {
 /// Result of a ray-vs-AABB intersection test with additional hit metadata.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct AabbRayHit {
-    /// The t-value of the entry point along the ray.
-    pub t: f32,
+    /// World-unit distance from the ray origin to the entry point.
+    pub distance: f32,
     /// The world-space hit point on (or near) the AABB surface.
     pub point: Vec3,
-    /// The outward-facing normal at the hit point.
-    pub normal: Vec3,
+    /// The outward-facing entry-face normal. A ray starting inside the box has
+    /// no entry face, so its zero-distance hit has no normal.
+    pub normal: Option<Vec3>,
 }
 
 /// Axis-aligned bounding box for intersection testing.
@@ -148,37 +149,25 @@ impl Aabb {
         Some(Aabb::from_min_max(min, max))
     }
 
-    /// Ray-AABB intersection test (slab method). Returns the t-value of the
-    /// entry point if the ray hits, or None.
+    /// Ray-AABB intersection test (slab method). Returns the entry distance
+    /// if the ray hits, or `None`. This compatibility API delegates to the
+    /// rich hit path so both APIs share validation and intersection semantics.
     pub fn intersect_ray(&self, ray: &Ray) -> Option<f32> {
-        if ray.direction.length_squared() == 0.0 {
-            return None;
-        }
-
-        let (tx_min, tx_max) =
-            ray_axis_interval(ray.origin.x, ray.direction.x, self.min.x, self.max.x)?;
-        let (ty_min, ty_max) =
-            ray_axis_interval(ray.origin.y, ray.direction.y, self.min.y, self.max.y)?;
-        let (tz_min, tz_max) =
-            ray_axis_interval(ray.origin.z, ray.direction.z, self.min.z, self.max.z)?;
-
-        let tmin = tx_min.max(ty_min).max(tz_min);
-        let tmax = tx_max.min(ty_max).min(tz_max);
-
-        if tmax < 0.0 || tmin > tmax {
-            return None;
-        }
-
-        Some(tmin.max(0.0))
+        self.intersect_ray_hit(ray).map(|hit| hit.distance)
     }
 
     /// Ray-AABB intersection test with hit metadata.
     ///
-    /// Returns an [`AabbRayHit`] with the entry t, hit point, and
-    /// outward-facing normal, or `None` on miss.  Preserves the same
-    /// intersection logic as [`intersect_ray`](Self::intersect_ray).
+    /// Invalid/non-finite bounds and rays are rejected. A ray beginning inside
+    /// the box reports distance zero with no synthetic entry normal. Exact
+    /// corner ties use X, then Y, then Z as the deterministic entry axis.
     pub fn intersect_ray_hit(&self, ray: &Ray) -> Option<AabbRayHit> {
-        if ray.direction.length_squared() == 0.0 {
+        if !self.is_finite()
+            || !self.is_ordered()
+            || !ray.origin.is_finite()
+            || !ray.direction.is_finite()
+            || ray.direction.length_squared() == 0.0
+        {
             return None;
         }
 
@@ -188,7 +177,6 @@ impl Aabb {
             ray_axis_interval(ray.origin.y, ray.direction.y, self.min.y, self.max.y)?;
         let (tz_min, tz_max) =
             ray_axis_interval(ray.origin.z, ray.direction.z, self.min.z, self.max.z)?;
-
         let tmin = tx_min.max(ty_min).max(tz_min);
         let tmax = tx_max.min(ty_max).min(tz_max);
 
@@ -196,29 +184,32 @@ impl Aabb {
             return None;
         }
 
-        let t = tmin.max(0.0);
-        let point = ray.origin + ray.direction * t;
-
-        // Determine which axis contributed the entry t and derive the normal.
-        let normal = if (t - tx_min).abs() <= f32::EPSILON * 10.0 {
-            if ray.direction.x > 0.0 {
-                Vec3::NEG_X
+        let inside = tmin < 0.0;
+        let distance = tmin.max(0.0);
+        let point = ray.origin + ray.direction * distance;
+        let normal = (!inside).then(|| {
+            let axis = if tx_min >= ty_min && tx_min >= tz_min {
+                0
+            } else if ty_min >= tz_min {
+                1
             } else {
-                Vec3::X
+                2
+            };
+            match axis {
+                0 if ray.direction.x > 0.0 => Vec3::NEG_X,
+                0 => Vec3::X,
+                1 if ray.direction.y > 0.0 => Vec3::NEG_Y,
+                1 => Vec3::Y,
+                2 if ray.direction.z > 0.0 => Vec3::NEG_Z,
+                _ => Vec3::Z,
             }
-        } else if (t - ty_min).abs() <= f32::EPSILON * 10.0 {
-            if ray.direction.y > 0.0 {
-                Vec3::NEG_Y
-            } else {
-                Vec3::Y
-            }
-        } else if ray.direction.z > 0.0 {
-            Vec3::NEG_Z
-        } else {
-            Vec3::Z
-        };
+        });
 
-        Some(AabbRayHit { t, point, normal })
+        Some(AabbRayHit {
+            distance,
+            point,
+            normal,
+        })
     }
 }
 
@@ -442,7 +433,7 @@ impl Camera {
 
 #[cfg(test)]
 mod tests {
-    use super::{Aabb, Camera, CameraLookAtError, Frustum};
+    use super::{Aabb, Camera, CameraLookAtError, Frustum, Ray};
     use glam::{Mat4, Vec3};
 
     const ASSERT_EPSILON: f32 = 1.0e-4;
@@ -514,6 +505,35 @@ mod tests {
         assert!(frustum.intersects_aabb(&across_near));
         assert!(!frustum.intersects_aabb(&beyond_far));
         assert!(!frustum.intersects_aabb(&outside_right));
+    }
+
+    #[test]
+    fn aabb_hit_reports_entry_normal_and_inside_without_one() {
+        let aabb = Aabb::from_min_max(Vec3::splat(-1.0), Vec3::splat(1.0));
+        let hit = aabb
+            .intersect_ray_hit(&Ray {
+                origin: Vec3::new(0.0, 0.0, 3.0),
+                direction: Vec3::NEG_Z,
+            })
+            .expect("outside ray hits");
+        assert_eq!(hit.distance, 2.0);
+        assert_eq!(hit.normal, Some(Vec3::Z));
+
+        let inside = aabb
+            .intersect_ray_hit(&Ray {
+                origin: Vec3::ZERO,
+                direction: Vec3::X,
+            })
+            .expect("inside ray hits");
+        assert_eq!(inside.distance, 0.0);
+        assert_eq!(inside.normal, None);
+        assert_eq!(
+            aabb.intersect_ray(&Ray {
+                origin: Vec3::ZERO,
+                direction: Vec3::X,
+            }),
+            Some(0.0)
+        );
     }
 
     #[test]
@@ -924,6 +944,13 @@ impl EditorCamera {
     /// `screen_pos.0` = x pixels, `screen_pos.1` = y pixels, with
     /// (0,0) at top-left.  `viewport_size` = (width, height) in pixels.
     ///
+    /// - **Perspective**: ray originates at the eye, direction toward
+    ///   the un-projected world point.
+    /// - **Orthographic**: ray originates at a per-pixel point on the
+    ///   near plane, direction parallel to the view axis.  This ensures
+    ///   intersection tests produce correct world-space distances even
+    ///   though all ortho rays are parallel.
+    ///
     /// Returns `None` if the view-projection matrix is singular or the
     /// ray cannot be constructed.
     pub fn screen_to_ray(
@@ -935,12 +962,43 @@ impl EditorCamera {
         if !inv_vp.is_finite() {
             return None;
         }
-        let eye = self.eye_position();
-        let ray = Ray::from_screen(screen_pos, viewport_size, inv_vp, eye);
-        if ray.direction.length_squared() < 1e-10 {
-            return None;
+
+        match self.projection_mode {
+            EditorProjection::Perspective { .. } => {
+                let eye = self.eye_position();
+                let ray = Ray::from_screen(screen_pos, viewport_size, inv_vp, eye);
+                if ray.direction.length_squared() < 1e-10 {
+                    return None;
+                }
+                Some(ray)
+            }
+            EditorProjection::Orthographic { .. } => {
+                // Orthographic: map screen pixel to near-plane world point.
+                let w = viewport_size.0 as f32;
+                let h = viewport_size.1 as f32;
+                if w <= 0.0 || h <= 0.0 {
+                    return None;
+                }
+                let ndc_x = (2.0 * screen_pos.0) / w - 1.0;
+                let ndc_y = 1.0 - (2.0 * screen_pos.1) / h;
+                // Near plane in NDC (Vulkan [0,1] depth).
+                let ndc_near = glam::Vec4::new(ndc_x, ndc_y, 0.0, 1.0);
+                let world_near = inv_vp * ndc_near;
+                if world_near.w.abs() < 1e-10 {
+                    return None;
+                }
+                let origin = glam::Vec3::new(world_near.x, world_near.y, world_near.z) / world_near.w;
+                // Direction is along the view axis (camera forward), not eye-relative.
+                let forward = (self.orbit.target - self.eye_position()).normalize();
+                if forward.length_squared() < 1e-10 {
+                    return None;
+                }
+                Some(Ray {
+                    origin,
+                    direction: forward,
+                })
+            }
         }
-        Some(ray)
     }
 
     // ── Focus on AABB ──────────────────────────────────────────────
@@ -950,35 +1008,87 @@ impl EditorCamera {
     ///
     /// Returns `Err` if the AABB is non-finite or degenerate.
     pub fn focus_on(&mut self, aabb: &Aabb) -> Result<(), &'static str> {
+        let center = aabb.center();
+        let radius = self.compute_fit_radius(aabb)?;
+        self.orbit.target = center;
+        self.orbit.radius = radius;
+        Ok(())
+    }
+
+    /// Reposition the orbit target to the aggregate center of multiple
+    /// AABBs (e.g., all selected objects) and adjust radius so the union
+    /// fits in view.
+    ///
+    /// Returns `Err` if any AABB is non-finite or the aggregate is
+    /// degenerate.
+    pub fn focus_on_many(
+        &mut self,
+        aabbs: &[Aabb],
+    ) -> Result<(), &'static str> {
+        if aabbs.is_empty() {
+            return Err("no AABBs provided");
+        }
+        // Compute the union AABB.
+        let mut union = aabbs[0];
+        for aabb in &aabbs[1..] {
+            if !aabb.is_finite() || !aabb.is_ordered() {
+                return Err("AABB is non-finite or not ordered");
+            }
+            union.extend_to_enclose(aabb);
+        }
+        if !union.is_finite() || !union.is_ordered() {
+            return Err("union AABB is non-finite or not ordered");
+        }
+        self.focus_on(&union)
+    }
+
+    /// Convert to a [`CameraView`] for scene camera submission.
+    ///
+    /// `viewport_width` and `viewport_height` are in pixels and used
+    /// to compute the aspect ratio for the projection matrix.
+    pub fn to_camera_view(&self, viewport_width: u32, viewport_height: u32) -> crate::CameraView {
+        let aspect = viewport_width as f32 / viewport_height as f32;
+        let view = self.view_matrix();
+        let proj = match self.projection_mode {
+            EditorProjection::Perspective { fov_y } => {
+                glam::Mat4::perspective_rh(fov_y, aspect, self.near_plane, self.far_plane)
+            }
+            EditorProjection::Orthographic { half_height } => {
+                let half_width = half_height * aspect;
+                glam::Mat4::orthographic_rh(
+                    -half_width, half_width,
+                    -half_height, half_height,
+                    self.near_plane, self.far_plane,
+                )
+            }
+        };
+        crate::CameraView::new(view, proj, self.eye_position())
+    }
+
+    // ── Internal helper ────────────────────────────────────────────
+
+    /// Compute a radius that fits `aabb` in view given the current
+    /// projection mode.
+    fn compute_fit_radius(&self, aabb: &Aabb) -> Result<f32, &'static str> {
         if !aabb.is_finite() || !aabb.is_ordered() {
             return Err("AABB is non-finite or not ordered");
         }
-
-        let center = aabb.center();
         let extents = aabb.max - aabb.min;
         let max_extent = extents.x.max(extents.y).max(extents.z);
-
         if max_extent <= 0.0 {
             return Err("AABB is degenerate (zero extents)");
         }
-
-        // Compute a radius that frames the AABB given the current FOV/half-height.
         let required_radius = match self.projection_mode {
             EditorProjection::Perspective { fov_y } => {
                 let half_fov = fov_y * 0.5;
-                // Ensure the AABB fits vertically.
                 (max_extent * 0.5) / half_fov.tan()
             }
             EditorProjection::Orthographic { half_height } => {
-                // For ortho, just ensure the AABB fits in the vertical extent.
+                // For ortho, radius doesn't affect visibility, but a sensible
+                // distance helps frame the scene.
                 max_extent * 0.5 / half_height * self.orbit.radius
             }
         };
-
-        // Add a small margin.
-        let radius = required_radius * 1.2;
-        self.orbit.target = center;
-        self.orbit.radius = radius.clamp(self.orbit.min_radius, self.orbit.max_radius);
-        Ok(())
+        Ok((required_radius * 1.2).clamp(self.orbit.min_radius, self.orbit.max_radius))
     }
 }

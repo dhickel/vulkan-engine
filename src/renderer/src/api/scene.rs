@@ -2075,7 +2075,11 @@ impl Scene {
     ) -> Result<Option<crate::object::query::RayHit>, SceneError> {
         crate::object::query::validate_ray(ray)
             .map_err(|msg| SceneError::InvalidMutation(msg.to_string()))?;
-        Ok(self.world.raycast_readonly(ray).into_iter().next())
+        let normalized = crate::data::camera::Ray {
+            origin: ray.origin,
+            direction: ray.direction.normalize(),
+        };
+        Ok(self.world.raycast_readonly(&normalized).into_iter().next())
     }
 
     /// Raycast all: return every hit in deterministic order (distance,
@@ -2088,7 +2092,11 @@ impl Scene {
     ) -> Result<Vec<crate::object::query::RayHit>, SceneError> {
         crate::object::query::validate_ray(ray)
             .map_err(|msg| SceneError::InvalidMutation(msg.to_string()))?;
-        Ok(self.world.raycast_readonly(ray))
+        let normalized = crate::data::camera::Ray {
+            origin: ray.origin,
+            direction: ray.direction.normalize(),
+        };
+        Ok(self.world.raycast_readonly(&normalized))
     }
 
     /// Volume query: return all objects whose world-space bounds

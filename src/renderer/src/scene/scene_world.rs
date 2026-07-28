@@ -881,7 +881,9 @@ impl SceneWorld {
         // on-the-fly world transform (mirrors node_pick_bounds_exact +
         // compute_node_world_bounds but reads from scratch instead of
         // cached fields).
-        if let Some(aabb) = pick_bounds_readonly(node, &world) {
+        // Editor-pick path (from the legacy `pick` API): use editor bounds
+        // which include helper proxies for empty nodes.
+        if let Some(aabb) = pick_bounds_readonly_editor(node, &world) {
             if let Some(t) = aabb.intersect_ray(ray) {
                 if closest.map_or(true, |(best_t, _)| t < best_t) {
                     *closest = Some((t, node_id));
@@ -3309,7 +3311,7 @@ impl SceneWorld {
         world_transforms.insert(node_id, world);
 
         // Test intersection using the same bounds logic as pick_readonly.
-        let hit_info = pick_bounds_readonly(node, &world)
+        let hit_info = pick_bounds_readonly_general(node, &world)
             .and_then(|aabb| aabb.intersect_ray_hit(ray));
 
         if let Some(aabb_hit) = hit_info {
@@ -3324,7 +3326,7 @@ impl SceneWorld {
                         object: oid,
                         persistent_id: pid,
                         kind: ObjectKind::Node,
-                        distance: aabb_hit.t,
+                        distance: aabb_hit.distance,
                         point: aabb_hit.point,
                         normal: aabb_hit.normal,
                         is_proxy,
@@ -3358,27 +3360,33 @@ impl SceneWorld {
             self.volume_walk(root_id, Mat4::IDENTITY, volume, &mut world_transforms, &mut hits);
         }
 
-        // Walk point lights.
-        for (slot, entry) in self.point_lights.iter().enumerate() {
-            if let Some((light, record)) = &entry.light {
-                if self.volume_hit_point_light(light, volume, record, slot as u32, entry.generation) {
-                    if let Some(oid) = self.object_id_for_point_light(PointLightId {
-                        slot: slot as u32,
-                        generation: entry.generation,
-                    }) {
-                        hits.push(VolumeHit {
-                            object: oid,
-                            persistent_id: record.persistent_id.clone(),
-                            kind: ObjectKind::PointLight,
-                            is_bounded: true,
-                        });
+        // Walk point lights (only when kind filter allows).
+        if volume.filter.allows_kind(ObjectKind::PointLight) {
+            for (slot, entry) in self.point_lights.iter().enumerate() {
+                if let Some((light, record)) = &entry.light {
+                    if self.volume_hit_point_light(light, volume, record, slot as u32, entry.generation) {
+                        if let Some(oid) = self.object_id_for_point_light(PointLightId {
+                            slot: slot as u32,
+                            generation: entry.generation,
+                        }) {
+                            hits.push(VolumeHit {
+                                object: oid,
+                                persistent_id: record.persistent_id.clone(),
+                                kind: ObjectKind::PointLight,
+                                is_bounded: true,
+                            });
+                        }
                     }
                 }
             }
         }
 
-        // Directional lights have no bounded volume; skip unless policy says include.
-        if volume.unknown_bounds == UnknownBoundsPolicy::IncludeAsInfinite {
+        // Directional lights have no bounded volume; treat as indeterminate when
+        // policy allows and kind filter passes.
+        if volume.filter.allows_kind(ObjectKind::DirectionalLight)
+            && (volume.unknown_bounds == UnknownBoundsPolicy::IncludeAsInfinite
+                || volume.unknown_bounds == UnknownBoundsPolicy::IncludeAsIndeterminate)
+        {
             for (slot, entry) in self.directional_lights.iter().enumerate() {
                 if entry.light.is_some() {
                     if let Some(oid) = self.object_id_for_directional_light(DirectionalLightId {
@@ -3398,20 +3406,22 @@ impl SceneWorld {
             }
         }
 
-        // Walk spot lights.
-        for (slot, entry) in self.spot_lights.iter().enumerate() {
-            if let Some((light, record)) = &entry.light {
-                if self.volume_hit_spot_light(light, volume) {
-                    if let Some(oid) = self.object_id_for_spot_light(SpotLightId {
-                        slot: slot as u32,
-                        generation: entry.generation,
-                    }) {
-                        hits.push(VolumeHit {
-                            object: oid,
-                            persistent_id: record.persistent_id.clone(),
-                            kind: ObjectKind::SpotLight,
-                            is_bounded: true,
-                        });
+        // Walk spot lights (only when kind filter allows).
+        if volume.filter.allows_kind(ObjectKind::SpotLight) {
+            for (slot, entry) in self.spot_lights.iter().enumerate() {
+                if let Some((light, record)) = &entry.light {
+                    if self.volume_hit_spot_light(light, volume) {
+                        if let Some(oid) = self.object_id_for_spot_light(SpotLightId {
+                            slot: slot as u32,
+                            generation: entry.generation,
+                        }) {
+                            hits.push(VolumeHit {
+                                object: oid,
+                                persistent_id: record.persistent_id.clone(),
+                                kind: ObjectKind::SpotLight,
+                                is_bounded: true,
+                            });
+                        }
                     }
                 }
             }
@@ -3436,11 +3446,24 @@ impl SceneWorld {
             None => return,
         };
 
+        // Apply kind filter early.
+        if !volume.filter.allows_kind(ObjectKind::Node) {
+            // Still recurse children using the parent's world transform.
+            let world = parent_world * node.local_transform;
+            for child_id in node.children.iter().copied() {
+                if self.is_valid_node_id(child_id) {
+                    self.volume_walk(child_id, world, volume, world_transforms, hits);
+                }
+            }
+            return;
+        }
+
         let world = parent_world * node.local_transform;
         world_transforms.insert(node_id, world);
 
         // Test node's world bounds against the volume.
-        if let Some(aabb) = pick_bounds_readonly(node, &world) {
+        // General queries must NOT create editor helper proxies.
+        if let Some(aabb) = pick_bounds_readonly_general(node, &world) {
             if volume_intersects_aabb(&volume.volume, &aabb) {
                 if let Some(oid) = self.object_id_for_node(node_id) {
                     if let Some(pid) = self.object_persistent_id(oid) {
@@ -3453,8 +3476,10 @@ impl SceneWorld {
                     }
                 }
             }
-        } else if volume.unknown_bounds == UnknownBoundsPolicy::IncludeAsInfinite {
-            // Conservative-visible node: include as unbounded.
+        } else if volume.unknown_bounds == UnknownBoundsPolicy::IncludeAsInfinite
+            || volume.unknown_bounds == UnknownBoundsPolicy::IncludeAsIndeterminate
+        {
+            // Conservative-visible node or unknown bounds: include as indeterminate.
             if let Some(oid) = self.object_id_for_node(node_id) {
                 if let Some(pid) = self.object_persistent_id(oid) {
                     hits.push(VolumeHit {
@@ -3547,9 +3572,9 @@ impl SceneWorld {
                         }) {
                             if closest
                                 .as_ref()
-                                .map_or(true, |(best_t, _, _)| hit.t < *best_t)
+                                .map_or(true, |(best_t, _, _)| hit.distance < *best_t)
                             {
-                                closest = Some((hit.t, oid, hit));
+                                closest = Some((hit.distance, oid, hit));
                             }
                         }
                     }
@@ -3570,9 +3595,9 @@ impl SceneWorld {
                         }) {
                             if closest
                                 .as_ref()
-                                .map_or(true, |(best_t, _, _)| hit.t < *best_t)
+                                .map_or(true, |(best_t, _, _)| hit.distance < *best_t)
                             {
-                                closest = Some((hit.t, oid, hit));
+                                closest = Some((hit.distance, oid, hit));
                             }
                         }
                     }
@@ -3602,11 +3627,16 @@ impl SceneWorld {
         let world = parent_world * node.local_transform;
         world_transforms.insert(node_id, world);
 
-        if let Some(aabb) = pick_bounds_readonly(node, &world) {
+        // Editor pick: use editor bounds which include helper proxies for
+        // empty group nodes so editors can select them.
+        if let Some(aabb) = pick_bounds_readonly_editor(node, &world) {
             if let Some(hit) = aabb.intersect_ray_hit(ray) {
-                if closest.as_ref().map_or(true, |(best_t, _, _)| hit.t < *best_t) {
+                if closest
+                    .as_ref()
+                    .map_or(true, |(best_t, _, _)| hit.distance < *best_t)
+                {
                     if let Some(oid) = self.object_id_for_node(node_id) {
-                        *closest = Some((hit.t, oid, hit));
+                        *closest = Some((hit.distance, oid, hit));
                     }
                 }
             }
@@ -3647,13 +3677,61 @@ fn aabb_intersects_aabb(a: &Aabb, b: &Aabb) -> bool {
         && a.max.z >= b.min.z
 }
 
-// ── Re-export from query module ───────────────────────────────────────
+// ── Bounds traversal helpers (general vs editor) ─────────────────────
 
-/// Compute a world-space pickable AABB for a node using an on-the-fly
-/// world transform (`world`).  Mirrors the logic in
-/// `node_pick_bounds_exact` + `compute_node_world_bounds` but operates
-/// on scratch data without touching cached fields.
-fn pick_bounds_readonly(node: &SceneNode, world: &Mat4) -> Option<Aabb> {
+/// Compute a world-space AABB for general queries (raycast, volume).
+///
+/// Only returns `Known` and explicit `Proxy` bounds. Does **not** create
+/// editor helper proxies for empty nodes — those are only available through
+/// the editor-pick path.
+fn pick_bounds_readonly_general(node: &SceneNode, world: &Mat4) -> Option<Aabb> {
+    // If an explicit local proxy is set and no known meshes exist, use it.
+    if let Some(proxy) = node.local_proxy_bounds {
+        return proxy.transformed(world);
+    }
+
+    // Aggregate local mesh bounds then transform.
+    let mut any_conservative = false;
+    let mut local_union: Option<Aabb> = None;
+
+    for entry in &node.mesh_bounds {
+        match &entry.bounds {
+            SceneBounds::Known(aabb) | SceneBounds::Proxy(aabb) => {
+                if aabb.is_finite() && aabb.is_ordered() {
+                    match local_union {
+                        Some(ref mut u) => {
+                            u.extend_to_enclose(aabb);
+                        }
+                        None => local_union = Some(*aabb),
+                    }
+                } else {
+                    any_conservative = true;
+                }
+            }
+            SceneBounds::ConservativeVisible(_) => {
+                any_conservative = true;
+            }
+        }
+    }
+
+    if any_conservative {
+        // Conservative-visible: no trustworthy bounds for general queries.
+        return None;
+    }
+
+    if let Some(local) = local_union {
+        return local.transformed(world);
+    }
+
+    // No known or proxy bounds at all: general queries get nothing.
+    None
+}
+
+/// Compute a world-space pickable AABB for editor queries.
+///
+/// Same as `pick_bounds_readonly_general` but adds editor helper proxies
+/// for empty non-mesh group nodes so editors can select them.
+fn pick_bounds_readonly_editor(node: &SceneNode, world: &Mat4) -> Option<Aabb> {
     // If an explicit local proxy is set and no known meshes exist, use it.
     if let Some(proxy) = node.local_proxy_bounds {
         return proxy.transformed(world);

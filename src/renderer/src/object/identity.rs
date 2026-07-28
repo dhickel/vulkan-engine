@@ -107,8 +107,8 @@ impl ObjectId {
         self.generation
     }
 
-    /// Internal access to provenance.
-    pub(crate) fn provenance(&self) -> SceneRuntimeId {
+    /// Access the provenance token that ties this ID to one scene.
+    pub fn provenance(&self) -> SceneRuntimeId {
         self.provenance
     }
 }

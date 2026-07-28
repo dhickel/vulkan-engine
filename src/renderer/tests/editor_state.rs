@@ -43,8 +43,8 @@ fn selection_workflow_with_scene_ids() {
     // create and add
     let mut sel = Selection::new();
     assert!(sel.is_empty());
-    sel.add(id_a);
-    sel.add(id_b);
+    sel.add(id_a).unwrap();
+    sel.add(id_b).unwrap();
     assert_eq!(sel.len(), 2);
     assert!(sel.contains(&id_a));
     assert!(sel.contains(&id_b));
@@ -53,24 +53,27 @@ fn selection_workflow_with_scene_ids() {
     assert_eq!(sel.primary(), Some(&id_a));
 
     // dedup
-    assert!(!sel.add(id_a));
+    let ch = sel.add(id_a).unwrap();
+    assert!(!ch.changed());
     assert_eq!(sel.len(), 2);
 
     // toggle remove
-    assert!(!sel.toggle(id_a));
+    assert!(!sel.toggle(id_a).unwrap());
     assert_eq!(sel.len(), 1);
     assert!(sel.contains(&id_b));
 
     // toggle re-add
-    assert!(sel.toggle(id_a));
+    assert!(sel.toggle(id_a).unwrap());
     assert_eq!(sel.len(), 2);
 
     // remove
-    assert!(sel.remove(&id_b));
+    let ch = sel.remove(&id_b).unwrap();
+    assert!(ch.changed());
     assert_eq!(sel.len(), 1);
 
     // set
-    sel.set(id_b);
+    let ch = sel.set(id_b).unwrap();
+    assert!(ch.changed());
     assert_eq!(sel.len(), 1);
     assert!(sel.contains(&id_b));
     assert!(!sel.contains(&id_a));
@@ -100,8 +103,8 @@ fn selection_remap_with_scene_ids() {
     let id_b = scene.object_id(node_b).unwrap();
 
     let mut sel = Selection::new();
-    sel.add(id_a);
-    sel.add(id_b);
+    sel.add(id_a).unwrap();
+    sel.add(id_b).unwrap();
 
     // Remap: drop id_b, keep id_a
     sel.remap(|id| if *id == id_b { None } else { Some(id_a) });
@@ -118,8 +121,8 @@ fn selection_cleanup_stale_with_scene_ids() {
     let id_b = scene.object_id(node_b).unwrap();
 
     let mut sel = Selection::new();
-    sel.add(id_a);
-    sel.add(id_b);
+    sel.add(id_a).unwrap();
+    sel.add(id_b).unwrap();
 
     // Cleanup: keep only node a's ID
     sel.cleanup_stale(|id| *id == id_a);
@@ -150,7 +153,7 @@ fn selection_replace_all_with_scene_ids() {
     let id_b = scene.object_id(node_b).unwrap();
 
     let mut sel = Selection::new();
-    sel.add(id_a);
+    sel.add(id_a).unwrap();
     sel.replace_all(vec![id_b, id_a]);
     assert_eq!(sel.len(), 2);
 }
@@ -173,14 +176,65 @@ fn selection_kind_variety() {
     let pl_id = scene.object_id_for_point_light(pl).unwrap();
 
     let mut sel = Selection::new();
-    sel.add(node_id);
-    sel.add(pl_id);
+    sel.add(node_id).unwrap();
+    sel.add(pl_id).unwrap();
     assert_eq!(sel.len(), 2);
     assert_eq!(node_id.kind(), ObjectKind::Node);
     assert_eq!(pl_id.kind(), ObjectKind::PointLight);
 }
 
 // ── EditorCamera tests ─────────────────────────────────────────────────
+
+#[test]
+fn editor_camera_focus_on_many_works() {
+    let mut cam = EditorCamera::default();
+    let aabbs = [
+        Aabb::from_min_max(Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0)),
+        Aabb::from_min_max(Vec3::new(3.0, 0.0, 0.0), Vec3::new(5.0, 1.0, 1.0)),
+    ];
+    assert!(cam.focus_on_many(&aabbs).is_ok());
+    // Center should be between (-1, 1) and (3, 5) -> (1, 3) roughly
+    let target = cam.orbit().target;
+    assert!(target.x > -1.5 && target.x < 6.0);
+}
+
+#[test]
+fn editor_camera_to_camera_view_is_finite() {
+    let cam = EditorCamera::default();
+    let cv = cam.to_camera_view(800, 600);
+    assert!(cv.view.is_finite());
+    assert!(cv.projection.is_finite());
+    assert!(cv.position.is_finite());
+}
+
+#[test]
+fn editor_camera_screen_to_ray_orthographic() {
+    let mut cam = EditorCamera::default();
+    cam.set_orthographic(5.0, 0.1, 500.0).unwrap();
+    let ray = cam
+        .screen_to_ray((400.0, 300.0), (800, 600))
+        .expect("should produce ray");
+    assert!(ray.origin.is_finite());
+    assert!(ray.direction.is_finite());
+    // Orthographic rays should all be parallel (direction = camera forward).
+    let forward = (cam.orbit().target - cam.eye_position()).normalize();
+    assert!(
+        ray.direction.dot(forward) > 0.99,
+        "ortho ray should be parallel to view direction"
+    );
+}
+
+#[test]
+fn editor_camera_screen_to_ray_orthographic_corner_origin_differs() {
+    let mut cam = EditorCamera::default();
+    cam.set_orthographic(5.0, 0.1, 500.0).unwrap();
+    let ray_center = cam.screen_to_ray((400.0, 300.0), (800, 600)).unwrap();
+    let ray_corner = cam.screen_to_ray((0.0, 0.0), (800, 600)).unwrap();
+    // Ortho rays share the same direction...
+    assert!((ray_center.direction - ray_corner.direction).length() < 0.001);
+    // ...but different origin points on the near plane.
+    assert!((ray_center.origin - ray_corner.origin).length() > 0.1);
+}
 
 #[test]
 fn editor_camera_default_is_perspective() {

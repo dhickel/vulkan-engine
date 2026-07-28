@@ -39,10 +39,10 @@ pub use crate::debug_ui::{
     DebugViewDescriptor, DebugViewId,
 };
 pub use crate::object::query::{
-    EditorPickResult, EditorProxyPolicy, RayHit, UnknownBoundsPolicy, VolumeHit, VolumeQuery,
-    VolumeShape,
+    EditorPickResult, EditorProxyPolicy, ObjectQueryFilter, RayHit, UnknownBoundsPolicy,
+    VolumeHit, VolumeQuery, VolumeShape,
 };
-pub use crate::object::selection::Selection;
+pub use crate::object::selection::{Selection, SelectionChange};
 pub use crate::object::ObjectId;
 pub use crate::scene::SceneNodeId;
 pub use assets::{
