@@ -46,7 +46,7 @@ use crate::vulkan::vk_types::PendingTransition;
 use crate::vulkan::vk_types::*;
 use crate::vulkan::vk_util;
 use ash::vk;
-use log::{error, info, warn};
+use log::{error, info};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use vk_mem::Allocator;

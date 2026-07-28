@@ -2379,6 +2379,96 @@ impl SceneWorld {
             mount.state.inline_model_bounds = bounds;
         }
     }
+
+    // ── Component accessors ──────────────────────────────────────────
+
+    /// Attach a prevalidated component envelope to the node's record.
+    pub(crate) fn attach_component(
+        &mut self,
+        node_id: SceneNodeId,
+        envelope: crate::object::component::ComponentEnvelope,
+    ) -> Result<(), crate::object::component::ComponentError> {
+        let record = self
+            .get_node_record_mut(node_id)
+            .ok_or_else(|| {
+                use crate::object::component::ComponentError;
+                ComponentError::InvalidEnvelope("node not found".into())
+            })?;
+        record.component_store.attach(envelope)
+    }
+
+    /// Remove a component instance from the node's record by key and instance ID.
+    pub(crate) fn remove_component(
+        &mut self,
+        node_id: SceneNodeId,
+        key: &crate::object::component::ComponentKey,
+        instance_id: &crate::object::component::ComponentInstanceId,
+    ) -> Option<crate::object::component::ComponentEnvelope> {
+        self.get_node_record_mut(node_id)
+            .and_then(|record| record.component_store.remove(key, instance_id))
+    }
+
+    /// Enumerate all component envelopes for a node.
+    pub(crate) fn component_envelopes(
+        &self,
+        node_id: SceneNodeId,
+    ) -> Option<impl Iterator<Item = &crate::object::component::ComponentEnvelope>> {
+        self.get_node_record(node_id)
+            .map(|record| record.component_store.envelopes())
+    }
+
+    /// Enumerate component envelopes of a given type for a node.
+    pub(crate) fn component_envelopes_by_key(
+        &self,
+        node_id: SceneNodeId,
+        key: &crate::object::component::ComponentKey,
+    ) -> Option<impl Iterator<Item = &crate::object::component::ComponentEnvelope>> {
+        self.get_node_record(node_id)
+            .map(|record| record.component_store.envelopes_by_key(key))
+    }
+
+    /// Get a typed component instance by key and instance ID.
+    pub(crate) fn component_downcast<T: 'static>(
+        &self,
+        node_id: SceneNodeId,
+        key: &crate::object::component::ComponentKey,
+        instance_id: &crate::object::component::ComponentInstanceId,
+    ) -> Result<&T, crate::object::component::ComponentError> {
+        let record = self
+            .get_node_record(node_id)
+            .ok_or_else(|| {
+                crate::object::component::ComponentError::InvalidEnvelope(
+                    "node not found".into(),
+                )
+            })?;
+        record.component_store.downcast::<T>(key, instance_id)
+    }
+
+    /// Iterate typed hydrated instances of a given component type on a node.
+    pub(crate) fn component_typed_instances<T: 'static>(
+        &self,
+        node_id: SceneNodeId,
+        key: &crate::object::component::ComponentKey,
+    ) -> Option<
+        impl Iterator<
+            Item = (
+                &crate::object::component::ComponentEnvelope,
+                &T,
+            ),
+        >,
+    > {
+        self.get_node_record(node_id)
+            .map(|record| record.component_store.typed_instances::<T>(key))
+    }
+
+    /// Get a mutable reference to the component store for a node.
+    pub(crate) fn component_store_mut(
+        &mut self,
+        node_id: SceneNodeId,
+    ) -> Option<&mut crate::object::component::ComponentStore> {
+        self.get_node_record_mut(node_id)
+            .map(|record| &mut record.component_store)
+    }
 }
 
 /// Compute a world-space pickable AABB for a node using an on-the-fly

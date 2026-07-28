@@ -7,10 +7,14 @@ use serde::{Deserialize, Serialize};
 use crate::api::assets::{AssetManager, EnvironmentSource};
 use crate::data::handles::{EnvironmentHandle, MeshHandle};
 use crate::data::validation::{ValidationArea, ValidationDiagnostic, ValidationError};
+use crate::object::component::{
+    hydrate_all, hydrate_all_by_key, ComponentKey, ComponentEnvelope, ComponentInstanceId,
+    ComponentRegistry,
+};
 use crate::object::identity::ObjectId;
 use crate::scene::command::{Command, CommandHistory, CommandResult};
 use crate::scene::object_store::{
-    mint_persistent_id, ObjectHandle, ObjectRecord,
+    ObjectHandle, ObjectRecord,
 };
 use crate::scene::render_submission::{
     RenderSubmission, MAX_DIRECTIONAL_LIGHTS_GPU, MAX_POINT_LIGHTS_GPU, MAX_SPOT_LIGHTS_GPU,
@@ -2023,6 +2027,111 @@ impl Scene {
             }
         }
     }
+
+    // ── Component API ───────────────────────────────────────────────
+
+    /// Attach a prevalidated component envelope to a scene node.
+    ///
+    /// The envelope must pass all limit checks (size, depth, attachment count)
+    /// before being stored.
+    pub fn attach_component(
+        &mut self,
+        node: SceneNodeId,
+        envelope: ComponentEnvelope,
+    ) -> Result<(), SceneError> {
+        self.validate_node(node)?;
+        self.world
+            .attach_component(node, envelope)
+            .map_err(|e| SceneError::InvalidMutation(format!("component attach: {e}")))
+    }
+
+    /// Remove a component instance from a scene node by key and instance ID.
+    pub fn remove_component(
+        &mut self,
+        node: SceneNodeId,
+        key: &ComponentKey,
+        instance_id: &ComponentInstanceId,
+    ) -> Result<(), SceneError> {
+        self.validate_node(node)?;
+        self.world
+            .remove_component(node, key, instance_id)
+            .map(|_| ())
+            .ok_or_else(|| {
+                SceneError::InvalidMutation(format!(
+                    "component instance '{instance_id}' not found for key '{key}'"
+                ))
+            })
+    }
+
+    /// Enumerate all component envelopes for a scene node.
+    pub fn component_envelopes(
+        &self,
+        node: SceneNodeId,
+    ) -> Result<Vec<ComponentEnvelope>, SceneError> {
+        self.world
+            .component_envelopes(node)
+            .map(|iter| iter.cloned().collect())
+            .ok_or_else(|| SceneError::InvalidNode(node))
+    }
+
+    /// Enumerate all component envelopes of a given component key for a node.
+    pub fn component_envelopes_by_key(
+        &self,
+        node: SceneNodeId,
+        key: &ComponentKey,
+    ) -> Result<Vec<ComponentEnvelope>, SceneError> {
+        self.world
+            .component_envelopes_by_key(node, key)
+            .map(|iter| iter.cloned().collect())
+            .ok_or_else(|| SceneError::InvalidNode(node))
+    }
+
+    /// Get a typed component instance by downcast.
+    pub fn component_downcast<T: 'static>(
+        &self,
+        node: SceneNodeId,
+        key: &ComponentKey,
+        instance_id: &ComponentInstanceId,
+    ) -> Result<&T, SceneError> {
+        self.world
+            .component_downcast::<T>(node, key, instance_id)
+            .map_err(|e| SceneError::InvalidMutation(format!("component downcast: {e}")))
+    }
+
+    /// Hydrate all components on a node using a caller-owned registry.
+    ///
+    /// Unknown types remain as opaque canonical JSON.
+    pub fn hydrate_components(
+        &mut self,
+        node: SceneNodeId,
+        registry: &ComponentRegistry,
+    ) -> Result<usize, SceneError> {
+        self.validate_node(node)?;
+        let store = self
+            .world
+            .component_store_mut(node)
+            .ok_or_else(|| SceneError::InvalidNode(node))?;
+        hydrate_all(registry, store).map_err(|e| {
+            SceneError::InvalidMutation(format!("component hydration: {e}"))
+        })
+    }
+
+    /// Hydrate all components of a given key on a node.
+    pub fn hydrate_components_by_key(
+        &mut self,
+        node: SceneNodeId,
+        registry: &ComponentRegistry,
+        key: &ComponentKey,
+    ) -> Result<usize, SceneError> {
+        self.validate_node(node)?;
+        let store = self
+            .world
+            .component_store_mut(node)
+            .ok_or_else(|| SceneError::InvalidNode(node))?;
+        hydrate_all_by_key(registry, store, key).map_err(|e| {
+            SceneError::InvalidMutation(format!("component hydration by key: {e}"))
+        })
+    }
 }
 
 fn map_node_ref_error(node: SceneNodeId, err: SceneNodeRefError) -> SceneError {
@@ -2663,7 +2772,7 @@ impl SerializedScene {
                 Some(light.id.clone()),
                 light_group_parent,
             );
-            let id = scene.world.add_point_light_with_record(PointLight {
+            let _id = scene.world.add_point_light_with_record(PointLight {
                 color: pl.sanitize_color(),
                 ..pl
             }, record);

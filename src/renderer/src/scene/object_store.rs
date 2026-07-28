@@ -18,9 +18,9 @@
 
 use crate::api::scene::{
     DirectionalLight, DirectionalLightId, DirectionalShadowConfig, PointLight, PointLightId,
-    SerializedCollisionBody, SerializedCollisionCollider, SerializedCollisionComponent,
-    SerializedCollisionShape, SerializedVisibility, SpotLight, SpotLightId,
+    SerializedCollisionComponent, SerializedVisibility, SpotLight, SpotLightId,
 };
+use crate::object::component::ComponentStore;
 use crate::object::identity::SceneRuntimeId;
 use crate::scene::scene_world::{SceneNode, SceneNodeId};
 use engine_events::{ObjectKind, SceneObjectId};
@@ -48,9 +48,8 @@ pub struct ObjectRecord {
     pub prefab: Option<serde_json::Value>,
     /// Shadow configuration for directional lights.
     pub directional_shadow_config: Option<DirectionalShadowConfig>,
-    // Phase 03: component-store field (empty for now).
-    #[allow(dead_code)]
-    component_store: Vec<u8>,
+    /// Multi-instance component store (canonical JSON + typed views).
+    pub component_store: ComponentStore,
 }
 
 impl ObjectRecord {
@@ -65,7 +64,7 @@ impl ObjectRecord {
             collision: None,
             prefab: None,
             directional_shadow_config: None,
-            component_store: Vec::new(),
+            component_store: ComponentStore::new(),
         }
     }
 
@@ -88,7 +87,7 @@ impl ObjectRecord {
             collision,
             prefab,
             directional_shadow_config,
-            component_store: Vec::new(),
+            component_store: ComponentStore::new(),
         }
     }
 }
@@ -252,7 +251,7 @@ impl ObjectRecord {
             collision: None,
             prefab: None,
             directional_shadow_config: None,
-            component_store: Vec::new(),
+            component_store: ComponentStore::new(),
         }
     }
 
@@ -270,7 +269,7 @@ impl ObjectRecord {
             collision: None,
             prefab: None,
             directional_shadow_config: None,
-            component_store: Vec::new(),
+            component_store: ComponentStore::new(),
         }
     }
 
@@ -288,7 +287,7 @@ impl ObjectRecord {
             collision: None,
             prefab: None,
             directional_shadow_config: None,
-            component_store: Vec::new(),
+            component_store: ComponentStore::new(),
         }
     }
 
@@ -306,7 +305,7 @@ impl ObjectRecord {
             collision: None,
             prefab: None,
             directional_shadow_config: None,
-            component_store: Vec::new(),
+            component_store: ComponentStore::new(),
         }
     }
 }
