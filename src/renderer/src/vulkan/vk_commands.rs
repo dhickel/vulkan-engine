@@ -46,6 +46,8 @@ use crate::vulkan::vk_types::PendingTransition;
 use crate::vulkan::vk_types::*;
 use crate::vulkan::vk_util;
 use ash::vk;
+#[cfg(feature = "bsp")]
+use log::warn;
 use log::{error, info};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};

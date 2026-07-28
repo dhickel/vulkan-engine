@@ -1766,7 +1766,10 @@ impl VkRenderCore {
         Ok((render, scene_world))
     }
 
-    pub fn rebuild_swapchain(&mut self, new_size: Extent2D) -> Result<(), SwapchainRebuildFailure> {
+    pub(crate) fn rebuild_swapchain(
+        &mut self,
+        new_size: Extent2D,
+    ) -> Result<(), SwapchainRebuildFailure> {
         if self.surface_mode.is_headless() {
             self.window_state.update_curr_size(new_size);
             return Ok(());

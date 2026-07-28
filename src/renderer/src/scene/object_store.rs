@@ -41,9 +41,9 @@ pub struct ObjectRecord {
     /// When this is a light, the persistent node ID that groups it.
     pub light_group_parent: Option<SceneObjectId>,
     /// Editor visibility / lock / layer metadata (nodes only at present).
-    pub visibility: Option<SerializedVisibility>,
+    pub(crate) visibility: Option<SerializedVisibility>,
     /// Authored collision component (nodes only at present).
-    pub collision: Option<SerializedCollisionComponent>,
+    pub(crate) collision: Option<SerializedCollisionComponent>,
     /// Prefab-authored metadata blob.
     pub prefab: Option<serde_json::Value>,
     /// Shadow configuration for directional lights.
