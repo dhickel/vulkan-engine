@@ -240,6 +240,12 @@ impl SceneWorld {
         self.provenance
     }
 
+    /// Whether an object identity was minted by this scene, regardless of
+    /// whether its slot is still live. Used to reject cross-scene snapshots.
+    pub(crate) fn owns_object_provenance(&self, id: ObjectId) -> bool {
+        id.provenance() == self.provenance
+    }
+
     /// Test-only: artificially push a node slot's generation to u32::MAX.
     #[doc(hidden)]
     pub fn test_set_generation_max(&mut self, id: SceneNodeId) -> bool {
@@ -652,6 +658,27 @@ impl SceneWorld {
                 .position(|s| s.id == parent_id.unwrap_or(SceneNodeId::new(u32::MAX, 0)))
                 .unwrap_or(usize::MAX),
         });
+    }
+
+    /// Return a subtree's live node identities in deterministic
+    /// parent-before-child order.
+    pub(crate) fn subtree_node_ids_preorder(&self, node_id: SceneNodeId) -> Vec<ObjectId> {
+        let mut ids = Vec::new();
+        self.collect_subtree_node_ids_preorder(node_id, &mut ids);
+        ids
+    }
+
+    fn collect_subtree_node_ids_preorder(&self, node_id: SceneNodeId, ids: &mut Vec<ObjectId>) {
+        let Some(id) = self.object_id_for_node(node_id) else {
+            return;
+        };
+        ids.push(id);
+        let Some(node) = self.get_node(node_id) else {
+            return;
+        };
+        for child in node.children.iter().copied() {
+            self.collect_subtree_node_ids_preorder(child, ids);
+        }
     }
 
     pub(crate) fn clone_subtree(&self, node_id: SceneNodeId) -> Option<RestorableSceneSubtree> {
@@ -1960,8 +1987,46 @@ impl SceneWorld {
                 expected_scene: format!("{:?}", self.provenance),
             });
         }
-        self.resolve_object(id)
-            .ok_or(ObjectError::InvalidObject(id))
+        match id.kind() {
+            ObjectKind::Node => self
+                .validate_node_ref(SceneNodeId::new(id.slot(), id.generation()))
+                .map_err(|err| match err {
+                    SceneNodeRefError::OutOfBounds => ObjectError::InvalidObject(id),
+                    SceneNodeRefError::Vacant => ObjectError::VacantObject(id),
+                    SceneNodeRefError::GenerationMismatch => ObjectError::StaleGeneration(id),
+                })
+                .map(|_| ObjectHandle::Node(SceneNodeId::new(id.slot(), id.generation()))),
+            ObjectKind::PointLight => {
+                let light = PointLightId { slot: id.slot(), generation: id.generation() };
+                self.validate_point_light_ref(light)
+                    .map_err(|err| match err {
+                        PointLightRefError::OutOfBounds => ObjectError::InvalidObject(id),
+                        PointLightRefError::Vacant => ObjectError::VacantObject(id),
+                        PointLightRefError::GenerationMismatch => ObjectError::StaleGeneration(id),
+                    })
+                    .map(|_| ObjectHandle::PointLight(light))
+            }
+            ObjectKind::DirectionalLight => {
+                let light = DirectionalLightId { slot: id.slot(), generation: id.generation() };
+                self.validate_directional_light_ref(light)
+                    .map_err(|err| match err {
+                        DirectionalLightRefError::OutOfBounds => ObjectError::InvalidObject(id),
+                        DirectionalLightRefError::Vacant => ObjectError::VacantObject(id),
+                        DirectionalLightRefError::GenerationMismatch => ObjectError::StaleGeneration(id),
+                    })
+                    .map(|_| ObjectHandle::DirectionalLight(light))
+            }
+            ObjectKind::SpotLight => {
+                let light = SpotLightId { slot: id.slot(), generation: id.generation() };
+                self.validate_spot_light_ref(light)
+                    .map_err(|err| match err {
+                        SpotLightRefError::OutOfBounds => ObjectError::InvalidObject(id),
+                        SpotLightRefError::Vacant => ObjectError::VacantObject(id),
+                        SpotLightRefError::GenerationMismatch => ObjectError::StaleGeneration(id),
+                    })
+                    .map(|_| ObjectHandle::SpotLight(light))
+            }
+        }
     }
 
     /// Look up an ObjectId by persistent SceneObjectId.
@@ -2929,24 +2994,18 @@ impl SceneWorld {
     // ── Subtree restoration ─────────────────────────────────────────
 
     /// Restore a subtree from a snapshot and reattach previously detached
-    /// grouped lights.
+    /// grouped lights. Validation completes before any node or relation changes.
     pub(crate) fn restore_subtree_with_lights(
         &mut self,
         subtree: RestorableSceneSubtree,
         detached_lights: &[crate::scene::object_store::DetachedLightSnapshot],
-    ) -> (SceneNodeId, Vec<ObjectId>) {
+    ) -> Result<(SceneNodeId, Vec<ObjectId>), String> {
+        self.validate_restore_subtree_with_lights(&subtree, detached_lights)?;
         let new_root = self.restore_subtree(subtree);
-        let new_ids = vec![self
-            .object_id_for_node(new_root)
-            .expect("just-created node must have object ID")];
-
-        // Reattach grouped lights to the restored nodes.
-        // Map old persistent IDs to new ones.
-        let mut persistent_remap: HashMap<SceneObjectId, SceneObjectId> = HashMap::new();
-        self.collect_restored_persistent_map(new_root, &mut persistent_remap);
+        let new_ids = self.subtree_node_ids_preorder(new_root);
 
         for dl in detached_lights {
-            let new_parent = persistent_remap.get(&dl.old_group_parent).cloned();
+            let new_parent = Some(dl.old_group_parent.clone());
             match dl.kind {
                 ObjectKind::PointLight => {
                     if let Some(handle) = self.reverse_index.get(&dl.persistent_id) {
@@ -2981,26 +3040,45 @@ impl SceneWorld {
             }
         }
 
-        (new_root, new_ids)
+        Ok((new_root, new_ids))
     }
 
-    /// Collect a map from old persistent IDs to new ones after restoration.
-    fn collect_restored_persistent_map(
+    fn validate_restore_subtree_with_lights(
         &self,
-        node_id: SceneNodeId,
-        map: &mut HashMap<SceneObjectId, SceneObjectId>,
-    ) {
-        if let Some(record) = self.get_node_record(node_id) {
-            // Restore creates new persistent IDs, so this records the new one.
-            map.insert(record.persistent_id.clone(), record.persistent_id.clone());
-        }
-        if let Some(node) = self.get_node(node_id) {
-            for child_id in node.children.clone() {
-                if self.is_valid_node_id(child_id) {
-                    self.collect_restored_persistent_map(child_id, map);
-                }
+        subtree: &RestorableSceneSubtree,
+        detached_lights: &[crate::scene::object_store::DetachedLightSnapshot],
+    ) -> Result<(), String> {
+        let subtree_ids = self.collect_subtree_persistent_ids(subtree);
+        let subtree_set: std::collections::HashSet<&SceneObjectId> = subtree_ids.iter().collect();
+
+        for persistent_id in &subtree_ids {
+            if self.reverse_index.contains_key(persistent_id) {
+                return Err(format!(
+                    "cannot restore subtree: persistent ID {persistent_id} already exists"
+                ));
             }
         }
+        for detached in detached_lights {
+            if !subtree_set.contains(&detached.old_group_parent) {
+                return Err(format!(
+                    "cannot restore grouped light {}: parent {} is absent from snapshot",
+                    detached.persistent_id, detached.old_group_parent
+                ));
+            }
+            let Some(handle) = self.reverse_index.get(&detached.persistent_id) else {
+                return Err(format!(
+                    "cannot restore grouped light {}: light no longer exists",
+                    detached.persistent_id
+                ));
+            };
+            if handle.kind() != detached.kind {
+                return Err(format!(
+                    "cannot restore grouped light {}: kind changed",
+                    detached.persistent_id
+                ));
+            }
+        }
+        Ok(())
     }
 
     // ── Duplication ──────────────────────────────────────────────────
@@ -3036,6 +3114,7 @@ impl SceneWorld {
         new_record.stable_id = None;
 
         let mut new_node = subtree.node.clone();
+        new_node.stable_id = None;
         new_node.parent = parent;
         new_node.children.clear();
         new_node.dirty = true;

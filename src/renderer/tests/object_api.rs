@@ -8,7 +8,7 @@
 
 use glam::{Mat4, Vec3, Vec4};
 use renderer::{
-    DirectionalLight, PointLight, Scene, SceneError, SpotLight,
+    DirectionalLight, DirectionalShadowConfig, PointLight, Scene, SceneError, SpotLight,
     object::{
         identity::ObjectError,
         ObjectKind, ObjectParent, ObjectTransform,
@@ -252,6 +252,22 @@ fn try_get_wrong_kind_rejected() {
         }
         _ => panic!("expected WrongKind error"),
     }
+}
+
+#[test]
+fn wrong_scene_precedes_kind_validation() {
+    let mut source = new_scene();
+    let foreign = source.create_point_light(PointLight {
+        position: Vec3::ZERO,
+        color: Vec3::ONE,
+        intensity: 1.0,
+        range: 10.0,
+    }).unwrap();
+    let foreign_id = source.object_id_for_point_light(foreign).unwrap();
+
+    let target = new_scene();
+    let err = target.try_get_node_id(foreign_id).unwrap_err();
+    assert!(matches!(err, SceneError::Object(ObjectError::WrongScene { .. })));
 }
 
 // ── Unified Transform API ──────────────────────────────────────────────
@@ -512,6 +528,33 @@ fn light_group_parent_must_be_node() {
     }
 }
 
+#[test]
+fn grouping_all_light_kinds_preserves_world_payload() {
+    let mut scene = new_scene();
+    let group = scene.create_node_default(None).unwrap();
+    let group_id = scene.object_id(group).unwrap();
+    let point = scene.create_point_light(PointLight {
+        position: Vec3::new(1.0, 2.0, 3.0), color: Vec3::ONE, intensity: 1.0, range: 10.0,
+    }).unwrap();
+    let directional = scene.add_directional_light(DirectionalLight {
+        direction: Vec3::new(0.2, 0.7, -0.3).normalize(), color: Vec3::ONE, intensity: 1.0,
+    }).unwrap();
+    let spot = scene.create_spot_light(SpotLight::new(
+        Vec3::new(4.0, 5.0, 6.0), Vec3::new(0.1, -0.4, -0.9).normalize(),
+        Vec3::ONE, 1.0, 10.0, 0.1, 0.5,
+    )).unwrap();
+
+    for id in [
+        scene.object_id_for_point_light(point).unwrap(),
+        scene.object_id_for_directional_light(directional).unwrap(),
+        scene.object_id_for_spot_light(spot).unwrap(),
+    ] {
+        let before = scene.get_object_transform(id).unwrap();
+        scene.set_object_parent(id, ObjectParent::Node(group_id)).unwrap();
+        assert_eq!(scene.get_object_transform(id).unwrap(), before);
+    }
+}
+
 // ── Subtree Removal / Restoration ──────────────────────────────────────
 
 #[test]
@@ -537,6 +580,25 @@ fn node_subtree_remove_and_restore() {
     // New root should be valid
     let new_root = scene.try_get_node_id(new_root_oid).unwrap();
     assert!(scene.is_valid_node(new_root));
+}
+
+#[test]
+fn subtree_restore_reattaches_grouped_lights_without_payload_change() {
+    let mut scene = new_scene();
+    let root = scene.create_node_default(None).unwrap();
+    let root_id = scene.object_id(root).unwrap();
+    let light = scene.create_point_light(PointLight {
+        position: Vec3::new(7.0, 8.0, 9.0), color: Vec3::ONE, intensity: 2.0, range: 20.0,
+    }).unwrap();
+    let light_id = scene.object_id_for_point_light(light).unwrap();
+    let payload = scene.get_object_transform(light_id).unwrap();
+    scene.set_object_parent(light_id, ObjectParent::Node(root_id)).unwrap();
+
+    let snapshot = scene.remove_node_subtree(root).unwrap();
+    assert_eq!(scene.get_object_parent(light_id).unwrap(), ObjectParent::None);
+    let outcome = scene.restore_subtree(snapshot).unwrap();
+    assert_eq!(scene.get_object_parent(light_id).unwrap(), ObjectParent::Node(outcome.created_roots[0]));
+    assert_eq!(scene.get_object_transform(light_id).unwrap(), payload);
 }
 
 #[test]
@@ -584,6 +646,21 @@ fn duplicate_node_with_children() {
 }
 
 #[test]
+fn duplicate_node_never_implicitly_duplicates_grouped_lights() {
+    let mut scene = new_scene();
+    let node = scene.create_node_default(None).unwrap();
+    let node_id = scene.object_id(node).unwrap();
+    let light = scene.create_point_light(PointLight {
+        position: Vec3::ZERO, color: Vec3::ONE, intensity: 1.0, range: 10.0,
+    }).unwrap();
+    let light_id = scene.object_id_for_point_light(light).unwrap();
+    scene.set_object_parent(light_id, ObjectParent::Node(node_id)).unwrap();
+
+    scene.duplicate_node(node, None).unwrap();
+    assert_eq!(scene.objects_of_kind(ObjectKind::PointLight).len(), 1);
+}
+
+#[test]
 fn duplicate_point_light_preserves_world_state() {
     let mut scene = new_scene();
     let pl = scene.create_point_light(PointLight {
@@ -612,6 +689,10 @@ fn duplicate_directional_light_shadow_non_owning() {
         intensity: 1.0,
     }).unwrap();
 
+    scene.set_directional_shadow_config(dl, DirectionalShadowConfig {
+        enabled: true,
+        ..Default::default()
+    }).unwrap();
     let outcome = scene.duplicate_directional_light(dl).unwrap();
     let new_oid = outcome.created_roots[0];
     let new_dl_id = scene.try_get_directional_light_id(new_oid).unwrap();
@@ -620,6 +701,7 @@ fn duplicate_directional_light_shadow_non_owning() {
     let record = scene.world().get_directional_light_record(new_dl_id);
     assert!(record.is_some());
     assert!(record.unwrap().directional_shadow_config.is_none());
+    assert_eq!(scene.shadow_casting_directional_light_id(), Some(dl));
 }
 
 #[test]

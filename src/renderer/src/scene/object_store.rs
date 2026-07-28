@@ -21,7 +21,7 @@ use crate::api::scene::{
     SerializedCollisionComponent, SerializedVisibility, SpotLight, SpotLightId,
 };
 use crate::object::component::ComponentStore;
-use crate::object::identity::SceneRuntimeId;
+use crate::object::identity::{ObjectId, SceneRuntimeId};
 use crate::scene::scene_world::{SceneNode, SceneNodeId};
 use engine_events::{ObjectKind, SceneObjectId};
 
@@ -318,6 +318,9 @@ impl ObjectRecord {
 /// so callers can hold and restore it, but its fields are crate-private.
 #[derive(Clone, Debug)]
 pub struct RemovalSnapshotData {
+    /// Runtime IDs in deterministic parent-before-child order before removal.
+    /// They let restoration report a complete old-to-new runtime remap.
+    pub(crate) old_nodes: Vec<ObjectId>,
     /// The serialized node subtree root (if this was a node removal).
     pub(crate) subtree: Option<super::scene_world::RestorableSceneSubtree>,
     /// Surviving grouped lights whose group parent was in the removed set.

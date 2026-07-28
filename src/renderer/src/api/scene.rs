@@ -2304,6 +2304,7 @@ impl Scene {
 
     /// Try to extract a [`SceneNodeId`] from an [`ObjectId`].
     pub fn try_get_node_id(&self, id: ObjectId) -> Result<SceneNodeId, SceneError> {
+        self.validate_object(id)?;
         if id.kind() != ObjectKind::Node {
             return Err(SceneError::Object(ObjectError::WrongKind {
                 object: id,
@@ -2318,6 +2319,7 @@ impl Scene {
 
     /// Try to extract a [`PointLightId`] from an [`ObjectId`].
     pub fn try_get_point_light_id(&self, id: ObjectId) -> Result<PointLightId, SceneError> {
+        self.validate_object(id)?;
         if id.kind() != ObjectKind::PointLight {
             return Err(SceneError::Object(ObjectError::WrongKind {
                 object: id,
@@ -2338,6 +2340,7 @@ impl Scene {
         &self,
         id: ObjectId,
     ) -> Result<DirectionalLightId, SceneError> {
+        self.validate_object(id)?;
         if id.kind() != ObjectKind::DirectionalLight {
             return Err(SceneError::Object(ObjectError::WrongKind {
                 object: id,
@@ -2355,6 +2358,7 @@ impl Scene {
 
     /// Try to extract a [`SpotLightId`] from an [`ObjectId`].
     pub fn try_get_spot_light_id(&self, id: ObjectId) -> Result<SpotLightId, SceneError> {
+        self.validate_object(id)?;
         if id.kind() != ObjectKind::SpotLight {
             return Err(SceneError::Object(ObjectError::WrongKind {
                 object: id,
@@ -2743,6 +2747,7 @@ impl Scene {
                 let new_parent = match parent {
                     ObjectParent::None => None,
                     ObjectParent::Node(pid) => {
+                        self.validate_object(pid)?;
                         if pid.kind() != ObjectKind::Node {
                             return Err(SceneError::Object(ObjectError::WrongKind {
                                 object: pid,
@@ -2750,7 +2755,6 @@ impl Scene {
                                 actual: pid.kind(),
                             }));
                         }
-                        self.validate_object(pid)?;
                         Some(SceneNodeId::new(pid.slot(), pid.generation()))
                     }
                 };
@@ -2762,6 +2766,7 @@ impl Scene {
                 let new_group_parent = match parent {
                     ObjectParent::None => None,
                     ObjectParent::Node(pid) => {
+                        self.validate_object(pid)?;
                         if pid.kind() != ObjectKind::Node {
                             return Err(SceneError::Object(ObjectError::WrongKind {
                                 object: pid,
@@ -2769,7 +2774,6 @@ impl Scene {
                                 actual: pid.kind(),
                             }));
                         }
-                        self.validate_object(pid)?;
                         // Get the parent node's persistent ID
                         self.world
                             .get_node_record(SceneNodeId::new(pid.slot(), pid.generation()))
@@ -2884,6 +2888,7 @@ impl Scene {
             .object_persistent_id(root_oid)
             .unwrap_or_else(|| SceneObjectId::new("object.unknown".to_string()));
 
+        let old_nodes = self.world.subtree_node_ids_preorder(node);
         self.world
             .commit_remove_node_subtree(node, &detached_lights);
 
@@ -2891,6 +2896,7 @@ impl Scene {
             root: root_oid,
             root_persistent,
             internal: crate::scene::object_store::RemovalSnapshotData {
+                old_nodes,
                 subtree: Some(subtree),
                 detached_lights,
             },
@@ -2905,41 +2911,53 @@ impl Scene {
     ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
         use crate::object::{ObjectMutationOutcome, ObjectRemap};
 
+        if !self.world.owns_object_provenance(snapshot.root) {
+            return Err(SceneError::Object(ObjectError::WrongScene {
+                object: snapshot.root,
+                expected_scene: format!("{:?}", self.world.provenance()),
+            }));
+        }
         let data = snapshot.internal;
         let subtree = data
             .subtree
             .ok_or_else(|| SceneError::InvalidMutation("empty removal snapshot".to_string()))?;
-
-        let (new_root_id, _new_ids) =
-            self.world
-                .restore_subtree_with_lights(subtree, &data.detached_lights);
-
-        let new_root_oid = self
+        if data.old_nodes.is_empty() {
+            return Err(SceneError::InvalidMutation(
+                "removal snapshot has no original object identities".to_string(),
+            ));
+        }
+        let (new_root_id, new_nodes) = self
             .world
-            .object_id_for_node(new_root_id)
+            .restore_subtree_with_lights(subtree, &data.detached_lights)
+            .map_err(SceneError::InvalidMutation)?;
+        if data.old_nodes.len() != new_nodes.len() {
+            return Err(SceneError::InvalidMutation(
+                "restored subtree remap cardinality mismatch".to_string(),
+            ));
+        }
+
+        let remaps = data.old_nodes.into_iter().zip(new_nodes.iter().copied()).map(|(old, new)| {
+            ObjectRemap {
+                old,
+                new,
+                persistent: self.world.object_persistent_id(new)
+                    .expect("restored node must retain its persistent ID"),
+            }
+        }).collect();
+        let snapshots = new_nodes.iter().copied().map(|id| SceneObjectLifecycleSnapshot {
+            scene: SceneId::new(&self.scene_id),
+            object: self.world.object_persistent_id(id)
+                .expect("restored node must retain its persistent ID"),
+            kind: ObjectKind::Node,
+            name: self.world.object_name(id),
+            parent: None,
+        }).collect();
+        let new_root_oid = self.world.object_id_for_node(new_root_id)
             .ok_or(SceneError::InvalidNode(new_root_id))?;
 
-        let new_persistent = self
-            .world
-            .object_persistent_id(new_root_oid)
-            .unwrap_or_else(|| SceneObjectId::new("object.unknown".to_string()));
-
-        let name = self.world.object_name(new_root_oid);
-        let snapshot_event = SceneObjectLifecycleSnapshot {
-            scene: SceneId::new(&self.scene_id),
-            object: new_persistent.clone(),
-            kind: ObjectKind::Node,
-            name,
-            parent: None,
-        };
-
         Ok(ObjectMutationOutcome {
-            remaps: vec![ObjectRemap {
-                old: snapshot.root,
-                new: new_root_oid,
-                persistent: new_persistent,
-            }],
-            snapshots: vec![snapshot_event],
+            remaps,
+            snapshots,
             created_roots: vec![new_root_oid],
         })
     }
@@ -2982,41 +3000,38 @@ impl Scene {
             self.validate_node(pid)?;
         }
 
-        let new_node_id = self
-            .world
-            .duplicate_node(node, parent)
-            .map_err(|e| SceneError::InvalidMutation(e))?;
-
-        let new_oid = self
-            .world
-            .object_id_for_node(new_node_id)
+        let old_nodes = self.world.subtree_node_ids_preorder(node);
+        let new_node_id = self.world.duplicate_node(node, parent)
+            .map_err(SceneError::InvalidMutation)?;
+        let new_nodes = self.world.subtree_node_ids_preorder(new_node_id);
+        debug_assert_eq!(old_nodes.len(), new_nodes.len());
+        for new_node in new_nodes.iter().copied() {
+            self.ensure_node_persistence_metadata(SceneNodeId::new(
+                new_node.slot(), new_node.generation(),
+            ));
+        }
+        let remaps = old_nodes.into_iter().zip(new_nodes.iter().copied()).map(|(old, new)| {
+            crate::object::ObjectRemap {
+                old,
+                new,
+                persistent: self.world.object_persistent_id(new)
+                    .expect("duplicated node must have a persistent ID"),
+            }
+        }).collect();
+        let snapshots = new_nodes.iter().copied().map(|id| SceneObjectLifecycleSnapshot {
+            scene: SceneId::new(&self.scene_id),
+            object: self.world.object_persistent_id(id)
+                .expect("duplicated node must have a persistent ID"),
+            kind: ObjectKind::Node,
+            name: self.world.object_name(id),
+            parent: None,
+        }).collect();
+        let new_oid = self.world.object_id_for_node(new_node_id)
             .ok_or(SceneError::InvalidNode(new_node_id))?;
 
-        let old_oid = self
-            .world
-            .object_id_for_node(node)
-            .ok_or(SceneError::InvalidNode(node))?;
-
-        let new_persistent = self
-            .world
-            .object_persistent_id(new_oid)
-            .unwrap_or_else(|| SceneObjectId::new("object.unknown".to_string()));
-
-        let name = self.world.object_name(new_oid);
-
         Ok(crate::object::ObjectMutationOutcome {
-            remaps: vec![crate::object::ObjectRemap {
-                old: old_oid,
-                new: new_oid,
-                persistent: new_persistent.clone(),
-            }],
-            snapshots: vec![SceneObjectLifecycleSnapshot {
-                scene: SceneId::new(&self.scene_id),
-                object: new_persistent,
-                kind: ObjectKind::Node,
-                name,
-                parent: None,
-            }],
+            remaps,
+            snapshots,
             created_roots: vec![new_oid],
         })
     }
@@ -3027,6 +3042,11 @@ impl Scene {
         id: PointLightId,
     ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
         self.validate_point_light(id)?;
+        if self.world.active_point_light_count() >= MAX_POINT_LIGHTS_GPU {
+            return Err(SceneError::InvalidPointLight(format!(
+                "point-light cap ({MAX_POINT_LIGHTS_GPU}) reached"
+            )));
+        }
 
         let new_id = self
             .world
@@ -3072,6 +3092,11 @@ impl Scene {
         id: DirectionalLightId,
     ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
         self.validate_directional_light(id)?;
+        if self.world.active_directional_light_count() >= MAX_DIRECTIONAL_LIGHTS_GPU {
+            return Err(SceneError::InvalidDirectionalLight(format!(
+                "directional-light cap ({MAX_DIRECTIONAL_LIGHTS_GPU}) reached"
+            )));
+        }
 
         let new_id = self
             .world
@@ -3121,6 +3146,11 @@ impl Scene {
         id: SpotLightId,
     ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
         self.validate_spot_light(id)?;
+        if self.world.active_spot_light_count() >= MAX_SPOT_LIGHTS_GPU {
+            return Err(SceneError::InvalidSpotLight(format!(
+                "spot-light cap ({MAX_SPOT_LIGHTS_GPU}) reached"
+            )));
+        }
 
         let new_id = self
             .world
@@ -3193,6 +3223,85 @@ impl Scene {
                 self.duplicate_spot_light(sl_id)
             }
         }
+    }
+
+    /// Duplicate explicitly selected objects as one prevalidated operation.
+    /// Node roots use `request.parent`; lights retain organizational grouping.
+    pub fn duplicate_objects(
+        &mut self,
+        request: crate::object::ObjectDuplicateRequest,
+    ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
+        if request.objects.is_empty() {
+            return Err(SceneError::InvalidMutation(
+                "duplicate request must select at least one object".to_string(),
+            ));
+        }
+        let parent = match request.parent {
+            Some(id) => {
+                self.validate_object(id)?;
+                if id.kind() != ObjectKind::Node {
+                    return Err(SceneError::Object(ObjectError::WrongKind {
+                        object: id,
+                        expected: ObjectKind::Node,
+                        actual: id.kind(),
+                    }));
+                }
+                Some(SceneNodeId::new(id.slot(), id.generation()))
+            }
+            None => None,
+        };
+        let mut selected = request.objects;
+        for id in &selected {
+            self.validate_object(*id)?;
+        }
+        selected.sort_by_key(|id| self.world.object_persistent_id(*id)
+            .expect("validated object must have a persistent ID"));
+        if selected.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(SceneError::InvalidMutation(
+                "duplicate request contains the same object more than once".to_string(),
+            ));
+        }
+        let point_count = selected.iter().filter(|id| id.kind() == ObjectKind::PointLight).count();
+        let directional_count = selected.iter()
+            .filter(|id| id.kind() == ObjectKind::DirectionalLight).count();
+        let spot_count = selected.iter().filter(|id| id.kind() == ObjectKind::SpotLight).count();
+        if self.world.active_point_light_count() + point_count > MAX_POINT_LIGHTS_GPU {
+            return Err(SceneError::InvalidPointLight(format!(
+                "point-light cap ({MAX_POINT_LIGHTS_GPU}) reached"
+            )));
+        }
+        if self.world.active_directional_light_count() + directional_count > MAX_DIRECTIONAL_LIGHTS_GPU {
+            return Err(SceneError::InvalidDirectionalLight(format!(
+                "directional-light cap ({MAX_DIRECTIONAL_LIGHTS_GPU}) reached"
+            )));
+        }
+        if self.world.active_spot_light_count() + spot_count > MAX_SPOT_LIGHTS_GPU {
+            return Err(SceneError::InvalidSpotLight(format!(
+                "spot-light cap ({MAX_SPOT_LIGHTS_GPU}) reached"
+            )));
+        }
+
+        let mut combined = crate::object::ObjectMutationOutcome::default();
+        for id in selected {
+            let outcome = match id.kind() {
+                ObjectKind::Node => self.duplicate_node(
+                    SceneNodeId::new(id.slot(), id.generation()), parent,
+                )?,
+                ObjectKind::PointLight => self.duplicate_point_light(PointLightId {
+                    slot: id.slot(), generation: id.generation(),
+                })?,
+                ObjectKind::DirectionalLight => self.duplicate_directional_light(DirectionalLightId {
+                    slot: id.slot(), generation: id.generation(),
+                })?,
+                ObjectKind::SpotLight => self.duplicate_spot_light(SpotLightId {
+                    slot: id.slot(), generation: id.generation(),
+                })?,
+            };
+            combined.remaps.extend(outcome.remaps);
+            combined.snapshots.extend(outcome.snapshots);
+            combined.created_roots.extend(outcome.created_roots);
+        }
+        Ok(combined)
     }
 
     // ── Component remap during duplication ─────────────────────────
