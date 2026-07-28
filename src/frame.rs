@@ -114,6 +114,35 @@ pub fn begin_app_frame(
     frame_clock: &mut FrameClock,
 ) -> AppFrameBeginReport {
     let frame = frame_clock.tick();
+    dispatch_input_events(input, action_events, events, frame)
+}
+
+/// Begin one app-owned frame with a caller-owned [`Time`] service.
+///
+/// Dispatches input and emits lifecycle events like [`begin_app_frame`], then
+/// advances the [`Time`] service with the frame delta. The returned report
+/// includes the frame info; use [`Time::update`] after this call to obtain
+/// the per-frame [`crate::time::TimeUpdate`].
+pub fn begin_app_frame_with_time(
+    input: &mut InputSystem,
+    action_events: &mut InputActionEventEmitter,
+    events: &mut EventBus,
+    time: &mut crate::time::Time,
+) -> AppFrameBeginReport {
+    let frame = time.tick();
+    let report = dispatch_input_events(input, action_events, events, frame);
+    let _update = time.advance(frame.delta);
+    report
+}
+
+/// Shared private logic: dispatch input, emit action events, drain input
+/// stage, and broadcast FrameStarted.
+fn dispatch_input_events(
+    input: &mut InputSystem,
+    action_events: &mut InputActionEventEmitter,
+    events: &mut EventBus,
+    frame: FrameInfo,
+) -> AppFrameBeginReport {
     input.dispatch_frame();
     let action_events_emitted =
         action_events.emit_from_snapshot(events, input.snapshot(), frame.index);

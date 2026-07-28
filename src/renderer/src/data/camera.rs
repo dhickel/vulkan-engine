@@ -608,6 +608,16 @@ impl FPSController {
         self
     }
 
+    /// Mouse sensitivity (radians per pixel of mouse motion).
+    pub fn sensitivity(&self) -> f64 {
+        self.m_sensitivity
+    }
+
+    /// Movement speed in world units per second.
+    pub fn move_speed(&self) -> f32 {
+        self.move_speed
+    }
+
     pub fn update_from_snapshot(
         &mut self,
         snapshot: &InputSnapshot,

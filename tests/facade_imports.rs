@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use engine::prelude::*;
-use engine::{camera, command, events, input, object, render};
+use engine::{camera, command, events, input, object, render, time};
 use engine_events as raw_events;
 use input as raw_input;
 use renderer as raw_renderer;
@@ -10,6 +10,22 @@ use winit::window::Window;
 
 #[test]
 fn facade_and_raw_crate_imports_compile() {
+    // ── Time facade ──
+    let _time_config = time::TimeConfig::default();
+    let mut time_instance = time::Time::new(time::TimeConfig::default()).unwrap();
+    let _update: time::TimeUpdate = time_instance.advance(Duration::from_millis(16));
+    let _: Result<f32, time::TimeError> = time_instance.set_time_scale(1.0);
+    let _: f32 = time_instance.time_scale();
+
+    // ── Axis types from the prelude ──
+    let _contrib = AxisContributor::new(ActionId::new("move.right"), 1.0);
+    let _compound = CompoundAxis::new(vec![_contrib.clone()]);
+    let _axis2d = Axis2D::new(
+        CompoundAxis::new(vec![AxisContributor::new(ActionId::new("x"), 1.0)]),
+        CompoundAxis::new(vec![AxisContributor::new(ActionId::new("y"), 1.0)]),
+        0.1,
+    );
+
     let mut facade_input = input::InputSystem::new();
     facade_input.dispatch_frame();
     let _: input::InputSnapshot = facade_input.snapshot().clone();
@@ -114,6 +130,12 @@ fn facade_and_raw_crate_imports_compile() {
         &mut events::EventBus,
         &mut engine::frame::FrameClock,
     ) -> engine::frame::AppFrameBeginReport = engine::frame::begin_app_frame;
+    let _: fn(
+        &mut input::InputSystem,
+        &mut input::InputActionEventEmitter,
+        &mut events::EventBus,
+        &mut time::Time,
+    ) -> engine::frame::AppFrameBeginReport = engine::frame::begin_app_frame_with_time;
     let _: fn(&mut events::EventBus, u64) -> engine::frame::AppFrameEndReport =
         engine::frame::end_app_frame;
 }
@@ -178,6 +200,9 @@ fn prelude_imports_common_facade_types() {
         _command: Option<Box<dyn Command>>,
         _command_history: Option<CommandHistory>,
         _command_result: Option<CommandResult>,
+        _axis_contrib: Option<AxisContributor>,
+        _compound_axis: Option<CompoundAxis>,
+        _axis2d: Option<Axis2D>,
     ) {
     }
 
@@ -185,6 +210,9 @@ fn prelude_imports_common_facade_types() {
         ActionId::new("jump"),
         EventStage::Input,
         FrameId(0),
+        None,
+        None,
+        None,
         None,
         None,
         None,

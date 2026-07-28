@@ -12,6 +12,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub mod axis;
+
+pub use axis::{Axis2D, AxisContributor, CompoundAxis};
+
 use serde::{Deserialize, Serialize};
 use winit::event::{ElementState, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
@@ -700,6 +704,20 @@ impl InputSystem {
             }
             InputEvent::CursorFocus { entered } => {
                 self.snapshot.cursor_in_window = entered;
+                if !entered {
+                    // Focus loss clears held keyboard/mouse contributions and
+                    // releases edges coherently so no action stays stuck.
+                    for &code in &self.snapshot.keys_down {
+                        self.snapshot.keys_just_released.insert(code);
+                    }
+                    self.snapshot.keys_down.clear();
+                    for &button in &self.snapshot.buttons_down {
+                        self.snapshot.buttons_just_released.insert(button);
+                    }
+                    self.snapshot.buttons_down.clear();
+                    self.snapshot.mouse_delta = (0.0, 0.0);
+                    self.snapshot.scroll_delta_lines = 0.0;
+                }
             }
         }
     }
@@ -2428,6 +2446,43 @@ trigger = { key = "KeyW", mouse_button = "Left" }
             layer.on_frame_end(&snapshot, &mut ctx);
             assert!(!action_state.pressed(&ActionId::new("action")));
         }
+    }
+
+    /// Focus loss clears raw keyboard/mouse state and releases edges.
+    #[test]
+    fn focus_loss_clears_raw_snapshot_keys_buttons_and_delta() {
+        let mut system = InputSystem::new();
+
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::KeyW,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        system.queue_event(InputEvent::MouseButton {
+            button: MouseButton::Left,
+            state: ElementState::Pressed,
+            modifiers: ModifiersState::empty(),
+        });
+        system.queue_mouse_motion((5.0, -3.0));
+        system.queue_scroll_lines(2.0);
+        system.dispatch_frame();
+
+        assert!(system.snapshot().key_down(KeyCode::KeyW));
+        assert!(system.snapshot().mouse_button_down(MouseButton::Left));
+        assert_eq!(system.snapshot().mouse_delta(), (5.0, -3.0));
+        assert_eq!(system.snapshot().scroll_delta_lines(), 2.0);
+
+        // Focus loss clears held keys/buttons and zeroes deltas.
+        system.queue_event(InputEvent::CursorFocus { entered: false });
+        system.dispatch_frame();
+
+        assert!(!system.snapshot().key_down(KeyCode::KeyW));
+        assert!(system.snapshot().key_just_released(KeyCode::KeyW));
+        assert!(!system.snapshot().mouse_button_down(MouseButton::Left));
+        assert!(system.snapshot().mouse_button_just_released(MouseButton::Left));
+        assert_eq!(system.snapshot().mouse_delta(), (0.0, 0.0));
+        assert_eq!(system.snapshot().scroll_delta_lines(), 0.0);
     }
 
     /// Focus loss (CursorFocus{entered:false}) clears active instances.

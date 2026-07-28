@@ -19,14 +19,16 @@ use collision::CollisionWorld;
 use content::{load_content_pack, resolve_content_path};
 use engine::camera::{Camera, FPSController};
 use engine::events::{runtime_event_bus, DispatchReport, EventBus};
-use engine::frame::{FixedStepClock, FixedStepConfig, FrameClock};
 use engine::input::{
-    ActionId, ActionMap, InputActionEventEmitter, InputSystem, LayerDescriptor, LayerPriority,
+    ActionId, ActionMap, Axis2D, AxisContributor, CompoundAxis, InputActionEventEmitter,
+    InputSystem, LayerDescriptor, LayerPriority,
 };
+use engine::time::{Time, TimeConfig};
 use generator::{generate, GeneratorConfig, GeneratorError};
 use layout::{load_level_file, tile_to_world, ParsedLevel};
 use mesh_collider_bridge::MeshColliderBridge;
 use physics::BodyKind;
+use glam::{Quat, Vec2, Vec3};
 use player::{CameraIntentGuard, PlayerState, PLAYER_EYE_HEIGHT};
 use renderer::api::config::{CompressionConfig, TextureCompressionMode};
 use renderer::api::FrameSerial;
@@ -338,13 +340,31 @@ fn run() -> Result<(), AppError> {
     let mut previous_player_position = player.position;
     let mut app_camera = Camera::new(spawn_position);
     let mut app_input = InputSystem::new();
-    let mut fps_controller = install_app_fps_input(&mut app_input);
+    let fps_controller = install_app_fps_input(&mut app_input);
+    let fps_sensitivity = fps_controller.sensitivity();
+    let fps_move_speed = fps_controller.move_speed();
+
+    // Compound digital movement axes: stable intent computed once per app frame.
+    let movement_axis = Axis2D::new(
+        CompoundAxis::new(vec![
+            AxisContributor::new(ActionId::new("move.right"), 1.0),
+            AxisContributor::new(ActionId::new("move.left"), -1.0),
+        ]),
+        CompoundAxis::new(vec![
+            AxisContributor::new(ActionId::new("move.backward"), 1.0),
+            AxisContributor::new(ActionId::new("move.forward"), -1.0),
+        ]),
+        0.1,
+    );
+    let mut camera_yaw: f32 = 0.0;
+
     let mut action_events = InputActionEventEmitter::new();
-    let mut frame_clock = FrameClock::new();
-    let mut fixed_clock = FixedStepClock::new(FixedStepConfig {
+    let mut time = Time::new(TimeConfig {
         step: Duration::from_secs_f32(FIXED_DT),
         max_steps_per_frame: 10,
-    });
+        time_scale: 1.0,
+    })
+    .expect("valid default TimeConfig");
 
     log::info!("Dungeon dogfood initialized, starting event loop");
 
@@ -423,12 +443,14 @@ fn run() -> Result<(), AppError> {
                                 &mut player,
                                 &mut previous_player_position,
                                 &mut app_camera,
-                                &mut fps_controller,
+                                fps_sensitivity,
+                                fps_move_speed,
+                                &mut camera_yaw,
+                                &movement_axis,
                                 &mut app_input,
                                 &mut action_events,
                                 &mut app_events,
-                                &mut frame_clock,
-                                &mut fixed_clock,
+                                &mut time,
                                 &mut reported_manual_captures,
                                 current_size.width,
                                 current_size.height,
@@ -511,20 +533,25 @@ fn render_frame(
     player: &mut PlayerState,
     previous_player_position: &mut glam::Vec3,
     camera: &mut Camera,
-    fps_controller: &mut FPSController,
+    fps_sensitivity: f64,
+    move_speed: f32,
+    camera_yaw: &mut f32,
+    movement_axis: &Axis2D,
     input: &mut InputSystem,
     action_events: &mut InputActionEventEmitter,
     events: &mut EventBus,
-    frame_clock: &mut FrameClock,
-    fixed_clock: &mut FixedStepClock,
+    time: &mut Time,
     reported_manual_captures: &mut HashSet<PathBuf>,
     viewport_width: u32,
     viewport_height: u32,
     headless: bool,
 ) -> Result<renderer::FrameRenderOutcome, RendererError> {
-    let begin_report = engine::frame::begin_app_frame(input, action_events, events, frame_clock);
+    let begin_report =
+        engine::frame::begin_app_frame_with_time(input, action_events, events, time);
     log_dispatch_failures(begin_report.input_dispatch, "dogfood input");
     log_dispatch_failures(begin_report.frame_started, "dogfood lifecycle");
+
+    let time_update = *time.update();
 
     let noclip_toggle = input
         .snapshot()
@@ -546,16 +573,44 @@ fn render_frame(
         log::info!("Manual draw capture triggered");
     }
 
-    // Accumulate real time, sample display-frame input once, then advance the
-    // authoritative player state in fixed simulation steps. Applying the FPS
-    // controller once avoids multiplying this frame's mouse delta when a
-    // catch-up frame runs more than one simulation step.
-    let fixed_update = fixed_clock.update(begin_report.frame.delta);
-    let simulated_seconds = FIXED_DT * fixed_update.steps as f32;
-    fps_controller.update_from_snapshot(input.snapshot(), simulated_seconds, camera);
+    // Build stable movement intent from compound digital axes — computed once
+    // per app frame so pointer delta and axis values do not replay per fixed
+    // simulation step.
+    let (move_x, move_z) = movement_axis.evaluate(input.snapshot());
+    let mouse_delta = input.snapshot().mouse_delta();
+    let up = input.snapshot().action_value(&ActionId::new("move.up"));
+    let down = input
+        .snapshot()
+        .action_value(&ActionId::new("move.down"));
 
-    if fixed_update.steps > 0 {
-        match player.ingest_camera_intent(camera.get_position(), simulated_seconds) {
+    let simulated_seconds = FIXED_DT * time_update.fixed_step_count as f32;
+
+    // Apply camera rotation from captured pointer delta (once).
+    let delta_yaw = -mouse_delta.0 as f32 * fps_sensitivity as f32;
+    *camera_yaw += delta_yaw;
+    camera.update_rotation(
+        delta_yaw,
+        -mouse_delta.1 as f32 * fps_sensitivity as f32,
+    );
+
+    // Build camera-local movement vector (matches FPSController convention:
+    // x = right, y = up, z = forward-in-neg-z).
+    let mut move_vec = Vec3::new(move_x, up - down, move_z);
+    if move_vec.length_squared() > 0.0 {
+        move_vec = move_vec.normalize();
+    }
+    let amount = simulated_seconds * move_speed;
+
+    // Compute world-space displacement for the player (matches
+    // Camera::update_position, which uses only yaw rotation).
+    let yaw_quat = Quat::from_rotation_y(*camera_yaw);
+    let world_disp = yaw_quat * move_vec * amount;
+    camera.update_position(move_vec, amount);
+
+    if time_update.fixed_step_count > 0 {
+        let world_move = Vec2::new(world_disp.x, world_disp.z);
+        match player.ingest_movement_intent(world_move, move_vec.y * move_speed, simulated_seconds)
+        {
             CameraIntentGuard::Accepted => {}
             CameraIntentGuard::Clamped {
                 attempted_displacement,
@@ -574,7 +629,7 @@ fn render_frame(
             }
         }
 
-        for _ in 0..fixed_update.steps {
+        for _ in 0..time_update.fixed_step_count {
             *previous_player_position = player.position;
             collision::resolve_player_step(player, collision_world, FIXED_DT);
             if !player.has_finite_position() {
@@ -600,10 +655,10 @@ fn render_frame(
     }
     camera.set_position(player.position);
 
-    if !fixed_update.dropped_time.is_zero() {
+    if !time_update.dropped_time.is_zero() {
         log::warn!(
             "Dropped {:.3}ms of accumulated simulation time after reaching the fixed-step catch-up limit.",
-            fixed_update.dropped_time.as_secs_f64() * 1_000.0
+            time_update.dropped_time.as_secs_f64() * 1_000.0
         );
     }
 
@@ -614,7 +669,7 @@ fn render_frame(
     camera.set_position(interpolated_player_position(
         *previous_player_position,
         authoritative_position,
-        fixed_update.alpha,
+        time_update.alpha,
     ));
 
     renderer.pump_asset_tasks(32)?;
@@ -1166,13 +1221,28 @@ fn run_headless(
     let mut previous_player_position = player.position;
     let mut app_camera = Camera::new(spawn_position);
     let mut app_input = InputSystem::new();
-    let mut fps_controller = install_app_fps_input(&mut app_input);
+    let fps_controller = install_app_fps_input(&mut app_input);
+    let fps_sensitivity = fps_controller.sensitivity();
+    let fps_move_speed = fps_controller.move_speed();
+    let movement_axis = Axis2D::new(
+        CompoundAxis::new(vec![
+            AxisContributor::new(ActionId::new("move.right"), 1.0),
+            AxisContributor::new(ActionId::new("move.left"), -1.0),
+        ]),
+        CompoundAxis::new(vec![
+            AxisContributor::new(ActionId::new("move.backward"), 1.0),
+            AxisContributor::new(ActionId::new("move.forward"), -1.0),
+        ]),
+        0.1,
+    );
+    let mut camera_yaw: f32 = 0.0;
     let mut action_events = InputActionEventEmitter::new();
-    let mut frame_clock = FrameClock::new();
-    let mut fixed_clock = FixedStepClock::new(FixedStepConfig {
+    let mut time = Time::new(TimeConfig {
         step: Duration::from_secs_f32(FIXED_DT),
         max_steps_per_frame: 10,
-    });
+        time_scale: 1.0,
+    })
+    .expect("valid default TimeConfig");
 
     // Configure frame capture if requested
     let capture_target = headless_opts.capture_target;
@@ -1233,12 +1303,14 @@ fn run_headless(
             &mut player,
             &mut previous_player_position,
             &mut app_camera,
-            &mut fps_controller,
+            fps_sensitivity,
+            fps_move_speed,
+            &mut camera_yaw,
+            &movement_axis,
             &mut app_input,
             &mut action_events,
             &mut app_events,
-            &mut frame_clock,
-            &mut fixed_clock,
+            &mut time,
             &mut reported_manual_captures,
             1280,
             720,

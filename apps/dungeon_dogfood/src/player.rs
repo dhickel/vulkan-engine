@@ -31,6 +31,53 @@ impl PlayerState {
         }
     }
 
+    /// Ingest a sampled movement intent (pre-computed direction + dt).
+    ///
+    /// `move_dir` is the normalized horizontal movement direction in
+    /// world space, derived from an Axis2D evaluation or FPS controller.
+    /// Vertical input is applied only when noclip is active.
+    pub fn ingest_movement_intent(
+        &mut self,
+        move_dir: Vec2,
+        vertical: f32,
+        dt: f32,
+    ) -> CameraIntentGuard {
+        if dt <= 0.0 || !dt.is_finite() {
+            self.velocity = Vec3::ZERO;
+            return CameraIntentGuard::Accepted;
+        }
+
+        if !self.position.is_finite() || !move_dir.is_finite() {
+            self.velocity = Vec3::ZERO;
+            return CameraIntentGuard::RejectedNonFinite;
+        }
+
+        let attempted_displacement = move_dir.length();
+        let applied_horizontal =
+            if attempted_displacement > MAX_HORIZONTAL_DISPLACEMENT_PER_FRAME {
+                move_dir.normalize_or_zero() * MAX_HORIZONTAL_DISPLACEMENT_PER_FRAME
+            } else {
+                move_dir
+            };
+
+        let vertical_velocity = if self.noclip { vertical } else { 0.0 };
+        self.velocity = Vec3::new(
+            applied_horizontal.x / dt,
+            vertical_velocity,
+            applied_horizontal.y / dt,
+        );
+
+        if attempted_displacement > MAX_HORIZONTAL_DISPLACEMENT_PER_FRAME {
+            CameraIntentGuard::Clamped {
+                attempted_displacement,
+                applied_displacement: MAX_HORIZONTAL_DISPLACEMENT_PER_FRAME,
+            }
+        } else {
+            CameraIntentGuard::Accepted
+        }
+    }
+
+    /// Ingest camera intent (legacy path; prefer [`ingest_movement_intent`]).
     pub fn ingest_camera_intent(&mut self, camera_position: Vec3, dt: f32) -> CameraIntentGuard {
         if dt <= 0.0 || !dt.is_finite() {
             self.velocity = Vec3::ZERO;
@@ -118,5 +165,46 @@ mod tests {
 
         assert_eq!(guard, CameraIntentGuard::Accepted);
         assert_eq!(player.velocity, Vec3::new(0.0, 4.0, 0.0));
+    }
+
+    #[test]
+    fn ingest_movement_intent_applies_horizontal_and_noclip_vertical() {
+        let mut player = PlayerState::new(Vec3::ZERO);
+        player.noclip = true;
+
+        let guard = player.ingest_movement_intent(Vec2::new(1.0, 0.0), 2.0, 0.5);
+
+        assert_eq!(guard, CameraIntentGuard::Accepted);
+        assert!((player.velocity.x - 2.0).abs() < 1e-6);
+        assert!((player.velocity.y - 2.0).abs() < 1e-6);
+        assert!((player.velocity.z - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ingest_movement_intent_clamps_large_displacement() {
+        let mut player = PlayerState::new(Vec3::ZERO);
+
+        let guard = player.ingest_movement_intent(Vec2::new(3.0, 4.0), 0.0, 1.0);
+
+        assert_eq!(
+            guard,
+            CameraIntentGuard::Clamped {
+                attempted_displacement: 5.0,
+                applied_displacement: 3.0,
+            }
+        );
+        assert!((player.velocity.x - 1.8).abs() < 1e-3);
+        assert!((player.velocity.y - 0.0).abs() < 1e-3);
+        assert!((player.velocity.z - 2.4).abs() < 1e-3);
+    }
+
+    #[test]
+    fn ingest_movement_intent_rejects_non_finite() {
+        let mut player = PlayerState::new(Vec3::ZERO);
+
+        let guard = player.ingest_movement_intent(Vec2::new(f32::NAN, 0.0), 0.0, 1.0);
+
+        assert_eq!(guard, CameraIntentGuard::RejectedNonFinite);
+        assert_eq!(player.velocity, Vec3::ZERO);
     }
 }
