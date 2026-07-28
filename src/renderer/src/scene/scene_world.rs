@@ -14,7 +14,7 @@ use crate::api::scene::{
     BoundsUnknownReason, DirectionalLight, DirectionalLightId, MeshBoundsEntry, PointLight,
     PointLightId, SceneAssetReference, SceneBounds, SpotLight, SpotLightId,
 };
-use crate::data::camera::{Aabb, Frustum, Ray};
+use crate::data::camera::{Aabb, AabbRayHit, Frustum, Ray};
 use crate::data::gpu_data::SceneDataUBO;
 use crate::data::handles::EnvironmentHandle;
 use crate::data::handles::MeshHandle;
@@ -3253,7 +3253,401 @@ impl SceneWorld {
         // remapping is needed.
         source.clone()
     }
+
+    // ── Query: scratch raycast (read-only, no dirty-flag mutation) ────
+
+    /// Pure read-only raycast returning all hits in deterministic order.
+    ///
+    /// Walks the hierarchy from root, computing world transforms on the fly
+    /// into scratch maps.  Hits are sorted by distance, then
+    /// [`SceneObjectId`], then [`ObjectKind`].  Conservative-visible
+    /// (unknown-bounds) mesh-bearing nodes are excluded.
+    pub(crate) fn raycast_readonly(
+        &self,
+        ray: &Ray,
+    ) -> Vec<crate::object::query::RayHit> {
+        use crate::object::query::RayHit;
+
+        let root_id = match self.root {
+            Some(id) if self.is_valid_node_id(id) => id,
+            _ => return Vec::new(),
+        };
+
+        let mut world_transforms: std::collections::HashMap<SceneNodeId, Mat4> =
+            std::collections::HashMap::with_capacity(self.nodes.len());
+        let mut hits: Vec<RayHit> = Vec::new();
+
+        self.raycast_walk(
+            root_id,
+            Mat4::IDENTITY,
+            ray,
+            &mut world_transforms,
+            &mut hits,
+        );
+
+        crate::object::query::sort_ray_hits(&mut hits);
+        hits
+    }
+
+    /// Recursive read-only walk for raycast_all.
+    fn raycast_walk(
+        &self,
+        node_id: SceneNodeId,
+        parent_world: Mat4,
+        ray: &Ray,
+        world_transforms: &mut std::collections::HashMap<SceneNodeId, Mat4>,
+        hits: &mut Vec<crate::object::query::RayHit>,
+    ) {
+        use crate::object::query::RayHit;
+
+        let node = match self.get_node(node_id) {
+            Some(n) => n,
+            None => return,
+        };
+
+        let world = parent_world * node.local_transform;
+        world_transforms.insert(node_id, world);
+
+        // Test intersection using the same bounds logic as pick_readonly.
+        let hit_info = pick_bounds_readonly(node, &world)
+            .and_then(|aabb| aabb.intersect_ray_hit(ray));
+
+        if let Some(aabb_hit) = hit_info {
+            if let Some(oid) = self.object_id_for_node(node_id) {
+                if let Some(pid) = self.object_persistent_id(oid) {
+                    // Determine if this was from a proxy vs known bound.
+                    let is_proxy = node.mesh_bounds.iter().any(|e| {
+                        matches!(e.bounds, SceneBounds::Proxy(_))
+                    }) || node.local_proxy_bounds.is_some();
+
+                    hits.push(RayHit {
+                        object: oid,
+                        persistent_id: pid,
+                        kind: ObjectKind::Node,
+                        distance: aabb_hit.t,
+                        point: aabb_hit.point,
+                        normal: aabb_hit.normal,
+                        is_proxy,
+                    });
+                }
+            }
+        }
+
+        for child_id in node.children.iter().copied() {
+            if self.is_valid_node_id(child_id) {
+                self.raycast_walk(child_id, world, ray, world_transforms, hits);
+            }
+        }
+    }
+
+    // ── Query: volume query (AABB / frustum) read-only ─────────────────
+
+    /// Collect all objects whose world-space bounds intersect `volume`.
+    pub(crate) fn volume_query_readonly(
+        &self,
+        volume: &crate::object::query::VolumeQuery,
+    ) -> Vec<crate::object::query::VolumeHit> {
+        use crate::object::query::{UnknownBoundsPolicy, VolumeHit};
+
+        let mut hits: Vec<VolumeHit> = Vec::new();
+
+        // Walk nodes.
+        if let Some(root_id) = self.root.filter(|id| self.is_valid_node_id(*id)) {
+            let mut world_transforms: std::collections::HashMap<SceneNodeId, Mat4> =
+                std::collections::HashMap::with_capacity(self.nodes.len());
+            self.volume_walk(root_id, Mat4::IDENTITY, volume, &mut world_transforms, &mut hits);
+        }
+
+        // Walk point lights.
+        for (slot, entry) in self.point_lights.iter().enumerate() {
+            if let Some((light, record)) = &entry.light {
+                if self.volume_hit_point_light(light, volume, record, slot as u32, entry.generation) {
+                    if let Some(oid) = self.object_id_for_point_light(PointLightId {
+                        slot: slot as u32,
+                        generation: entry.generation,
+                    }) {
+                        hits.push(VolumeHit {
+                            object: oid,
+                            persistent_id: record.persistent_id.clone(),
+                            kind: ObjectKind::PointLight,
+                            is_bounded: true,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Directional lights have no bounded volume; skip unless policy says include.
+        if volume.unknown_bounds == UnknownBoundsPolicy::IncludeAsInfinite {
+            for (slot, entry) in self.directional_lights.iter().enumerate() {
+                if entry.light.is_some() {
+                    if let Some(oid) = self.object_id_for_directional_light(DirectionalLightId {
+                        slot: slot as u32,
+                        generation: entry.generation,
+                    }) {
+                        if let Some(pid) = self.object_persistent_id(oid) {
+                            hits.push(VolumeHit {
+                                object: oid,
+                                persistent_id: pid,
+                                kind: ObjectKind::DirectionalLight,
+                                is_bounded: false,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Walk spot lights.
+        for (slot, entry) in self.spot_lights.iter().enumerate() {
+            if let Some((light, record)) = &entry.light {
+                if self.volume_hit_spot_light(light, volume) {
+                    if let Some(oid) = self.object_id_for_spot_light(SpotLightId {
+                        slot: slot as u32,
+                        generation: entry.generation,
+                    }) {
+                        hits.push(VolumeHit {
+                            object: oid,
+                            persistent_id: record.persistent_id.clone(),
+                            kind: ObjectKind::SpotLight,
+                            is_bounded: true,
+                        });
+                    }
+                }
+            }
+        }
+
+        crate::object::query::sort_volume_hits(&mut hits);
+        hits
+    }
+
+    fn volume_walk(
+        &self,
+        node_id: SceneNodeId,
+        parent_world: Mat4,
+        volume: &crate::object::query::VolumeQuery,
+        world_transforms: &mut std::collections::HashMap<SceneNodeId, Mat4>,
+        hits: &mut Vec<crate::object::query::VolumeHit>,
+    ) {
+        use crate::object::query::{UnknownBoundsPolicy, VolumeHit};
+
+        let node = match self.get_node(node_id) {
+            Some(n) => n,
+            None => return,
+        };
+
+        let world = parent_world * node.local_transform;
+        world_transforms.insert(node_id, world);
+
+        // Test node's world bounds against the volume.
+        if let Some(aabb) = pick_bounds_readonly(node, &world) {
+            if volume_intersects_aabb(&volume.volume, &aabb) {
+                if let Some(oid) = self.object_id_for_node(node_id) {
+                    if let Some(pid) = self.object_persistent_id(oid) {
+                        hits.push(VolumeHit {
+                            object: oid,
+                            persistent_id: pid,
+                            kind: ObjectKind::Node,
+                            is_bounded: true,
+                        });
+                    }
+                }
+            }
+        } else if volume.unknown_bounds == UnknownBoundsPolicy::IncludeAsInfinite {
+            // Conservative-visible node: include as unbounded.
+            if let Some(oid) = self.object_id_for_node(node_id) {
+                if let Some(pid) = self.object_persistent_id(oid) {
+                    hits.push(VolumeHit {
+                        object: oid,
+                        persistent_id: pid,
+                        kind: ObjectKind::Node,
+                        is_bounded: false,
+                    });
+                }
+            }
+        }
+
+        for child_id in node.children.iter().copied() {
+            if self.is_valid_node_id(child_id) {
+                self.volume_walk(child_id, world, volume, world_transforms, hits);
+            }
+        }
+    }
+
+    fn volume_hit_point_light(
+        &self,
+        light: &PointLight,
+        volume: &crate::object::query::VolumeQuery,
+        _record: &ObjectRecord,
+        _slot: u32,
+        _generation: u32,
+    ) -> bool {
+        // Point light: small proxy sphere at position.
+        // Use a small radius proportional to the light's range or a default.
+        let radius = (light.range * 0.05).max(0.1).min(5.0);
+        let half = Vec3::splat(radius);
+        let aabb = Aabb::from_min_max(light.position - half, light.position + half);
+        volume_intersects_aabb(&volume.volume, &aabb)
+    }
+
+    fn volume_hit_spot_light(
+        &self,
+        light: &SpotLight,
+        volume: &crate::object::query::VolumeQuery,
+    ) -> bool {
+        let radius = (light.range * 0.05).max(0.1).min(5.0);
+        let half = Vec3::splat(radius);
+        let aabb = Aabb::from_min_max(light.position - half, light.position + half);
+        volume_intersects_aabb(&volume.volume, &aabb)
+    }
+
+    // ── Query: editor pick with policy ──────────────────────────────────
+
+    /// Editor-specific pick with [`EditorProxyPolicy`].
+    ///
+    /// Returns the closest hit (by t-value) among objects matching the
+    /// policy.  Directional lights are never ray-pickable (unbounded).
+    /// Point/spot lights are only included when policy allows.
+    pub(crate) fn editor_pick_readonly(
+        &self,
+        ray: &Ray,
+        policy: crate::object::query::EditorProxyPolicy,
+    ) -> Option<crate::object::query::EditorPickResult> {
+        use crate::object::query::{EditorPickResult, EditorProxyPolicy};
+
+        let mut world_transforms: std::collections::HashMap<SceneNodeId, Mat4> =
+            std::collections::HashMap::with_capacity(self.nodes.len());
+        let mut closest: Option<(f32, ObjectId, AabbRayHit)> = None;
+
+        // Walk nodes if a root exists.
+        if let Some(root_id) = self.root.filter(|id| self.is_valid_node_id(*id)) {
+            self.editor_pick_walk(
+                root_id,
+                Mat4::IDENTITY,
+                ray,
+                &mut world_transforms,
+                &mut closest,
+            );
+        }
+
+        // Point lights (if policy allows).
+        if policy == EditorProxyPolicy::NodesAndBoundedLights
+            || policy == EditorProxyPolicy::All
+        {
+            for (slot, entry) in self.point_lights.iter().enumerate() {
+                if let Some((light, _)) = &entry.light {
+                    let radius = (light.range * 0.05).max(0.1).min(5.0);
+                    let half = Vec3::splat(radius);
+                    let aabb =
+                        Aabb::from_min_max(light.position - half, light.position + half);
+                    if let Some(hit) = aabb.intersect_ray_hit(ray) {
+                        if let Some(oid) = self.object_id_for_point_light(PointLightId {
+                            slot: slot as u32,
+                            generation: entry.generation,
+                        }) {
+                            if closest
+                                .as_ref()
+                                .map_or(true, |(best_t, _, _)| hit.t < *best_t)
+                            {
+                                closest = Some((hit.t, oid, hit));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Spot lights (if policy allows).
+            for (slot, entry) in self.spot_lights.iter().enumerate() {
+                if let Some((light, _)) = &entry.light {
+                    let radius = (light.range * 0.05).max(0.1).min(5.0);
+                    let half = Vec3::splat(radius);
+                    let aabb =
+                        Aabb::from_min_max(light.position - half, light.position + half);
+                    if let Some(hit) = aabb.intersect_ray_hit(ray) {
+                        if let Some(oid) = self.object_id_for_spot_light(SpotLightId {
+                            slot: slot as u32,
+                            generation: entry.generation,
+                        }) {
+                            if closest
+                                .as_ref()
+                                .map_or(true, |(best_t, _, _)| hit.t < *best_t)
+                            {
+                                closest = Some((hit.t, oid, hit));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        closest.map(|(_, object, hit)| EditorPickResult {
+            object,
+            hit: Some(hit),
+        })
+    }
+
+    fn editor_pick_walk(
+        &self,
+        node_id: SceneNodeId,
+        parent_world: Mat4,
+        ray: &Ray,
+        world_transforms: &mut std::collections::HashMap<SceneNodeId, Mat4>,
+        closest: &mut Option<(f32, ObjectId, AabbRayHit)>,
+    ) {
+        let node = match self.get_node(node_id) {
+            Some(n) => n,
+            None => return,
+        };
+
+        let world = parent_world * node.local_transform;
+        world_transforms.insert(node_id, world);
+
+        if let Some(aabb) = pick_bounds_readonly(node, &world) {
+            if let Some(hit) = aabb.intersect_ray_hit(ray) {
+                if closest.as_ref().map_or(true, |(best_t, _, _)| hit.t < *best_t) {
+                    if let Some(oid) = self.object_id_for_node(node_id) {
+                        *closest = Some((hit.t, oid, hit));
+                    }
+                }
+            }
+        }
+
+        for child_id in node.children.iter().copied() {
+            if self.is_valid_node_id(child_id) {
+                self.editor_pick_walk(child_id, world, ray, world_transforms, closest);
+            }
+        }
+    }
+
+    // ── Convenience: scene provenance getter ────────────────────────────
+
+    /// Return the scene's provenance token for [`Selection`] binding.
+    pub fn provenance_token(&self) -> SceneRuntimeId {
+        self.provenance
+    }
 }
+
+// ── Volume intersection helpers ──────────────────────────────────────
+
+/// Test whether an [`Aabb`] intersects a [`VolumeShape`].
+fn volume_intersects_aabb(volume: &crate::object::query::VolumeShape, aabb: &Aabb) -> bool {
+    match volume {
+        crate::object::query::VolumeShape::Aabb(query_aabb) => aabb_intersects_aabb(query_aabb, aabb),
+        crate::object::query::VolumeShape::Frustum(frustum) => frustum.intersects_aabb(aabb),
+    }
+}
+
+/// Conservative AABB-AABB intersection test.
+fn aabb_intersects_aabb(a: &Aabb, b: &Aabb) -> bool {
+    a.min.x <= b.max.x
+        && a.max.x >= b.min.x
+        && a.min.y <= b.max.y
+        && a.max.y >= b.min.y
+        && a.min.z <= b.max.z
+        && a.max.z >= b.min.z
+}
+
+// ── Re-export from query module ───────────────────────────────────────
 
 /// Compute a world-space pickable AABB for a node using an on-the-fly
 /// world transform (`world`).  Mirrors the logic in

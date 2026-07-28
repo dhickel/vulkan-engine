@@ -2060,6 +2060,94 @@ impl Scene {
         )
     }
 
+    // ── Phase 07: Queries, Selection, and Editor Camera ─────────────────
+
+    /// Raycast: return the closest [`RayHit`] for a world-space ray.
+    ///
+    /// Validates the ray (origin must be finite, direction must be
+    /// finite and non-zero).  Conservative-visible nodes are excluded
+    /// from results.
+    ///
+    /// Thread: Any · May Stall: No
+    pub fn raycast(
+        &self,
+        ray: &crate::data::camera::Ray,
+    ) -> Result<Option<crate::object::query::RayHit>, SceneError> {
+        crate::object::query::validate_ray(ray)
+            .map_err(|msg| SceneError::InvalidMutation(msg.to_string()))?;
+        Ok(self.world.raycast_readonly(ray).into_iter().next())
+    }
+
+    /// Raycast all: return every hit in deterministic order (distance,
+    /// then [`SceneObjectId`], then [`ObjectKind`]).
+    ///
+    /// Thread: Any · May Stall: No
+    pub fn raycast_all(
+        &self,
+        ray: &crate::data::camera::Ray,
+    ) -> Result<Vec<crate::object::query::RayHit>, SceneError> {
+        crate::object::query::validate_ray(ray)
+            .map_err(|msg| SceneError::InvalidMutation(msg.to_string()))?;
+        Ok(self.world.raycast_readonly(ray))
+    }
+
+    /// Volume query: return all objects whose world-space bounds
+    /// intersect the given volume shape.
+    ///
+    /// Thread: Any · May Stall: No
+    pub fn query_volume(
+        &self,
+        query: &crate::object::query::VolumeQuery,
+    ) -> Vec<crate::object::query::VolumeHit> {
+        self.world.volume_query_readonly(query)
+    }
+
+    /// Editor pick: cast a ray and return the closest editable object
+    /// matching the given [`EditorProxyPolicy`].
+    ///
+    /// Directional lights are always excluded (unbounded).  Point/spot
+    /// lights require opt-in via policy.
+    ///
+    /// Thread: Any · May Stall: No
+    pub fn editor_pick(
+        &self,
+        ray: &crate::data::camera::Ray,
+        policy: crate::object::query::EditorProxyPolicy,
+    ) -> Result<Option<crate::object::query::EditorPickResult>, SceneError> {
+        crate::object::query::validate_ray(ray)
+            .map_err(|msg| SceneError::InvalidMutation(msg.to_string()))?;
+        Ok(self.world.editor_pick_readonly(ray, policy))
+    }
+
+    /// Return the scene's provenance token for [`crate::object::selection::Selection`]
+    /// binding.
+    ///
+    /// Thread: Any · May Stall: No
+    pub fn provenance_token(&self) -> crate::object::identity::SceneRuntimeId {
+        self.world.provenance_token()
+    }
+
+    /// Helper: create a [`Ray`] from screen coordinates using the
+    /// scene's last renderer-supplied camera.
+    ///
+    /// Thread: Any · May Stall: No
+    pub fn screen_to_ray(
+        &self,
+        screen_x: f32,
+        screen_y: f32,
+        viewport_width: u32,
+        viewport_height: u32,
+    ) -> crate::data::camera::Ray {
+        let camera = self.world.camera_data();
+        let inv_vp = (camera.projection * camera.view).inverse();
+        crate::data::camera::Ray::from_screen(
+            (screen_x, screen_y),
+            (viewport_width, viewport_height),
+            inv_vp,
+            camera.cam_pos,
+        )
+    }
+
     /// Thread: Any
     /// May Stall: No
     pub fn execute_command(

@@ -94,7 +94,10 @@ pub use api::{
 };
 
 pub use animation::AnimationPlayer;
-pub use data::camera::{Aabb, Camera, FPSController, Frustum, OrbitCamera, OrbitController, Ray};
+pub use data::camera::{
+    Aabb, AabbRayHit, Camera, EditorCamera, EditorProjection, FPSController, Frustum,
+    OrbitCamera, OrbitController, Ray,
+};
 pub use scene::command::{
     AddNodeCommand, Command, CommandHistory, CommandResult, PlaceAssetCommand, RemoveNodeCommand,
     SceneNodeRemap, SetTransformCommand,

@@ -5,10 +5,12 @@ use engine_events::{ObjectKind, SceneObjectId};
 /// Opaque runtime scene provenance token.
 ///
 /// Two [`ObjectId`]s with different [`SceneRuntimeId`] must not compare equal,
-/// preventing cross-scene ID forgery. Minting is internal-only in this phase;
-/// a `#[cfg(test)]` constructor is available for tests.
+/// preventing cross-scene ID forgery. Minting is internal-only; a
+/// `#[cfg(test)]` constructor is available for tests.
+///
+/// External callers can hold and compare tokens but cannot construct them.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub(crate) struct SceneRuntimeId(u64);
+pub struct SceneRuntimeId(u64);
 
 impl SceneRuntimeId {
     /// Internal constructor used during SceneWorld construction.

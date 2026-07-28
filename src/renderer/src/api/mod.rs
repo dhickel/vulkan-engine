@@ -38,6 +38,11 @@ pub use crate::debug_ui::{
     AppUiCallback, DebugTimingRow, DebugTimingSnapshot, DebugUiFrameContext, DebugViewCallback,
     DebugViewDescriptor, DebugViewId,
 };
+pub use crate::object::query::{
+    EditorPickResult, EditorProxyPolicy, RayHit, UnknownBoundsPolicy, VolumeHit, VolumeQuery,
+    VolumeShape,
+};
+pub use crate::object::selection::Selection;
 pub use crate::object::ObjectId;
 pub use crate::scene::SceneNodeId;
 pub use assets::{

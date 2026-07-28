@@ -6,6 +6,8 @@
 
 pub mod component;
 pub mod identity;
+pub mod query;
+pub mod selection;
 
 use glam::{Mat4, Vec3};
 
@@ -16,7 +18,7 @@ pub use engine_events::{
 };
 
 // Renderer runtime types
-pub use identity::ObjectId;
+pub use identity::{ObjectId, SceneRuntimeId};
 
 // Re-export ObjectHandle from scene internals for test validation.
 pub use crate::scene::object_store::ObjectHandle;
