@@ -636,6 +636,22 @@ impl MeshColliderBridge {
         self.next_body_idx += 1;
         idx
     }
+
+    /// Export all dynamic/kinematic body-node mappings for integration with
+    /// a [`PhysicsBridge`]. Callers should invoke this after seeding so the
+    /// component-driven bridge can participate in unified transform writeback.
+    pub fn export_body_node_mappings_to_physics_bridge(
+        &self,
+        physics_bridge: &mut crate::physics_bridge::PhysicsBridge,
+    ) {
+        for (body_id, node_id) in self.body_node_map.iter() {
+            physics_bridge.register_external_body_node(
+                body_id.clone(),
+                node_id,
+                glam::Mat4::IDENTITY,
+            );
+        }
+    }
 }
 
 impl Default for MeshColliderBridge {

@@ -5,6 +5,7 @@
 //! unforgeable runtime [`ObjectId`] type.
 
 pub mod component;
+pub mod component_compatibility;
 pub mod identity;
 pub mod query;
 pub mod selection;

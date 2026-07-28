@@ -1,5 +1,8 @@
 mod audio_bridge;
+mod behavior_bridge;
 mod collision;
+mod component_compatibility;
+mod components;
 mod content;
 mod events;
 mod generator;
@@ -8,6 +11,7 @@ mod geometry;
 mod geometry_fixtures;
 mod layout;
 mod mesh_collider_bridge;
+mod physics_bridge;
 mod player;
 mod scene_seed;
 
@@ -28,6 +32,7 @@ use generator::{generate, GeneratorConfig, GeneratorError};
 use layout::{load_level_file, tile_to_world, ParsedLevel};
 use mesh_collider_bridge::MeshColliderBridge;
 use physics::BodyKind;
+use physics_bridge::PhysicsBridge;
 use glam::{Quat, Vec2, Vec3};
 use player::{CameraIntentGuard, PlayerState, PLAYER_EYE_HEIGHT};
 use renderer::api::config::{CompressionConfig, TextureCompressionMode};
@@ -329,6 +334,15 @@ fn run() -> Result<(), AppError> {
     // Seed collider recipes from explicit policy assignments.
     let mut bridge = seed_collider_bridge(&mut renderer, &_level_scene, level);
 
+    // Create component-driven physics bridge sharing the mesh bridge's world.
+    let mut physics_bridge = PhysicsBridge::new(&scene);
+    // Register mesh-collider body-node mappings for unified writeback.
+    export_body_node_mappings(&bridge, &mut physics_bridge);
+    log::info!(
+        "Physics bridge ready: {} registered nodes",
+        physics_bridge.registered_count()
+    );
+
     let spawn_world = tile_to_world(level.spawn.x, level.spawn.y);
     let spawn_position = spawn_world
         + glam::Vec3::new(
@@ -430,6 +444,7 @@ fn run() -> Result<(), AppError> {
                                 &mut scene,
                                 &collision_world,
                                 &mut bridge,
+                                &mut physics_bridge,
                                 &mut player,
                                 &mut previous_player_position,
                                 &mut app_camera,
@@ -538,6 +553,7 @@ fn render_frame(
     scene: &mut renderer::Scene,
     collision_world: &CollisionWorld,
     bridge: &mut MeshColliderBridge,
+    physics_bridge: &mut PhysicsBridge,
     player: &mut PlayerState,
     previous_player_position: &mut glam::Vec3,
     camera: &mut Camera,
@@ -650,9 +666,12 @@ fn render_frame(
                         .to_string(),
                 ));
             }
-            // Step the physics world in sync with gameplay ticks.
+            // Step the physics worlds in sync with gameplay ticks.
             if let Err(err) = bridge.world.step(FIXED_DT) {
-                log::warn!("Physics step failed: {}", err);
+                log::warn!("Mesh physics step failed: {}", err);
+            }
+            if let Err(err) = physics_bridge.step(FIXED_DT) {
+                log::warn!("Component physics step failed: {}", err);
             }
         }
         // Record contacts for observability.
@@ -703,6 +722,9 @@ fn render_frame(
     // Write back dynamic/kinematic physics body poses to scene nodes.
     if let Err(err) = bridge.writeback_dynamic_transforms(scene) {
         log::warn!("Transform writeback failed: {}", err);
+    }
+    if let Err(err) = physics_bridge.sync_transforms(scene) {
+        log::warn!("Physics bridge sync transforms failed: {}", err);
     }
 
     Ok(outcome)
@@ -860,6 +882,22 @@ fn seed_collider_bridge(
     );
 
     bridge
+}
+
+/// Export body-node mappings from the mesh collider bridge into the
+/// component-driven physics bridge so that both bridges share a single
+/// writeback and sync view.
+fn export_body_node_mappings(
+    mesh_bridge: &MeshColliderBridge,
+    physics_bridge: &mut PhysicsBridge,
+) {
+    for (body_id, node_id) in mesh_bridge.body_node_map().iter() {
+        physics_bridge.register_external_body_node(
+            body_id.clone(),
+            node_id,
+            glam::Mat4::IDENTITY,
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1171,6 +1209,10 @@ fn run_headless(
     // Seed collider bridge (headless path).
     let mut bridge = seed_collider_bridge(&mut renderer, &_level_scene, level);
 
+    // Create component-driven physics bridge sharing the mesh bridge's world.
+    let mut physics_bridge = PhysicsBridge::new(&scene);
+    export_body_node_mappings(&bridge, &mut physics_bridge);
+
     if headless_opts.validate_colliders {
         log::info!(
             "[Collider Validation] Bridge seeded: {} recipes, bridge ready",
@@ -1298,6 +1340,7 @@ fn run_headless(
             &mut scene,
             collision_world,
             &mut bridge,
+            &mut physics_bridge,
             &mut player,
             &mut previous_player_position,
             &mut app_camera,

@@ -368,6 +368,70 @@ impl LevelScene {
             dynamic_proof_mesh,
         })
     }
+
+    /// Attach physics components to the dynamic proof node so the
+    /// [`PhysicsBridge`] can discover and register it.
+    ///
+    /// Call after the scene is fully seeded.
+    pub fn attach_physics_components(
+        &self,
+        scene: &mut Scene,
+    ) -> Result<(), SceneSeedError> {
+        use renderer::object::component::{ComponentEnvelope, ComponentInstanceId, ComponentKey};
+        use serde_json::json;
+
+        let Some((_proof_mesh, proof_node)) = self.dynamic_proof_mesh else {
+            return Ok(());
+        };
+
+        // Attach RigidBody component (dynamic).
+        let rigid_body_json = json!({
+            "body_kind": "dynamic",
+            "mass": 1.0,
+            "linear_damping": 0.1,
+            "angular_damping": 0.1,
+            "can_sleep": true
+        });
+        let rigid_env = ComponentEnvelope::new(
+            ComponentInstanceId::new("physics.dynamic_proof.rb").map_err(|e| {
+                SceneSeedError::Scene(renderer::SceneError::InvalidMutation(e.to_string()))
+            })?,
+            ComponentKey::new("physics.rigid_body").map_err(|e| {
+                SceneSeedError::Scene(renderer::SceneError::InvalidMutation(e.to_string()))
+            })?,
+            1,
+            rigid_body_json,
+        )
+        .map_err(|e| {
+            SceneSeedError::Scene(renderer::SceneError::InvalidMutation(e.to_string()))
+        })?;
+        scene.attach_component(proof_node, rigid_env)?;
+
+        // Attach BoxCollider component (approximate bounds for the tetrahedron).
+        let collider_json = json!({
+            "half_extents": [0.35, 0.35, 0.35]
+        });
+        let collider_env = ComponentEnvelope::new(
+            ComponentInstanceId::new("physics.dynamic_proof.collider").map_err(|e| {
+                SceneSeedError::Scene(renderer::SceneError::InvalidMutation(e.to_string()))
+            })?,
+            ComponentKey::new("physics.box_collider").map_err(|e| {
+                SceneSeedError::Scene(renderer::SceneError::InvalidMutation(e.to_string()))
+            })?,
+            1,
+            collider_json,
+        )
+        .map_err(|e| {
+            SceneSeedError::Scene(renderer::SceneError::InvalidMutation(e.to_string()))
+        })?;
+        scene.attach_component(proof_node, collider_env)?;
+
+        log::info!(
+            "Attached physics components (RigidBody + BoxCollider) to dynamic proof node slot={}",
+            proof_node.slot
+        );
+        Ok(())
+    }
 }
 
 fn load_environment(
