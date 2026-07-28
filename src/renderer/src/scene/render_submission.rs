@@ -467,6 +467,10 @@ pub struct RenderSubmission {
     /// Wrapped in `RefCell` so recording can populate outcomes via shared reference.
     #[cfg(feature = "bsp")]
     pub bsp_evidence_collector: std::cell::RefCell<Option<BspEvidenceCollector>>,
+    /// Debug line segments from [`FrameExtensions`]. Rendered by the debug-lines
+    /// pass when the `debug-draw` feature is enabled and lines are non-empty.
+    #[cfg(feature = "debug-draw")]
+    pub debug_lines: Vec<(glam::Vec3, glam::Vec3, glam::Vec3)>,
 }
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
@@ -507,6 +511,8 @@ impl RenderSubmission {
             bsp_command_diags: Vec::new(),
             #[cfg(feature = "bsp")]
             bsp_evidence_collector: std::cell::RefCell::new(None),
+            #[cfg(feature = "debug-draw")]
+            debug_lines: Vec::new(),
         }
     }
 

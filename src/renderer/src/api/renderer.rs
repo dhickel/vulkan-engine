@@ -25,6 +25,7 @@ use crate::debug_ui::{
 use crate::vulkan::vk_render;
 use crate::vulkan::vk_types::VkWindowState;
 
+use super::frame_extensions::FrameExtensions;
 use super::assets::{AssetLoadTracker, AssetManager};
 use super::config::{
     AssetPolicyConfig, CaptureTarget, FrameCaptureRequest, FrameCaptureScheduler,
@@ -189,6 +190,8 @@ pub struct Renderer {
     /// Last grab mode successfully requested from winit. This tracks the persistent request, not
     /// whether the compositor is currently activating the constraint for a focused pointer.
     cursor_grab_requested: bool,
+    /// Per-frame extensions set by the app; consumed during submission and cleared.
+    frame_extensions: FrameExtensions,
 }
 
 impl Renderer {
@@ -235,6 +238,7 @@ impl Renderer {
             fps_plugin: None,
             cursor_in_window: true,
             cursor_grab_requested: false,
+            frame_extensions: FrameExtensions::new(),
         })
     }
 
@@ -281,6 +285,7 @@ impl Renderer {
             fps_plugin: None,
             cursor_in_window: true,
             cursor_grab_requested: false,
+            frame_extensions: FrameExtensions::new(),
         })
     }
 
@@ -805,6 +810,22 @@ impl Renderer {
         }
     }
 
+    /// Set per-frame extensions consumed during the next render submission.
+    ///
+    /// The renderer takes ownership of the value and replaces it with a
+    /// default empty set after the frame is submitted. This is safe to call
+    /// at any time; extensions are applied on the next frame.
+    ///
+    /// # Design
+    ///
+    /// Frame extensions are immutable once submitted. Transform overrides
+    /// propagate to subtrees but never mutate scene-graph local transforms.
+    /// Debug lines are consumed by the debug-line render pass (only when the
+    /// `debug-draw` feature is enabled).
+    pub fn set_frame_extensions(&mut self, extensions: FrameExtensions) {
+        self.frame_extensions = extensions;
+    }
+
     /// Retire a detached BSP mount through the renderer's fence-aware queue.
     ///
     /// Preflight validates every owned handle, computes the common `retire_after`
@@ -1305,7 +1326,16 @@ impl Renderer {
             }
         }
 
-        let submission = build_submission_with_camera_view(scene, view);
+        let mut submission = build_submission_with_camera_view(scene, view);
+
+        // Transfer frame extensions into the submission.
+        #[cfg(feature = "debug-draw")]
+        {
+            submission.debug_lines = std::mem::take(&mut self.frame_extensions.debug_lines);
+        }
+        let _ = std::mem::take(&mut self.frame_extensions.transform_overrides);
+        debug_assert!(self.frame_extensions.is_empty());
+
         let viewport_size = self.viewport_size();
         let hooks_enabled = self.pre_render_hook.is_some() || self.post_render_hook.is_some();
         let hook_report = RefCell::new(HookReport::new(frame_index));

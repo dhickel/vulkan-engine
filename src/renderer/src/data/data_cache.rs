@@ -2748,17 +2748,28 @@ pub enum CoreShaderType {
     BspSkyFrag,
     #[cfg(feature = "bsp")]
     BspLiquidFrag,
+    #[cfg(feature = "debug-draw")]
+    DebugLineVert,
+    #[cfg(feature = "debug-draw")]
+    DebugLineFrag,
 }
 
 impl CoreShaderType {
-    #[cfg(all(not(feature = "instancing"), not(feature = "bsp")))]
-    pub const COUNT: usize = 13;
-    #[cfg(all(feature = "instancing", not(feature = "bsp")))]
-    pub const COUNT: usize = 14;
-    #[cfg(all(not(feature = "instancing"), feature = "bsp"))]
-    pub const COUNT: usize = 18;
-    #[cfg(all(feature = "instancing", feature = "bsp"))]
-    pub const COUNT: usize = 19;
+    const BASE: usize = 13;
+    #[cfg(feature = "instancing")]
+    const INSTANCING_DELTA: usize = 1;
+    #[cfg(not(feature = "instancing"))]
+    const INSTANCING_DELTA: usize = 0;
+    #[cfg(feature = "bsp")]
+    const BSP_DELTA: usize = 5;
+    #[cfg(not(feature = "bsp"))]
+    const BSP_DELTA: usize = 0;
+    #[cfg(feature = "debug-draw")]
+    const DEBUG_DRAW_DELTA: usize = 2;
+    #[cfg(not(feature = "debug-draw"))]
+    const DEBUG_DRAW_DELTA: usize = 0;
+    pub const COUNT: usize =
+        Self::BASE + Self::INSTANCING_DELTA + Self::BSP_DELTA + Self::DEBUG_DRAW_DELTA;
 
     fn from_manifest_key(key: &str) -> Option<Self> {
         match key {
@@ -2787,6 +2798,10 @@ impl CoreShaderType {
             "BspSkyFrag" => Some(Self::BspSkyFrag),
             #[cfg(feature = "bsp")]
             "BspLiquidFrag" => Some(Self::BspLiquidFrag),
+            #[cfg(feature = "debug-draw")]
+            "DebugLineVert" => Some(Self::DebugLineVert),
+            #[cfg(feature = "debug-draw")]
+            "DebugLineFrag" => Some(Self::DebugLineFrag),
             _ => None,
         }
     }
@@ -2839,6 +2854,11 @@ fn parse_shader_manifest_lines<'a>(
 
         #[cfg(not(feature = "instancing"))]
         if key.trim() == "MetRoughInstancedVert" {
+            continue;
+        }
+
+        #[cfg(not(feature = "debug-draw"))]
+        if key.trim() == "DebugLineVert" || key.trim() == "DebugLineFrag" {
             continue;
         }
 
@@ -2958,17 +2978,26 @@ pub enum VkPipelineType {
     BspSky,
     #[cfg(feature = "bsp")]
     BspLiquid,
+    #[cfg(feature = "debug-draw")]
+    DebugLines,
 }
 
 impl VkPipelineType {
-    #[cfg(all(not(feature = "instancing"), not(feature = "bsp")))]
-    pub const COUNT: usize = 10;
-    #[cfg(all(feature = "instancing", not(feature = "bsp")))]
-    pub const COUNT: usize = 12;
-    #[cfg(all(not(feature = "instancing"), feature = "bsp"))]
-    pub const COUNT: usize = 17;
-    #[cfg(all(feature = "instancing", feature = "bsp"))]
-    pub const COUNT: usize = 19;
+    const BASE: usize = 10;
+    #[cfg(feature = "instancing")]
+    const INSTANCING_DELTA: usize = 2;
+    #[cfg(not(feature = "instancing"))]
+    const INSTANCING_DELTA: usize = 0;
+    #[cfg(feature = "bsp")]
+    const BSP_DELTA: usize = 7;
+    #[cfg(not(feature = "bsp"))]
+    const BSP_DELTA: usize = 0;
+    #[cfg(feature = "debug-draw")]
+    const DEBUG_DRAW_DELTA: usize = 1;
+    #[cfg(not(feature = "debug-draw"))]
+    const DEBUG_DRAW_DELTA: usize = 0;
+    pub const COUNT: usize =
+        Self::BASE + Self::INSTANCING_DELTA + Self::BSP_DELTA + Self::DEBUG_DRAW_DELTA;
 }
 
 //#[derive(Clone, Copy)]

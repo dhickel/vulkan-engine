@@ -1,144 +1,79 @@
-# Debug UI & Timing Capture
+# Debug and Diagnostics
 
-> Source: [`src/renderer/src/debug_ui/mod.rs`](../../src/renderer/src/debug_ui/mod.rs), [`src/renderer/src/api/renderer.rs`](../../src/renderer/src/api/renderer.rs) — no legacy docs consulted.
+## Frame Extensions
 
-## Overview
-
-The engine includes an imgui-based debug UI with built-in panels for performance monitoring and the ability to register custom debug views. It also supports JSONL timing capture for offline analysis.
-
-## Built-in Panels
-
-| Toggle | Key | Panel |
-|--------|-----|-------|
-| Debug UI | F1 | Main debug overlay with performance graphs, frame timing, GPU stats |
-| Console | F2 | In-engine console window |
-| Debug overlay | (API only) | Performance overlay (FPS counter, frame time) |
-
-These toggles are handled by `Renderer::update_input()` — if you bypass it for custom input handling, they won't work. However, on the **app-owned path**, `route_platform_input_to_app` also processes the same F1/F2 debug toggles through the renderer's platform side effects, so app-owned input routing does not lose debug UI support.
-
-## Global Visibility Control
+The `FrameExtensions` DTO provides a safe, immutable per-frame extension mechanism for
+overriding renderer behaviour without mutating the scene graph.
 
 ```rust
-// Toggle main debug UI
-renderer.toggle_debug_ui();
-renderer.set_debug_ui_visible(true);
-let visible = renderer.is_debug_ui_visible();
+use renderer::{FrameExtensions, SceneNodeId};
+use glam::Mat4;
 
-// Toggle console
-renderer.toggle_console_ui();
-renderer.set_console_ui_visible(true);
+let mut ext = FrameExtensions::new();
 
-// Toggle performance overlay
-renderer.toggle_debug_overlay_ui();
+// Override a node's world transform (hierarchy-consistent, app-owned)
+ext.transform_overrides.insert(node_id, Mat4::from_translation(...));
+
+renderer.set_frame_extensions(ext);
+// Extensions are consumed during the next render submission and cleared.
 ```
 
-Defined at [`renderer.rs:262-280`](../../src/renderer/src/api/renderer.rs#L262).
+### Properties
+- **Immutable per frame**: Extensions are set before a frame and cannot be changed mid-frame.
+- **No scene mutation**: Transform overrides propagate to subtrees but never mutate the
+  scene-graph's local transforms.
+- **Fence-safe**: Extensions are consumed by value during submission build and replaced
+  with an empty default set.
 
-## Custom Debug Views
+## Debug Draw (feature-gated)
 
-Register your own imgui windows as debug panels:
+When the `debug-draw` Cargo feature is enabled, `FrameExtensions` can carry debug-line
+segments for editor gizmos, physics wireframes, AI navmesh visualisation, and other
+development overlays.
 
 ```rust
-pub struct DebugViewDescriptor {
-    pub name: String,
-    pub default_visible: bool,
-}
+#[cfg(feature = "debug-draw")]
+{
+    use renderer::debug_draw::DebugDrawState;
+    use glam::Vec3;
 
-pub type DebugViewCallback = Box<dyn FnMut(&DebugUiFrameContext<'_>) + Send>;
+    let mut debug = DebugDrawState::new();
 
-pub struct DebugUiFrameContext<'a> {
-    pub ui: &'a imgui::Ui,
-    // ...
-}
-```
+    // Push individual line segments
+    debug.push_line(from, to, color);
 
-```rust
-// Register
-let view_id = renderer.register_debug_view(
-    DebugViewDescriptor { name: "My Stats".into(), default_visible: true },
-    Box::new(|ctx: &DebugUiFrameContext| {
-        ctx.ui.text("Hello from custom debug view!");
-    }),
-);
+    // Push common primitives
+    debug.push_aabb(min, max, color);
+    debug.push_sphere(center, radius, color);
+    debug.push_cross(position, size, color_x, color_y, color_z);
 
-// Control
-renderer.set_debug_view_enabled(view_id, false);
-renderer.unregister_debug_view(view_id);
-```
-
-Defined at [`renderer.rs:244-259`](../../src/renderer/src/api/renderer.rs#L244) and [`debug_ui/mod.rs`](../../src/renderer/src/debug_ui/mod.rs).
-
-## Timing Capture (JSONL)
-
-Record frame timing data to a JSONL file for offline profiling:
-
-```rust
-// Configure before starting
-renderer.configure_debug_timing_recording(
-    Some(10),                         // record for 10 seconds
-    Some(50),                         // sample every 50ms
-    Some("timing.jsonl".to_string()), // output path
-)?;
-
-// Start recording
-let output_path = renderer.start_debug_timing_recording()?;
-// ... run your app for 10 seconds ...
-// Recording stops automatically after duration_secs
-```
-
-### CLI Integration
-
-Examples support launch flags (see [`examples/common/mod.rs`](../../src/renderer/examples/common/mod.rs)):
-
-```sh
-# Record 10 seconds at 50ms intervals
-cargo run -p renderer --example demo_pbr -- \
-  --record_debug=10 --record_debug_interval=50 \
-  --record_debug_path=.internal-dev/debug_reports/demo_pbr-timing.jsonl
-
-# With custom environment map
-cargo run -p renderer --example api_test -- \
-  --env src/renderer/src/assets/sky_maps/indoor_4k.exr \
-  --record_debug=10 --record_debug_interval=50
-```
-
-### Timing Data Format
-
-Each JSONL line is a valid JSON object produced via `serde_json`. Non-finite floats (NaN, ±Inf) are serialized as JSON `null`. The recording subsystem validates the output path and writes an initial "start" record before activating, so a missing or unwritable path fails before any timing data is collected. If initialization fails, no partial recording state remains active.
-
-All debug capture and timing output is generated through serializer-backed code paths. Manual JSON string formatting (which previously could emit bare `NaN`, unescaped control characters, or invalid UTF-8) has been replaced with `serde_json` serialization that guarantees valid output.
-
-```json
-pub struct DebugTimingSnapshot {
-    // frame index, timestamp, per-pass durations, GPU timestamps
-}
-pub struct DebugTimingRow {
-    // individual pass timing
+    // Transfer to frame extensions
+    let mut ext = FrameExtensions::new();
+    ext.debug_lines = debug.take_lines();
+    renderer.set_frame_extensions(ext);
 }
 ```
 
-### Frame Capture Scheduling
+### Rendering Pipeline
+- **Pass**: DebugLinesPass runs after geometry, before UI.
+- **Depth-tested**: Lines are occluded by scene geometry.
+- **World-space**: Line coordinates are in world space, transformed by the active camera's
+  view-projection matrix.
+- **Ring-buffer**: Lines are uploaded to a host-visible GPU ring buffer each frame and
+  cleared automatically.
 
-Due capture requests fire when `target_frame <= current_frame`, so a request
-that becomes overdue is consumed on the next valid rendered frame instead of
-remaining queued indefinitely. Capture status and sidecar `frame` / `frame_number`
-fields describe the actual execution frame. Sidecars also include
-`requested_frame` / `requested_frame_number` so callers can detect scheduling drift.
+### Capacity
+- Default capacity is 64K lines (128K vertices).
+- Lines beyond capacity are silently discarded (no reallocation at runtime).
+- Use `DebugDrawState::with_capacity(n)` to configure a larger buffer.
 
-## Frame Capture Evidence
+### Shaders
+- `debug_line.vert`: Transforms world-space position by view-projection push constant,
+  reads vertices via buffer device address, and passes color to the fragment shader.
+- `debug_line.frag`: Passes through the interpolated color as the output.
 
-The frame-capture facade distinguishes `CaptureTarget::Present` from
-`CaptureTarget::Draw`. Present captures are useful for interactive debugging.
-Draw captures are the validation path when a change affects visible renderer
-output.
-
-For sprint evidence, use the root project launcher with `--headless
---capture_target draw` and write artifacts under `.internal-dev/captures/`.
-A desktop screenshot is not accepted as visual proof because it is outside the
-renderer-owned capture path.
-
-## See Also
-
-- [02-renderer-lifecycle-and-frame-api.md](02-renderer-lifecycle-and-frame-api.md) — debug API on the Renderer
-- [src/renderer/src/debug_ui/mod.rs](../../src/renderer/src/debug_ui/mod.rs) — debug UI implementation
-- [src/renderer/examples/common/mod.rs](../../src/renderer/examples/common/mod.rs) — CLI argument parsing
+### Feature Gate
+`debug-draw` is **not** in default features. Enable with:
+```bash
+cargo run --features debug-draw
+```

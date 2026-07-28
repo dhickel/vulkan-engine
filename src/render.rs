@@ -22,11 +22,11 @@ pub use renderer::api::{
 };
 pub use renderer::{
     boxed_render_hook, install_app_event_logger, AnimationPlayer, AssetError, AssetKind,
-    AssetManager, BoxedRenderHook, DebugRuntimeMode, EventBus, FrameContext, FrameRenderOutcome,
-    MaterialHandle, MeshHandle, ObjectLifecycleOutcome, ObjectMutationOutcome, ObjectSummary,
-    PointLight, PointLightId, RenderHook, RenderHookContext, Renderer, RendererConfig,
-    RendererError, RendererInputRouting, RendererInputSuppression, Scene, SceneError,
-    SceneNodeId, SceneWorld, TextureHandle, VisualTuning,
+    AssetManager, BoxedRenderHook, DebugRuntimeMode, EventBus, FrameContext, FrameExtensions,
+    FrameRenderOutcome, MaterialHandle, MeshHandle, ObjectLifecycleOutcome,
+    ObjectMutationOutcome, ObjectSummary, PointLight, PointLightId, RenderHook, RenderHookContext,
+    Renderer, RendererConfig, RendererError, RendererInputRouting, RendererInputSuppression,
+    Scene, SceneError, SceneNodeId, SceneWorld, TextureHandle, VisualTuning,
 };
 
 /// Construct a [`CameraView`] for a framebuffer/window size.

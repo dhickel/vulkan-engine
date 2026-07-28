@@ -93,6 +93,9 @@ pub(crate) struct RecordingDispatcher<'a> {
     transition_overlay: &'a mut vk_util::FrameTransitionOverlay,
     /// Monotonic frame number for capture metadata.
     frame_number: u32,
+    /// Debug line renderer backend (only when `debug-draw` feature is enabled).
+    #[cfg(feature = "debug-draw")]
+    debug_lines: &'a mut crate::vulkan::vk_debug_lines::VkDebugLines,
 }
 
 pub(crate) struct PrepareTargetsRecording<'a> {
@@ -176,6 +179,17 @@ pub(crate) struct TerminalPresentRecording<'a> {
     image_state_tracker: &'a ImageStateTracker,
     transition_overlay: &'a mut vk_util::FrameTransitionOverlay,
     graphics_queue_family: u32,
+}
+
+#[cfg(feature = "debug-draw")]
+pub(crate) struct DebugLinesRecording<'a> {
+    device: &'a ash::Device,
+    window_state: &'a VkWindowState,
+    pipeline_cache: &'a crate::data::data_cache::VkPipelineCache,
+    debug_lines: &'a mut crate::vulkan::vk_debug_lines::VkDebugLines,
+    allocator: &'a std::sync::Arc<std::sync::Mutex<vk_mem::Allocator>>,
+    submission: &'a RenderSubmission,
+    frame: &'a VkFrame,
 }
 
 impl PrepareTargetsRecording<'_> {
@@ -454,6 +468,8 @@ pub(crate) unsafe fn execute_rendergraph_for_frame(
         graphics_queue_family: core.queue_family_indices.graphics,
         transition_overlay: &mut transition_overlay,
         frame_number,
+        #[cfg(feature = "debug-draw")]
+        debug_lines: &mut core.debug_lines,
     };
     // SAFETY: `frame_ptr` is unique for this scope and dispatcher cannot reach presentation.
     let frame = unsafe { &mut *frame_ptr };
@@ -574,6 +590,19 @@ impl RenderGraphContext<'_> {
             image_state_tracker: self.recording.image_state_tracker,
             transition_overlay: self.recording.transition_overlay,
             graphics_queue_family: self.recording.graphics_queue_family,
+        }
+    }
+
+    #[cfg(feature = "debug-draw")]
+    pub(crate) fn debug_lines_ctx(&mut self) -> DebugLinesRecording<'_> {
+        DebugLinesRecording {
+            device: self.recording.device,
+            window_state: self.recording.window_state,
+            pipeline_cache: &self.recording.vulkan_cache.pipelines,
+            debug_lines: self.recording.debug_lines,
+            allocator: self.recording.allocator,
+            submission: self.submission,
+            frame: self.frame,
         }
     }
 }
@@ -2700,6 +2729,50 @@ pub(crate) fn build_frame_environment_ubo(
         env.cascade_splits
     );
     env
+}
+
+// ---------------------------------------------------------------------------
+// Debug lines recording impl
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "debug-draw")]
+impl DebugLinesRecording<'_> {
+    pub(crate) fn draw_debug_lines(&mut self) -> Result<(), String> {
+        if self.submission.debug_lines.is_empty() {
+            return Ok(());
+        }
+
+        let cmd_buffer = self
+            .frame
+            .cmd_pools
+            .frame_graphics_primary()
+            .map_err(|e| format!("DebugLinesPass: {e}"))?;
+
+        // Compute view-projection from camera submission data.
+        let view = self.submission.camera.view;
+        let projection = self.submission.camera.projection;
+        let view_projection = projection * view;
+
+        // Upload line vertices to GPU.
+        let allocator = self
+            .allocator
+            .lock()
+            .map_err(|e| format!("allocator lock: {e}"))?;
+        self.debug_lines
+            .upload_lines(self.device, &allocator, &self.submission.debug_lines)?;
+        drop(allocator);
+
+        // Record draw.
+        self.debug_lines.record_draw(
+            self.device,
+            cmd_buffer,
+            self.pipeline_cache,
+            self.window_state,
+            view_projection,
+        )?;
+
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

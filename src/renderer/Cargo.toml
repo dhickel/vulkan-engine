@@ -17,6 +17,10 @@ default = []
 # These APIs may change across alpha sprints without notice.
 advanced-interop = []
 
+# Feature gate for debug draw overlays (debug lines, wireframes, gizmos).
+# Excluded from `default`. Opt-in for development and diagnostic rendering.
+debug-draw = []
+
 # Feature gates for engine-integration sprint rendering paths.
 # All excluded from `default`. Opt-in; each track's runtime activation is
 # added when its evidence branch passes.
@@ -126,4 +130,9 @@ path = "examples/capture_tests/capture_object_workflow.rs"
 [[example]]
 name = "capture_bsp_beta"
 path = "examples/capture_tests/capture_bsp_beta.rs"
+
+[[example]]
+name = "demo_debug_lines"
+path = "examples/demo_debug_lines.rs"
+required-features = ["debug-draw"]
 

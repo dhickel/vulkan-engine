@@ -51,6 +51,8 @@ use crate::rendergraph::passes::{
     DebugCapturePass, GeometryPass, ImguiPass, PrepareTargetsPass, PresentCopyPass, ShadowPass,
     SkyboxPass, TerminalPresentPass,
 };
+#[cfg(feature = "debug-draw")]
+use crate::rendergraph::passes::DebugLinesPass;
 use crate::scene::render_submission::RenderSubmission;
 use crate::vulkan::vk_commands::RecordingDispatcher;
 use crate::vulkan::vk_types::VkFrame;
@@ -124,16 +126,22 @@ impl RenderGraph {
     }
 
     pub fn default_graph() -> Self {
-        Self::new(vec![
+        let mut passes: Vec<Box<dyn RenderPassNode>> = vec![
             Box::new(PrepareTargetsPass),
             Box::new(ShadowPass),
             Box::new(SkyboxPass),
             Box::new(GeometryPass),
-            Box::new(PresentCopyPass),
-            Box::new(ImguiPass),
-            Box::new(DebugCapturePass),
-            Box::new(TerminalPresentPass),
-        ])
+        ];
+
+        #[cfg(feature = "debug-draw")]
+        passes.push(Box::new(DebugLinesPass));
+
+        passes.push(Box::new(PresentCopyPass));
+        passes.push(Box::new(ImguiPass));
+        passes.push(Box::new(DebugCapturePass));
+        passes.push(Box::new(TerminalPresentPass));
+
+        Self::new(passes)
     }
 
     pub fn execute(

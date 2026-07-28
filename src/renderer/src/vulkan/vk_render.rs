@@ -211,6 +211,9 @@ pub struct VkRenderCore {
     pub(crate) image_state_tracker: ImageStateTracker,
     /// Queue family indices for ownership-transfer decisions.
     pub(crate) queue_family_indices: QueueFamilyIndices,
+    /// Debug line rendering backend. Only present when `debug-draw` is enabled.
+    #[cfg(feature = "debug-draw")]
+    pub(crate) debug_lines: crate::vulkan::vk_debug_lines::VkDebugLines,
 }
 
 pub struct VkRender {
@@ -1524,6 +1527,10 @@ impl VkRenderCore {
             brdf_lut: brd_flut,
             image_state_tracker: ImageStateTracker::new(),
             queue_family_indices,
+            #[cfg(feature = "debug-draw")]
+            debug_lines: crate::vulkan::vk_debug_lines::VkDebugLines::new(
+                crate::vulkan::vk_debug_lines::DEFAULT_MAX_DEBUG_LINES,
+            ),
         };
 
         render.register_all_core_images();
@@ -1739,6 +1746,10 @@ impl VkRenderCore {
             brdf_lut: brd_flut,
             image_state_tracker: ImageStateTracker::new(),
             queue_family_indices,
+            #[cfg(feature = "debug-draw")]
+            debug_lines: crate::vulkan::vk_debug_lines::VkDebugLines::new(
+                crate::vulkan::vk_debug_lines::DEFAULT_MAX_DEBUG_LINES,
+            ),
         };
 
         render.register_all_core_images();

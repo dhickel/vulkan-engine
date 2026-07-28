@@ -11,6 +11,8 @@ pub mod prelude {
 
 pub mod animation;
 mod data;
+#[cfg(feature = "debug-draw")]
+pub mod debug_draw;
 mod debug_ui;
 
 // The `advanced-interop` Cargo feature gates unstable, unsafe, or internal
@@ -61,6 +63,7 @@ pub use api::{
     EventBus,
     // Frame API
     FrameContext,
+    FrameExtensions,
     FrameRenderOutcome,
     // Handles (widely used)
     MaterialHandle,
@@ -92,6 +95,9 @@ pub use api::{
     TextureHandle,
     VisualTuning,
 };
+
+#[cfg(feature = "debug-draw")]
+pub use debug_draw::DebugDrawState;
 
 pub use animation::AnimationPlayer;
 pub use data::camera::{

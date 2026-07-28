@@ -21,3 +21,5 @@ pub mod vk_storage;
 pub mod vk_swapchain;
 pub mod vk_types;
 pub mod vk_util;
+#[cfg(feature = "debug-draw")]
+pub(crate) mod vk_debug_lines;

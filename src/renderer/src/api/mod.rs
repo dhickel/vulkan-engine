@@ -4,6 +4,7 @@ pub mod bsp;
 pub mod config;
 mod errors;
 pub mod event_logging;
+mod frame_extensions;
 mod hooks;
 mod loading;
 pub mod prelude;
@@ -77,6 +78,7 @@ pub use input::{
     InputSystem, LayerDescriptor, LayerHandle, LayerId, LayerPriority, LayerSpec,
 };
 pub use loading::{LoadStatus, LoadTicket};
+pub use frame_extensions::FrameExtensions;
 pub use renderer::{
     CameraView, EnvironmentRuntimeStatus, FrameContext, FrameRenderOutcome, Renderer,
     RendererInputRouting, RendererInputSuppression, RetirementSerials,

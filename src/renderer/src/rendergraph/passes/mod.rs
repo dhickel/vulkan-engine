@@ -3,6 +3,8 @@
 //! Canonical frame-pass list used by the renderer's default rendergraph.
 
 mod debug_capture_pass;
+#[cfg(feature = "debug-draw")]
+mod debug_lines;
 mod geometry_pass;
 mod imgui_pass;
 mod prepare_targets_pass;
@@ -12,6 +14,8 @@ mod skybox_pass;
 mod terminal_present_pass;
 
 pub use debug_capture_pass::DebugCapturePass;
+#[cfg(feature = "debug-draw")]
+pub use debug_lines::DebugLinesPass;
 pub use geometry_pass::GeometryPass;
 pub use imgui_pass::ImguiPass;
 pub use prepare_targets_pass::PrepareTargetsPass;
