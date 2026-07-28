@@ -3344,8 +3344,9 @@ impl BspSurfaceArena {
 /// associated with their creating arena; a valid slot/generation from A cannot
 /// be accepted as B. Arena destruction is the only descriptor-set release path.
 pub struct BspSurfaceCache {
-    /// Prepared BSP materials indexed by slot.
-    cached_materials: Vec<BspCachedSurface>,
+    /// Prepared BSP materials indexed by slot. A vacant entry is a terminal
+    /// tombstone or reusable slot; no handle may resolve it.
+    cached_materials: Vec<Option<BspCachedSurface>>,
     /// Per-slot generation counters.
     generations: Vec<u32>,
     /// Free slot indices for reuse after retirement.
@@ -3434,7 +3435,10 @@ impl BspSurfaceCache {
             // Invalidate all material slots owned by this arena before destroying
             // the pool, so no handle can later reference a destroyed set.
             for slot in arena.material_slots.drain(..) {
-                self.remove_by_slot(slot);
+                debug_assert!(
+                    self.remove_by_slot(slot).is_ok(),
+                    "arena material slot must be live exactly once"
+                );
             }
             arena.destroy(device, allocator);
         }
@@ -3656,17 +3660,25 @@ impl BspSurfaceCache {
             "BSP material arena_id must match the registering arena"
         );
         let (slot, handle) = if let Some(slot) = self.free_slots.pop() {
-            self.cached_materials[slot as usize] = material;
+            debug_assert!(
+                self.cached_materials
+                    .get(slot as usize)
+                    .is_some_and(Option::is_none),
+                "free BSP material slot contained a live payload"
+            );
+            self.cached_materials[slot as usize] = Some(material);
             (slot, self.handle_for_slot(slot))
         } else {
             let slot = self.cached_materials.len() as u32;
-            self.cached_materials.push(material);
+            self.cached_materials.push(Some(material));
             self.generations.push(0);
             (slot, crate::data::handles::BspMaterialHandle::new(slot, 0))
         };
         // Register the slot in the arena for rollback tracking.
         if let Ok(arena) = self.arena_mut(arena_id) {
-            arena.material_slots.push(slot);
+            if !arena.material_slots.contains(&slot) {
+                arena.material_slots.push(slot);
+            }
         }
         handle
     }
@@ -3686,6 +3698,7 @@ impl BspSurfaceCache {
         }
         self.cached_materials
             .get(slot)
+            .and_then(Option::as_ref)
             .ok_or(crate::data::handles::CacheError::InvalidHandle)
     }
 
@@ -3717,18 +3730,57 @@ impl BspSurfaceCache {
         Ok(surface)
     }
 
-    /// Invalidate a BSP material handle by bumping its generation counter.
-    pub fn remove(&mut self, handle: crate::data::handles::BspMaterialHandle) {
-        self.remove_by_slot(handle.slot);
+    /// Invalidate a BSP material handle. Stale and out-of-range handles are
+    /// rejected before the slot can be changed.
+    pub fn remove(
+        &mut self,
+        handle: crate::data::handles::BspMaterialHandle,
+    ) -> Result<(), crate::data::handles::CacheError> {
+        let slot = handle.slot as usize;
+        let generation = *self
+            .generations
+            .get(slot)
+            .ok_or(crate::data::handles::CacheError::OutOfBounds)?;
+        if generation != handle.generation {
+            return Err(crate::data::handles::CacheError::StaleHandle);
+        }
+        let arena_id = self.cached_materials[slot]
+            .as_ref()
+            .ok_or(crate::data::handles::CacheError::InvalidHandle)?
+            .arena_id;
+        self.remove_by_slot(handle.slot)?;
+        if let Ok(arena) = self.arena_mut(arena_id) {
+            arena.material_slots.retain(|registered| *registered != handle.slot);
+        }
+        Ok(())
     }
 
-    fn remove_by_slot(&mut self, slot: u32) {
-        if let Some(gen) = self.generations.get_mut(slot as usize) {
-            *gen = gen.wrapping_add(1);
-            if !self.free_slots.contains(&slot) {
-                self.free_slots.push(slot);
-            }
+    /// Remove a known live slot. Generation exhaustion terminally retires the
+    /// slot: its payload is cleared but it is not returned to the free list.
+    fn remove_by_slot(&mut self, slot: u32) -> Result<(), crate::data::handles::CacheError> {
+        let slot_index = slot as usize;
+        let next_generation = self
+            .generations
+            .get(slot_index)
+            .copied()
+            .ok_or(crate::data::handles::CacheError::OutOfBounds)?
+            .checked_add(1);
+        let material = self
+            .cached_materials
+            .get_mut(slot_index)
+            .ok_or(crate::data::handles::CacheError::OutOfBounds)?;
+        if material.is_none() {
+            return Err(crate::data::handles::CacheError::InvalidHandle);
         }
+
+        // All fallible validation, including checked_add, has completed.
+        // At u32::MAX the slot is terminally retired rather than recycled.
+        *material = None;
+        if let Some(next_generation) = next_generation {
+            self.generations[slot_index] = next_generation;
+            self.free_slots.push(slot);
+        }
+        Ok(())
     }
 
     /// Destroy all resources owned by a specific arena, leaving other arenas intact.
@@ -3791,7 +3843,10 @@ impl BspSurfaceCache {
 
         // Invalidate all material slots immediately.
         for slot in arena.material_slots.iter().copied() {
-            self.remove_by_slot(slot);
+            debug_assert!(
+                self.remove_by_slot(slot).is_ok(),
+                "arena material slot must be live exactly once"
+            );
         }
 
         Some(crate::data::retirement::BspRetirementClosure {
@@ -4269,6 +4324,74 @@ mod tests {
             checked_retired_generation(u32::MAX),
             Err(CacheError::GenerationExhausted)
         );
+    }
+
+    #[cfg(feature = "bsp")]
+    fn bsp_surface_for_test(arena_id: u64) -> BspCachedSurface {
+        use ash::vk::Handle;
+
+        BspCachedSurface {
+            material_descriptor: ash::vk::DescriptorSet::from_raw(1),
+            surf_ubo_alloc: Default::default(),
+            pipeline: VkPipelineType::BspOpaque,
+            surface_flags: 0,
+            albedo_tex: TextureHandle::new(1, 0),
+            fullbright_tex: None,
+            lightmap_tex: TextureHandle::new(2, 0),
+            arena_id,
+        }
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn bsp_surface_cache_rejects_stale_removal_before_mutation() {
+        let mut cache = BspSurfaceCache::new();
+        let arena = cache.allocate_arena();
+        let old = cache.add(arena, bsp_surface_for_test(arena));
+        cache.remove(old).expect("live handle removes");
+        let replacement = cache.add(arena, bsp_surface_for_test(arena));
+
+        assert_eq!(replacement.slot, old.slot);
+        assert_eq!(replacement.generation, old.generation + 1);
+        assert_eq!(cache.remove(old), Err(CacheError::StaleHandle));
+        assert!(cache.get(replacement).is_ok());
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn bsp_surface_cache_removal_detaches_the_old_arena_slot() {
+        let mut cache = BspSurfaceCache::new();
+        let old_arena = cache.allocate_arena();
+        let old = cache.add(old_arena, bsp_surface_for_test(old_arena));
+        cache.remove(old).expect("live handle removes");
+
+        let replacement_arena = cache.allocate_arena();
+        let replacement = cache.add(replacement_arena, bsp_surface_for_test(replacement_arena));
+        assert_eq!(replacement.slot, old.slot);
+
+        cache
+            .extract_retirement_closure(old_arena)
+            .expect("old arena remains removable");
+        assert!(cache.get(replacement).is_ok());
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn bsp_surface_cache_max_generation_retires_slot_without_reuse() {
+        let mut cache = BspSurfaceCache::new();
+        let arena = cache.allocate_arena();
+        let handle = cache.add(arena, bsp_surface_for_test(arena));
+        cache.generations[handle.slot as usize] = u32::MAX;
+        let terminal = crate::data::handles::BspMaterialHandle::new(handle.slot, u32::MAX);
+
+        cache
+            .remove(terminal)
+            .expect("terminal handle removes safely");
+        assert!(matches!(
+            cache.get(terminal),
+            Err(CacheError::InvalidHandle)
+        ));
+        assert!(!cache.free_slots.contains(&terminal.slot));
     }
 
     fn minimal_staged_import_plan() -> StagedImportPlan {
