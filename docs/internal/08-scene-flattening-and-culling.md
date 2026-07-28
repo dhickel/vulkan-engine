@@ -251,5 +251,6 @@ reason:
 - `docs/internal/04-api-to-backend-handoff.md`
 - `docs/internal/06-data-suballocation-and-transfer.md`
 - `docs/internal/07-rendergraph-dependencies-and-aliasing.md`
+- `docs/internal/20-scene-object-lifecycle.md`
 - `src/renderer/src/data/AGENTS.md`
 - `docs/internal/18-bsp-runtime-and-lifetime.md` — BSP render batches carry leaf-membership signatures for PVS filtering; BSP draw items submit through the same `build_submission` path with additional PVS-aware batch culling

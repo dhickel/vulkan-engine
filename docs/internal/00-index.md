@@ -53,6 +53,7 @@ Renderer (public API)
 | 17 | [17-safety-refactor-remediation-ledger.md](17-safety-refactor-remediation-ledger.md) | Phase 10 closeout: 21-row finding ledger, cross-reference map, status taxonomy, and companion to `tests/remediation_ledger.rs` |
 | 18 | [18-bsp-runtime-and-lifetime.md](18-bsp-runtime-and-lifetime.md) | BSP ownership graph, descriptor/frame ABI, commit protocol, generation safety, fence retirement, snapshot persistence, and failure matrix |
 | 19 | [19-bsp-generator.md](19-bsp-generator.md) | BSP dungeon generator architecture, intent pipeline, algorithms, serialization contract, and validation |
+| 20 | [20-scene-object-lifecycle.md](20-scene-object-lifecycle.md) | ObjectId minting, ObjectRecord, provenance, reverse index, prepare/commit, invariant audit |
 
 ## Key Source Files
 

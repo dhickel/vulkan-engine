@@ -205,4 +205,5 @@ A lifecycle snapshot contains only persistent `SceneId`, `SceneObjectId`, `Objec
 - [Input Polling and Layered Dispatch](06-input-polling-and-listeners.md)
 - [Runtime Project Launcher](11-runtime-project-launcher.md)
 - [App-Owned Loop](15-app-owned-loop.md)
+- [Editor Object System](18-editor-object-system.md)
 - [Internal Event System and Lifecycle](../internal/10-event-system-and-lifecycle.md)

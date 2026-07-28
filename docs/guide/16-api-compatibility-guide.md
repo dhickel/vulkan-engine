@@ -243,7 +243,7 @@ cargo run -p voxel_demo -- \
 | Import | Contains | Intended For |
 |--------|----------|--------------|
 | `renderer::prelude::*` | `Renderer`, `RendererConfig`, `Scene`, `AssetManager`, `LoadTicket`, `InputSystem`, `FrameCaptureRequest`, `EventBus`, `Camera`, `FPSController`, `ProceduralMeshData`, `PbrMaterialDesc`, `PointLight`, `DirectionalLight`, ... | Renderer-owned examples and diagnostics |
-| `engine::prelude::*` | `Renderer` (re-export), `RendererConfig`, `Scene`, `Camera`, `FPSController`, `EventBus`, `runtime_event_bus`, `FrameClock`, `FixedStepClock`, `begin_app_frame`, `end_app_frame`, `InputSystem`, `InputActionEventEmitter`, `render_scene_with_view`, `camera_view_for_size`, `CameraView`, `FrameRenderOutcome`, ... | Custom app-owned loops |
+| `engine::prelude::*` | `Renderer` (re-export), `RendererConfig`, `Scene`, `Camera`, `FPSController`, `EventBus`, `runtime_event_bus`, `FrameClock`, `FixedStepClock`, `begin_app_frame`, `end_app_frame`, `InputSystem`, `InputActionEventEmitter`, `render_scene_with_view`, `camera_view_for_size`, `CameraView`, `FrameRenderOutcome`, `ObjectId`, `ObjectKind`, `SceneObjectId`, `Selection`, `SelectionChange`, ... | Custom app-owned loops |
 
 ## Deferred Gaps
 

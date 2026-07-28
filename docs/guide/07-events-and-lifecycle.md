@@ -453,3 +453,5 @@ cargo check --locked --manifest-path examples/guide_app/Cargo.toml
 ## Next
 
 Continue to [08 — Scene Construction](08-scene-construction.md) to learn how to build scenes programmatically with nodes, transforms, meshes, materials, lights, and environment maps.
+
+> For the unified editor object system (`ObjectId`, `Selection`, `Component`, commands), see the [Editor Object System API Reference](../api/18-editor-object-system.md).

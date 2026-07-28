@@ -34,6 +34,7 @@ The root workspace currently contains the root `engine` package plus `src/input`
 | Configurable voxel demo | [16-voxel-demo.md](16-voxel-demo.md) | Strict presets, deterministic v2 generation, imgui editing, regeneration, MC33 partitioning, PBR rendering, and captures |
 | **BSP Map Support (Beta)** | [17-bsp-beta.md](17-bsp-beta.md) | Feature-gated BSP map loading, rendering, and lifecycle behind `renderer/bsp` feature |
 | **BSP Dungeon Generator** | [19-bsp-generator.md](19-bsp-generator.md) | Pure-Rust procedural dungeon `.map` generation from `(seed, config)` — offline pipeline |
+| Editor object system | [18-editor-object-system.md](18-editor-object-system.md) | `ObjectId`, `ObjectKind`, queries, `Selection`, `EditorCamera`, `Component`, commands |
 
 ## Public API Contract
 

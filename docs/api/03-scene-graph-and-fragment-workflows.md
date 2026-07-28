@@ -447,4 +447,6 @@ Zero-capacity `CommandHistory::new(0)`:
 - `docs/api/02-renderer-lifecycle-and-frame-api.md`
 - `docs/api/04-assets-sync-deferred-and-handles.md`
 - `docs/api/12-events-and-lifecycle.md`
+- `docs/api/18-editor-object-system.md`
 - `docs/internal/01-rendering-pipeline-mental-model.md`
+- `docs/internal/20-scene-object-lifecycle.md`
