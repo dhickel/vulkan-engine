@@ -1,12 +1,12 @@
 //! Headless sprite-batch capture example.
 //!
 //! # Purpose
-//! Demonstrates the `sprites-2d` feature: rendering colored quad sprites
+//! Demonstrates sprite rendering: colored quad sprites
 //! with an orthographic Camera2D via `FrameExtensions`.
 //!
 //! # Usage
 //! ```bash
-//! cargo run -p renderer --example demo_sprites --features sprites-2d -- --headless
+//! cargo run -p renderer --example demo_sprites -- --headless
 //! ```
 //!
 //! The captured frame is saved to the default capture directory.

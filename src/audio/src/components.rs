@@ -4,7 +4,7 @@
 //! - `audio.listener` — [`AudioListener`]
 //! - `audio.spatial_source` — [`AudioSource`]
 //!
-//! Activated by the `spatial-audio` feature gate.
+//! Always available (no feature gate).
 
 use crate::AudioClipId;
 

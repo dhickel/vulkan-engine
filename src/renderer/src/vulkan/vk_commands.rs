@@ -96,8 +96,7 @@ pub(crate) struct RecordingDispatcher<'a> {
     /// Debug line renderer backend (only when `debug-draw` feature is enabled).
     #[cfg(feature = "debug-draw")]
     debug_lines: &'a mut crate::vulkan::vk_debug_lines::VkDebugLines,
-    /// Sprite batch backend (only when `sprites-2d` feature is enabled).
-    #[cfg(feature = "sprites-2d")]
+    /// Sprite batch backend.
     sprites: &'a mut crate::vulkan::vk_sprites::VkSprites,
 }
 
@@ -195,7 +194,6 @@ pub(crate) struct DebugLinesRecording<'a> {
     frame: &'a VkFrame,
 }
 
-#[cfg(feature = "sprites-2d")]
 pub(crate) struct SpritesRecording<'a> {
     device: &'a ash::Device,
     window_state: &'a VkWindowState,
@@ -484,7 +482,6 @@ pub(crate) unsafe fn execute_rendergraph_for_frame(
         frame_number,
         #[cfg(feature = "debug-draw")]
         debug_lines: &mut core.debug_lines,
-        #[cfg(feature = "sprites-2d")]
         sprites: &mut core.sprites,
     };
     // SAFETY: `frame_ptr` is unique for this scope and dispatcher cannot reach presentation.
@@ -622,7 +619,6 @@ impl RenderGraphContext<'_> {
         }
     }
 
-    #[cfg(feature = "sprites-2d")]
     pub(crate) fn sprites_ctx(&mut self) -> SpritesRecording<'_> {
         SpritesRecording {
             device: self.recording.device,
@@ -2809,7 +2805,6 @@ impl DebugLinesRecording<'_> {
     }
 }
 
-#[cfg(feature = "sprites-2d")]
 impl SpritesRecording<'_> {
     pub(crate) fn draw_sprites(&mut self) -> Result<(), String> {
         if self.submission.sprites.is_empty() {

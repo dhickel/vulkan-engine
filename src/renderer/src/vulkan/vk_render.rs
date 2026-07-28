@@ -214,8 +214,7 @@ pub struct VkRenderCore {
     /// Debug line rendering backend. Only present when `debug-draw` is enabled.
     #[cfg(feature = "debug-draw")]
     pub(crate) debug_lines: crate::vulkan::vk_debug_lines::VkDebugLines,
-    /// Sprite batch rendering backend. Only present when `sprites-2d` is enabled.
-    #[cfg(feature = "sprites-2d")]
+    /// Sprite batch rendering backend.
     pub(crate) sprites: crate::vulkan::vk_sprites::VkSprites,
 }
 
@@ -568,7 +567,6 @@ impl Drop for VkRenderCore {
             #[cfg(feature = "debug-draw")]
             self.debug_lines.destroy(&self.device, allocator);
 
-            #[cfg(feature = "sprites-2d")]
             self.sprites.destroy(&self.device, allocator);
 
             for slot in self.gpu_timing.slots.iter() {
@@ -1540,8 +1538,7 @@ impl VkRenderCore {
             debug_lines: crate::vulkan::vk_debug_lines::VkDebugLines::new(
                 crate::vulkan::vk_debug_lines::DEFAULT_MAX_DEBUG_LINES,
             ),
-            #[cfg(feature = "sprites-2d")]
-            sprites: crate::vulkan::vk_sprites::VkSprites::new(
+                        sprites: crate::vulkan::vk_sprites::VkSprites::new(
                 crate::vulkan::vk_sprites::DEFAULT_MAX_SPRITES,
             ),
         };
@@ -1763,8 +1760,7 @@ impl VkRenderCore {
             debug_lines: crate::vulkan::vk_debug_lines::VkDebugLines::new(
                 crate::vulkan::vk_debug_lines::DEFAULT_MAX_DEBUG_LINES,
             ),
-            #[cfg(feature = "sprites-2d")]
-            sprites: crate::vulkan::vk_sprites::VkSprites::new(
+                        sprites: crate::vulkan::vk_sprites::VkSprites::new(
                 crate::vulkan::vk_sprites::DEFAULT_MAX_SPRITES,
             ),
         };

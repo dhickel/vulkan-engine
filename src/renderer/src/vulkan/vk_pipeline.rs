@@ -787,7 +787,6 @@ pub fn init_pipeline_cache(
         );
     }
 
-    #[cfg(feature = "sprites-2d")]
     {
         let (pipeline, layout) = init_sprite_pipeline(
             device,
@@ -1250,11 +1249,10 @@ fn init_debug_lines_pipeline(
 }
 
 // ---------------------------------------------------------------------------
-// Sprite pipeline (behind `sprites-2d` feature flag)
+// Sprite pipeline
 // ---------------------------------------------------------------------------
 
 /// Push constants for sprite draw (VP matrix + buffer device address).
-#[cfg(feature = "sprites-2d")]
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct PushConstSprites {
@@ -1265,12 +1263,9 @@ pub struct PushConstSprites {
 // SAFETY: Mat4 is 16×f32 with no internal padding; DeviceAddress is u64.
 // struct is repr(C) with Mat4 at offset 0 (align 4) and u64 at offset 64
 // (align 8). Total size 72 = 9×8, no trailing padding.
-#[cfg(feature = "sprites-2d")]
 unsafe impl bytemuck::Zeroable for PushConstSprites {}
-#[cfg(feature = "sprites-2d")]
 unsafe impl bytemuck::Pod for PushConstSprites {}
 
-#[cfg(feature = "sprites-2d")]
 fn init_sprite_pipeline(
     device: &ash::Device,
     shader_cache: &VkShaderCache,

@@ -5,11 +5,6 @@ edition = "2021"
 
 [features]
 default = []
-# Conditional spatial audio: stereo panning + distance attenuation.
-# Adds AudioSource/AudioListener components and mono-to-stereo spatialization.
-# Excluded from default; opt-in for spatial audio support.
-spatial-audio = []
-
 [dependencies]
 rodio = "0.19"
 log = "0.4"

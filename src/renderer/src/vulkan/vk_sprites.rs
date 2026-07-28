@@ -1,5 +1,5 @@
 //! Sprite batch Vulkan backend: per-frame host-visible vertex upload, pipeline
-//! binding, and draw. Gated behind the `sprites-2d` Cargo feature.
+//! binding, and draw. Always available.
 //!
 //! Each sprite is expanded into a quad (2 triangles = 6 vertices) in a
 //! host-visible ring buffer. A single pipeline is created at init time

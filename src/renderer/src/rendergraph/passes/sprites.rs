@@ -1,4 +1,4 @@
-//! Sprite batch render pass. Gated behind the `sprites-2d` Cargo feature.
+//! Sprite batch render pass. Always available.
 //!
 //! Renders world-space sprite quads with orthographic projection after
 //! debug lines and before UI.

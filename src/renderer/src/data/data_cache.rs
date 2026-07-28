@@ -2752,9 +2752,7 @@ pub enum CoreShaderType {
     DebugLineVert,
     #[cfg(feature = "debug-draw")]
     DebugLineFrag,
-    #[cfg(feature = "sprites-2d")]
     SpriteVert,
-    #[cfg(feature = "sprites-2d")]
     SpriteFrag,
 }
 
@@ -2772,10 +2770,7 @@ impl CoreShaderType {
     const DEBUG_DRAW_DELTA: usize = 2;
     #[cfg(not(feature = "debug-draw"))]
     const DEBUG_DRAW_DELTA: usize = 0;
-    #[cfg(feature = "sprites-2d")]
     const SPRITES_2D_DELTA: usize = 2;
-    #[cfg(not(feature = "sprites-2d"))]
-    const SPRITES_2D_DELTA: usize = 0;
     pub const COUNT: usize =
         Self::BASE + Self::INSTANCING_DELTA + Self::BSP_DELTA + Self::DEBUG_DRAW_DELTA
             + Self::SPRITES_2D_DELTA;
@@ -2811,9 +2806,7 @@ impl CoreShaderType {
             "DebugLineVert" => Some(Self::DebugLineVert),
             #[cfg(feature = "debug-draw")]
             "DebugLineFrag" => Some(Self::DebugLineFrag),
-            #[cfg(feature = "sprites-2d")]
             "SpriteVert" => Some(Self::SpriteVert),
-            #[cfg(feature = "sprites-2d")]
             "SpriteFrag" => Some(Self::SpriteFrag),
             _ => None,
         }
@@ -2872,11 +2865,6 @@ fn parse_shader_manifest_lines<'a>(
 
         #[cfg(not(feature = "debug-draw"))]
         if key.trim() == "DebugLineVert" || key.trim() == "DebugLineFrag" {
-            continue;
-        }
-
-        #[cfg(not(feature = "sprites-2d"))]
-        if key.trim() == "SpriteVert" || key.trim() == "SpriteFrag" {
             continue;
         }
 
@@ -2998,7 +2986,6 @@ pub enum VkPipelineType {
     BspLiquid,
     #[cfg(feature = "debug-draw")]
     DebugLines,
-    #[cfg(feature = "sprites-2d")]
     Sprites,
 }
 
@@ -3016,10 +3003,7 @@ impl VkPipelineType {
     const DEBUG_DRAW_DELTA: usize = 1;
     #[cfg(not(feature = "debug-draw"))]
     const DEBUG_DRAW_DELTA: usize = 0;
-    #[cfg(feature = "sprites-2d")]
     const SPRITES_2D_DELTA: usize = 1;
-    #[cfg(not(feature = "sprites-2d"))]
-    const SPRITES_2D_DELTA: usize = 0;
     pub const COUNT: usize =
         Self::BASE + Self::INSTANCING_DELTA + Self::BSP_DELTA + Self::DEBUG_DRAW_DELTA
             + Self::SPRITES_2D_DELTA;

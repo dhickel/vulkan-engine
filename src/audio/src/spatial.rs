@@ -1,6 +1,6 @@
 //! Conditional spatial audio: stereo panning + distance attenuation.
 //!
-//! Activated by the `spatial-audio` feature gate. Provides:
+//! Always available (no feature gate). Provides:
 //!
 //! - 3D math types for listener/source positions and directions
 //! - Equal-power stereo panning from listener right vector

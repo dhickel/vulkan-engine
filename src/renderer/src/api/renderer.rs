@@ -1339,13 +1339,10 @@ impl Renderer {
         {
             submission.debug_lines = extensions.debug_lines;
         }
-        #[cfg(feature = "sprites-2d")]
-        {
-            submission.sprites = extensions.sprites;
-            if let Some(ref cam) = extensions.sprite_camera {
-                submission.sprite_camera_view = cam.view_matrix();
-                submission.sprite_camera_projection = cam.projection_matrix();
-            }
+        submission.sprites = extensions.sprites;
+        if let Some(ref cam) = extensions.sprite_camera {
+            submission.sprite_camera_view = cam.view_matrix();
+            submission.sprite_camera_projection = cam.projection_matrix();
         }
         debug_assert!(self.frame_extensions.is_empty());
 

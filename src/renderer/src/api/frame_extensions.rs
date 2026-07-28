@@ -21,7 +21,6 @@ use crate::scene::SceneNodeId;
 use glam::Mat4;
 #[cfg(feature = "debug-draw")]
 use glam::Vec3;
-#[cfg(feature = "sprites-2d")]
 use crate::vulkan::vk_sprites::SpriteInstance;
 
 /// Immutable per-frame extension payload consumed by the renderer.
@@ -46,13 +45,10 @@ pub struct FrameExtensions {
     /// `debug-draw` feature is enabled and lines are non-empty).
     #[cfg(feature = "debug-draw")]
     pub debug_lines: Vec<(Vec3, Vec3, Vec3)>,
-    /// Sprite instances rendered by the sprite-batch pass (only when
-    /// `sprites-2d` is enabled and sprites are non-empty).
-    #[cfg(feature = "sprites-2d")]
+    /// Sprite instances rendered by the sprite-batch pass.
     pub sprites: Vec<SpriteInstance>,
     /// Optional orthographic camera for the 2D layer.
     /// When `None`, an identity projection is used.
-    #[cfg(feature = "sprites-2d")]
     pub sprite_camera: Option<super::sprite::Camera2D>,
 }
 
@@ -64,22 +60,12 @@ impl FrameExtensions {
 
     /// Returns `true` when no extensions are set.
     pub fn is_empty(&self) -> bool {
-        #[cfg(any(feature = "debug-draw", feature = "sprites-2d"))]
+        let mut empty = self.transform_overrides.is_empty();
+        #[cfg(feature = "debug-draw")]
         {
-            let mut empty = self.transform_overrides.is_empty();
-            #[cfg(feature = "debug-draw")]
-            {
-                empty = empty && self.debug_lines.is_empty();
-            }
-            #[cfg(feature = "sprites-2d")]
-            {
-                empty = empty && self.sprites.is_empty() && self.sprite_camera.is_none();
-            }
-            empty
+            empty = empty && self.debug_lines.is_empty();
         }
-        #[cfg(not(any(feature = "debug-draw", feature = "sprites-2d")))]
-        {
-            self.transform_overrides.is_empty()
-        }
+        empty = empty && self.sprites.is_empty() && self.sprite_camera.is_none();
+        empty
     }
 }

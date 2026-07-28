@@ -4,14 +4,13 @@
 //! without opening an output device. Device-backed playback is explicit through
 //! `AudioEngine`.
 //!
-//! ## Feature flags
+//! ## Spatial audio
 //!
-//! - `spatial-audio` — stereo panning + distance attenuation, [`AudioSource`]
-//!   and [`AudioListener`] components, and [`AudioEngine::play_spatial_mono`].
+//! Stereo panning + distance attenuation, [`AudioSource`]
+//! and [`AudioListener`] components, and [`AudioEngine::play_spatial_mono`]
+//! are always available.
 
-#[cfg(feature = "spatial-audio")]
 pub mod components;
-#[cfg(feature = "spatial-audio")]
 pub mod spatial;
 
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
@@ -22,7 +21,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(feature = "spatial-audio")]
 use std::sync::Arc as StdArc;
 
 /// Stable authored identity for an audio clip.
@@ -276,11 +274,9 @@ impl AudioEngine {
 
     /// Play a mono audio clip with spatial stereo panning.
     ///
-    /// Available only with the `spatial-audio` feature. The clip must be mono
-    /// (1 channel); multi-channel clips return an error without side effects.
-    /// The returned [`SpatialPlaybackHandle`] provides independent left/right
-    /// gain control via shared atomic state.
-    #[cfg(feature = "spatial-audio")]
+    /// The clip must be mono (1 channel); multi-channel clips return an error
+    /// without side effects. The returned [`SpatialPlaybackHandle`] provides
+    /// independent left/right gain control via shared atomic state.
     pub fn play_spatial_mono(
         &self,
         clip: &AudioClip,
@@ -342,17 +338,14 @@ impl PlaybackHandle {
 
 /// Handle to active device-backed spatial playback.
 ///
-/// Available only with the `spatial-audio` feature. Wraps a rodio [`Sink`]
-/// together with shared atomic stereo gains so the caller can update the
-/// listener/source position and have the changes take effect on the audio
-/// thread without locks.
-#[cfg(feature = "spatial-audio")]
+/// Wraps a rodio [`Sink`] together with shared atomic stereo gains so the
+/// caller can update the listener/source position and have the changes take
+/// effect on the audio thread without locks.
 pub struct SpatialPlaybackHandle {
     sink: Sink,
     gains: StdArc<spatial::AtomicSpatialGains>,
 }
 
-#[cfg(feature = "spatial-audio")]
 impl fmt::Debug for SpatialPlaybackHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SpatialPlaybackHandle")
@@ -363,7 +356,6 @@ impl fmt::Debug for SpatialPlaybackHandle {
     }
 }
 
-#[cfg(feature = "spatial-audio")]
 impl SpatialPlaybackHandle {
     /// Set the master (sink) scalar volume, clamped to `[0, 1]`.
     pub fn set_volume(&self, volume: f32) {

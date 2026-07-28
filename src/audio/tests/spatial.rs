@@ -1,6 +1,4 @@
-#![cfg(feature = "spatial-audio")]
-
-//! Integration tests for the spatial-audio feature.
+//! Integration tests for spatial audio.
 //!
 //! Validates the full pipeline: source adapter, panning math, attenuation,
 //! device-backed spatial playback, mono-only validation, component DTOs,

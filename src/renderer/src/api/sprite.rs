@@ -1,4 +1,4 @@
-//! 2D sprite rendering API. Gated behind the `sprites-2d` Cargo feature.
+//! 2D sprite rendering API. Always available.
 //!
 //! Provides [`Camera2D`] for orthographic projection and [`SpriteRenderer`]
 //! for batching colored quads in world space.

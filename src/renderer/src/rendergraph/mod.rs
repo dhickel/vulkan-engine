@@ -53,7 +53,6 @@ use crate::rendergraph::passes::{
 };
 #[cfg(feature = "debug-draw")]
 use crate::rendergraph::passes::DebugLinesPass;
-#[cfg(feature = "sprites-2d")]
 use crate::rendergraph::passes::SpritesPass;
 use crate::scene::render_submission::RenderSubmission;
 use crate::vulkan::vk_commands::RecordingDispatcher;
@@ -138,7 +137,6 @@ impl RenderGraph {
         #[cfg(feature = "debug-draw")]
         passes.push(Box::new(DebugLinesPass));
 
-        #[cfg(feature = "sprites-2d")]
         passes.push(Box::new(SpritesPass));
 
         passes.push(Box::new(PresentCopyPass));
