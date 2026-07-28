@@ -76,6 +76,45 @@ string_id!(PhysicsBodyId);
 string_id!(ColliderId);
 string_id!(AudioClipId);
 string_id!(ScriptId);
+string_id!(SceneObjectId);
+
+/// Persistent object kind label for dependency-neutral vocabulary.
+///
+/// Variants are ordered by declaration; the derived [`Ord`] / [`Hash`]
+/// implementations are deterministic.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum ObjectKind {
+    Node,
+    PointLight,
+    DirectionalLight,
+    SpotLight,
+}
+
+/// Immutable lifecycle action applied to a scene object.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum SceneObjectLifecycleAction {
+    Created,
+    Removed,
+    Restored,
+    Duplicated { source: SceneObjectId },
+}
+
+/// Snapshot of a scene object at the time of a lifecycle action.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct SceneObjectLifecycleSnapshot {
+    pub scene: SceneId,
+    pub object: SceneObjectId,
+    pub kind: ObjectKind,
+    pub name: Option<String>,
+    pub parent: Option<SceneObjectId>,
+}
+
+/// Lifecycle event combining an action and a snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct SceneObjectLifecycleEvent {
+    pub action: SceneObjectLifecycleAction,
+    pub snapshot: SceneObjectLifecycleSnapshot,
+}
 
 /// Coarse frame-safe event stages.
 ///
@@ -201,6 +240,7 @@ pub enum SceneEvent {
     NodeTransformed { node: NodeId },
     AssetPlaced { node: NodeId, asset: AssetId },
     MaterialChanged { node: NodeId, material: MaterialId },
+    ObjectLifecycle(SceneObjectLifecycleEvent),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1217,5 +1257,186 @@ mod tests {
         // seq 1: not consumed, both see it
         // seq 2: consumed, so only a sees it
         assert_eq!(seen.as_slice(), &["a:0", "a:1", "b:1", "a:2"]);
+    }
+
+    // ── Object lifecycle tests ──
+
+    #[test]
+    fn scene_object_id_construction_and_equality() {
+        let a = SceneObjectId::new("obj-a");
+        let b = SceneObjectId::new("obj-b");
+        let a2 = SceneObjectId::new("obj-a");
+
+        assert_eq!(a, a2);
+        assert_ne!(a, b);
+        assert_eq!(a.as_str(), "obj-a");
+        assert_eq!(a.to_string(), "obj-a");
+    }
+
+    #[test]
+    fn scene_object_id_clone() {
+        let id = SceneObjectId::new("obj-c");
+        let cloned = id.clone();
+        assert_eq!(id, cloned);
+    }
+
+    #[test]
+    fn object_kind_variants_are_distinct() {
+        assert_ne!(ObjectKind::Node, ObjectKind::PointLight);
+        assert_ne!(ObjectKind::PointLight, ObjectKind::DirectionalLight);
+        assert_ne!(ObjectKind::DirectionalLight, ObjectKind::SpotLight);
+        assert_ne!(ObjectKind::SpotLight, ObjectKind::Node);
+    }
+
+    #[test]
+    fn object_kind_deterministic_ord() {
+        let kinds = [
+            ObjectKind::DirectionalLight,
+            ObjectKind::SpotLight,
+            ObjectKind::Node,
+            ObjectKind::PointLight,
+        ];
+        let mut sorted = kinds;
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            [
+                ObjectKind::Node,
+                ObjectKind::PointLight,
+                ObjectKind::DirectionalLight,
+                ObjectKind::SpotLight,
+            ]
+        );
+    }
+
+    #[test]
+    fn lifecycle_action_construction_and_eq() {
+        let created = SceneObjectLifecycleAction::Created;
+        let removed = SceneObjectLifecycleAction::Removed;
+        let restored = SceneObjectLifecycleAction::Restored;
+        let dup = SceneObjectLifecycleAction::Duplicated {
+            source: SceneObjectId::new("src"),
+        };
+
+        assert_eq!(created, SceneObjectLifecycleAction::Created);
+        assert_ne!(created, removed);
+        assert_ne!(removed, restored);
+        assert_ne!(
+            dup,
+            SceneObjectLifecycleAction::Duplicated {
+                source: SceneObjectId::new("other")
+            }
+        );
+    }
+
+    #[test]
+    fn lifecycle_snapshot_construction() {
+        let snap = SceneObjectLifecycleSnapshot {
+            scene: SceneId::new("scene-1"),
+            object: SceneObjectId::new("obj-1"),
+            kind: ObjectKind::Node,
+            name: Some("Root".into()),
+            parent: None,
+        };
+
+        assert_eq!(snap.scene.as_str(), "scene-1");
+        assert_eq!(snap.object.as_str(), "obj-1");
+        assert_eq!(snap.kind, ObjectKind::Node);
+        assert_eq!(snap.name.as_deref(), Some("Root"));
+        assert!(snap.parent.is_none());
+    }
+
+    #[test]
+    fn lifecycle_event_typed_subscription() {
+        let mut bus = EventBus::new();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_listener = Arc::clone(&seen);
+
+        bus.subscribe_to::<SceneEvent, _>(move |event| {
+            match event {
+                SceneEvent::ObjectLifecycle(e) => {
+                    seen_listener
+                        .lock()
+                        .unwrap()
+                        .push(format!("{:?}", e.action));
+                }
+                _ => {}
+            }
+            Ok(())
+        });
+
+        let event = EngineEvent::Scene(SceneEvent::ObjectLifecycle(SceneObjectLifecycleEvent {
+            action: SceneObjectLifecycleAction::Created,
+            snapshot: SceneObjectLifecycleSnapshot {
+                scene: SceneId::new("scene-1"),
+                object: SceneObjectId::new("obj-a"),
+                kind: ObjectKind::PointLight,
+                name: None,
+                parent: None,
+            },
+        }));
+
+        bus.emit(EventStage::SceneLoad, None, event);
+        let report = bus.dispatch_pending();
+        assert_eq!(report.dispatched, 1);
+        assert!(report.failures.is_empty());
+
+        let entries = seen.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].contains("Created"));
+    }
+
+    #[test]
+    fn lifecycle_event_recorder_capture() {
+        let mut bus = EventBus::with_recorder(EventRecorder::bounded(5));
+
+        let snap = SceneObjectLifecycleSnapshot {
+            scene: SceneId::new("scene-1"),
+            object: SceneObjectId::new("obj-x"),
+            kind: ObjectKind::DirectionalLight,
+            name: Some("Sun".into()),
+            parent: None,
+        };
+        let event = EngineEvent::Scene(SceneEvent::ObjectLifecycle(SceneObjectLifecycleEvent {
+            action: SceneObjectLifecycleAction::Removed,
+            snapshot: snap,
+        }));
+
+        bus.emit(EventStage::PostUpdate, None, event);
+
+        let recorder = bus.recorder().unwrap();
+        assert_eq!(recorder.len(), 1);
+
+        let recorded: Vec<_> = recorder.entries().collect();
+        assert_eq!(recorded.len(), 1);
+
+        match &recorded[0].event {
+            EngineEvent::Scene(SceneEvent::ObjectLifecycle(e)) => {
+                assert_eq!(e.action, SceneObjectLifecycleAction::Removed);
+                assert_eq!(e.snapshot.object.as_str(), "obj-x");
+                assert_eq!(e.snapshot.kind, ObjectKind::DirectionalLight);
+            }
+            _ => panic!("expected ObjectLifecycle event"),
+        }
+    }
+
+    #[test]
+    fn lifecycle_snapshot_has_no_runtime_slot_or_generation() {
+        // SceneObjectLifecycleSnapshot has only persistent fields:
+        // scene (SceneId), object (SceneObjectId), kind (ObjectKind),
+        // name (Option<String>), parent (Option<SceneObjectId>).
+        // None of these are runtime slot/generation handles.
+        let snap = SceneObjectLifecycleSnapshot {
+            scene: SceneId::new("s1"),
+            object: SceneObjectId::new("o1"),
+            kind: ObjectKind::SpotLight,
+            name: None,
+            parent: None,
+        };
+        // Verify all fields are persistent string/id-based, not numeric handles
+        assert_eq!(snap.scene.as_str(), "s1");
+        assert_eq!(snap.object.as_str(), "o1");
+        assert_eq!(snap.kind, ObjectKind::SpotLight);
+        // Compile-time proof: no .slot or .generation fields accessible
     }
 }

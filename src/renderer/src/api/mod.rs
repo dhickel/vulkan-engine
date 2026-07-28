@@ -38,6 +38,7 @@ pub use crate::debug_ui::{
     AppUiCallback, DebugTimingRow, DebugTimingSnapshot, DebugUiFrameContext, DebugViewCallback,
     DebugViewDescriptor, DebugViewId,
 };
+pub use crate::object::ObjectId;
 pub use crate::scene::SceneNodeId;
 pub use assets::{
     AssetManager, EnvironmentSource, EnvironmentState, FacePattern, PbrMaterialDesc,
@@ -54,12 +55,13 @@ pub use engine_events::{
     ActionPhase, AssetEvent, AssetId, AudioClipId, AudioEvent, ColliderId, ContactPhase,
     EngineEvent, EventBus, EventEnvelope, EventRecorder, EventSequence, EventStage, FrameId,
     InputActionEvent, LifecycleEvent, ListenerError, ListenerFailure, ListenerId, MaterialId,
-    NodeId, PackageId, PhysicsBodyId, PhysicsEvent, ProjectId, SceneEvent, SceneId, ScriptId,
-    ScriptingEvent,
+    NodeId, ObjectKind, PackageId, PhysicsBodyId, PhysicsEvent, ProjectId, SceneEvent, SceneId,
+    SceneObjectId, SceneObjectLifecycleAction, SceneObjectLifecycleEvent,
+    SceneObjectLifecycleSnapshot, ScriptId, ScriptingEvent,
 };
 pub use errors::{
     AnimationError, AssetError, CommandError, HookError, HookFailureEntry, HookFailureStage,
-    HookReport, RendererError, RendererFrameError, RendererInitError, SceneError,
+    HookReport, ObjectError, RendererError, RendererFrameError, RendererInitError, SceneError,
 };
 pub use hooks::{boxed_render_hook, BoxedRenderHook, RenderHook, RenderHookContext};
 pub use input::{

@@ -1,4 +1,5 @@
 pub mod api;
+pub mod object;
 
 /// Curated alpha facade imports for quickstart-style renderer applications.
 ///

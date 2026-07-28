@@ -3,6 +3,7 @@ use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 
 use super::config::FrameCaptureConfigError;
+pub use crate::object::identity::ObjectError;
 use crate::scene::scene_world::SceneNodeId;
 
 #[derive(Debug)]
@@ -183,6 +184,8 @@ pub enum SceneError {
     CommandError(CommandError),
     SerializationError(String),
     InvalidMutation(String),
+    Object(ObjectError),
+    GenerationExhausted { resource: String, slot: u32 },
 }
 
 impl Display for SceneError {
@@ -243,7 +246,18 @@ impl Display for SceneError {
             Self::CommandError(err) => write!(f, "command error: {err}"),
             Self::SerializationError(msg) => write!(f, "serialization error: {msg}"),
             Self::InvalidMutation(msg) => write!(f, "invalid mutation: {msg}"),
+            Self::Object(err) => write!(f, "object error: {err}"),
+            Self::GenerationExhausted { resource, slot } => write!(
+                f,
+                "generation counter exhausted for {resource} at slot {slot}"
+            ),
         }
+    }
+}
+
+impl From<ObjectError> for SceneError {
+    fn from(err: ObjectError) -> Self {
+        Self::Object(err)
     }
 }
 
@@ -261,7 +275,10 @@ impl From<CommandError> for SceneError {
 
 impl Error for SceneError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        None
+        match self {
+            Self::Object(err) => Some(err),
+            _ => None,
+        }
     }
 }
 
