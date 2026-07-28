@@ -3,6 +3,16 @@
 //! Clips have durable authored IDs and can be loaded, constructed, and probed
 //! without opening an output device. Device-backed playback is explicit through
 //! `AudioEngine`.
+//!
+//! ## Feature flags
+//!
+//! - `spatial-audio` — stereo panning + distance attenuation, [`AudioSource`]
+//!   and [`AudioListener`] components, and [`AudioEngine::play_spatial_mono`].
+
+#[cfg(feature = "spatial-audio")]
+pub mod components;
+#[cfg(feature = "spatial-audio")]
+pub mod spatial;
 
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 use std::error::Error;
@@ -11,6 +21,9 @@ use std::io::{BufReader, Cursor};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+
+#[cfg(feature = "spatial-audio")]
+use std::sync::Arc as StdArc;
 
 /// Stable authored identity for an audio clip.
 ///
@@ -260,6 +273,40 @@ impl AudioEngine {
     pub fn set_master_volume(&mut self, volume: f32) {
         self.master_volume = clamp_volume(volume);
     }
+
+    /// Play a mono audio clip with spatial stereo panning.
+    ///
+    /// Available only with the `spatial-audio` feature. The clip must be mono
+    /// (1 channel); multi-channel clips return an error without side effects.
+    /// The returned [`SpatialPlaybackHandle`] provides independent left/right
+    /// gain control via shared atomic state.
+    #[cfg(feature = "spatial-audio")]
+    pub fn play_spatial_mono(
+        &self,
+        clip: &AudioClip,
+    ) -> Result<SpatialPlaybackHandle, AudioError> {
+        let source = clip.decoder()?;
+        if source.channels() != 1 {
+            return Err(AudioError::Playback {
+                clip_id: clip.id().clone(),
+                message: format!(
+                    "spatial audio requires mono source, got {} channels",
+                    source.channels()
+                ),
+            });
+        }
+        let gains = StdArc::new(spatial::AtomicSpatialGains::new(
+            spatial::SpatialGain::CENTER,
+        ));
+        let spatial_source =
+            spatial::SpatialSource::new(source, StdArc::clone(&gains));
+        let sink = Sink::try_new(&self.stream_handle).map_err(|err| AudioError::Playback {
+            clip_id: clip.id().clone(),
+            message: err.to_string(),
+        })?;
+        sink.append(spatial_source);
+        Ok(SpatialPlaybackHandle { sink, gains })
+    }
 }
 
 /// Handle to active device-backed playback.
@@ -274,6 +321,85 @@ impl PlaybackHandle {
 
     pub fn volume(&self) -> f32 {
         self.sink.volume()
+    }
+
+    pub fn pause(&self) {
+        self.sink.pause();
+    }
+
+    pub fn play(&self) {
+        self.sink.play();
+    }
+
+    pub fn stop(&self) {
+        self.sink.stop();
+    }
+
+    pub fn is_playing(&self) -> bool {
+        !self.sink.empty()
+    }
+}
+
+/// Handle to active device-backed spatial playback.
+///
+/// Available only with the `spatial-audio` feature. Wraps a rodio [`Sink`]
+/// together with shared atomic stereo gains so the caller can update the
+/// listener/source position and have the changes take effect on the audio
+/// thread without locks.
+#[cfg(feature = "spatial-audio")]
+pub struct SpatialPlaybackHandle {
+    sink: Sink,
+    gains: StdArc<spatial::AtomicSpatialGains>,
+}
+
+#[cfg(feature = "spatial-audio")]
+impl fmt::Debug for SpatialPlaybackHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SpatialPlaybackHandle")
+            .field("volume", &self.sink.volume())
+            .field("empty", &self.sink.empty())
+            .field("gains", &self.gains.get())
+            .finish()
+    }
+}
+
+#[cfg(feature = "spatial-audio")]
+impl SpatialPlaybackHandle {
+    /// Set the master (sink) scalar volume, clamped to `[0, 1]`.
+    pub fn set_volume(&self, volume: f32) {
+        self.sink.set_volume(clamp_volume(volume));
+    }
+
+    /// Current master (sink) scalar volume.
+    pub fn volume(&self) -> f32 {
+        self.sink.volume()
+    }
+
+    /// Overwrite the spatial stereo gains directly.
+    pub fn set_spatial_gains(&self, gains: spatial::SpatialGain) {
+        self.gains.set(gains);
+    }
+
+    /// Compute and apply spatial gains from listener, source, and attenuation.
+    pub fn update_spatial(
+        &self,
+        listener: &spatial::ListenerPose,
+        source: &spatial::SourcePose,
+        attenuation: &spatial::Attenuation,
+        spatial_blend: f32,
+    ) {
+        let spatial_gains = spatial::spatialize(listener, source, attenuation);
+        let blended = spatial::blend_gains(
+            spatial::SpatialGain::CENTER,
+            spatial_gains,
+            spatial_blend,
+        );
+        self.gains.set(blended);
+    }
+
+    /// Read the current spatial gain pair.
+    pub fn spatial_gains(&self) -> spatial::SpatialGain {
+        self.gains.get()
     }
 
     pub fn pause(&self) {

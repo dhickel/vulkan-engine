@@ -6,7 +6,11 @@
 
 pub mod character;
 pub mod components;
+#[cfg(feature = "rapier2d")]
+pub mod components2d;
 pub mod query;
+#[cfg(feature = "rapier2d")]
+pub mod world2d;
 
 use std::collections::{BTreeMap, BTreeSet};
 
