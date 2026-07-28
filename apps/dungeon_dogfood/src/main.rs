@@ -19,7 +19,6 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use collision::CollisionWorld;
 use content::{load_content_pack, resolve_content_path};
 use engine::camera::{Camera, FPSController};
 use engine::events::{runtime_event_bus, DispatchReport, EventBus};
@@ -34,7 +33,7 @@ use mesh_collider_bridge::MeshColliderBridge;
 use physics::BodyKind;
 use physics_bridge::PhysicsBridge;
 use glam::{Quat, Vec2, Vec3};
-use player::{CameraIntentGuard, PlayerState, PLAYER_EYE_HEIGHT};
+use player::{CameraIntentGuard, PlayerState, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, PLAYER_EYE_HEIGHT};
 use renderer::api::config::{CompressionConfig, TextureCompressionMode};
 use renderer::api::FrameSerial;
 use renderer::prelude::{
@@ -261,10 +260,8 @@ fn run() -> Result<(), AppError> {
     log::info!("Light markers: {}", level.light_markers.len());
     log::info!("Model markers: {}", level.model_markers.len());
 
-    let collision_world = CollisionWorld::from_level(level);
-
     if headless_opts.enabled {
-        return run_headless(level, &content_pack, &collision_world, &headless_opts);
+        return run_headless(level, &content_pack, &headless_opts);
     }
 
     let event_loop = EventLoop::new()?;
@@ -335,9 +332,9 @@ fn run() -> Result<(), AppError> {
     let mut bridge = seed_collider_bridge(&mut renderer, &_level_scene, level);
 
     // Create component-driven physics bridge sharing the mesh bridge's world.
-    let mut physics_bridge = PhysicsBridge::new(&scene);
+    let mut physics_bridge = PhysicsBridge::new();
     // Register mesh-collider body-node mappings for unified writeback.
-    export_body_node_mappings(&bridge, &mut physics_bridge);
+    bridge.export_body_node_mappings_to_physics_bridge(&mut physics_bridge);
     log::info!(
         "Physics bridge ready: {} registered nodes",
         physics_bridge.registered_count()
@@ -350,6 +347,16 @@ fn run() -> Result<(), AppError> {
             level.spawn.layer as f32 * collision::WALL_HEIGHT + PLAYER_EYE_HEIGHT,
             -0.5,
         );
+
+    // Create player character in the shared physics world.
+    physics_bridge
+        .create_player_character(
+            &mut bridge.world,
+            spawn_position.to_array(),
+            PLAYER_CAPSULE_RADIUS,
+            PLAYER_CAPSULE_HALF_HEIGHT,
+        )
+        .map_err(|e| AppError::RendererInit(RendererError::InvalidState(e.to_string())))?;
     let mut player = PlayerState::new(spawn_position);
     let mut previous_player_position = player.position;
     let mut app_camera = Camera::new(spawn_position);
@@ -442,7 +449,6 @@ fn run() -> Result<(), AppError> {
                             match render_frame(
                                 &mut renderer,
                                 &mut scene,
-                                &collision_world,
                                 &mut bridge,
                                 &mut physics_bridge,
                                 &mut player,
@@ -551,7 +557,6 @@ fn log_dispatch_failures(report: DispatchReport, context: &str) {
 fn render_frame(
     renderer: &mut renderer::Renderer,
     scene: &mut renderer::Scene,
-    collision_world: &CollisionWorld,
     bridge: &mut MeshColliderBridge,
     physics_bridge: &mut PhysicsBridge,
     player: &mut PlayerState,
@@ -607,8 +612,6 @@ fn render_frame(
         .snapshot()
         .action_value(&ActionId::new("move.down"));
 
-    let simulated_seconds = FIXED_DT * time_update.fixed_step_count as f32;
-
     // Apply camera rotation from captured pointer delta (once).
     let delta_yaw = -mouse_delta.0 as f32 * fps_sensitivity as f32;
     *camera_yaw += delta_yaw;
@@ -617,48 +620,95 @@ fn render_frame(
         -mouse_delta.1 as f32 * fps_sensitivity as f32,
     );
 
-    // Build camera-local movement vector (matches FPSController convention:
+    // Build normalized camera-local movement direction (FPSController convention:
     // x = right, y = up, z = forward-in-neg-z).
-    let mut move_vec = Vec3::new(move_x, up - down, move_z);
-    if move_vec.length_squared() > 0.0 {
-        move_vec = move_vec.normalize();
-    }
-    let amount = simulated_seconds * move_speed;
+    let raw_move = Vec3::new(move_x, up - down, move_z);
+    let local_dir = if raw_move.length_squared() > 0.0 {
+        raw_move.normalize()
+    } else {
+        Vec3::ZERO
+    };
 
-    // Compute world-space displacement for the player (matches
-    // Camera::update_position, which uses only yaw rotation).
+    // Rotate direction to world space (Y-only rotation preserves vertical).
     let yaw_quat = Quat::from_rotation_y(*camera_yaw);
-    let world_disp = yaw_quat * move_vec * amount;
-    camera.update_position(move_vec, amount);
+    let world_dir = yaw_quat * local_dir;
+    let world_horizontal_dir = {
+        let v = Vec2::new(world_dir.x, world_dir.z);
+        if v.length_squared() > 0.0 {
+            v.normalize()
+        } else {
+            Vec2::ZERO
+        }
+    };
+    let vertical_input = local_dir.y;
+
+    // Keep camera position in sync with the authoritative player position
+    // (position is already resolved from the previous frame's physics step).
+    camera.set_position(player.position);
 
     if time_update.fixed_step_count > 0 {
-        let world_move = Vec2::new(world_disp.x, world_disp.z);
-        match player.ingest_movement_intent(world_move, move_vec.y * move_speed, simulated_seconds)
-        {
-            CameraIntentGuard::Accepted => {}
-            CameraIntentGuard::Clamped {
-                attempted_displacement,
-                applied_displacement,
-            } => {
-                log::warn!(
-                    "Clamped player movement from {:.3}m to {:.3}m for this simulation update.",
-                    attempted_displacement,
-                    applied_displacement
-                );
-            }
-            CameraIntentGuard::RejectedNonFinite => {
-                log::error!(
-                    "Rejected non-finite camera intent before collision resolution; keeping previous player position."
-                );
-            }
-        }
-
         for _ in 0..time_update.fixed_step_count {
             *previous_player_position = player.position;
-            collision::resolve_player_step(player, collision_world, FIXED_DT);
+
+            // Compute per-step desired translation from input direction.
+            let guard = player.ingest_movement_intent(
+                world_horizontal_dir,
+                vertical_input,
+                FIXED_DT,
+                move_speed,
+            );
+            match guard {
+                CameraIntentGuard::Accepted => {}
+                CameraIntentGuard::Clamped {
+                    attempted_displacement,
+                    applied_displacement,
+                } => {
+                    log::warn!(
+                        "Clamped player movement from {:.3}m to {:.3}m for this step.",
+                        attempted_displacement,
+                        applied_displacement
+                    );
+                }
+                CameraIntentGuard::RejectedNonFinite => {
+                    log::error!(
+                        "Rejected non-finite camera intent; keeping previous player position."
+                    );
+                }
+            }
+
+            if player.noclip {
+                // Noclip bypasses physics: apply desired translation directly
+                // and teleport the kinematic body so it stays out of the way.
+                player.position += player.desired_translation;
+                if let Some(body_id) = physics_bridge.character_body_id() {
+                    let body_y = player.position.y - PLAYER_EYE_HEIGHT
+                        + PLAYER_CAPSULE_HALF_HEIGHT
+                        + PLAYER_CAPSULE_RADIUS;
+                    let _ = bridge.world.set_body_position_by_id(
+                        body_id,
+                        [player.position.x, body_y, player.position.z],
+                    );
+                }
+            } else {
+                // Character-controller-driven movement through the shared physics world.
+                let desired = player.desired_translation.to_array();
+                match physics_bridge.move_character(&mut bridge.world, desired, FIXED_DT) {
+                    Ok(_actual) => {
+                        if let Some(eye_pos) =
+                            physics_bridge.character_eye_position(&bridge.world)
+                        {
+                            player.position = glam::Vec3::from_array(eye_pos);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Character movement failed: {e}");
+                    }
+                }
+            }
+
             if !player.has_finite_position() {
                 log::error!(
-                    "Player position became non-finite after collision resolution: {:?}",
+                    "Player position became non-finite after character movement: {:?}",
                     player.position
                 );
                 return Err(RendererError::InvalidState(
@@ -666,12 +716,10 @@ fn render_frame(
                         .to_string(),
                 ));
             }
-            // Step the physics worlds in sync with gameplay ticks.
+
+            // Step the shared physics world (single collision authority).
             if let Err(err) = bridge.world.step(FIXED_DT) {
-                log::warn!("Mesh physics step failed: {}", err);
-            }
-            if let Err(err) = physics_bridge.step(FIXED_DT) {
-                log::warn!("Component physics step failed: {}", err);
+                log::warn!("Physics step failed: {}", err);
             }
         }
         // Record contacts for observability.
@@ -680,7 +728,6 @@ fn render_frame(
             log::debug!("Physics contacts this frame: {}", contacts.len());
         }
     }
-    camera.set_position(player.position);
 
     if !time_update.dropped_time.is_zero() {
         log::warn!(
@@ -723,7 +770,7 @@ fn render_frame(
     if let Err(err) = bridge.writeback_dynamic_transforms(scene) {
         log::warn!("Transform writeback failed: {}", err);
     }
-    if let Err(err) = physics_bridge.sync_transforms(scene) {
+    if let Err(err) = physics_bridge.sync_transforms(&bridge.world, scene) {
         log::warn!("Physics bridge sync transforms failed: {}", err);
     }
 
@@ -882,22 +929,6 @@ fn seed_collider_bridge(
     );
 
     bridge
-}
-
-/// Export body-node mappings from the mesh collider bridge into the
-/// component-driven physics bridge so that both bridges share a single
-/// writeback and sync view.
-fn export_body_node_mappings(
-    mesh_bridge: &MeshColliderBridge,
-    physics_bridge: &mut PhysicsBridge,
-) {
-    for (body_id, node_id) in mesh_bridge.body_node_map().iter() {
-        physics_bridge.register_external_body_node(
-            body_id.clone(),
-            node_id,
-            glam::Mat4::IDENTITY,
-        );
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1147,7 +1178,6 @@ fn print_level_load_help() {
 fn run_headless(
     level: &ParsedLevel,
     content_pack: &content::ContentPack,
-    collision_world: &CollisionWorld,
     headless_opts: &HeadlessOptions,
 ) -> Result<(), AppError> {
     log::info!("Starting dogfood headless capture run");
@@ -1210,8 +1240,8 @@ fn run_headless(
     let mut bridge = seed_collider_bridge(&mut renderer, &_level_scene, level);
 
     // Create component-driven physics bridge sharing the mesh bridge's world.
-    let mut physics_bridge = PhysicsBridge::new(&scene);
-    export_body_node_mappings(&bridge, &mut physics_bridge);
+    let mut physics_bridge = PhysicsBridge::new();
+    bridge.export_body_node_mappings_to_physics_bridge(&mut physics_bridge);
 
     if headless_opts.validate_colliders {
         log::info!(
@@ -1267,6 +1297,17 @@ fn run_headless(
             level.spawn.layer as f32 * collision::WALL_HEIGHT + PLAYER_EYE_HEIGHT,
             -0.5,
         );
+
+    // Create player character in the shared physics world.
+    physics_bridge
+        .create_player_character(
+            &mut bridge.world,
+            spawn_position.to_array(),
+            PLAYER_CAPSULE_RADIUS,
+            PLAYER_CAPSULE_HALF_HEIGHT,
+        )
+        .map_err(|e| AppError::RendererInit(RendererError::InvalidState(e.to_string())))?;
+
     let mut player = PlayerState::new(spawn_position);
     let mut previous_player_position = player.position;
     let mut app_camera = Camera::new(spawn_position);
@@ -1338,7 +1379,6 @@ fn run_headless(
         match render_frame(
             &mut renderer,
             &mut scene,
-            collision_world,
             &mut bridge,
             &mut physics_bridge,
             &mut player,

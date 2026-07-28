@@ -2,6 +2,7 @@ use glam::{Vec2, Vec3};
 
 use crate::layout::{tile_to_world, ParsedLevel, Tile};
 use crate::player::{PlayerState, PLAYER_EYE_HEIGHT, PLAYER_RADIUS};
+use physics::{BodyDescriptor, BodyKind, ColliderDescriptor, ColliderShape, PhysicsBodyId, PhysicsColliderId, PhysicsWorld};
 
 pub const TILE_SIZE: f32 = 1.0;
 pub const WALL_HEIGHT: f32 = 2.5;
@@ -104,6 +105,87 @@ impl CollisionWorld {
             floor_tiles,
         }
     }
+}
+
+/// Seed level geometry as static cuboid colliders in a physics world.
+///
+/// Creates simple AABB colliders for walls, floors, and ramp planes.
+/// This provides a single collision-authority path for the character
+/// controller.  Returns the number of created colliders.
+pub fn seed_level_colliders(world: &mut PhysicsWorld, level: &ParsedLevel) -> Result<usize, physics::PhysicsError> {
+    let mut count = 0;
+    for layer_idx in 0..level.layer_count() {
+        let y_offset = layer_idx as f32 * WALL_HEIGHT;
+        for y in 0..level.height {
+            for x in 0..level.width {
+                let origin = tile_to_world(x, y);
+                let tile = level.tile_at_3d(layer_idx, x, y);
+                let body_id = PhysicsBodyId::new(format!("body.level_L{layer_idx}_{x}_{y}"));
+                match tile {
+                    Tile::Wall => {
+                        let cx = origin.x + TILE_SIZE * 0.5;
+                        let cy = y_offset + WALL_HEIGHT * 0.5;
+                        let cz = origin.z - TILE_SIZE * 0.5;
+                        world.create_body(BodyDescriptor::new(
+                            body_id.clone(),
+                            BodyKind::Static,
+                            [cx, cy, cz],
+                        ))?;
+                        let collider_id = PhysicsColliderId::new(format!("collider.level_L{layer_idx}_{x}_{y}"));
+                        world.create_collider(ColliderDescriptor::new(
+                            collider_id,
+                            body_id,
+                            ColliderShape::Cuboid {
+                                half_extents: [TILE_SIZE * 0.5, WALL_HEIGHT * 0.5, TILE_SIZE * 0.5],
+                            },
+                        ))?;
+                        count += 1;
+                    }
+                    Tile::Floor => {
+                        let cx = origin.x + TILE_SIZE * 0.5;
+                        let cy = y_offset;
+                        let cz = origin.z - TILE_SIZE * 0.5;
+                        world.create_body(BodyDescriptor::new(
+                            body_id.clone(),
+                            BodyKind::Static,
+                            [cx, cy, cz],
+                        ))?;
+                        let collider_id = PhysicsColliderId::new(format!("collider.level_L{layer_idx}_{x}_{y}"));
+                        world.create_collider(ColliderDescriptor::new(
+                            collider_id,
+                            body_id,
+                            ColliderShape::Cuboid {
+                                half_extents: [TILE_SIZE * 0.5, 0.05, TILE_SIZE * 0.5],
+                            },
+                        ))?;
+                        count += 1;
+                    }
+                    Tile::Void => {}
+                    Tile::RampNorth(_) | Tile::RampEast(_) | Tile::RampSouth(_) | Tile::RampWest(_) => {
+                        // Ramps are approximated as thin cuboid planes.
+                        let (p0, p1, p2) = ramp_plane_points(tile, origin, y_offset);
+                        let center = (p0 + p1 + p2) / 3.0;
+                        world.create_body(BodyDescriptor::new(
+                            body_id.clone(),
+                            BodyKind::Static,
+                            [center.x, center.y, center.z],
+                        ))?;
+                        let collider_id = PhysicsColliderId::new(format!("collider.level_L{layer_idx}_{x}_{y}"));
+                        world.create_collider(ColliderDescriptor::new(
+                            collider_id,
+                            body_id,
+                            ColliderShape::Cuboid {
+                                half_extents: [TILE_SIZE * 0.5, 0.1, TILE_SIZE * 0.5],
+                            },
+                        ))?;
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    log::info!("Seeded {} level colliders into physics world", count);
+    Ok(count)
 }
 
 pub fn resolve_player_step(player: &mut PlayerState, world: &CollisionWorld, dt: f32) {

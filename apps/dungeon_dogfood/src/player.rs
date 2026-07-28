@@ -5,6 +5,10 @@ pub const PLAYER_RADIUS: f32 = 0.3;
 pub const PLAYER_EYE_HEIGHT: f32 = 1.6;
 pub const MAX_HORIZONTAL_DISPLACEMENT_PER_FRAME: f32 = 3.0;
 
+/// Character controller capsule geometry — must match the physics body shape.
+pub const PLAYER_CAPSULE_HALF_HEIGHT: f32 = 0.55;
+pub const PLAYER_CAPSULE_RADIUS: f32 = 0.30;
+
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum CameraIntentGuard {
     Accepted,
@@ -15,11 +19,23 @@ pub enum CameraIntentGuard {
     RejectedNonFinite,
 }
 
+/// Player state for the character-controller-driven player.
+///
+/// Position is read back from the physics body after each step; velocity is
+/// managed by the [`physics::CharacterController`] and retained for
+/// backward compatibility with the generator validation tool.
 #[derive(Debug, Clone)]
 pub struct PlayerState {
+    /// Current world position (authoritative — read from physics body).
     pub position: Vec3,
+    /// Velocity in world units per second (set from desired translation for
+    /// backward compatibility with [`collision::resolve_player_step`]).
     pub velocity: Vec3,
+    /// Whether noclip mode is active. When true, collision is bypassed
+    /// and vertical input is applied.
     pub noclip: bool,
+    /// Per-step desired translation in world space (set by [`ingest_movement_intent`]).
+    pub desired_translation: Vec3,
 }
 
 impl PlayerState {
@@ -28,87 +44,52 @@ impl PlayerState {
             position: spawn_eye_position,
             velocity: Vec3::ZERO,
             noclip: false,
+            desired_translation: Vec3::ZERO,
         }
     }
 
-    /// Ingest a sampled movement intent (pre-computed direction + dt).
+    /// Compute per-step desired translation from input state.
     ///
-    /// `move_dir` is the normalized horizontal movement direction in
-    /// world space, derived from an Axis2D evaluation or FPS controller.
-    /// Vertical input is applied only when noclip is active.
+    /// `world_move_dir` is the normalized horizontal movement direction in
+    /// world space (derived from camera-local axes and yaw rotation).
+    /// `vertical` is the raw vertical input (-1.0..1.0).
+    /// `dt` is the fixed timestep duration.  `move_speed` is the
+    /// base movement speed in world units per second.
+    ///
+    /// Stores `desired_translation` for the next fixed step and returns a
+    /// [`CameraIntentGuard`] recording whether clamping was needed.
     pub fn ingest_movement_intent(
         &mut self,
-        move_dir: Vec2,
+        world_move_dir: Vec2,
         vertical: f32,
         dt: f32,
+        move_speed: f32,
     ) -> CameraIntentGuard {
         if dt <= 0.0 || !dt.is_finite() {
-            self.velocity = Vec3::ZERO;
+            self.desired_translation = Vec3::ZERO;
             return CameraIntentGuard::Accepted;
         }
 
-        if !self.position.is_finite() || !move_dir.is_finite() {
-            self.velocity = Vec3::ZERO;
+        if !self.position.is_finite() || !world_move_dir.is_finite() {
+            self.desired_translation = Vec3::ZERO;
             return CameraIntentGuard::RejectedNonFinite;
         }
 
-        let attempted_displacement = move_dir.length();
-        let applied_horizontal =
-            if attempted_displacement > MAX_HORIZONTAL_DISPLACEMENT_PER_FRAME {
-                move_dir.normalize_or_zero() * MAX_HORIZONTAL_DISPLACEMENT_PER_FRAME
-            } else {
-                move_dir
-            };
+        let horizontal = world_move_dir * move_speed * dt;
+        let vert = if self.noclip { vertical * move_speed * dt } else { 0.0 };
 
-        let vertical_velocity = if self.noclip { vertical } else { 0.0 };
-        self.velocity = Vec3::new(
-            applied_horizontal.x / dt,
-            vertical_velocity,
-            applied_horizontal.y / dt,
-        );
+        let desired = Vec3::new(horizontal.x, vert, horizontal.y);
+        let attempted_displacement = desired.length();
 
-        if attempted_displacement > MAX_HORIZONTAL_DISPLACEMENT_PER_FRAME {
-            CameraIntentGuard::Clamped {
-                attempted_displacement,
-                applied_displacement: MAX_HORIZONTAL_DISPLACEMENT_PER_FRAME,
-            }
+        let clamped = if attempted_displacement > MAX_HORIZONTAL_DISPLACEMENT_PER_FRAME {
+            desired.normalize_or_zero() * MAX_HORIZONTAL_DISPLACEMENT_PER_FRAME
         } else {
-            CameraIntentGuard::Accepted
-        }
-    }
-
-    /// Ingest camera intent (legacy path; prefer [`ingest_movement_intent`]).
-    pub fn ingest_camera_intent(&mut self, camera_position: Vec3, dt: f32) -> CameraIntentGuard {
-        if dt <= 0.0 || !dt.is_finite() {
-            self.velocity = Vec3::ZERO;
-            return CameraIntentGuard::Accepted;
-        }
-
-        if !camera_position.is_finite() || !self.position.is_finite() {
-            self.velocity = Vec3::ZERO;
-            return CameraIntentGuard::RejectedNonFinite;
-        }
-
-        let delta = camera_position - self.position;
-        if !delta.is_finite() {
-            self.velocity = Vec3::ZERO;
-            return CameraIntentGuard::RejectedNonFinite;
-        }
-
-        let horizontal_delta = Vec2::new(delta.x, delta.z);
-        let attempted_displacement = horizontal_delta.length();
-        let applied_horizontal = if attempted_displacement > MAX_HORIZONTAL_DISPLACEMENT_PER_FRAME {
-            horizontal_delta.normalize_or_zero() * MAX_HORIZONTAL_DISPLACEMENT_PER_FRAME
-        } else {
-            horizontal_delta
+            desired
         };
 
-        let vertical_velocity = if self.noclip { delta.y / dt } else { 0.0 };
-        self.velocity = Vec3::new(
-            applied_horizontal.x / dt,
-            vertical_velocity,
-            applied_horizontal.y / dt,
-        );
+        self.desired_translation = clamped;
+        // Maintain velocity for backward compatibility with collision module.
+        self.velocity = if dt > 0.0 { clamped / dt } else { Vec3::ZERO };
 
         if attempted_displacement > MAX_HORIZONTAL_DISPLACEMENT_PER_FRAME {
             CameraIntentGuard::Clamped {
@@ -133,7 +114,12 @@ mod tests {
     fn clamps_large_horizontal_frame_displacement() {
         let mut player = PlayerState::new(Vec3::ZERO);
 
-        let guard = player.ingest_camera_intent(Vec3::new(3.0, 0.0, 4.0), 1.0);
+        let guard = player.ingest_movement_intent(
+            Vec2::new(3.0, 4.0),
+            0.0,
+            1.0,
+            1.0,
+        );
 
         assert_eq!(
             guard,
@@ -142,69 +128,64 @@ mod tests {
                 applied_displacement: 3.0,
             }
         );
-        assert!((player.velocity.x - 1.8).abs() < 1e-6);
-        assert!((player.velocity.z - 2.4).abs() < 1e-6);
+        // desired_translation is clamped to length 3 in the (3,0,4) direction
+        let expected = Vec2::new(3.0, 4.0).normalize() * 3.0;
+        assert!((player.desired_translation.x - expected.x).abs() < 1e-6);
+        assert!((player.desired_translation.z - expected.y).abs() < 1e-6);
     }
 
     #[test]
-    fn rejects_non_finite_camera_intent() {
+    fn rejects_non_finite_input() {
         let mut player = PlayerState::new(Vec3::ZERO);
 
-        let guard = player.ingest_camera_intent(Vec3::new(f32::NAN, 0.0, 0.0), 1.0);
-
-        assert_eq!(guard, CameraIntentGuard::RejectedNonFinite);
-        assert_eq!(player.velocity, Vec3::ZERO);
-    }
-
-    #[test]
-    fn noclip_preserves_vertical_camera_intent() {
-        let mut player = PlayerState::new(Vec3::ZERO);
-        player.noclip = true;
-
-        let guard = player.ingest_camera_intent(Vec3::new(0.0, 2.0, 0.0), 0.5);
-
-        assert_eq!(guard, CameraIntentGuard::Accepted);
-        assert_eq!(player.velocity, Vec3::new(0.0, 4.0, 0.0));
-    }
-
-    #[test]
-    fn ingest_movement_intent_applies_horizontal_and_noclip_vertical() {
-        let mut player = PlayerState::new(Vec3::ZERO);
-        player.noclip = true;
-
-        let guard = player.ingest_movement_intent(Vec2::new(1.0, 0.0), 2.0, 0.5);
-
-        assert_eq!(guard, CameraIntentGuard::Accepted);
-        assert!((player.velocity.x - 2.0).abs() < 1e-6);
-        assert!((player.velocity.y - 2.0).abs() < 1e-6);
-        assert!((player.velocity.z - 0.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn ingest_movement_intent_clamps_large_displacement() {
-        let mut player = PlayerState::new(Vec3::ZERO);
-
-        let guard = player.ingest_movement_intent(Vec2::new(3.0, 4.0), 0.0, 1.0);
-
-        assert_eq!(
-            guard,
-            CameraIntentGuard::Clamped {
-                attempted_displacement: 5.0,
-                applied_displacement: 3.0,
-            }
+        let guard = player.ingest_movement_intent(
+            Vec2::new(f32::NAN, 0.0),
+            0.0,
+            1.0,
+            1.0,
         );
-        assert!((player.velocity.x - 1.8).abs() < 1e-3);
-        assert!((player.velocity.y - 0.0).abs() < 1e-3);
-        assert!((player.velocity.z - 2.4).abs() < 1e-3);
+
+        assert_eq!(guard, CameraIntentGuard::RejectedNonFinite);
+        assert_eq!(player.desired_translation, Vec3::ZERO);
     }
 
     #[test]
-    fn ingest_movement_intent_rejects_non_finite() {
+    fn noclip_applies_vertical() {
+        let mut player = PlayerState::new(Vec3::ZERO);
+        player.noclip = true;
+
+        let guard = player.ingest_movement_intent(
+            Vec2::new(0.0, 0.0),
+            2.0,
+            0.5,
+            1.0,
+        );
+
+        assert_eq!(guard, CameraIntentGuard::Accepted);
+        assert!((player.desired_translation.y - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn normal_movement_applies_horizontal_without_vertical() {
         let mut player = PlayerState::new(Vec3::ZERO);
 
-        let guard = player.ingest_movement_intent(Vec2::new(f32::NAN, 0.0), 0.0, 1.0);
+        let guard = player.ingest_movement_intent(
+            Vec2::new(1.0, 0.0),
+            2.0,
+            0.5,
+            1.0,
+        );
 
-        assert_eq!(guard, CameraIntentGuard::RejectedNonFinite);
-        assert_eq!(player.velocity, Vec3::ZERO);
+        assert_eq!(guard, CameraIntentGuard::Accepted);
+        assert!((player.desired_translation.x - 0.5).abs() < 1e-6);
+        assert!((player.desired_translation.y - 0.0).abs() < 1e-6);
+        assert!((player.desired_translation.z - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn zero_dt_results_in_no_movement() {
+        let mut player = PlayerState::new(Vec3::ZERO);
+        player.ingest_movement_intent(Vec2::new(1.0, 0.0), 0.0, 0.0, 1.0);
+        assert_eq!(player.desired_translation, Vec3::ZERO);
     }
 }
