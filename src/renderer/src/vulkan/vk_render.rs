@@ -568,6 +568,9 @@ impl Drop for VkRenderCore {
             #[cfg(feature = "debug-draw")]
             self.debug_lines.destroy(&self.device, allocator);
 
+            #[cfg(feature = "sprites-2d")]
+            self.sprites.destroy(&self.device, allocator);
+
             for slot in self.gpu_timing.slots.iter() {
                 self.device.destroy_query_pool(slot.query_pool, None);
             }
@@ -1537,6 +1540,10 @@ impl VkRenderCore {
             debug_lines: crate::vulkan::vk_debug_lines::VkDebugLines::new(
                 crate::vulkan::vk_debug_lines::DEFAULT_MAX_DEBUG_LINES,
             ),
+            #[cfg(feature = "sprites-2d")]
+            sprites: crate::vulkan::vk_sprites::VkSprites::new(
+                crate::vulkan::vk_sprites::DEFAULT_MAX_SPRITES,
+            ),
         };
 
         render.register_all_core_images();
@@ -1755,6 +1762,10 @@ impl VkRenderCore {
             #[cfg(feature = "debug-draw")]
             debug_lines: crate::vulkan::vk_debug_lines::VkDebugLines::new(
                 crate::vulkan::vk_debug_lines::DEFAULT_MAX_DEBUG_LINES,
+            ),
+            #[cfg(feature = "sprites-2d")]
+            sprites: crate::vulkan::vk_sprites::VkSprites::new(
+                crate::vulkan::vk_sprites::DEFAULT_MAX_SPRITES,
             ),
         };
 

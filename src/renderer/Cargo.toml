@@ -21,6 +21,12 @@ advanced-interop = []
 # Excluded from `default`. Opt-in for development and diagnostic rendering.
 debug-draw = []
 
+# Feature gate for 2D sprite batch rendering.
+# Adds a sprite batch pass with Camera2D, SpriteRenderer component, and
+# orthographic projection. Renders after debug lines, before UI.
+# Excluded from `default`.
+sprites-2d = []
+
 # Feature gates for engine-integration sprint rendering paths.
 # All excluded from `default`. Opt-in; each track's runtime activation is
 # added when its evidence branch passes.
@@ -135,4 +141,9 @@ path = "examples/capture_tests/capture_bsp_beta.rs"
 name = "demo_debug_lines"
 path = "examples/demo_debug_lines.rs"
 required-features = ["debug-draw"]
+
+[[example]]
+name = "demo_sprites"
+path = "examples/demo_sprites.rs"
+required-features = ["sprites-2d"]
 

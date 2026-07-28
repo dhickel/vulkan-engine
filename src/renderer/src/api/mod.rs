@@ -2,6 +2,8 @@ mod assets;
 #[cfg(feature = "bsp")]
 pub mod bsp;
 pub mod config;
+#[cfg(feature = "sprites-2d")]
+pub mod sprite;
 mod errors;
 pub mod event_logging;
 mod frame_extensions;

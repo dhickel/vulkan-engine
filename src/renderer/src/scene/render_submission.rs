@@ -7,6 +7,8 @@ use crate::data::data_cache::MeshCache;
 use crate::data::gpu_data::SceneDataUBO;
 use crate::data::handles::{EnvironmentHandle, MeshHandle};
 use glam::{Mat4, Vec3};
+#[cfg(feature = "sprites-2d")]
+use crate::vulkan::vk_sprites::SpriteInstance;
 
 /// Maximum number of directional lights that can be uploaded to GPU per frame.
 pub const MAX_DIRECTIONAL_LIGHTS_GPU: usize = 4;
@@ -471,6 +473,16 @@ pub struct RenderSubmission {
     /// pass when the `debug-draw` feature is enabled and lines are non-empty.
     #[cfg(feature = "debug-draw")]
     pub debug_lines: Vec<(glam::Vec3, glam::Vec3, glam::Vec3)>,
+    /// Sprite instances for the sprite batch pass. Only present when
+    /// `sprites-2d` is enabled and sprites are non-empty.
+    #[cfg(feature = "sprites-2d")]
+    pub sprites: Vec<SpriteInstance>,
+    /// Orthographic view matrix for the 2D sprite camera.
+    #[cfg(feature = "sprites-2d")]
+    pub sprite_camera_view: Mat4,
+    /// Orthographic projection matrix for the 2D sprite camera.
+    #[cfg(feature = "sprites-2d")]
+    pub sprite_camera_projection: Mat4,
 }
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
@@ -513,6 +525,12 @@ impl RenderSubmission {
             bsp_evidence_collector: std::cell::RefCell::new(None),
             #[cfg(feature = "debug-draw")]
             debug_lines: Vec::new(),
+            #[cfg(feature = "sprites-2d")]
+            sprites: Vec::new(),
+            #[cfg(feature = "sprites-2d")]
+            sprite_camera_view: Mat4::IDENTITY,
+            #[cfg(feature = "sprites-2d")]
+            sprite_camera_projection: Mat4::IDENTITY,
         }
     }
 

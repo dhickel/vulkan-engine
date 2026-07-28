@@ -10,7 +10,7 @@ use crate::vulkan::vk_types::{VkBuffer, VkDestroyable, VkWindowState};
 use crate::vulkan::vk_util;
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec2, Vec3, Vec4Swizzles};
+use glam::{Mat4, Vec2};
 
 // ---------------------------------------------------------------------------
 // GPU vertex format — 32 bytes, matches shader SpriteVertex
@@ -194,6 +194,7 @@ impl VkSprites {
     }
 
     /// Clear per-frame vertex count.
+    #[allow(dead_code)]
     pub fn clear_frame(&mut self) {
         self.written_vertices = 0;
     }
@@ -362,11 +363,11 @@ mod tests {
     fn zero_rotation_is_axis_aligned() {
         let sprite = SpriteInstance::new(Vec2::ZERO, Vec2::new(2.0, 2.0));
         let verts = sprite.to_vertices();
-        // Bottom-left should be (-1, -1)
+        // Bottom-left should be (-1, -1) — verts[0] = v0
         assert!((verts[0].position[0] + 1.0).abs() < 1e-6);
         assert!((verts[0].position[1] + 1.0).abs() < 1e-6);
-        // Top-right should be (1, 1)
-        assert!((verts[3].position[0] - 1.0).abs() < 1e-6);
-        assert!((verts[3].position[1] - 1.0).abs() < 1e-6);
+        // Top-right should be (1, 1) — verts[5] = v3
+        assert!((verts[5].position[0] - 1.0).abs() < 1e-6);
+        assert!((verts[5].position[1] - 1.0).abs() < 1e-6);
     }
 }

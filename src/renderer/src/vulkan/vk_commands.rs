@@ -96,6 +96,9 @@ pub(crate) struct RecordingDispatcher<'a> {
     /// Debug line renderer backend (only when `debug-draw` feature is enabled).
     #[cfg(feature = "debug-draw")]
     debug_lines: &'a mut crate::vulkan::vk_debug_lines::VkDebugLines,
+    /// Sprite batch backend (only when `sprites-2d` feature is enabled).
+    #[cfg(feature = "sprites-2d")]
+    sprites: &'a mut crate::vulkan::vk_sprites::VkSprites,
 }
 
 pub(crate) struct PrepareTargetsRecording<'a> {
@@ -187,6 +190,17 @@ pub(crate) struct DebugLinesRecording<'a> {
     window_state: &'a VkWindowState,
     pipeline_cache: &'a crate::data::data_cache::VkPipelineCache,
     debug_lines: &'a mut crate::vulkan::vk_debug_lines::VkDebugLines,
+    allocator: &'a std::sync::Arc<std::sync::Mutex<vk_mem::Allocator>>,
+    submission: &'a RenderSubmission,
+    frame: &'a VkFrame,
+}
+
+#[cfg(feature = "sprites-2d")]
+pub(crate) struct SpritesRecording<'a> {
+    device: &'a ash::Device,
+    window_state: &'a VkWindowState,
+    pipeline_cache: &'a crate::data::data_cache::VkPipelineCache,
+    sprites: &'a mut crate::vulkan::vk_sprites::VkSprites,
     allocator: &'a std::sync::Arc<std::sync::Mutex<vk_mem::Allocator>>,
     submission: &'a RenderSubmission,
     frame: &'a VkFrame,
@@ -470,6 +484,8 @@ pub(crate) unsafe fn execute_rendergraph_for_frame(
         frame_number,
         #[cfg(feature = "debug-draw")]
         debug_lines: &mut core.debug_lines,
+        #[cfg(feature = "sprites-2d")]
+        sprites: &mut core.sprites,
     };
     // SAFETY: `frame_ptr` is unique for this scope and dispatcher cannot reach presentation.
     let frame = unsafe { &mut *frame_ptr };
@@ -600,6 +616,19 @@ impl RenderGraphContext<'_> {
             window_state: self.recording.window_state,
             pipeline_cache: &self.recording.vulkan_cache.pipelines,
             debug_lines: self.recording.debug_lines,
+            allocator: self.recording.allocator,
+            submission: self.submission,
+            frame: self.frame,
+        }
+    }
+
+    #[cfg(feature = "sprites-2d")]
+    pub(crate) fn sprites_ctx(&mut self) -> SpritesRecording<'_> {
+        SpritesRecording {
+            device: self.recording.device,
+            window_state: self.recording.window_state,
+            pipeline_cache: &self.recording.vulkan_cache.pipelines,
+            sprites: self.recording.sprites,
             allocator: self.recording.allocator,
             submission: self.submission,
             frame: self.frame,
@@ -2769,6 +2798,51 @@ impl DebugLinesRecording<'_> {
 
         // Record draw.
         self.debug_lines.record_draw(
+            self.device,
+            cmd_buffer,
+            self.pipeline_cache,
+            self.window_state,
+            view_projection,
+        )?;
+
+        Ok(())
+    }
+}
+
+#[cfg(feature = "sprites-2d")]
+impl SpritesRecording<'_> {
+    pub(crate) fn draw_sprites(&mut self) -> Result<(), String> {
+        if self.submission.sprites.is_empty() {
+            return Ok(());
+        }
+
+        let cmd_buffer = self
+            .frame
+            .cmd_pools
+            .frame_graphics_primary()
+            .map_err(|e| format!("SpritesPass: {e}"))?;
+
+        // Compute orthographic view-projection from the sprite camera.
+        let view = self.submission.sprite_camera_view;
+        let projection = self.submission.sprite_camera_projection;
+        let view_projection = projection * view;
+
+        // Upload sprite vertices to GPU.
+        let allocator = self
+            .allocator
+            .lock()
+            .map_err(|e| format!("allocator lock: {e}"))?;
+        self.sprites
+            .upload_sprites(
+                self.device,
+                &allocator,
+                self.frame.index,
+                &self.submission.sprites,
+            )?;
+        drop(allocator);
+
+        // Record draw.
+        self.sprites.record_draw(
             self.device,
             cmd_buffer,
             self.pipeline_cache,
