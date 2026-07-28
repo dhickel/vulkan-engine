@@ -29,6 +29,8 @@ Primary entrypoint type exports are in `src/renderer/src/lib.rs` and `src/render
 - Scene workflows: `docs/api/03-scene-graph-and-fragment-workflows.md`
 - Asset workflows: `docs/api/04-assets-sync-deferred-and-handles.md`
 - Render hooks: `docs/api/05-render-hooks-and-extension-points.md`
+- Editor object system: `docs/api/18-editor-object-system.md`
+- Scene object lifecycle internals: `docs/internal/20-scene-object-lifecycle.md`
 - API-to-backend handoff: `docs/internal/04-api-to-backend-handoff.md`
 - Rendergraph internals: `docs/internal/07-rendergraph-dependencies-and-aliasing.md`
 
@@ -42,6 +44,8 @@ Module guides:
 
 - `src/renderer/src/vulkan/vk_render.rs`: highest blast radius orchestration.
 - `src/renderer/src/data/data_cache.rs`: handle validity and lifetime-sensitive caches.
+- `src/renderer/src/scene/object_store.rs`: ObjectId minting, ObjectRecord co-location, reverse index bijection, prepare/commit lifecycle. Errors here can produce cross-scene identity forgery or corrupt the persistent identity mapping.
+- `src/renderer/src/scene/object_commands.rs`: built-in undoable commands anchored on persistent identity. State machine violations (double-execute, undo without execute) can corrupt the command history.
 - render-path correctness is sensitive to descriptor/pipeline binding order, especially scene binding 5 for the frame-local directional shadow map.
 - material draw records must remain by-value copies made while the texture-cache lock is held; do not reintroduce cache-owned raw pointers.
 
@@ -62,6 +66,11 @@ Module guides:
 - `cargo run -p renderer --example demo_async_loading`
 - `cargo run -p renderer --example capture_culling -- --headless --culling=on`
 - `cargo run -p renderer --example capture_shadows -- --headless`
+
+### BSP Feature Gate
+
+- `cargo check -p renderer --features bsp`
+- `cargo run -p renderer --example capture_bsp_beta --features bsp -- --headless`
 
 ## Headless Capture Validation
 

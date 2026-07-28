@@ -1,0 +1,222 @@
+// vulkan-engine Q1 Entity Definitions — Engine.fgd
+//
+// Engine-recognized structural entities for the BSP beta.
+// Covers worldspawn, lights, brush models, triggers, targets,
+// and spawn markers. Custom entity properties beyond these are
+// preserved as generic key/value data.
+//
+// This FGD does NOT include:
+//   - Monster/character entities (out of beta scope)
+//   - Weapon/ammo/item entities (out of beta scope)
+//   - Proprietary Quake entity definitions
+
+// ── Worldspawn ──────────────────────────────────────────────────────────────
+
+@WorldspawnClass
+    base(AppearanceFlags)
+    = worldspawn : "World"
+[
+    message(string) : "Map title" : : "Map title shown in the engine."
+    wad(string) : "WAD file list" : : "Semicolon-separated WAD basenames."
+    _tb_textures(string) : "TrenchBroom texture collection" : : "Auto-populated by TB."
+    sky(string) : "Sky texture name" : : "Skybox texture for this map."
+    sounds(integer) : "CD track" : 1 : "Soundtrack track number (1-based)."
+    worldtype(integer) : "World type" : 0 : "0 = normal, 1 = base, 2 = medieval."
+]
+
+// ── Lights ──────────────────────────────────────────────────────────────────
+
+@PointClass
+    size(-8 -8 -8, 8 8 8)
+    color(255 255 0)
+    = light : "Point Light"
+[
+    light(integer) : "Brightness" : 300 : "Light intensity (Quake light units)."
+    _color(color1) : "Light color" : "1.0 1.0 1.0" : "RGB light color."
+    style(integer) : "Style" : 0 : "0 = static, 1-11 = flicker/pulse, -1 = unused."
+    delay(integer) : "Delay" : 0 : "Time offset for animated styles."
+    wait(integer) : "Wait" : 1 : "Pattern speed multiplier."
+    targetname(string) : "Name" : : "Light name for runtime targeting."
+]
+
+@PointClass
+    size(-8 -8 -8, 8 8 8)
+    color(255 200 100)
+    = light_fluoro : "Fluorescent Light"
+[
+    light(integer) : "Brightness" : 500
+    _color(color1) : "Light color" : "1.0 0.95 0.8"
+    style(integer) : "Style" : 0
+    delay(integer) : "Delay" : 0
+    wait(integer) : "Wait" : 1
+]
+
+@PointClass
+    size(-12 -12 -12, 12 12 12)
+    color(255 100 0)
+    = light_flame_large_yellow : "Large Yellow Flame"
+[
+    light(integer) : "Brightness" : 150
+    _color(color1) : "Light color" : "1.0 0.8 0.3"
+    style(integer) : "Style" : 2
+]
+
+@PointClass
+    size(-6 -6 -6, 6 6 6)
+    color(255 100 0)
+    = light_torch_small_walltorch : "Small Wall Torch"
+[
+    light(integer) : "Brightness" : 80
+    _color(color1) : "Light color" : "1.0 0.7 0.3"
+    style(integer) : "Style" : 2
+]
+
+// ── Brush Model Entities ────────────────────────────────────────────────────
+
+@SolidClass
+    base(AppearanceFlags) base(Targetname)
+    = func_door : "Door"
+[
+    speed(integer) : "Speed" : 100 : "Movement speed in Quake units/sec."
+    wait(integer) : "Wait" : 3 : "Seconds to stay open (-1 = stay open)."
+    lip(integer) : "Lip" : 0 : "Overlap distance when closed."
+    damage(integer) : "Damage" : 0 : "Damage on touch while moving."
+    angle(integer) : "Angle" : -1 : "Opening direction (Quake angle)."
+    target(string) : "Target" : : "Entity to trigger when opened."
+    delay(integer) : "Delay" : 0 : "Delay before triggering target."
+    message(string) : "Message" : : "Activation message."
+    health(integer) : "Health" : 0 : "0 = usable, >0 = shootable to open."
+    sounds(integer) : "Sounds" : 0 : "Sound set (0-7)."
+    spawnflags(Flags) =
+    [
+        1: "Starts Open" : 0
+        4: "Don't Link (toggle)" : 0
+    ]
+]
+
+@SolidClass
+    base(AppearanceFlags) base(Targetname)
+    = func_button : "Button"
+[
+    speed(integer) : "Speed" : 40
+    wait(integer) : "Wait" : 1 : "-1 = stay pressed."
+    lip(integer) : "Lip" : 4
+    angle(integer) : "Angle" : 0
+    target(string) : "Target" : : "Entity to trigger."
+    delay(integer) : "Delay" : 1
+    message(string) : "Message" : : "Activation message."
+    health(integer) : "Health" : 0 : "0 = usable, >0 = shootable."
+    sounds(integer) : "Sounds" : 0
+    spawnflags(Flags) =
+    [
+        1: "Don't Move" : 0
+    ]
+]
+
+@SolidClass
+    base(AppearanceFlags) base(Targetname)
+    = func_plat : "Lift / Platform"
+[
+    speed(integer) : "Speed" : 100
+    wait(integer) : "Wait" : 3
+    lip(integer) : "Lip" : 8
+    height(integer) : "Height" : 0 : "Travel distance (0 = implied by brush)."
+    sounds(integer) : "Sounds" : 2
+    spawnflags(Flags) =
+    [
+        1: "Low Trigger" : 1
+    ]
+]
+
+// ── Triggers ────────────────────────────────────────────────────────────────
+
+@SolidClass
+    base(AppearanceFlags) base(Targetname)
+    = trigger_once : "Trigger Once"
+[
+    target(string) : "Target" : : "Entity to trigger."
+    delay(integer) : "Delay" : 0
+    message(string) : "Message" : : "Message to display."
+    killtarget(string) : "Kill Target" : : "Entity to remove on trigger."
+    spawnflags(Flags) =
+    [
+        1: "No Clients" : 0
+        2: "No Monsters" : 0  // preserved, vestigial in beta
+    ]
+]
+
+@SolidClass
+    base(AppearanceFlags) base(Targetname)
+    = trigger_multiple : "Trigger Multiple"
+[
+    target(string) : "Target" : : "Entity to trigger."
+    delay(integer) : "Delay" : 0
+    wait(integer) : "Wait" : 0 : "Seconds between activations (0 = only once)."
+    message(string) : "Message" : : "Message to display."
+    killtarget(string) : "Kill Target" : : "Entity to remove on trigger."
+    spawnflags(Flags) =
+    [
+        1: "No Clients" : 0
+        2: "No Monsters" : 0
+    ]
+]
+
+@SolidClass
+    base(AppearanceFlags) base(Targetname)
+    = trigger_push : "Push Trigger"
+[
+    speed(integer) : "Speed" : 1000 : "Launch speed in Quake units/sec."
+    target(string) : "Target" : : "Optional destination target."
+    delay(integer) : "Delay" : 0
+]
+
+// ── Target Entities ─────────────────────────────────────────────────────────
+
+@PointClass
+    size(-8 -8 -8, 8 8 8)
+    color(0 255 255)
+    = target : "Target"
+[
+    target(string) : "Target" : : "Next target in chain."
+    delay(integer) : "Delay" : 0 : "Seconds before triggering."
+]
+
+// ── Spawn Markers ───────────────────────────────────────────────────────────
+
+@PointClass
+    size(-16 -16 -24, 16 16 32)
+    color(0 255 0)
+    = info_player_start : "Player Spawn"
+[
+    angle(integer) : "Angle" : 0 : "Facing direction (Quake angle)."
+]
+
+@PointClass
+    size(-16 -16 -24, 16 16 32)
+    color(0 220 0)
+    = info_player_deathmatch : "Deathmatch Spawn"
+[
+    angle(integer) : "Angle" : 0 : "Facing direction (Quake angle)."
+]
+
+@PointClass
+    size(-16 -16 -24, 16 16 32)
+    color(0 200 0)
+    = info_teleport_destination : "Teleport Destination"
+[
+    angle(integer) : "Angle" : 0 : "Facing direction after teleport."
+    targetname(string) : "Name" : : "Matched by trigger_teleport target."
+]
+
+// ── Base Classes ────────────────────────────────────────────────────────────
+
+@BaseClass = AppearanceFlags
+[
+    skin(integer) : "Skin" : 0
+    body(integer) : "Body" : 0
+]
+
+@BaseClass = Targetname
+[
+    targetname(string) : "Name" : : "Durable entity name for targeting."
+]

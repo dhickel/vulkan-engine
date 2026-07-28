@@ -478,3 +478,5 @@ Your app should interact with the scene exclusively through the public `Scene` m
 ## Next
 
 Continue to [09 — Asset Pipeline](09-asset-pipeline.md) to learn how to load models, textures, and environments, manage handle lifetimes, and drive async loading.
+
+> For the unified editor object system (`ObjectId`, `SceneObjectId`, `Selection`, `ObjectSummary`, commands), see the [Editor Object System API Reference](../api/18-editor-object-system.md).

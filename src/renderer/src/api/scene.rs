@@ -1,5 +1,7 @@
+use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
@@ -7,15 +9,23 @@ use serde::{Deserialize, Serialize};
 use crate::api::assets::{AssetManager, EnvironmentSource};
 use crate::data::handles::{EnvironmentHandle, MeshHandle};
 use crate::data::validation::{ValidationArea, ValidationDiagnostic, ValidationError};
+use crate::object::component::{
+    commit_full_state_replacement, enforce_limits, hydrate_all, hydrate_all_by_key,
+    hydrate_and_store, prepare_reference_remap, ComponentEnvelope, ComponentInstanceId,
+    ComponentKey, ComponentRegistry, ComponentStore,
+};
+use crate::object::identity::{ObjectError, ObjectId};
 use crate::scene::command::{Command, CommandHistory, CommandResult};
+use crate::scene::object_store::{ObjectHandle, ObjectRecord};
 use crate::scene::render_submission::{
     RenderSubmission, MAX_DIRECTIONAL_LIGHTS_GPU, MAX_POINT_LIGHTS_GPU, MAX_SPOT_LIGHTS_GPU,
 };
 use crate::scene::scene_world::{
-    DirectionalLightRefError, PointLightRefError, ReparentError, SceneNodeRefError, SceneWorld,
-    SpotLightRefError,
+    DirectionalLightRefError, PointLightRefError, ReparentError, SceneNode, SceneNodeRefError,
+    SceneWorld, SpotLightRefError,
 };
 use crate::scene::SceneNodeId;
+use engine_events::{ObjectKind, SceneId, SceneObjectId, SceneObjectLifecycleSnapshot};
 
 use crate::data::camera::Aabb;
 use crate::data::mesh_geometry::{MeshDeformation, MeshGeometryDto};
@@ -413,6 +423,9 @@ pub struct SceneFragmentNode {
     pub local_transform: Mat4,
     pub meshes: Vec<MeshHandle>,
     pub mesh_bounds: Vec<MeshBoundsEntry>,
+    /// Component envelopes attached to this fragment node (preserved through
+    /// asset placement, merge, removal snapshots, restore, and duplicate).
+    pub components: Vec<ComponentEnvelope>,
 }
 
 impl Default for SceneFragmentNode {
@@ -423,6 +436,7 @@ impl Default for SceneFragmentNode {
             local_transform: Mat4::IDENTITY,
             meshes: Vec::new(),
             mesh_bounds: Vec::new(),
+            components: Vec::new(),
         }
     }
 }
@@ -480,6 +494,12 @@ impl SceneFragment {
 
     /// Thread: Any
     /// May Stall: No
+    pub fn node_mut(&mut self, node: SceneFragmentNodeId) -> Option<&mut SceneFragmentNode> {
+        self.nodes.get_mut(node.index as usize)
+    }
+
+    /// Thread: Any
+    /// May Stall: No
     pub fn add_node(
         &mut self,
         parent: Option<SceneFragmentNodeId>,
@@ -514,6 +534,7 @@ impl SceneFragment {
             local_transform: transform,
             meshes,
             mesh_bounds,
+            components: Vec::new(),
         });
 
         if let Some(parent_id) = parent {
@@ -619,17 +640,15 @@ pub struct Scene {
     scene_id: String,
     display_name: Option<String>,
     next_stable_node_id: u64,
+    next_stable_light_id: u64,
     skybox_asset: Option<SceneAssetReference>,
     materials: BTreeMap<String, SerializedMaterialOverride>,
-    node_persistence: HashMap<SceneNodeId, SerializedNodePersistence>,
-    point_light_stable_ids: HashMap<PointLightId, String>,
-    point_light_parents: HashMap<PointLightId, String>,
-    directional_light_stable_ids: HashMap<DirectionalLightId, String>,
-    directional_light_parents: HashMap<DirectionalLightId, String>,
-    spot_light_stable_ids: HashMap<SpotLightId, String>,
-    spot_light_parents: HashMap<SpotLightId, String>,
-    directional_shadow_configs: HashMap<DirectionalLightId, DirectionalShadowConfig>,
     audio: Vec<SerializedAudioReference>,
+    /// BSP source-link metadata (if a BSP mount provides it).
+    ///
+    /// Stored as a raw JSON value so the renderer does not depend on
+    /// the `bsp_runtime` crate. The coordinator owns the typed form.
+    bsp_source_link: Option<serde_json::Value>,
     /// Editor-specific metadata blob.
     ///
     /// This field is preserved for serialization compatibility but is not
@@ -659,19 +678,43 @@ impl Scene {
             scene_id: "scene.untitled".to_string(),
             display_name: None,
             next_stable_node_id: 1,
+            next_stable_light_id: 1,
             skybox_asset: None,
             materials: BTreeMap::new(),
-            node_persistence: HashMap::new(),
-            point_light_stable_ids: HashMap::new(),
-            point_light_parents: HashMap::new(),
-            directional_light_stable_ids: HashMap::new(),
-            directional_light_parents: HashMap::new(),
-            spot_light_stable_ids: HashMap::new(),
-            spot_light_parents: HashMap::new(),
-            directional_shadow_configs: HashMap::new(),
             audio: Vec::new(),
+            bsp_source_link: None,
             editor: serde_json::json!({}),
         }
+    }
+
+    /// Returns the BSP source-link metadata, if set by the coordinator.
+    pub fn bsp_source_link(&self) -> Option<&serde_json::Value> {
+        self.bsp_source_link.as_ref()
+    }
+
+    /// Set the BSP source-link metadata from the coordinator.
+    pub fn set_bsp_source_link(&mut self, link: serde_json::Value) {
+        self.bsp_source_link = Some(link);
+    }
+
+    /// Clear the BSP source-link metadata.
+    pub fn clear_bsp_source_link(&mut self) {
+        self.bsp_source_link = None;
+    }
+
+    /// Return the number of point lights that can still be created before the
+    /// renderer's fixed GPU point-light cap is reached.
+    pub fn available_point_light_slots(&self) -> usize {
+        MAX_POINT_LIGHTS_GPU.saturating_sub(self.world.active_point_light_count())
+    }
+
+    /// Reserve storage so a later prevalidated point-light publication can add
+    /// `total_slots` point lights without growing the scene light slot table.
+    ///
+    /// Thread: Any
+    /// May Stall: Yes
+    pub fn reserve_point_light_storage(&mut self, total_slots: usize) {
+        self.world.reserve_point_light_slots(total_slots);
     }
 
     /// Returns a reference to the editor metadata blob.
@@ -690,8 +733,41 @@ impl Scene {
 
     /// Thread: Any
     /// May Stall: No
+    /// Return the scene's identity string.
+    pub fn scene_id(&self) -> &str {
+        &self.scene_id
+    }
+
+    /// Set the scene's identity string.
+    pub fn set_scene_id(&mut self, id: impl Into<String>) {
+        self.scene_id = id.into();
+    }
+
     pub fn root(&self) -> Option<SceneNodeId> {
         self.world.root_id()
+    }
+
+    /// Return direct children of a node.
+    pub fn children(&self, node: SceneNodeId) -> Vec<SceneNodeId> {
+        self.world
+            .get_node(node)
+            .map(|n| n.children.clone())
+            .unwrap_or_default()
+    }
+
+    /// Return the object record for a node, if the node is valid.
+    pub fn get_node_record(&self, node: SceneNodeId) -> Option<&ObjectRecord> {
+        self.world.get_node_record(node)
+    }
+
+    /// Return the object record for a point light, if the light is valid.
+    pub fn get_point_light_record(&self, id: PointLightId) -> Option<&ObjectRecord> {
+        self.world.get_point_light_record(id)
+    }
+
+    /// Return the object record for a directional light, if the light is valid.
+    pub fn get_directional_light_record(&self, id: DirectionalLightId) -> Option<&ObjectRecord> {
+        self.world.get_directional_light_record(id)
     }
 
     /// Thread: Any
@@ -731,7 +807,6 @@ impl Scene {
     pub fn remove_node(&mut self, node: SceneNodeId) -> Result<(), SceneError> {
         self.validate_node(node)?;
         if self.world.remove_node(node) {
-            self.node_persistence.remove(&node);
             return Ok(());
         }
 
@@ -1156,6 +1231,182 @@ impl Scene {
         Ok(())
     }
 
+    // ── BSP mount ────────────────────────────────────────────────────
+
+    /// Mount a prepared BSP into the scene for PVS-aware rendering.
+    ///
+    /// While a BSP mount is active, imported BSP lights are selected via
+    /// PVS-filtered deterministic scoring, and BSP static geometry is
+    /// PVS-culled before frustum culling. Replacing an existing mount detaches
+    /// it from scene publication before publishing the new lease.
+    ///
+    /// The caller must retire the returned [`DetachedBspMount`] through the
+    /// renderer to complete fence-aware GPU resource teardown.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    #[cfg(feature = "bsp")]
+    pub fn set_bsp_mount(
+        &mut self,
+        mount: crate::api::bsp::PreparedBspMount,
+    ) -> Option<crate::api::bsp::DetachedBspMount> {
+        let detached = self.retire_bsp_mount();
+        self.world.set_bsp_mount(mount.into_published());
+        detached
+    }
+
+    /// Retire the currently published BSP mount.
+    ///
+    /// The returned [`DetachedBspMount`] retains the full resource lease.
+    /// The caller must pass it to the renderer's retirement path for
+    /// fence-aware GPU teardown. Dropping the detached mount leaks GPU
+    /// resources.
+    #[cfg(feature = "bsp")]
+    #[must_use = "a detached BSP mount must be retired through the renderer"]
+    pub fn retire_bsp_mount(&mut self) -> Option<crate::api::bsp::DetachedBspMount> {
+        self.world.retire_bsp_mount()
+    }
+
+    /// Return whether this scene currently publishes a BSP mount.
+    #[cfg(feature = "bsp")]
+    pub fn has_bsp_mount(&self) -> bool {
+        self.world.has_bsp_mount()
+    }
+
+    /// Phase 07: Set a pending BSP evidence request for the next submission build.
+    ///
+    /// The request is consumed during [`Scene::build_submission`]. Only call this
+    /// immediately before rendering when an evidence request is active.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn set_bsp_evidence_request(
+        &mut self,
+        corpus_identity: String,
+        request_identity: String,
+        visibility: crate::api::bsp::BspEvidenceVisibility,
+        frame_number: u32,
+    ) {
+        self.world.set_bsp_evidence_request(
+            corpus_identity,
+            request_identity,
+            visibility,
+            frame_number,
+        );
+    }
+
+    /// Clear the BSP mount, returning to non-BSP rendering.
+    ///
+    /// This compatibility helper uses the same scene-detachment boundary as
+    /// an explicit unload. [`Scene::retire_bsp_mount`] acknowledges removal
+    /// from submission, not queueing of GPU teardown.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    #[cfg(feature = "bsp")]
+    pub fn clear_bsp_mount(&mut self) {
+        let _retired = self.retire_bsp_mount();
+    }
+
+    /// Replace BSP-owned point lights after transaction preflight.
+    ///
+    /// The coordinator validates all input before commit. This method repeats
+    /// the checks before mutating anything, then performs an infallible slot
+    /// swap so an error leaves the old light set untouched.
+    #[cfg(feature = "bsp")]
+    #[doc(hidden)]
+    pub fn replace_prevalidated_bsp_point_lights(
+        &mut self,
+        old_ids: &[PointLightId],
+        new_lights: &[PointLight],
+    ) -> Result<Vec<PointLightId>, SceneError> {
+        for (index, id) in old_ids.iter().enumerate() {
+            if old_ids[..index].contains(id) {
+                return Err(SceneError::InvalidPointLight(format!(
+                    "duplicate BSP-owned point-light id (slot={}, generation={})",
+                    id.slot, id.generation
+                )));
+            }
+            self.validate_point_light(*id)?;
+        }
+        for light in new_lights {
+            light.validate()?;
+        }
+
+        let remaining = self
+            .world
+            .active_point_light_count()
+            .checked_sub(old_ids.len())
+            .ok_or_else(|| {
+                SceneError::InvalidPointLight(
+                    "BSP-owned point lights exceed the active scene count".to_string(),
+                )
+            })?;
+        if remaining.saturating_add(new_lights.len()) > MAX_POINT_LIGHTS_GPU {
+            return Err(SceneError::InvalidPointLight(format!(
+                "BSP point-light replacement would exceed cap ({MAX_POINT_LIGHTS_GPU})"
+            )));
+        }
+
+        for id in old_ids {
+            let removed = self.world.remove_point_light(*id);
+            debug_assert!(removed, "validated BSP point light must remove");
+        }
+
+        Ok(new_lights
+            .iter()
+            .map(|light| {
+                self.world.add_point_light(PointLight {
+                    color: light.sanitize_color(),
+                    ..*light
+                })
+            })
+            .collect())
+    }
+
+    /// Set per-frame BSP frame values (light-style intensities, liquid time).
+    ///
+    /// These are consumed by the BSP frame-values UBO each rendered frame.
+    /// `style_intensities` is a 64-element array mapping style_id → intensity (0.0..1.0).
+    /// `liquid_time` is the accumulated liquid animation time in seconds.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    #[cfg(feature = "bsp")]
+    pub fn set_bsp_frame_values(&mut self, style_intensities: [f32; 64], liquid_time: f32) {
+        self.world
+            .set_bsp_frame_values(style_intensities, liquid_time);
+    }
+
+    /// Set per-model transforms for inline model BSP draws.
+    ///
+    /// `transforms` maps model_index (1..n) to world-space transform.
+    /// Model 0 (worldspawn) is always identity and need not be included.
+    /// These are applied as per-draw transforms for inline model batches.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    #[cfg(feature = "bsp")]
+    pub fn set_inline_model_transforms(
+        &mut self,
+        transforms: std::collections::HashMap<u32, glam::Mat4>,
+    ) {
+        self.world.set_inline_model_transforms(transforms);
+    }
+
+    /// Set per-model world-space bounds for inline model BSP culling.
+    ///
+    /// Bounds are keyed by model_index (1..n) and come from the same simulation
+    /// snapshot as the inline transforms.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    #[cfg(feature = "bsp")]
+    pub fn set_inline_model_bounds(
+        &mut self,
+        bounds: std::collections::HashMap<u32, (glam::Vec3, glam::Vec3)>,
+    ) {
+        self.world.set_inline_model_bounds(bounds);
+    }
+
     /// Thread: Any
     /// May Stall: No
     pub fn create_point_light(&mut self, light: PointLight) -> Result<PointLightId, SceneError> {
@@ -1169,7 +1420,9 @@ impl Scene {
             color: light.sanitize_color(),
             ..light
         };
-        Ok(self.world.add_point_light(sanitized))
+        let stable_id = self.next_light_stable_id();
+        let record = ObjectRecord::for_new_point_light(Some(stable_id), None);
+        Ok(self.world.add_point_light_with_record(sanitized, record))
     }
 
     /// Thread: Any
@@ -1203,8 +1456,6 @@ impl Scene {
         self.validate_point_light(id)?;
 
         if self.world.remove_point_light(id) {
-            self.point_light_stable_ids.remove(&id);
-            self.point_light_parents.remove(&id);
             return Ok(());
         }
 
@@ -1230,7 +1481,11 @@ impl Scene {
             color: light.sanitize_color(),
             ..light
         };
-        let id = self.world.add_directional_light(sanitized);
+        let stable_id = self.next_light_stable_id();
+        let record = ObjectRecord::for_new_directional_light(Some(stable_id), None);
+        let id = self
+            .world
+            .add_directional_light_with_record(sanitized, record);
         // Preserve the pre-CSM zero/one route: in default builds its single
         // directional light continues to cast the legacy shadow automatically.
         #[cfg(not(feature = "csm"))]
@@ -1269,9 +1524,6 @@ impl Scene {
         self.validate_directional_light(id)?;
 
         if self.world.remove_directional_light(id) {
-            self.directional_light_stable_ids.remove(&id);
-            self.directional_light_parents.remove(&id);
-            self.directional_shadow_configs.remove(&id);
             return Ok(());
         }
 
@@ -1321,7 +1573,11 @@ impl Scene {
             color: light.sanitize_color(),
             ..light
         };
-        Ok(self.world.add_directional_light(sanitized))
+        let stable_id = self.next_light_stable_id();
+        let record = ObjectRecord::for_new_directional_light(Some(stable_id), None);
+        Ok(self
+            .world
+            .add_directional_light_with_record(sanitized, record))
     }
 
     /// Returns all active directional lights.
@@ -1351,7 +1607,10 @@ impl Scene {
         } else if self.world.shadow_casting_directional() == Some(id) {
             self.world.set_shadow_casting_directional(None);
         }
-        self.directional_shadow_configs.insert(id, config);
+        // Store shadow config in the record.
+        if let Some(record) = self.world.get_directional_light_record_mut(id) {
+            record.directional_shadow_config = Some(config);
+        }
         Ok(())
     }
 
@@ -1399,7 +1658,9 @@ impl Scene {
             color: light.sanitize_color(),
             ..light
         };
-        Ok(self.world.add_spot_light(sanitized))
+        let stable_id = self.next_light_stable_id();
+        let record = ObjectRecord::for_new_spot_light(Some(stable_id), None);
+        Ok(self.world.add_spot_light_with_record(sanitized, record))
     }
 
     /// Update a spot light.
@@ -1426,8 +1687,6 @@ impl Scene {
     pub fn remove_spot_light(&mut self, id: SpotLightId) -> Result<(), SceneError> {
         self.validate_spot_light(id)?;
         if self.world.remove_spot_light(id) {
-            self.spot_light_stable_ids.remove(&id);
-            self.spot_light_parents.remove(&id);
             return Ok(());
         }
         Err(SceneError::InvalidSpotLight(format!(
@@ -1485,6 +1744,17 @@ impl Scene {
                 source.mesh_bounds.clone(),
             );
             self.ensure_node_persistence_metadata(new_node);
+            // Carry component envelopes from fragment into the scene record.
+            if let Some(record) = self.world.get_node_record_mut(new_node) {
+                for env in &source.components {
+                    // Clone the envelope; it was validated when built.
+                    record.component_store.attach(env.clone()).map_err(|e| {
+                        SceneError::MergeFailed(format!(
+                            "failed to attach component from fragment: {e}"
+                        ))
+                    })?;
+                }
+            }
             mapping.insert(fragment_node, new_node);
         }
 
@@ -1515,7 +1785,8 @@ impl Scene {
     /// May Stall: Yes (file I/O)
     pub fn save(&self, path: impl AsRef<std::path::Path>) -> Result<(), SceneError> {
         let path = path.as_ref();
-        let serialized = SerializedScene::from_scene(self);
+        let serialized = SerializedScene::from_scene(self)?;
+        serialized.validate()?;
         let json = serde_json::to_string_pretty(&serialized).map_err(|e| {
             SceneError::SerializationError(format!("scene serialization failed: {e}"))
         })?;
@@ -1527,6 +1798,52 @@ impl Scene {
         })?;
 
         Ok(())
+    }
+
+    /// Serialize the scene to a pretty-printed JSON string.
+    pub fn save_to_string(&self) -> Result<String, SceneError> {
+        let serialized = SerializedScene::from_scene(self)?;
+        serialized.validate()?;
+        serde_json::to_string_pretty(&serialized)
+            .map_err(|e| SceneError::SerializationError(format!("scene serialization failed: {e}")))
+    }
+
+    /// Load a scene from a versioned JSON string via [`AssetManager`].
+    /// Handles v1→v2 migration transparently.
+    pub fn load_from_str(
+        json: &str,
+        assets: &mut crate::api::assets::AssetManager,
+    ) -> Result<Self, crate::api::errors::RendererError> {
+        let raw: serde_json::Value = serde_json::from_str(json).map_err(|e| {
+            crate::api::errors::RendererError::Scene(SceneError::SerializationError(format!(
+                "scene deserialization failed: {e}"
+            )))
+        })?;
+
+        let version = raw
+            .get("format_version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        let migrated = if version == 1 {
+            migrate_v1_to_v2(raw)
+        } else if version == SCENE_FORMAT_VERSION as u64 {
+            raw
+        } else {
+            return Err(crate::api::errors::RendererError::Scene(
+                SceneError::UnsupportedSceneVersion {
+                    found: version as u32,
+                    expected: SCENE_FORMAT_VERSION,
+                },
+            ));
+        };
+
+        let serialized: SerializedScene = serde_json::from_value(migrated).map_err(|e| {
+            crate::api::errors::RendererError::Scene(SceneError::SerializationError(format!(
+                "scene deserialization failed: {e}"
+            )))
+        })?;
+        serialized.into_scene(assets)
     }
 
     /// Load a scene from a versioned JSON file. Durable asset IDs are resolved
@@ -1602,19 +1919,75 @@ impl Scene {
             scene_id: "scene.imported".to_string(),
             display_name: None,
             next_stable_node_id: 1,
+            next_stable_light_id: 1,
             skybox_asset: None,
             materials: BTreeMap::new(),
-            node_persistence: HashMap::new(),
-            point_light_stable_ids: HashMap::new(),
-            point_light_parents: HashMap::new(),
-            directional_light_stable_ids: HashMap::new(),
-            directional_light_parents: HashMap::new(),
-            spot_light_stable_ids: HashMap::new(),
-            spot_light_parents: HashMap::new(),
-            directional_shadow_configs: HashMap::new(),
             audio: Vec::new(),
+            bsp_source_link: None,
             editor: serde_json::json!({}),
         }
+    }
+
+    // ── Object identity facade methods ──────────────────────────────────
+
+    /// Returns the [`ObjectId`] for a node, or an error if the node is invalid.
+    pub fn object_id(&self, node: SceneNodeId) -> Result<ObjectId, SceneError> {
+        self.validate_node(node)?;
+        self.world
+            .object_id_for_node(node)
+            .ok_or(SceneError::InvalidNode(node))
+    }
+
+    /// Returns the [`ObjectId`] for a point light.
+    pub fn object_id_for_point_light(&self, id: PointLightId) -> Result<ObjectId, SceneError> {
+        self.validate_point_light(id)?;
+        self.world
+            .object_id_for_point_light(id)
+            .ok_or(SceneError::InvalidPointLight(format!(
+                "invalid point light"
+            )))
+    }
+
+    /// Returns the [`ObjectId`] for a directional light.
+    pub fn object_id_for_directional_light(
+        &self,
+        id: DirectionalLightId,
+    ) -> Result<ObjectId, SceneError> {
+        self.validate_directional_light(id)?;
+        self.world
+            .object_id_for_directional_light(id)
+            .ok_or(SceneError::InvalidDirectionalLight(format!(
+                "invalid directional light"
+            )))
+    }
+
+    /// Returns the [`ObjectId`] for a spot light.
+    pub fn object_id_for_spot_light(&self, id: SpotLightId) -> Result<ObjectId, SceneError> {
+        self.validate_spot_light(id)?;
+        self.world
+            .object_id_for_spot_light(id)
+            .ok_or(SceneError::InvalidSpotLight(format!("invalid spot light")))
+    }
+
+    /// Resolve an [`ObjectId`] back to a typed [`ObjectHandle`].
+    pub fn resolve_object(&self, id: ObjectId) -> Option<ObjectHandle> {
+        self.world.resolve_object(id)
+    }
+
+    /// Access the underlying [`SceneWorld`] for audit operations.
+    pub fn world(&self) -> &SceneWorld {
+        &self.world
+    }
+
+    /// Access the underlying [`SceneWorld`] mutably for test operations.
+    #[doc(hidden)]
+    pub fn world_mut(&mut self) -> &mut SceneWorld {
+        &mut self.world
+    }
+
+    /// Look up an [`ObjectId`] by persistent [`SceneObjectId`].
+    pub fn find_object_by_persistent_id(&self, persistent_id: &SceneObjectId) -> Option<ObjectId> {
+        self.world.find_object_by_persistent_id(persistent_id)
     }
 
     pub(crate) fn update_camera(&mut self, view: Mat4, projection: Mat4, position: Vec3) {
@@ -1683,6 +2056,102 @@ impl Scene {
             viewport_height,
             camera.view,
             camera.projection,
+            camera.cam_pos,
+        )
+    }
+
+    // ── Phase 07: Queries, Selection, and Editor Camera ─────────────────
+
+    /// Raycast: return the closest [`RayHit`] for a world-space ray.
+    ///
+    /// Validates the ray (origin must be finite, direction must be
+    /// finite and non-zero).  Conservative-visible nodes are excluded
+    /// from results.
+    ///
+    /// Thread: Any · May Stall: No
+    pub fn raycast(
+        &self,
+        ray: &crate::data::camera::Ray,
+    ) -> Result<Option<crate::object::query::RayHit>, SceneError> {
+        crate::object::query::validate_ray(ray)
+            .map_err(|msg| SceneError::InvalidMutation(msg.to_string()))?;
+        let normalized = crate::data::camera::Ray {
+            origin: ray.origin,
+            direction: ray.direction.normalize(),
+        };
+        Ok(self.world.raycast_readonly(&normalized).into_iter().next())
+    }
+
+    /// Raycast all: return every hit in deterministic order (distance,
+    /// then [`SceneObjectId`], then [`ObjectKind`]).
+    ///
+    /// Thread: Any · May Stall: No
+    pub fn raycast_all(
+        &self,
+        ray: &crate::data::camera::Ray,
+    ) -> Result<Vec<crate::object::query::RayHit>, SceneError> {
+        crate::object::query::validate_ray(ray)
+            .map_err(|msg| SceneError::InvalidMutation(msg.to_string()))?;
+        let normalized = crate::data::camera::Ray {
+            origin: ray.origin,
+            direction: ray.direction.normalize(),
+        };
+        Ok(self.world.raycast_readonly(&normalized))
+    }
+
+    /// Volume query: return all objects whose world-space bounds
+    /// intersect the given volume shape.
+    ///
+    /// Thread: Any · May Stall: No
+    pub fn query_volume(
+        &self,
+        query: &crate::object::query::VolumeQuery,
+    ) -> Vec<crate::object::query::VolumeHit> {
+        self.world.volume_query_readonly(query)
+    }
+
+    /// Editor pick: cast a ray and return the closest editable object
+    /// matching the given [`EditorProxyPolicy`].
+    ///
+    /// Directional lights are always excluded (unbounded).  Point/spot
+    /// lights require opt-in via policy.
+    ///
+    /// Thread: Any · May Stall: No
+    pub fn editor_pick(
+        &self,
+        ray: &crate::data::camera::Ray,
+        policy: crate::object::query::EditorProxyPolicy,
+    ) -> Result<Option<crate::object::query::EditorPickResult>, SceneError> {
+        crate::object::query::validate_ray(ray)
+            .map_err(|msg| SceneError::InvalidMutation(msg.to_string()))?;
+        Ok(self.world.editor_pick_readonly(ray, policy))
+    }
+
+    /// Return the scene's provenance token for [`crate::object::selection::Selection`]
+    /// binding.
+    ///
+    /// Thread: Any · May Stall: No
+    pub fn provenance_token(&self) -> crate::object::identity::SceneRuntimeId {
+        self.world.provenance_token()
+    }
+
+    /// Helper: create a [`Ray`] from screen coordinates using the
+    /// scene's last renderer-supplied camera.
+    ///
+    /// Thread: Any · May Stall: No
+    pub fn screen_to_ray(
+        &self,
+        screen_x: f32,
+        screen_y: f32,
+        viewport_width: u32,
+        viewport_height: u32,
+    ) -> crate::data::camera::Ray {
+        let camera = self.world.camera_data();
+        let inv_vp = (camera.projection * camera.view).inverse();
+        crate::data::camera::Ray::from_screen(
+            (screen_x, screen_y),
+            (viewport_width, viewport_height),
+            inv_vp,
             camera.cam_pos,
         )
     }
@@ -1758,9 +2227,1338 @@ impl Scene {
                 node_ref.stable_id = Some(stable_id.clone());
             }
             if node_ref.name.is_empty() {
-                node_ref.name = stable_id;
+                node_ref.name = stable_id.clone();
             }
         }
+        // Also store the stable ID in the record.
+        if let Some(record) = self.world.get_node_record_mut(node) {
+            if record.stable_id.is_none() {
+                record.stable_id = Some(stable_id);
+            }
+        }
+    }
+
+    fn next_light_stable_id(&mut self) -> String {
+        let id = format!("light.{:06}", self.next_stable_light_id);
+        self.next_stable_light_id += 1;
+        id
+    }
+
+    // ── Component API ───────────────────────────────────────────────
+
+    /// Attach a prevalidated component envelope to a scene node.
+    ///
+    /// The envelope must pass all limit checks (size, depth, attachment count)
+    /// before being stored.
+    pub fn attach_component(
+        &mut self,
+        node: SceneNodeId,
+        envelope: ComponentEnvelope,
+    ) -> Result<(), SceneError> {
+        self.validate_node(node)?;
+        self.world
+            .attach_component(node, envelope)
+            .map_err(SceneError::from)
+    }
+
+    /// Remove a component instance from a scene node by key and instance ID.
+    pub fn remove_component(
+        &mut self,
+        node: SceneNodeId,
+        key: &ComponentKey,
+        instance_id: &ComponentInstanceId,
+    ) -> Result<(), SceneError> {
+        self.validate_node(node)?;
+        self.world
+            .remove_component(node, key, instance_id)
+            .map(|_| ())
+            .ok_or_else(|| {
+                SceneError::InvalidMutation(format!(
+                    "component instance '{instance_id}' not found for key '{key}'"
+                ))
+            })
+    }
+
+    /// Enumerate all component envelopes for a scene node.
+    pub fn component_envelopes(
+        &self,
+        node: SceneNodeId,
+    ) -> Result<Vec<ComponentEnvelope>, SceneError> {
+        self.world
+            .component_envelopes(node)
+            .map(|iter| iter.cloned().collect())
+            .ok_or_else(|| SceneError::InvalidNode(node))
+    }
+
+    /// Enumerate all component envelopes of a given component key for a node.
+    pub fn component_envelopes_by_key(
+        &self,
+        node: SceneNodeId,
+        key: &ComponentKey,
+    ) -> Result<Vec<ComponentEnvelope>, SceneError> {
+        self.world
+            .component_envelopes_by_key(node, key)
+            .map(|iter| iter.cloned().collect())
+            .ok_or_else(|| SceneError::InvalidNode(node))
+    }
+
+    /// Get a typed component instance by downcast.
+    pub fn component_downcast<T: 'static>(
+        &self,
+        node: SceneNodeId,
+        key: &ComponentKey,
+        instance_id: &ComponentInstanceId,
+    ) -> Result<&T, SceneError> {
+        self.world
+            .component_downcast::<T>(node, key, instance_id)
+            .map_err(SceneError::from)
+    }
+
+    /// Return typed hydrated component instances in deterministic envelope order.
+    ///
+    /// The returned `Arc` values are runtime views only; persistence remains
+    /// represented by the paired canonical envelopes.
+    pub fn component_typed_instances<T: Any + Send + Sync>(
+        &self,
+        node: SceneNodeId,
+        key: &ComponentKey,
+    ) -> Result<Vec<(ComponentEnvelope, Arc<T>)>, SceneError> {
+        self.world
+            .component_typed_instances::<T>(node, key)
+            .ok_or(SceneError::InvalidNode(node))
+    }
+
+    /// Hydrate one component attachment using a caller-owned registry.
+    ///
+    /// Unknown types remain unchanged as opaque canonical envelopes.
+    pub fn hydrate_component(
+        &mut self,
+        node: SceneNodeId,
+        registry: &ComponentRegistry,
+        key: &ComponentKey,
+        instance_id: &ComponentInstanceId,
+    ) -> Result<(), SceneError> {
+        self.validate_node(node)?;
+        let store = self
+            .world
+            .component_store_mut(node)
+            .ok_or(SceneError::InvalidNode(node))?;
+        hydrate_and_store(registry, store, key, instance_id).map_err(SceneError::from)
+    }
+
+    /// Hydrate all components on a node using a caller-owned registry.
+    ///
+    /// Unknown types remain as opaque canonical JSON.
+    pub fn hydrate_components(
+        &mut self,
+        node: SceneNodeId,
+        registry: &ComponentRegistry,
+    ) -> Result<usize, SceneError> {
+        self.validate_node(node)?;
+        let store = self
+            .world
+            .component_store_mut(node)
+            .ok_or_else(|| SceneError::InvalidNode(node))?;
+        hydrate_all(registry, store).map_err(SceneError::from)
+    }
+
+    /// Hydrate all components of a given key on a node.
+    pub fn hydrate_components_by_key(
+        &mut self,
+        node: SceneNodeId,
+        registry: &ComponentRegistry,
+        key: &ComponentKey,
+    ) -> Result<usize, SceneError> {
+        self.validate_node(node)?;
+        let store = self
+            .world
+            .component_store_mut(node)
+            .ok_or_else(|| SceneError::InvalidNode(node))?;
+        hydrate_all_by_key(registry, store, key).map_err(SceneError::from)
+    }
+
+    // ── Object enumeration ─────────────────────────────────────────
+
+    /// Enumerate all live objects in stable (kind, slot, generation) order.
+    pub fn objects(&self) -> Vec<ObjectId> {
+        self.world.all_objects()
+    }
+
+    /// Enumerate all objects of a given kind.
+    pub fn objects_of_kind(&self, kind: ObjectKind) -> Vec<ObjectId> {
+        self.world
+            .all_objects()
+            .into_iter()
+            .filter(|id| id.kind() == kind)
+            .collect()
+    }
+
+    /// Build an [`ObjectSummary`] for an object.
+    pub fn object_summary(&self, id: ObjectId) -> Result<crate::object::ObjectSummary, SceneError> {
+        self.validate_object(id)?;
+        use crate::object::ObjectSummary;
+        let persistent_id = self
+            .world
+            .object_persistent_id(id)
+            .unwrap_or_else(|| SceneObjectId::new("object.unknown".to_string()));
+        let name = self.world.object_name(id).unwrap_or_default();
+
+        let (tags, mesh_count, child_count, stable_id, visible, layer) = match id.kind() {
+            ObjectKind::Node => {
+                let node = self
+                    .world
+                    .get_node(SceneNodeId::new(id.slot(), id.generation()))
+                    .ok_or(SceneError::InvalidNode(SceneNodeId::new(
+                        id.slot(),
+                        id.generation(),
+                    )))?;
+                let record = self
+                    .world
+                    .get_node_record(SceneNodeId::new(id.slot(), id.generation()));
+                (
+                    node.tags.clone(),
+                    node.meshes.len(),
+                    node.children.len(),
+                    record.and_then(|r| r.stable_id.clone()),
+                    record.and_then(|r| r.visibility.as_ref().map(|v| v.visible)),
+                    record.and_then(|r| r.visibility.as_ref().map(|v| v.layer.clone())),
+                )
+            }
+            ObjectKind::PointLight => {
+                let record = self.world.get_point_light_record(PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                });
+                (
+                    Vec::new(),
+                    0,
+                    0,
+                    record.and_then(|r| r.stable_id.clone()),
+                    Some(true),
+                    None,
+                )
+            }
+            ObjectKind::DirectionalLight => {
+                let record = self.world.get_directional_light_record(DirectionalLightId {
+                        slot: id.slot(),
+                        generation: id.generation(),
+                });
+                (
+                    Vec::new(),
+                    0,
+                    0,
+                    record.and_then(|r| r.stable_id.clone()),
+                    Some(true),
+                    None,
+                )
+            }
+            ObjectKind::SpotLight => {
+                let record = self.world.get_spot_light_record(SpotLightId {
+                            slot: id.slot(),
+                            generation: id.generation(),
+                        });
+                (
+                    Vec::new(),
+                    0,
+                    0,
+                    record.and_then(|r| r.stable_id.clone()),
+                    Some(true),
+                    None,
+                )
+            }
+        };
+
+        let group_parent = self.group_parent_persistent(id);
+        let component_count = self
+            .world
+            .object_component_store(id)
+            .map(|s| s.len())
+            .unwrap_or(0);
+
+        Ok(ObjectSummary {
+            id,
+            persistent_id,
+            stable_id,
+            kind: id.kind(),
+            name,
+            tags,
+            mesh_count,
+            child_count,
+            group_parent,
+            visible: visible.unwrap_or(true),
+            layer,
+            component_count,
+        })
+    }
+
+    /// Enumerate all object summaries.
+    pub fn object_summaries(&self) -> Vec<crate::object::ObjectSummary> {
+        self.objects()
+            .into_iter()
+            .filter_map(|id| self.object_summary(id).ok())
+            .collect()
+    }
+
+    /// Validate an ObjectId against this scene.
+    /// Reports WrongScene before kind/slot errors.
+    pub fn validate_object(&self, id: ObjectId) -> Result<(), SceneError> {
+        self.world
+            .resolve_object_with_error(id)
+            .map(|_| ())
+            .map_err(SceneError::Object)
+    }
+
+    // ── Typed ObjectId conversion ───────────────────────────────────
+
+    /// Try to extract a [`SceneNodeId`] from an [`ObjectId`].
+    pub fn try_get_node_id(&self, id: ObjectId) -> Result<SceneNodeId, SceneError> {
+        self.validate_object(id)?;
+        if id.kind() != ObjectKind::Node {
+            return Err(SceneError::Object(ObjectError::WrongKind {
+                object: id,
+                expected: ObjectKind::Node,
+                actual: id.kind(),
+            }));
+        }
+        let node_id = SceneNodeId::new(id.slot(), id.generation());
+        self.validate_node(node_id)?;
+        Ok(node_id)
+    }
+
+    /// Try to extract a [`PointLightId`] from an [`ObjectId`].
+    pub fn try_get_point_light_id(&self, id: ObjectId) -> Result<PointLightId, SceneError> {
+        self.validate_object(id)?;
+        if id.kind() != ObjectKind::PointLight {
+            return Err(SceneError::Object(ObjectError::WrongKind {
+                object: id,
+                expected: ObjectKind::PointLight,
+                actual: id.kind(),
+            }));
+        }
+        let pl_id = PointLightId {
+            slot: id.slot(),
+            generation: id.generation(),
+        };
+        self.validate_point_light(pl_id)?;
+        Ok(pl_id)
+    }
+
+    /// Try to extract a [`DirectionalLightId`] from an [`ObjectId`].
+    pub fn try_get_directional_light_id(
+        &self,
+        id: ObjectId,
+    ) -> Result<DirectionalLightId, SceneError> {
+        self.validate_object(id)?;
+        if id.kind() != ObjectKind::DirectionalLight {
+            return Err(SceneError::Object(ObjectError::WrongKind {
+                object: id,
+                expected: ObjectKind::DirectionalLight,
+                actual: id.kind(),
+            }));
+        }
+        let dl_id = DirectionalLightId {
+            slot: id.slot(),
+            generation: id.generation(),
+        };
+        self.validate_directional_light(dl_id)?;
+        Ok(dl_id)
+    }
+
+    /// Try to extract a [`SpotLightId`] from an [`ObjectId`].
+    pub fn try_get_spot_light_id(&self, id: ObjectId) -> Result<SpotLightId, SceneError> {
+        self.validate_object(id)?;
+        if id.kind() != ObjectKind::SpotLight {
+            return Err(SceneError::Object(ObjectError::WrongKind {
+                object: id,
+                expected: ObjectKind::SpotLight,
+                actual: id.kind(),
+            }));
+        }
+        let sl_id = SpotLightId {
+            slot: id.slot(),
+            generation: id.generation(),
+        };
+        self.validate_spot_light(sl_id)?;
+        Ok(sl_id)
+    }
+
+    // ── Unified Transform API ───────────────────────────────────────
+
+    /// Get the canonical transform of any object.
+    pub fn get_object_transform(
+        &self,
+        id: ObjectId,
+    ) -> Result<crate::object::ObjectTransform, SceneError> {
+        self.validate_object(id)?;
+        use crate::object::ObjectTransform;
+        match id.kind() {
+            ObjectKind::Node => {
+                let node = self
+                    .world
+                    .get_node(SceneNodeId::new(id.slot(), id.generation()))
+                    .ok_or_else(|| {
+                        SceneError::InvalidNode(SceneNodeId::new(id.slot(), id.generation()))
+                    })?;
+                Ok(ObjectTransform::Node(node.local_transform))
+            }
+            ObjectKind::PointLight => {
+                let pl_id = PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                let light = self.world.point_light_entry(pl_id).ok_or_else(|| {
+                        SceneError::InvalidPointLight("point light not found".to_string())
+                    })?;
+                Ok(ObjectTransform::PointLight(light.position))
+            }
+            ObjectKind::DirectionalLight => {
+                let dl_id = DirectionalLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                let light = self.world.directional_light_entry(dl_id).ok_or_else(|| {
+                    SceneError::InvalidDirectionalLight("directional light not found".to_string())
+                    })?;
+                let dir = light.direction.normalize();
+                Ok(ObjectTransform::DirectionalLight(dir))
+            }
+            ObjectKind::SpotLight => {
+                let sl_id = SpotLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                let light = self.world.spot_light_entry(sl_id).ok_or_else(|| {
+                        SceneError::InvalidSpotLight("spot light not found".to_string())
+                    })?;
+                let dir = light.direction.normalize();
+                Ok(ObjectTransform::SpotLight {
+                    position: light.position,
+                    direction: dir,
+                })
+            }
+        }
+    }
+
+    /// Set the transform of any object, validated according to its kind.
+    pub fn set_object_transform(
+        &mut self,
+        id: ObjectId,
+        transform: &Mat4,
+    ) -> Result<(), SceneError> {
+        self.validate_object(id)?;
+        use crate::object::{is_identity_basis_matrix, is_rigid_direction_only, is_rigid_matrix};
+
+        if !transform.is_finite() {
+            return Err(SceneError::InvalidMutation(
+                "transform must contain only finite values".to_string(),
+            ));
+        }
+
+        match id.kind() {
+            ObjectKind::Node => {
+                let node_id = SceneNodeId::new(id.slot(), id.generation());
+                let node = self
+                    .world
+                    .get_node_mut(node_id)
+                    .ok_or(SceneError::InvalidNode(node_id))?;
+                node.local_transform = *transform;
+                self.world.invalidate_derived_state(node_id);
+            }
+            ObjectKind::PointLight => {
+                // Accept only finite affine matrices with identity 3×3 basis.
+                if !is_identity_basis_matrix(transform) {
+                    return Err(SceneError::InvalidMutation(
+                        "point light transform must be translation-only (no scale/shear/rotation)"
+                            .to_string(),
+                    ));
+                }
+                let position = transform.w_axis.truncate();
+                let pl_id = PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                self.update_point_light_position(pl_id, position)?;
+            }
+            ObjectKind::SpotLight => {
+                // Accept only finite rigid transforms.
+                if !is_rigid_matrix(transform) {
+                    return Err(SceneError::InvalidMutation(
+                        "spot light transform must be rigid (no scale/shear/reflection)"
+                            .to_string(),
+                    ));
+                }
+                let position = transform.w_axis.truncate();
+                let direction = crate::object::ObjectTransform::direction_from_rigid(transform);
+                let sl_id = SpotLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                self.update_spot_light_position_direction(sl_id, position, direction)?;
+            }
+            ObjectKind::DirectionalLight => {
+                // Accept only finite rigid zero-translation transforms.
+                if !is_rigid_direction_only(transform) {
+                    return Err(SceneError::InvalidMutation(
+                        "directional light transform must be rigid with zero translation"
+                            .to_string(),
+                    ));
+                }
+                let direction = crate::object::ObjectTransform::direction_from_rigid(transform);
+                let dl_id = DirectionalLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                self.update_directional_light_direction(dl_id, direction)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Get the local transform of a node.
+    pub fn node_transform(&self, node: SceneNodeId) -> Result<Mat4, SceneError> {
+        self.transform(node)
+    }
+
+    /// Set the local transform of a node.
+    pub fn set_node_transform(
+        &mut self,
+        node: SceneNodeId,
+        transform: Mat4,
+    ) -> Result<(), SceneError> {
+        self.set_transform(node, transform)
+    }
+
+    /// Get the canonical rigid matrix for a point light (translation-only).
+    pub fn point_light_transform(&self, id: PointLightId) -> Result<Mat4, SceneError> {
+        self.validate_point_light(id)?;
+        let light = self
+            .world
+            .point_light_entry(id)
+            .ok_or(SceneError::StalePointLight(id))?;
+        Ok(Mat4::from_translation(light.position))
+    }
+
+    /// Set a point light's transform (translation-only, rejects
+    /// scale/shear/rotation).
+    pub fn set_point_light_transform(
+        &mut self,
+        id: PointLightId,
+        transform: Mat4,
+    ) -> Result<(), SceneError> {
+        if !transform.is_finite() {
+            return Err(SceneError::InvalidMutation(
+                "transform must contain only finite values".to_string(),
+            ));
+        }
+        if !crate::object::is_identity_basis_matrix(&transform) {
+            return Err(SceneError::InvalidMutation(
+                "point light transform must be translation-only (no scale/shear/rotation)"
+                    .to_string(),
+            ));
+        }
+        let position = transform.w_axis.truncate();
+        self.update_point_light_position(id, position)
+    }
+
+    /// Get the canonical rigid matrix for a spot light.
+    pub fn spot_light_transform(&self, id: SpotLightId) -> Result<Mat4, SceneError> {
+        self.validate_spot_light(id)?;
+        let light = self
+            .world
+            .spot_light_entry(id)
+            .ok_or(SceneError::StaleSpotLight(id))?;
+        let dir = light.direction.normalize();
+        Ok(crate::object::ObjectTransform::rigid_from_position_direction(light.position, dir))
+    }
+
+    /// Set a spot light's transform (rigid only).
+    pub fn set_spot_light_transform(
+        &mut self,
+        id: SpotLightId,
+        transform: Mat4,
+    ) -> Result<(), SceneError> {
+        if !transform.is_finite() {
+            return Err(SceneError::InvalidMutation(
+                "transform must contain only finite values".to_string(),
+            ));
+        }
+        if !crate::object::is_rigid_matrix(&transform) {
+            return Err(SceneError::InvalidMutation(
+                "spot light transform must be rigid (no scale/shear/reflection)".to_string(),
+            ));
+        }
+        let position = transform.w_axis.truncate();
+        let direction = crate::object::ObjectTransform::direction_from_rigid(&transform);
+        self.update_spot_light_position_direction(id, position, direction)
+    }
+
+    /// Get the canonical rigid matrix for a directional light.
+    pub fn directional_light_transform(&self, id: DirectionalLightId) -> Result<Mat4, SceneError> {
+        self.validate_directional_light(id)?;
+        let light = self
+            .world
+            .directional_light_entry(id)
+            .ok_or(SceneError::StaleDirectionalLight(id))?;
+        let dir = light.direction.normalize();
+        Ok(crate::object::ObjectTransform::rigid_from_direction(dir))
+    }
+
+    /// Set a directional light's transform (rigid direction only).
+    pub fn set_directional_light_transform(
+        &mut self,
+        id: DirectionalLightId,
+        transform: Mat4,
+    ) -> Result<(), SceneError> {
+        if !transform.is_finite() {
+            return Err(SceneError::InvalidMutation(
+                "transform must contain only finite values".to_string(),
+            ));
+        }
+        if !crate::object::is_rigid_direction_only(&transform) {
+            return Err(SceneError::InvalidMutation(
+                "directional light transform must be rigid with zero translation".to_string(),
+            ));
+        }
+        let direction = crate::object::ObjectTransform::direction_from_rigid(&transform);
+        self.update_directional_light_direction(id, direction)
+    }
+
+    // ── Internal helpers for typed light transform updates ──────────
+
+    fn update_point_light_position(
+        &mut self,
+        id: PointLightId,
+        position: Vec3,
+    ) -> Result<(), SceneError> {
+        self.validate_point_light(id)?;
+        let entry = self
+            .world
+            .point_light_entry_mut(id)
+            .ok_or(SceneError::StalePointLight(id))?;
+        entry.0.position = position;
+        Ok(())
+    }
+
+    fn update_spot_light_position_direction(
+        &mut self,
+        id: SpotLightId,
+        position: Vec3,
+        direction: Vec3,
+    ) -> Result<(), SceneError> {
+        if !position.is_finite() {
+            return Err(SceneError::InvalidSpotLight(
+                "position must be finite".into(),
+            ));
+        }
+        if !direction.is_finite() || direction.length_squared() < 1e-6 {
+            return Err(SceneError::InvalidSpotLight(
+                "direction must be finite and non-zero".into(),
+            ));
+        }
+        self.validate_spot_light(id)?;
+        let entry = self
+            .world
+            .spot_light_entry_mut(id)
+            .ok_or(SceneError::StaleSpotLight(id))?;
+        entry.0.position = position;
+        entry.0.direction = direction.normalize();
+        Ok(())
+    }
+
+    fn update_directional_light_direction(
+        &mut self,
+        id: DirectionalLightId,
+        direction: Vec3,
+    ) -> Result<(), SceneError> {
+        if !direction.is_finite() || direction.length_squared() < 1e-6 {
+            return Err(SceneError::InvalidDirectionalLight(
+                "direction must be finite and non-zero".to_string(),
+            ));
+        }
+        self.validate_directional_light(id)?;
+        let entry = self
+            .world
+            .directional_light_entry_mut(id)
+            .ok_or(SceneError::StaleDirectionalLight(id))?;
+        entry.0.direction = direction.normalize();
+        Ok(())
+    }
+
+    // ── Unified Object Parent API ───────────────────────────────────
+
+    /// Get the group parent persistent ID for a light.
+    fn group_parent_persistent(&self, id: ObjectId) -> Option<SceneObjectId> {
+        match id.kind() {
+            ObjectKind::Node => None,
+            ObjectKind::PointLight => self
+                .world
+                .get_point_light_record(PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .and_then(|r| r.light_group_parent.clone()),
+            ObjectKind::DirectionalLight => self
+                .world
+                .get_directional_light_record(DirectionalLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .and_then(|r| r.light_group_parent.clone()),
+            ObjectKind::SpotLight => self
+                .world
+                .get_spot_light_record(SpotLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .and_then(|r| r.light_group_parent.clone()),
+        }
+    }
+
+    /// Set the parent of an object under a unified API.
+    ///
+    /// - Node reparent keeps cycle/root checks (via `reparent_node`).
+    /// - Light regroup accepts `None` or a live node, changes record
+    ///   metadata only; world-space payload is unchanged.
+    pub fn set_object_parent(
+        &mut self,
+        id: ObjectId,
+        parent: crate::object::ObjectParent,
+    ) -> Result<(), SceneError> {
+        self.validate_object(id)?;
+        use crate::object::ObjectParent;
+
+        match id.kind() {
+            ObjectKind::Node => {
+                let node_id = SceneNodeId::new(id.slot(), id.generation());
+                let new_parent = match parent {
+                    ObjectParent::None => None,
+                    ObjectParent::Node(pid) => {
+                        self.validate_object(pid)?;
+                        if pid.kind() != ObjectKind::Node {
+                            return Err(SceneError::Object(ObjectError::WrongKind {
+                                object: pid,
+                                expected: ObjectKind::Node,
+                                actual: pid.kind(),
+                            }));
+                        }
+                        Some(SceneNodeId::new(pid.slot(), pid.generation()))
+                    }
+                };
+                self.reparent_node(node_id, new_parent)?;
+            }
+            ObjectKind::PointLight | ObjectKind::DirectionalLight | ObjectKind::SpotLight => {
+                let new_group_parent = match parent {
+                    ObjectParent::None => None,
+                    ObjectParent::Node(pid) => {
+                        self.validate_object(pid)?;
+                        if pid.kind() != ObjectKind::Node {
+                            return Err(SceneError::Object(ObjectError::WrongKind {
+                                object: pid,
+                                expected: ObjectKind::Node,
+                                actual: pid.kind(),
+                            }));
+                        }
+                        // Get the parent node's persistent ID
+                        self.world
+                            .get_node_record(SceneNodeId::new(pid.slot(), pid.generation()))
+                            .map(|r| r.persistent_id.clone())
+                    }
+                };
+
+                // Update only the record's light_group_parent metadata.
+                match id.kind() {
+                    ObjectKind::PointLight => {
+                        let pl_id = PointLightId {
+                            slot: id.slot(),
+                            generation: id.generation(),
+                        };
+                        if let Some(record) = self.world.get_point_light_record_mut(pl_id) {
+                            record.light_group_parent = new_group_parent;
+                        }
+                    }
+                    ObjectKind::DirectionalLight => {
+                        let dl_id = DirectionalLightId {
+                            slot: id.slot(),
+                            generation: id.generation(),
+                        };
+                        if let Some(record) = self.world.get_directional_light_record_mut(dl_id) {
+                            record.light_group_parent = new_group_parent;
+                        }
+                    }
+                    ObjectKind::SpotLight => {
+                        let sl_id = SpotLightId {
+                            slot: id.slot(),
+                            generation: id.generation(),
+                        };
+                        if let Some(record) = self.world.get_spot_light_record_mut(sl_id) {
+                            record.light_group_parent = new_group_parent;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Get the parent of a node.
+    pub fn get_object_parent(
+        &self,
+        id: ObjectId,
+    ) -> Result<crate::object::ObjectParent, SceneError> {
+        self.validate_object(id)?;
+        use crate::object::ObjectParent;
+
+        match id.kind() {
+            ObjectKind::Node => {
+                let node = self
+                    .world
+                    .get_node(SceneNodeId::new(id.slot(), id.generation()))
+                    .ok_or(SceneError::InvalidNode(SceneNodeId::new(
+                        id.slot(),
+                        id.generation(),
+                    )))?;
+                match node.parent {
+                    Some(pid) => {
+                        let oid = self
+                            .world
+                            .object_id_for_node(pid)
+                            .ok_or(SceneError::InvalidNode(pid))?;
+                        Ok(ObjectParent::Node(oid))
+                    }
+                    None => Ok(ObjectParent::None),
+                }
+            }
+            _ => {
+                let group = self.group_parent_persistent(id);
+                match group {
+                    Some(gid) => {
+                        let oid = self
+                            .world
+                            .find_object_by_persistent_id(&gid)
+                            .ok_or(SceneError::Object(ObjectError::InvalidObject(id)))?;
+                        Ok(ObjectParent::Node(oid))
+                    }
+                    None => Ok(ObjectParent::None),
+                }
+            }
+        }
+    }
+
+    // ── Subtree Removal / Restoration ───────────────────────────────
+
+    /// Remove a node subtree, detaching surviving grouped lights whose
+    /// group parent is in the removed subtree. Returns a snapshot that can
+    /// be used to restore the subtree later.
+    pub fn remove_node_subtree(
+        &mut self,
+        node: SceneNodeId,
+    ) -> Result<crate::object::ObjectRemovalSnapshot, SceneError> {
+        self.validate_node(node)?;
+
+        let (subtree, detached_lights) = self
+            .world
+            .prepare_remove_node_subtree(node)
+            .map_err(|e| SceneError::InvalidMutation(e))?;
+
+        let root_oid = self
+            .world
+            .object_id_for_node(node)
+            .ok_or(SceneError::InvalidNode(node))?;
+        let root_persistent = self
+            .world
+            .object_persistent_id(root_oid)
+            .unwrap_or_else(|| SceneObjectId::new("object.unknown".to_string()));
+
+        let old_nodes = self.world.subtree_node_ids_preorder(node);
+        self.world
+            .commit_remove_node_subtree(node, &detached_lights);
+
+        Ok(crate::object::ObjectRemovalSnapshot {
+            root: root_oid,
+            root_persistent,
+            internal: crate::scene::object_store::RemovalSnapshotData {
+                old_nodes,
+                subtree: Some(subtree),
+                detached_lights,
+            },
+        })
+    }
+
+    /// Restore a previously removed subtree and reattach detached grouped
+    /// lights.
+    pub fn restore_subtree(
+        &mut self,
+        snapshot: crate::object::ObjectRemovalSnapshot,
+    ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
+        use crate::object::{ObjectMutationOutcome, ObjectRemap};
+
+        if !self.world.owns_object_provenance(snapshot.root) {
+            return Err(SceneError::Object(ObjectError::WrongScene {
+                object: snapshot.root,
+                expected_scene: format!("{:?}", self.world.provenance()),
+            }));
+        }
+        let data = snapshot.internal;
+        let subtree = data
+            .subtree
+            .ok_or_else(|| SceneError::InvalidMutation("empty removal snapshot".to_string()))?;
+        if data.old_nodes.is_empty() {
+            return Err(SceneError::InvalidMutation(
+                "removal snapshot has no original object identities".to_string(),
+            ));
+        }
+        let (new_root_id, new_nodes) = self
+            .world
+            .restore_subtree_with_lights(subtree, &data.detached_lights)
+            .map_err(SceneError::InvalidMutation)?;
+        if data.old_nodes.len() != new_nodes.len() {
+            return Err(SceneError::InvalidMutation(
+                "restored subtree remap cardinality mismatch".to_string(),
+            ));
+        }
+
+        let remaps = data
+            .old_nodes
+            .into_iter()
+            .zip(new_nodes.iter().copied())
+            .map(|(old, new)| ObjectRemap {
+                old,
+                new,
+                persistent: self
+                    .world
+                    .object_persistent_id(new)
+                    .expect("restored node must retain its persistent ID"),
+            })
+            .collect();
+        let snapshots = new_nodes
+            .iter()
+            .copied()
+            .map(|id| SceneObjectLifecycleSnapshot {
+            scene: SceneId::new(&self.scene_id),
+                object: self
+                    .world
+                    .object_persistent_id(id)
+                .expect("restored node must retain its persistent ID"),
+            kind: ObjectKind::Node,
+            name: self.world.object_name(id),
+            parent: None,
+            })
+            .collect();
+        let new_root_oid = self
+            .world
+            .object_id_for_node(new_root_id)
+            .ok_or(SceneError::InvalidNode(new_root_id))?;
+
+        Ok(ObjectMutationOutcome {
+            remaps,
+            snapshots,
+            created_roots: vec![new_root_oid],
+        })
+    }
+
+    /// Remove a node subtree and return a mutation outcome (convenience).
+    pub fn remove_node_subtree_with_outcome(
+        &mut self,
+        node: SceneNodeId,
+    ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
+        let snapshot = self.remove_node_subtree(node)?;
+        let root_persistent = snapshot.root_persistent.clone();
+        Ok(crate::object::ObjectMutationOutcome {
+            remaps: vec![crate::object::ObjectRemap {
+                old: snapshot.root,
+                new: snapshot.root,
+                persistent: root_persistent.clone(),
+            }],
+            snapshots: vec![SceneObjectLifecycleSnapshot {
+                scene: SceneId::new(&self.scene_id),
+                object: root_persistent,
+                kind: ObjectKind::Node,
+                name: None,
+                parent: None,
+            }],
+            created_roots: Vec::new(),
+        })
+    }
+
+    // ── Duplication ─────────────────────────────────────────────────
+
+    /// Duplicate a node subtree. Mint new persistent IDs and runtime
+    /// handles. Grouped lights are never implicitly duplicated.
+    pub fn duplicate_node(
+        &mut self,
+        node: SceneNodeId,
+        parent: Option<SceneNodeId>,
+    ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
+        self.validate_node(node)?;
+        if let Some(pid) = parent {
+            self.validate_node(pid)?;
+        }
+
+        let old_nodes = self.world.subtree_node_ids_preorder(node);
+        let new_node_id = self
+            .world
+            .duplicate_node(node, parent)
+            .map_err(SceneError::InvalidMutation)?;
+        let new_nodes = self.world.subtree_node_ids_preorder(new_node_id);
+        debug_assert_eq!(old_nodes.len(), new_nodes.len());
+        for new_node in new_nodes.iter().copied() {
+            self.ensure_node_persistence_metadata(SceneNodeId::new(
+                new_node.slot(),
+                new_node.generation(),
+            ));
+        }
+        let remaps = old_nodes
+            .into_iter()
+            .zip(new_nodes.iter().copied())
+            .map(|(old, new)| crate::object::ObjectRemap {
+                old,
+                new,
+                persistent: self
+                    .world
+                    .object_persistent_id(new)
+                    .expect("duplicated node must have a persistent ID"),
+            })
+            .collect();
+        let snapshots = new_nodes
+            .iter()
+            .copied()
+            .map(|id| SceneObjectLifecycleSnapshot {
+            scene: SceneId::new(&self.scene_id),
+                object: self
+                    .world
+                    .object_persistent_id(id)
+                .expect("duplicated node must have a persistent ID"),
+            kind: ObjectKind::Node,
+            name: self.world.object_name(id),
+            parent: None,
+            })
+            .collect();
+        let new_oid = self
+            .world
+            .object_id_for_node(new_node_id)
+            .ok_or(SceneError::InvalidNode(new_node_id))?;
+
+        Ok(crate::object::ObjectMutationOutcome {
+            remaps,
+            snapshots,
+            created_roots: vec![new_oid],
+        })
+    }
+
+    /// Duplicate a point light.
+    pub fn duplicate_point_light(
+        &mut self,
+        id: PointLightId,
+    ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
+        self.validate_point_light(id)?;
+        if self.world.active_point_light_count() >= MAX_POINT_LIGHTS_GPU {
+            return Err(SceneError::InvalidPointLight(format!(
+                "point-light cap ({MAX_POINT_LIGHTS_GPU}) reached"
+            )));
+        }
+
+        let new_id = self
+            .world
+            .duplicate_point_light(id)
+            .map_err(|e| SceneError::InvalidMutation(e))?;
+
+        let old_oid =
+            self.world
+            .object_id_for_point_light(id)
+                .ok_or(SceneError::InvalidPointLight(format!(
+                    "invalid point light"
+                )))?;
+        let new_oid =
+            self.world
+            .object_id_for_point_light(new_id)
+                .ok_or(SceneError::InvalidPointLight(format!(
+                    "invalid point light"
+                )))?;
+
+        let new_persistent = self
+            .world
+            .object_persistent_id(new_oid)
+            .unwrap_or_else(|| SceneObjectId::new("object.unknown".to_string()));
+
+        let name = self.world.object_name(new_oid);
+
+        Ok(crate::object::ObjectMutationOutcome {
+            remaps: vec![crate::object::ObjectRemap {
+                old: old_oid,
+                new: new_oid,
+                persistent: new_persistent.clone(),
+            }],
+            snapshots: vec![SceneObjectLifecycleSnapshot {
+                scene: SceneId::new(&self.scene_id),
+                object: new_persistent,
+                kind: ObjectKind::PointLight,
+                name,
+                parent: None,
+            }],
+            created_roots: vec![new_oid],
+        })
+    }
+
+    /// Duplicate a directional light.
+    pub fn duplicate_directional_light(
+        &mut self,
+        id: DirectionalLightId,
+    ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
+        self.validate_directional_light(id)?;
+        if self.world.active_directional_light_count() >= MAX_DIRECTIONAL_LIGHTS_GPU {
+            return Err(SceneError::InvalidDirectionalLight(format!(
+                "directional-light cap ({MAX_DIRECTIONAL_LIGHTS_GPU}) reached"
+            )));
+        }
+
+        let new_id = self
+            .world
+            .duplicate_directional_light(id)
+            .map_err(|e| SceneError::InvalidMutation(e))?;
+
+        let old_oid = self.world.object_id_for_directional_light(id).ok_or(
+            SceneError::InvalidDirectionalLight(format!("invalid directional light")),
+        )?;
+        let new_oid = self.world.object_id_for_directional_light(new_id).ok_or(
+            SceneError::InvalidDirectionalLight(format!("invalid directional light")),
+        )?;
+
+        let new_persistent = self
+            .world
+            .object_persistent_id(new_oid)
+            .unwrap_or_else(|| SceneObjectId::new("object.unknown".to_string()));
+
+        let name = self.world.object_name(new_oid);
+
+        Ok(crate::object::ObjectMutationOutcome {
+            remaps: vec![crate::object::ObjectRemap {
+                old: old_oid,
+                new: new_oid,
+                persistent: new_persistent.clone(),
+            }],
+            snapshots: vec![SceneObjectLifecycleSnapshot {
+                scene: SceneId::new(&self.scene_id),
+                object: new_persistent,
+                kind: ObjectKind::DirectionalLight,
+                name,
+                parent: None,
+            }],
+            created_roots: vec![new_oid],
+        })
+    }
+
+    /// Duplicate a spot light.
+    pub fn duplicate_spot_light(
+        &mut self,
+        id: SpotLightId,
+    ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
+        self.validate_spot_light(id)?;
+        if self.world.active_spot_light_count() >= MAX_SPOT_LIGHTS_GPU {
+            return Err(SceneError::InvalidSpotLight(format!(
+                "spot-light cap ({MAX_SPOT_LIGHTS_GPU}) reached"
+            )));
+        }
+
+        let new_id = self
+            .world
+            .duplicate_spot_light(id)
+            .map_err(|e| SceneError::InvalidMutation(e))?;
+
+        let old_oid = self
+            .world
+            .object_id_for_spot_light(id)
+            .ok_or(SceneError::InvalidSpotLight(format!("invalid spot light")))?;
+        let new_oid = self
+            .world
+            .object_id_for_spot_light(new_id)
+            .ok_or(SceneError::InvalidSpotLight(format!("invalid spot light")))?;
+
+        let new_persistent = self
+            .world
+            .object_persistent_id(new_oid)
+            .unwrap_or_else(|| SceneObjectId::new("object.unknown".to_string()));
+
+        let name = self.world.object_name(new_oid);
+
+        Ok(crate::object::ObjectMutationOutcome {
+            remaps: vec![crate::object::ObjectRemap {
+                old: old_oid,
+                new: new_oid,
+                persistent: new_persistent.clone(),
+            }],
+            snapshots: vec![SceneObjectLifecycleSnapshot {
+                scene: SceneId::new(&self.scene_id),
+                object: new_persistent,
+                kind: ObjectKind::SpotLight,
+                name,
+                parent: None,
+            }],
+            created_roots: vec![new_oid],
+        })
+    }
+
+    /// General object duplication: dispatches by kind.
+    pub fn duplicate_object(
+        &mut self,
+        id: ObjectId,
+    ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
+        self.validate_object(id)?;
+        match id.kind() {
+            ObjectKind::Node => {
+                let node_id = SceneNodeId::new(id.slot(), id.generation());
+                self.duplicate_node(node_id, None)
+            }
+            ObjectKind::PointLight => {
+                let pl_id = PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                self.duplicate_point_light(pl_id)
+            }
+            ObjectKind::DirectionalLight => {
+                let dl_id = DirectionalLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                self.duplicate_directional_light(dl_id)
+            }
+            ObjectKind::SpotLight => {
+                let sl_id = SpotLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                self.duplicate_spot_light(sl_id)
+            }
+        }
+    }
+
+    /// Duplicate explicitly selected objects as one prevalidated operation.
+    /// Node roots use `request.parent`; lights retain organizational grouping.
+    pub fn duplicate_objects(
+        &mut self,
+        request: crate::object::ObjectDuplicateRequest,
+    ) -> Result<crate::object::ObjectMutationOutcome, SceneError> {
+        if request.objects.is_empty() {
+            return Err(SceneError::InvalidMutation(
+                "duplicate request must select at least one object".to_string(),
+            ));
+        }
+        let parent = match request.parent {
+            Some(id) => {
+                self.validate_object(id)?;
+                if id.kind() != ObjectKind::Node {
+                    return Err(SceneError::Object(ObjectError::WrongKind {
+                        object: id,
+                        expected: ObjectKind::Node,
+                        actual: id.kind(),
+                    }));
+                }
+                Some(SceneNodeId::new(id.slot(), id.generation()))
+            }
+            None => None,
+        };
+        let mut selected = request.objects;
+        for id in &selected {
+            self.validate_object(*id)?;
+        }
+        selected.sort_by_key(|id| {
+            self.world
+                .object_persistent_id(*id)
+                .expect("validated object must have a persistent ID")
+        });
+        if selected.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(SceneError::InvalidMutation(
+                "duplicate request contains the same object more than once".to_string(),
+            ));
+        }
+        let point_count = selected
+            .iter()
+            .filter(|id| id.kind() == ObjectKind::PointLight)
+            .count();
+        let directional_count = selected
+            .iter()
+            .filter(|id| id.kind() == ObjectKind::DirectionalLight)
+            .count();
+        let spot_count = selected
+            .iter()
+            .filter(|id| id.kind() == ObjectKind::SpotLight)
+            .count();
+        if self.world.active_point_light_count() + point_count > MAX_POINT_LIGHTS_GPU {
+            return Err(SceneError::InvalidPointLight(format!(
+                "point-light cap ({MAX_POINT_LIGHTS_GPU}) reached"
+            )));
+        }
+        if self.world.active_directional_light_count() + directional_count
+            > MAX_DIRECTIONAL_LIGHTS_GPU
+        {
+            return Err(SceneError::InvalidDirectionalLight(format!(
+                "directional-light cap ({MAX_DIRECTIONAL_LIGHTS_GPU}) reached"
+            )));
+        }
+        if self.world.active_spot_light_count() + spot_count > MAX_SPOT_LIGHTS_GPU {
+            return Err(SceneError::InvalidSpotLight(format!(
+                "spot-light cap ({MAX_SPOT_LIGHTS_GPU}) reached"
+            )));
+        }
+
+        let mut combined = crate::object::ObjectMutationOutcome::default();
+        for id in selected {
+            let outcome = match id.kind() {
+                ObjectKind::Node => {
+                    self.duplicate_node(SceneNodeId::new(id.slot(), id.generation()), parent)?
+                }
+                ObjectKind::PointLight => self.duplicate_point_light(PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })?,
+                ObjectKind::DirectionalLight => {
+                    self.duplicate_directional_light(DirectionalLightId {
+                        slot: id.slot(),
+                        generation: id.generation(),
+                    })?
+                }
+                ObjectKind::SpotLight => self.duplicate_spot_light(SpotLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })?,
+            };
+            combined.remaps.extend(outcome.remaps);
+            combined.snapshots.extend(outcome.snapshots);
+            combined.created_roots.extend(outcome.created_roots);
+        }
+        Ok(combined)
+    }
+
+    // ── Component remap during duplication ─────────────────────────
+
+    /// Remap component references using a caller-owned registry and a
+    /// persistent-ID mapping.
+    pub fn remap_object_component_references(
+        &mut self,
+        id: ObjectId,
+        registry: &ComponentRegistry,
+        mapping: &HashMap<SceneObjectId, SceneObjectId>,
+    ) -> Result<(), SceneError> {
+        let store = self
+            .world
+            .object_component_store_mut(id)
+            .ok_or_else(|| SceneError::Object(ObjectError::InvalidObject(id)))?;
+
+        let keys: Vec<(ComponentKey, ComponentInstanceId)> = store
+            .envelopes()
+            .map(|e| (e.key.clone(), e.instance_id.clone()))
+            .collect();
+
+        for (key, iid) in &keys {
+            if registry.contains(key) {
+                let (envelope, hydrated) =
+                    prepare_reference_remap(registry, store, key, iid, mapping)?;
+                commit_full_state_replacement(store, envelope, hydrated)?;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -1969,6 +3767,51 @@ fn build_fragment_merge_plan_recursive(
 // Scene serialization
 // ---------------------------------------------------------------------------
 
+fn default_serialized_schema_version() -> u32 {
+    1
+}
+
+/// Canonical persistent component envelope suitable for scene-file embedding.
+/// Mirrors [`ComponentEnvelope`] but uses plain-string identities so unknown
+/// components survive a full scene round-trip without a registry.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SerializedComponentEnvelope {
+    /// Persistent instance identity, minted before mutation.
+    pub instance_id: String,
+    /// Lowercase dot-qualified component type key.
+    pub type_key: String,
+    /// Schema version (≥1).
+    #[serde(default = "default_serialized_schema_version")]
+    pub schema_version: u32,
+    /// Canonical JSON payload.
+    pub data: serde_json::Value,
+}
+
+impl From<&ComponentEnvelope> for SerializedComponentEnvelope {
+    fn from(e: &ComponentEnvelope) -> Self {
+        Self {
+            instance_id: e.instance_id.to_string(),
+            type_key: e.key.to_string(),
+            schema_version: e.schema_version,
+            data: e.data.clone(),
+        }
+    }
+}
+
+impl TryFrom<SerializedComponentEnvelope> for ComponentEnvelope {
+    type Error = String;
+
+    fn try_from(s: SerializedComponentEnvelope) -> Result<Self, Self::Error> {
+        let instance_id = ComponentInstanceId::new(&s.instance_id)
+            .map_err(|e| format!("bad component instance_id '{}': {e}", s.instance_id))?;
+        let key = ComponentKey::new(&s.type_key)
+            .map_err(|e| format!("bad component type_key '{}': {e}", s.type_key))?;
+        ComponentEnvelope::new(instance_id, key, s.schema_version, s.data)
+            .map_err(|e| format!("bad component envelope: {e}"))
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SerializedTransform {
@@ -1988,16 +3831,18 @@ struct SerializedAssetReference {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SerializedVisibility {
-    visible: bool,
-    locked: bool,
-    layer: String,
+pub(crate) struct SerializedVisibility {
+    pub visible: bool,
+    pub locked: bool,
+    pub layer: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SerializedNode {
     id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    object_id: Option<String>,
     parent: Option<String>,
     name: String,
     transform: SerializedTransform,
@@ -2012,19 +3857,16 @@ struct SerializedNode {
     tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     prefab: Option<serde_json::Value>,
-}
-
-#[derive(Clone, Debug)]
-struct SerializedNodePersistence {
-    visibility: SerializedVisibility,
-    collision: Option<SerializedCollisionComponent>,
-    prefab: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    components: Vec<SerializedComponentEnvelope>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SerializedPointLight {
     id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    object_id: Option<String>,
     kind: String,
     #[serde(default)]
     parent: Option<String>,
@@ -2032,12 +3874,16 @@ struct SerializedPointLight {
     color: [f32; 3],
     intensity: f32,
     range: f32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    components: Vec<SerializedComponentEnvelope>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SerializedDirectionalLight {
     id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    object_id: Option<String>,
     kind: String,
     #[serde(default)]
     parent: Option<String>,
@@ -2046,12 +3892,16 @@ struct SerializedDirectionalLight {
     intensity: f32,
     #[serde(default)]
     shadow_config: Option<SerializedDirectionalShadowConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    components: Vec<SerializedComponentEnvelope>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SerializedSpotLight {
     id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    object_id: Option<String>,
     kind: String,
     #[serde(default)]
     parent: Option<String>,
@@ -2064,6 +3914,8 @@ struct SerializedSpotLight {
     inner_cone_angle: f32,
     #[serde(default)]
     outer_cone_angle: f32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    components: Vec<SerializedComponentEnvelope>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2083,42 +3935,42 @@ struct SerializedMaterialOverride {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SerializedCollisionComponent {
-    body: SerializedCollisionBody,
+pub(crate) struct SerializedCollisionComponent {
+    pub body: SerializedCollisionBody,
     #[serde(default)]
-    colliders: Vec<SerializedCollisionCollider>,
+    pub colliders: Vec<SerializedCollisionCollider>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SerializedCollisionBody {
-    id: String,
-    kind: String,
+pub(crate) struct SerializedCollisionBody {
+    pub id: String,
+    pub kind: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SerializedCollisionCollider {
-    id: String,
-    shape: SerializedCollisionShape,
+pub(crate) struct SerializedCollisionCollider {
+    pub id: String,
+    pub shape: SerializedCollisionShape,
     #[serde(default)]
-    trigger: bool,
+    pub trigger: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    asset: Option<String>,
+    pub asset: Option<String>,
     #[serde(default)]
-    offset: [f32; 3],
+    pub offset: [f32; 3],
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SerializedCollisionShape {
-    kind: String,
+pub(crate) struct SerializedCollisionShape {
+    pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    half_extents: Option<[f32; 3]>,
+    pub half_extents: Option<[f32; 3]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    radius: Option<f32>,
+    pub radius: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    half_height: Option<f32>,
+    pub half_height: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2168,28 +4020,82 @@ struct SerializedScene {
     audio: Vec<SerializedAudioReference>,
     #[serde(default = "default_editor_metadata")]
     editor: serde_json::Value,
+    /// BSP source-link metadata (persisted for coordinator reload).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bsp_source: Option<serde_json::Value>,
 }
 
 impl SerializedScene {
-    fn from_scene(scene: &Scene) -> Self {
-        let mut fallback_index = 1_u64;
-        let nodes: Vec<SerializedNode> = scene
+    fn from_scene(scene: &Scene) -> Result<Self, SceneError> {
+        scene
             .world
-            .serializable_nodes()
+            .audit_object_invariants()
+            .map_err(SceneError::SerializationError)?;
+        ensure_scene_save_identity_invariants(scene)?;
+
+        // Deterministic pre-order walk: parents before children, siblings
+        // sorted by persistent SceneObjectId.
+        let mut ordered: Vec<(SceneNodeId, SceneNode)> = Vec::new();
+        if let Some(root_id) = scene.world.root_id() {
+            let mut stack: Vec<SceneNodeId> = vec![root_id];
+            while let Some(node_id) = stack.pop() {
+                if let Some(node) = scene.world.get_node(node_id) {
+                    let node = node.clone();
+                    // Collect children sorted by persistent ID for determinism.
+                    let mut children: Vec<SceneNodeId> = node.children.clone();
+                    children.sort_by(|a, b| {
+                        let pa = scene
+                            .world
+                            .get_node_record(*a)
+                            .map(|r| r.persistent_id.clone());
+                        let pb = scene
+                            .world
+                            .get_node_record(*b)
+                            .map(|r| r.persistent_id.clone());
+                        pa.cmp(&pb)
+                    });
+                    // Push in reverse order so first sibling is processed first
+                    // when popping from stack (we process parent before children).
+                    for child in children.into_iter().rev() {
+                        stack.push(child);
+                    }
+                    ordered.push((node_id, node));
+                }
+            }
+        }
+
+        let nodes: Vec<SerializedNode> = ordered
+            .iter()
             .map(|(node_id, node)| {
-                let persistence = scene.node_persistence.get(&node_id);
-                let id = node.stable_id.clone().unwrap_or_else(|| {
-                    let generated = format!("node.autogenerated.{fallback_index:06}");
-                    fallback_index += 1;
-                    generated
-                });
+                let record = scene.world.get_node_record(*node_id);
+                let persistence_visibility = record.and_then(|r| r.visibility.clone());
+                let persistence_collision = record.and_then(|r| r.collision.clone());
+                let persistence_prefab = record.and_then(|r| r.prefab.clone());
+                let object_id = Some(
+                    record
+                        .expect("scene save identity invariants were checked")
+                        .persistent_id
+                        .to_string(),
+                );
+                let components: Vec<SerializedComponentEnvelope> = record
+                    .map(|r| {
+                        r.component_store
+                            .envelopes()
+                            .map(|e| SerializedComponentEnvelope::from(e))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let id = record
+                    .and_then(|r| r.stable_id.clone())
+                    .expect("scene save identity invariants were checked");
                 SerializedNode {
                     id,
+                    object_id,
                     parent: node.parent.and_then(|parent| {
                         scene
                             .world
-                            .get_node(parent)
-                            .and_then(|parent_node| parent_node.stable_id.clone())
+                            .get_node_record(parent)
+                            .and_then(|r| r.stable_id.clone())
                     }),
                     name: if node.name.is_empty() {
                         node.stable_id
@@ -2203,13 +4109,12 @@ impl SerializedScene {
                         .asset
                         .as_ref()
                         .map(SerializedAssetReference::from_scene_ref),
-                    collision: persistence.and_then(|entry| entry.collision.clone()),
+                    collision: persistence_collision,
                     material_overrides: node.material_overrides.clone(),
-                    visibility: persistence
-                        .map(|entry| entry.visibility.clone())
-                        .unwrap_or_else(default_visibility),
+                    visibility: persistence_visibility.unwrap_or_else(default_visibility),
                     tags: node.tags.clone(),
-                    prefab: persistence.and_then(|entry| entry.prefab.clone()),
+                    prefab: persistence_prefab,
+                    components,
                 }
             })
             .collect();
@@ -2219,71 +4124,134 @@ impl SerializedScene {
             .filter_map(|node| node.parent.is_none().then_some(node.id.clone()))
             .collect();
 
-        let lights: Vec<SerializedPointLight> = scene
+        // Lights sorted by persistent ID for determinism.
+        let mut lights: Vec<(SerializedPointLight, String)> = scene
             .world
             .serializable_lights()
-            .enumerate()
-            .map(|(idx, (id, light))| SerializedPointLight {
-                id: scene
-                    .point_light_stable_ids
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("light.{:06}", idx + 1)),
-                kind: "point".to_string(),
-                parent: scene.point_light_parents.get(&id).cloned(),
-                position: light.position.to_array(),
-                color: light.color.to_array(),
-                intensity: light.intensity,
-                range: light.range,
+            .map(|(id, light)| {
+                let record = scene.world.get_point_light_record(id);
+                let stable_id = record.and_then(|r| r.stable_id.clone());
+                let parent = record.and_then(|r| r.light_group_parent.clone());
+                let object_id = Some(
+                    record
+                        .expect("scene save identity invariants were checked")
+                        .persistent_id
+                        .to_string(),
+                );
+                let sort_id = object_id.clone().expect("object ID is always serialized");
+                let components: Vec<SerializedComponentEnvelope> = record
+                    .map(|r| {
+                        r.component_store
+                            .envelopes()
+                            .map(|e| SerializedComponentEnvelope::from(e))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let id_str = stable_id.expect("scene save identity invariants were checked");
+                let serialized = SerializedPointLight {
+                    id: id_str.clone(),
+                    object_id,
+                    kind: "point".to_string(),
+                    parent: parent.map(|pid| pid.to_string()),
+                    position: light.position.to_array(),
+                    color: light.color.to_array(),
+                    intensity: light.intensity,
+                    range: light.range,
+                    components,
+                };
+                (serialized, sort_id)
             })
             .collect();
+        lights.sort_by(|a, b| a.1.cmp(&b.1));
+        let lights: Vec<SerializedPointLight> = lights.into_iter().map(|(s, _)| s).collect();
 
-        let directional_lights: Vec<SerializedDirectionalLight> = scene
+        let mut directional_lights: Vec<(SerializedDirectionalLight, String)> = scene
             .world
             .serializable_directional_lights()
-            .enumerate()
-            .map(|(idx, (id, light))| SerializedDirectionalLight {
-                id: scene
-                    .directional_light_stable_ids
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("directional.{:06}", idx + 1)),
-                kind: "directional".to_string(),
-                parent: scene.directional_light_parents.get(&id).cloned(),
-                direction: light.direction.to_array(),
-                color: light.color.to_array(),
-                intensity: light.intensity,
-                shadow_config: scene
-                    .directional_shadow_configs
-                    .get(&id)
-                    .copied()
-                    .map(SerializedDirectionalShadowConfig::from),
+            .map(|(id, light)| {
+                let record = scene.world.get_directional_light_record(id);
+                let stable_id = record.and_then(|r| r.stable_id.clone());
+                let parent = record.and_then(|r| r.light_group_parent.clone());
+                let shadow_config = record.and_then(|r| r.directional_shadow_config);
+                let object_id = Some(
+                    record
+                        .expect("scene save identity invariants were checked")
+                        .persistent_id
+                        .to_string(),
+                );
+                let sort_id = object_id.clone().expect("object ID is always serialized");
+                let components: Vec<SerializedComponentEnvelope> = record
+                    .map(|r| {
+                        r.component_store
+                            .envelopes()
+                            .map(|e| SerializedComponentEnvelope::from(e))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let id_str = stable_id.expect("scene save identity invariants were checked");
+                let serialized = SerializedDirectionalLight {
+                    id: id_str.clone(),
+                    object_id,
+                    kind: "directional".to_string(),
+                    parent: parent.map(|pid| pid.to_string()),
+                    direction: light.direction.to_array(),
+                    color: light.color.to_array(),
+                    intensity: light.intensity,
+                    shadow_config: shadow_config.map(SerializedDirectionalShadowConfig::from),
+                    components,
+                };
+                (serialized, sort_id)
             })
             .collect();
+        directional_lights.sort_by(|a, b| a.1.cmp(&b.1));
+        let directional_lights: Vec<SerializedDirectionalLight> =
+            directional_lights.into_iter().map(|(s, _)| s).collect();
 
-        let spot_lights: Vec<SerializedSpotLight> = scene
+        let mut spot_lights: Vec<(SerializedSpotLight, String)> = scene
             .world
             .serializable_spot_lights()
-            .enumerate()
-            .map(|(idx, (id, light))| SerializedSpotLight {
-                id: scene
-                    .spot_light_stable_ids
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("spot.{:06}", idx + 1)),
-                kind: "spot".to_string(),
-                parent: scene.spot_light_parents.get(&id).cloned(),
-                position: light.position.to_array(),
-                direction: light.direction.to_array(),
-                color: light.color.to_array(),
-                intensity: light.intensity,
-                range: light.range,
-                inner_cone_angle: light.inner_cone_angle,
-                outer_cone_angle: light.outer_cone_angle,
+            .map(|(id, light)| {
+                let record = scene.world.get_spot_light_record(id);
+                let stable_id = record.and_then(|r| r.stable_id.clone());
+                let parent = record.and_then(|r| r.light_group_parent.clone());
+                let object_id = Some(
+                    record
+                        .expect("scene save identity invariants were checked")
+                        .persistent_id
+                        .to_string(),
+                );
+                let sort_id = object_id.clone().expect("object ID is always serialized");
+                let components: Vec<SerializedComponentEnvelope> = record
+                    .map(|r| {
+                        r.component_store
+                            .envelopes()
+                            .map(|e| SerializedComponentEnvelope::from(e))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let id_str = stable_id.expect("scene save identity invariants were checked");
+                let serialized = SerializedSpotLight {
+                    id: id_str.clone(),
+                    object_id,
+                    kind: "spot".to_string(),
+                    parent: parent.map(|pid| pid.to_string()),
+                    position: light.position.to_array(),
+                    direction: light.direction.to_array(),
+                    color: light.color.to_array(),
+                    intensity: light.intensity,
+                    range: light.range,
+                    inner_cone_angle: light.inner_cone_angle,
+                    outer_cone_angle: light.outer_cone_angle,
+                    components,
+                };
+                (serialized, sort_id)
             })
             .collect();
+        spot_lights.sort_by(|a, b| a.1.cmp(&b.1));
+        let spot_lights: Vec<SerializedSpotLight> =
+            spot_lights.into_iter().map(|(s, _)| s).collect();
 
-        SerializedScene {
+        Ok(SerializedScene {
             format_version: SCENE_FORMAT_VERSION,
             scene_id: scene.scene_id.clone(),
             display_name: scene.display_name.clone(),
@@ -2301,7 +4269,8 @@ impl SerializedScene {
             materials: scene.materials.clone(),
             audio: scene.audio.clone(),
             editor: scene.editor_metadata().clone(),
-        }
+            bsp_source: scene.bsp_source_link.clone(),
+        })
     }
 
     fn into_scene(
@@ -2312,16 +4281,22 @@ impl SerializedScene {
     }
 
     fn into_scene_with_loader(
-        self,
+        mut self,
         loader: &mut impl SceneAssetLoader,
     ) -> Result<Scene, crate::api::errors::RendererError> {
+        // Validate the graph and every component envelope before any asset
+        // callback, then deterministically backfill all legacy identities.
+        let initial_plan = self.validate()?;
+        self.normalize_object_ids(&initial_plan)?;
         let load_plan = self.validate()?;
+
         let mut scene = Scene::new();
         scene.scene_id = self.scene_id.clone();
         scene.display_name = self.display_name.clone();
         scene.materials = self.materials.clone();
         scene.audio = self.audio.clone();
         scene.set_editor_metadata(self.editor.clone());
+        scene.bsp_source_link = self.bsp_source.clone();
 
         let mut id_map: HashMap<String, SceneNodeId> = HashMap::new();
 
@@ -2333,11 +4308,17 @@ impl SerializedScene {
                 .and_then(|parent_id| id_map.get(parent_id).copied());
             let transform = serialized_node.transform.to_mat4();
 
+            let is_asset_backed = serialized_node.asset.is_some();
             let node_id = if let Some(asset) = serialized_node.asset.as_ref() {
                 let scene_asset = asset.to_scene_ref(&format!("node '{}'", serialized_node.id))?;
-                let fragment = loader
+                let mut fragment = loader
                     .load_model_ref(&scene_asset)
                     .map_err(crate::api::errors::RendererError::from)?;
+                // Attach serialized components to the fragment root.
+                attach_serialized_components_to_fragment(
+                    &mut fragment,
+                    &serialized_node.components,
+                )?;
                 let mount = scene
                     .merge_fragment(parent, fragment)
                     .map_err(crate::api::errors::RendererError::from)?;
@@ -2361,14 +4342,41 @@ impl SerializedScene {
                 node_ref.material_overrides = serialized_node.material_overrides.clone();
                 node_ref.tags = serialized_node.tags.clone();
             }
-            scene.node_persistence.insert(
-                node_id,
-                SerializedNodePersistence {
-                    visibility: serialized_node.visibility.clone(),
-                    collision: serialized_node.collision.clone(),
-                    prefab: serialized_node.prefab.clone(),
-                },
+            // The candidate world is private until this function returns. Its
+            // record gets the normalized identity before publication, and the
+            // reverse index is updated through the world-owned mutation path.
+            if let Some(record) = scene.world.get_node_record_mut(node_id) {
+                record.stable_id = Some(serialized_node.id.clone());
+                record.visibility = Some(serialized_node.visibility.clone());
+                record.collision = serialized_node.collision.clone();
+                record.prefab = serialized_node.prefab.clone();
+                if !is_asset_backed {
+                    for serialized_component in &serialized_node.components {
+                    record
+                        .component_store
+                            .attach(
+                                ComponentEnvelope::try_from(serialized_component.clone())
+                                    .map_err(SceneError::SerializationError)?,
+                            )
+                            .map_err(|err| {
+                            SceneError::SerializationError(format!(
+                                    "failed to attach component to node '{}': {err}",
+                                serialized_node.id
+                            ))
+                        })?;
+                }
+            }
+            }
+            let persistent_id = SceneObjectId::new(
+                serialized_node
+                    .object_id
+                    .clone()
+                    .expect("object IDs were normalized before world construction"),
             );
+            scene
+                .world
+                .replace_node_persistent_id(node_id, persistent_id)
+                .map_err(SceneError::SerializationError)?;
             id_map.insert(serialized_node.id.clone(), node_id);
         }
 
@@ -2380,18 +4388,48 @@ impl SerializedScene {
                 ))
                 .into());
             }
-            let id = scene
-                .create_point_light(PointLight {
-                    position: Vec3::from_array(light.position),
-                    color: Vec3::from_array(light.color),
-                    intensity: light.intensity,
-                    range: light.range,
-                })
+            let pl = PointLight {
+                position: Vec3::from_array(light.position),
+                color: Vec3::from_array(light.color),
+                intensity: light.intensity,
+                range: light.range,
+            };
+            pl.validate()
                 .map_err(crate::api::errors::RendererError::from)?;
-            scene.point_light_stable_ids.insert(id, light.id.clone());
-            if let Some(parent) = &light.parent {
-                scene.point_light_parents.insert(id, parent.clone());
+            if scene.world.active_point_light_count() >= MAX_POINT_LIGHTS_GPU {
+                return Err(SceneError::InvalidPointLight(format!(
+                    "point-light cap ({MAX_POINT_LIGHTS_GPU}) reached"
+                ))
+                .into());
             }
+            let light_group_parent = light.parent.as_ref().map(|p| SceneObjectId::new(p.clone()));
+            let persistent_id = light
+                .object_id
+                .as_ref()
+                .map(|oid| SceneObjectId::new(oid.clone()))
+                .unwrap_or_else(|| {
+                    derive_persistent_id(&self.scene_id, ObjectKind::PointLight, &light.id)
+                });
+            let mut record = ObjectRecord::new(persistent_id, Some(light.id.clone()));
+            record.light_group_parent = light_group_parent;
+            // Attach components.
+            for s in &light.components {
+                let envelope = ComponentEnvelope::try_from(s.clone())
+                    .map_err(|msg| SceneError::SerializationError(msg))?;
+                record.component_store.attach(envelope).map_err(|e| {
+                    SceneError::SerializationError(format!(
+                        "failed to attach component to point light '{}': {e}",
+                        light.id
+                    ))
+                })?;
+            }
+            let _id = scene.world.add_point_light_with_record(
+                PointLight {
+                color: pl.sanitize_color(),
+                ..pl
+                },
+                record,
+            );
         }
 
         for light in &self.directional_lights {
@@ -2407,22 +4445,53 @@ impl SerializedScene {
                 color: Vec3::from_array(light.color),
                 intensity: light.intensity,
             };
-            // Use add_directional_light to avoid the single-light cap during load.
-            let id = scene
-                .add_directional_light(dl)
+            dl.validate()
                 .map_err(crate::api::errors::RendererError::from)?;
-            scene
-                .directional_light_stable_ids
-                .insert(id, light.id.clone());
-            if let Some(parent) = &light.parent {
-                scene.directional_light_parents.insert(id, parent.clone());
+            if scene.world.active_directional_light_count() >= MAX_DIRECTIONAL_LIGHTS_GPU {
+                return Err(SceneError::InvalidDirectionalLight(format!(
+                    "directional-light cap ({MAX_DIRECTIONAL_LIGHTS_GPU}) reached"
+                ))
+                .into());
             }
+            let light_group_parent = light.parent.as_ref().map(|p| SceneObjectId::new(p.clone()));
+            let persistent_id = light
+                .object_id
+                .as_ref()
+                .map(|oid| SceneObjectId::new(oid.clone()))
+                .unwrap_or_else(|| {
+                    derive_persistent_id(&self.scene_id, ObjectKind::DirectionalLight, &light.id)
+                });
+            let mut record = ObjectRecord::new(persistent_id, Some(light.id.clone()));
+            record.light_group_parent = light_group_parent;
             // Restore shadow configuration if present.
             if let Some(ref shadow_cfg) = light.shadow_config {
                 let cfg: DirectionalShadowConfig = shadow_cfg.clone().into();
-                scene
-                    .set_directional_shadow_config(id, cfg)
-                    .map_err(crate::api::errors::RendererError::from)?;
+                record.directional_shadow_config = Some(cfg);
+            }
+            // Attach components.
+            for s in &light.components {
+                let envelope = ComponentEnvelope::try_from(s.clone())
+                    .map_err(|msg| SceneError::SerializationError(msg))?;
+                record.component_store.attach(envelope).map_err(|e| {
+                    SceneError::SerializationError(format!(
+                        "failed to attach component to directional light '{}': {e}",
+                        light.id
+                    ))
+                })?;
+            }
+            let sanitized = DirectionalLight {
+                color: dl.sanitize_color(),
+                ..dl
+            };
+            let id = scene
+                .world
+                .add_directional_light_with_record(sanitized, record);
+            // If shadow was enabled, set it now that we have the ID.
+            if let Some(ref shadow_cfg) = light.shadow_config {
+                let cfg: DirectionalShadowConfig = shadow_cfg.clone().into();
+                if cfg.enabled {
+                    scene.world.set_shadow_casting_directional(Some(id));
+                }
             }
         }
 
@@ -2434,21 +4503,51 @@ impl SerializedScene {
                 ))
                 .into());
             }
-            let id = scene
-                .create_spot_light(SpotLight {
-                    position: Vec3::from_array(light.position),
-                    direction: Vec3::from_array(light.direction),
-                    color: Vec3::from_array(light.color),
-                    intensity: light.intensity,
-                    range: light.range,
-                    inner_cone_angle: light.inner_cone_angle,
-                    outer_cone_angle: light.outer_cone_angle,
-                })
+            let sl = SpotLight {
+                position: Vec3::from_array(light.position),
+                direction: Vec3::from_array(light.direction),
+                color: Vec3::from_array(light.color),
+                intensity: light.intensity,
+                range: light.range,
+                inner_cone_angle: light.inner_cone_angle,
+                outer_cone_angle: light.outer_cone_angle,
+            };
+            sl.validate()
                 .map_err(crate::api::errors::RendererError::from)?;
-            scene.spot_light_stable_ids.insert(id, light.id.clone());
-            if let Some(parent) = &light.parent {
-                scene.spot_light_parents.insert(id, parent.clone());
+            if scene.world.active_spot_light_count() >= MAX_SPOT_LIGHTS_GPU {
+                return Err(SceneError::InvalidSpotLight(format!(
+                    "spot-light cap ({MAX_SPOT_LIGHTS_GPU}) reached"
+                ))
+                .into());
             }
+            let light_group_parent = light.parent.as_ref().map(|p| SceneObjectId::new(p.clone()));
+            let persistent_id = light
+                .object_id
+                .as_ref()
+                .map(|oid| SceneObjectId::new(oid.clone()))
+                .unwrap_or_else(|| {
+                    derive_persistent_id(&self.scene_id, ObjectKind::SpotLight, &light.id)
+                });
+            let mut record = ObjectRecord::new(persistent_id, Some(light.id.clone()));
+            record.light_group_parent = light_group_parent;
+            // Attach components.
+            for s in &light.components {
+                let envelope = ComponentEnvelope::try_from(s.clone())
+                    .map_err(|msg| SceneError::SerializationError(msg))?;
+                record.component_store.attach(envelope).map_err(|e| {
+                    SceneError::SerializationError(format!(
+                        "failed to attach component to spot light '{}': {e}",
+                        light.id
+                    ))
+                })?;
+            }
+            scene.world.add_spot_light_with_record(
+                SpotLight {
+                color: sl.sanitize_color(),
+                ..sl
+                },
+                record,
+            );
         }
 
         if let Some(environment) = self.environment {
@@ -2464,6 +4563,45 @@ impl SerializedScene {
         Ok(scene)
     }
 
+    /// Backfill legacy object IDs on the private serialized candidate. This
+    /// runs only after graph validation has established deterministic node
+    /// hierarchy order and before any asset loader call.
+    fn normalize_object_ids(&mut self, plan: &SceneLoadPlan) -> Result<(), SceneError> {
+        for &node_index in &plan.creation_order {
+            let node = &mut self.nodes[node_index];
+            if node.object_id.is_none() {
+                node.object_id = Some(
+                    derive_persistent_id(&self.scene_id, ObjectKind::Node, &node.id).to_string(),
+                );
+            }
+        }
+        for light in &mut self.lights {
+            if light.object_id.is_none() {
+                light.object_id = Some(
+                    derive_persistent_id(&self.scene_id, ObjectKind::PointLight, &light.id)
+                        .to_string(),
+                );
+            }
+        }
+        for light in &mut self.directional_lights {
+            if light.object_id.is_none() {
+                light.object_id = Some(
+                    derive_persistent_id(&self.scene_id, ObjectKind::DirectionalLight, &light.id)
+                        .to_string(),
+                );
+            }
+        }
+        for light in &mut self.spot_lights {
+            if light.object_id.is_none() {
+                light.object_id = Some(
+                    derive_persistent_id(&self.scene_id, ObjectKind::SpotLight, &light.id)
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<SceneLoadPlan, SceneError> {
         if self.format_version != SCENE_FORMAT_VERSION {
             return Err(SceneError::UnsupportedSceneVersion {
@@ -2475,6 +4613,49 @@ impl SerializedScene {
             return Err(SceneError::DisconnectedGraph(
                 "scene_id must not be empty".to_string(),
             ));
+        }
+
+        validate_component_envelopes(
+            &self.nodes,
+            &self.lights,
+            &self.directional_lights,
+            &self.spot_lights,
+        )?;
+
+        // Validate canonical explicit IDs and scene-wide uniqueness before
+        // any loader callback or candidate-world mutation.
+        let mut seen_object_ids = HashSet::new();
+        for node in &self.nodes {
+            if let Some(ref oid) = node.object_id {
+                validate_serialized_object_id(oid)?;
+                if !seen_object_ids.insert(oid.clone()) {
+                    return Err(SceneError::DuplicateSerializedObjectId(oid.clone()));
+                }
+            }
+        }
+        for light in &self.lights {
+            if let Some(ref oid) = light.object_id {
+                validate_serialized_object_id(oid)?;
+                if !seen_object_ids.insert(oid.clone()) {
+                    return Err(SceneError::DuplicateSerializedObjectId(oid.clone()));
+                }
+            }
+        }
+        for light in &self.directional_lights {
+            if let Some(ref oid) = light.object_id {
+                validate_serialized_object_id(oid)?;
+                if !seen_object_ids.insert(oid.clone()) {
+                    return Err(SceneError::DuplicateSerializedObjectId(oid.clone()));
+                }
+            }
+        }
+        for light in &self.spot_lights {
+            if let Some(ref oid) = light.object_id {
+                validate_serialized_object_id(oid)?;
+                if !seen_object_ids.insert(oid.clone()) {
+                    return Err(SceneError::DuplicateSerializedObjectId(oid.clone()));
+                }
+            }
         }
 
         let mut seen = HashSet::new();
@@ -2763,6 +4944,162 @@ impl SerializedScene {
         visited.insert(node.id.clone());
         Ok(())
     }
+}
+
+/// Saving must serialize only identities that were assigned when the object
+/// entered the scene. This deliberately rejects an internal invariant break
+/// instead of inventing a durable identity during save.
+fn ensure_scene_save_identity_invariants(scene: &Scene) -> Result<(), SceneError> {
+    fn validate_record(kind: &str, record: Option<&ObjectRecord>) -> Result<(), SceneError> {
+        let record = record.ok_or_else(|| {
+            SceneError::SerializationError(format!("missing object record while saving {kind}"))
+        })?;
+        if record.stable_id.as_deref().is_none_or(str::is_empty) {
+            return Err(SceneError::SerializationError(format!(
+                "missing stable ID while saving {kind}"
+            )));
+        }
+        validate_serialized_object_id(record.persistent_id.as_str())
+    }
+
+    for (id, _) in scene.world.serializable_nodes() {
+        validate_record("node", scene.world.get_node_record(id))?;
+    }
+    for (id, _) in scene.world.serializable_lights() {
+        validate_record("point light", scene.world.get_point_light_record(id))?;
+    }
+    for (id, _) in scene.world.serializable_directional_lights() {
+        validate_record(
+            "directional light",
+            scene.world.get_directional_light_record(id),
+        )?;
+    }
+    for (id, _) in scene.world.serializable_spot_lights() {
+        validate_record("spot light", scene.world.get_spot_light_record(id))?;
+    }
+    Ok(())
+}
+
+// ── Deterministic persistent ID derivation ─────────────────────────────
+
+/// Derive a deterministic [`SceneObjectId`] from scene identity, object kind,
+/// and the legacy stable id.
+///
+/// SHA-256 over `"engine.scene-object.v1\\0"`, followed by length-framed
+/// scene identity, kind tag, and legacy stable ID. The framing excludes file
+/// paths, runtime slots, insertion order, and serializer formatting.
+pub(crate) fn derive_persistent_id(
+    scene_id: &str,
+    kind: ObjectKind,
+    stable_id: &str,
+) -> SceneObjectId {
+    use sha2::{Digest, Sha256};
+
+    let kind_tag = match kind {
+        ObjectKind::Node => "node",
+        ObjectKind::PointLight => "point",
+        ObjectKind::DirectionalLight => "directional",
+        ObjectKind::SpotLight => "spot",
+    };
+
+    fn frame(hasher: &mut Sha256, value: &[u8]) {
+        hasher.update(&(value.len() as u64).to_le_bytes());
+        hasher.update(value);
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"engine.scene-object.v1\0");
+    frame(&mut hasher, scene_id.as_bytes());
+    frame(&mut hasher, kind_tag.as_bytes());
+    frame(&mut hasher, stable_id.as_bytes());
+
+    let hash = hasher.finalize();
+    let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+    SceneObjectId::new(format!("object.{hex}"))
+}
+
+// ── Component limit enforcement at load ────────────────────────────────
+
+/// Validate every attachment before any asset or registry callback. A local
+/// store enforces count and duplicate-pair rules; envelope conversion enforces
+/// strict fields and canonicalizes otherwise arbitrary JSON `data`.
+fn validate_component_envelopes(
+    nodes: &[SerializedNode],
+    point_lights: &[SerializedPointLight],
+    directional_lights: &[SerializedDirectionalLight],
+    spot_lights: &[SerializedSpotLight],
+) -> Result<(), SceneError> {
+    fn validate_owner(
+        owner: &str,
+        components: &[SerializedComponentEnvelope],
+    ) -> Result<(), SceneError> {
+        let mut store = ComponentStore::new();
+        for serialized in components {
+            let envelope = ComponentEnvelope::try_from(serialized.clone()).map_err(|err| {
+                SceneError::SerializationError(format!("invalid component on {owner}: {err}"))
+            })?;
+            enforce_limits(&envelope).map_err(|err| {
+                SceneError::SerializationError(format!("invalid component on {owner}: {err}"))
+            })?;
+            store.attach(envelope).map_err(|err| {
+                SceneError::SerializationError(format!("invalid component on {owner}: {err}"))
+            })?;
+        }
+        Ok(())
+    }
+
+    for node in nodes {
+        validate_owner(&format!("node '{}'", node.id), &node.components)?;
+    }
+    for light in point_lights {
+        validate_owner(&format!("point light '{}'", light.id), &light.components)?;
+    }
+    for light in directional_lights {
+        validate_owner(
+            &format!("directional light '{}'", light.id),
+            &light.components,
+        )?;
+    }
+    for light in spot_lights {
+        validate_owner(&format!("spot light '{}'", light.id), &light.components)?;
+    }
+    Ok(())
+}
+
+fn validate_serialized_object_id(id: &str) -> Result<(), SceneError> {
+    let valid = id.len() == "object.".len() + 64
+        && id.starts_with("object.")
+        && id["object.".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    if valid {
+        Ok(())
+    } else {
+        Err(SceneError::SerializationError(format!(
+            "invalid object_id '{id}': expected object.<64 lowercase hex>"
+        )))
+    }
+}
+
+/// Attach serialized component envelopes to the root node of a
+/// [`SceneFragment`] so they survive the asset-merge path.
+fn attach_serialized_components_to_fragment(
+    fragment: &mut SceneFragment,
+    serialized_components: &[SerializedComponentEnvelope],
+) -> Result<(), crate::api::errors::RendererError> {
+    let root_id = fragment.root().ok_or_else(|| {
+        SceneError::MergeFailed("fragment has no root node for component attachment".to_string())
+    })?;
+    let root_node = fragment.node_mut(root_id).ok_or_else(|| {
+        SceneError::MergeFailed("fragment root node is out of bounds".to_string())
+    })?;
+    for s in serialized_components {
+        let envelope = ComponentEnvelope::try_from(s.clone()).map_err(|msg| {
+            crate::api::errors::RendererError::Scene(SceneError::SerializationError(msg))
+        })?;
+        root_node.components.push(envelope);
+    }
+    Ok(())
 }
 
 fn validate_scene_content(
@@ -3471,6 +5808,7 @@ fn migrate_v1_to_v2(mut raw: serde_json::Value) -> serde_json::Value {
         "materials",
         "audio",
         "editor",
+        "bsp_source",
     ];
 
     // Bump version.
@@ -3483,6 +5821,42 @@ fn migrate_v1_to_v2(mut raw: serde_json::Value) -> serde_json::Value {
         // Strip unknown top-level keys.
         let known: std::collections::HashSet<&str> = V2_TOP_LEVEL_KEYS.iter().copied().collect();
         obj.retain(|key, _| known.contains(key.as_str()));
+
+        // Add object_id (null) and components (empty) defaults to each node.
+        if let Some(nodes) = obj.get_mut("nodes").and_then(|v| v.as_array_mut()) {
+            for node in nodes.iter_mut() {
+                if let Some(node_obj) = node.as_object_mut() {
+                    if !node_obj.contains_key("object_id") {
+                        node_obj.insert("object_id".to_string(), serde_json::Value::Null);
+                    }
+                    if !node_obj.contains_key("components") {
+                        node_obj.insert(
+                            "components".to_string(),
+                            serde_json::Value::Array(Vec::new()),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Add object_id (null) and components (empty) defaults to each light.
+        for array_key in &["lights", "directional_lights", "spot_lights"] {
+            if let Some(lights) = obj.get_mut(*array_key).and_then(|v| v.as_array_mut()) {
+                for light in lights.iter_mut() {
+                    if let Some(light_obj) = light.as_object_mut() {
+                        if !light_obj.contains_key("object_id") {
+                            light_obj.insert("object_id".to_string(), serde_json::Value::Null);
+                        }
+                        if !light_obj.contains_key("components") {
+                            light_obj.insert(
+                                "components".to_string(),
+                                serde_json::Value::Array(Vec::new()),
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         // Add shadow_config default to each directional light.
         if let Some(directional_lights) = obj
@@ -3529,6 +5903,21 @@ mod tests {
     use glam::{Mat4, Quat, Vec3};
     use std::fs;
     use std::path::{Path, PathBuf};
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn bsp_mount_retirement_detaches_scene_state() {
+        let mut scene = Scene::new();
+        scene.set_bsp_mount(crate::api::bsp::PreparedBspMount::new());
+        assert!(scene.has_bsp_mount());
+
+        let detached = scene
+            .retire_bsp_mount()
+            .expect("published BSP mount must return a detached mount");
+        assert!(!scene.has_bsp_mount());
+        assert!(scene.retire_bsp_mount().is_none());
+        drop(detached);
+    }
 
     #[test]
     fn stale_handle_rejected() {
@@ -3840,7 +6229,7 @@ mod tests {
             )
             .unwrap();
 
-        let serialized = SerializedScene::from_scene(&scene);
+        let serialized = SerializedScene::from_scene(&scene).unwrap();
         let json = serde_json::to_string_pretty(&serialized).unwrap();
         assert!(json.contains("\"format_version\": 2"));
         assert!(json.contains("\"id\": \"core.wall.stone_2m\""));
@@ -3869,7 +6258,7 @@ mod tests {
             )]
         );
 
-        let round_tripped = SerializedScene::from_scene(&loaded);
+        let round_tripped = SerializedScene::from_scene(&loaded).unwrap();
         let root_node = round_tripped
             .nodes
             .iter()
@@ -3944,7 +6333,7 @@ mod tests {
             Some("node.placed.wall.000001")
         );
 
-        let serialized = SerializedScene::from_scene(&scene);
+        let serialized = SerializedScene::from_scene(&scene).unwrap();
         let json = serde_json::to_string_pretty(&serialized).unwrap();
         assert!(json.contains("\"id\": \"editor_sample.wall.stone_2m\""));
         assert!(json.contains("\"wall\""));
@@ -3961,7 +6350,7 @@ mod tests {
             )]
         );
 
-        let round_tripped = SerializedScene::from_scene(&loaded);
+        let round_tripped = SerializedScene::from_scene(&loaded).unwrap();
         let wall_node = round_tripped
             .nodes
             .iter()
@@ -4044,18 +6433,12 @@ mod tests {
 
         let mut loader = FakeSceneAssetLoader::default();
         let loaded = Scene::load_with_loader(&saved_scene, &mut loader).unwrap();
+        let mut loaded_model_ids: Vec<_> =
+            loader.loaded_models.iter().map(|r| r.id.clone()).collect();
+        loaded_model_ids.sort();
         assert_eq!(
-            loader.loaded_models,
-            vec![
-                SceneAssetReference::new(
-                    "editor_sample.model.block",
-                    Some(PathBuf::from("models/block_prop.obj")),
-                ),
-                SceneAssetReference::new(
-                    "editor_sample.wall.stone_2m",
-                    Some(PathBuf::from("prefabs/wall_straight_2m.obj")),
-                ),
-            ]
+            loaded_model_ids,
+            vec!["editor_sample.model.block", "editor_sample.wall.stone_2m"],
         );
 
         let model_stable_id = scene.node_stable_id(model).unwrap().unwrap();
@@ -4180,7 +6563,7 @@ mod tests {
             .set_node_material_override(root, "0", "mat_override.editor_slot_0")
             .unwrap();
 
-        let serialized = SerializedScene::from_scene(&scene);
+        let serialized = SerializedScene::from_scene(&scene).unwrap();
         let json = serde_json::to_string_pretty(&serialized).unwrap();
         assert!(json.contains("\"Editable Root\""));
         assert!(json.contains("\"gameplay\""));
@@ -4189,7 +6572,7 @@ mod tests {
         let parsed: SerializedScene = serde_json::from_str(&json).unwrap();
         let mut loader = FakeSceneAssetLoader::default();
         let loaded = parsed.into_scene_with_loader(&mut loader).unwrap();
-        let round_tripped = SerializedScene::from_scene(&loaded);
+        let round_tripped = SerializedScene::from_scene(&loaded).unwrap();
         let node = round_tripped
             .nodes
             .iter()
@@ -4216,7 +6599,7 @@ mod tests {
             .set_node_material_override(root, "0", "mat_override.editor")
             .unwrap();
         scene.clear_node_material_override(root, "0").unwrap();
-        let serialized = SerializedScene::from_scene(&scene);
+        let serialized = SerializedScene::from_scene(&scene).unwrap();
         assert!(serialized.nodes[0].material_overrides.is_empty());
     }
 
@@ -5137,12 +7520,13 @@ mod tests {
         scene.set_directional_shadow_config(id, cfg).unwrap();
 
         assert_eq!(scene.shadow_casting_directional_light_id(), Some(id));
-        assert!(scene
-            .directional_shadow_configs
-            .get(&id)
-            .is_some_and(|c| c.shadow_map_size == 4096));
+        let cfg_from_record = scene
+            .world
+            .get_directional_light_record(id)
+            .and_then(|r| r.directional_shadow_config);
+        assert!(cfg_from_record.is_some_and(|c| c.shadow_map_size == 4096));
 
-        let serialized = SerializedScene::from_scene(&scene);
+        let serialized = SerializedScene::from_scene(&scene).unwrap();
         let json = serde_json::to_string_pretty(&serialized).unwrap();
         assert!(json.contains("\"format_version\": 2"));
         assert!(json.contains("\"shadow_config\""));
@@ -5162,9 +7546,9 @@ mod tests {
             .flatten();
         assert!(loaded_id.is_some());
         let loaded_cfg = loaded
-            .directional_shadow_configs
-            .get(&loaded_id.unwrap())
-            .copied();
+            .world
+            .get_directional_light_record(loaded_id.unwrap())
+            .and_then(|r| r.directional_shadow_config);
         assert!(loaded_cfg.is_some_and(|c| {
             c.enabled
                 && c.shadow_map_size == 4096
@@ -5211,7 +7595,18 @@ mod tests {
         let scene = parsed.into_scene_with_loader(&mut loader).unwrap();
         // No shadow config was provided, so none should be active.
         assert!(scene.shadow_casting_directional_light_id().is_none());
-        assert!(scene.directional_shadow_configs.is_empty());
+        // All directional light records should have no shadow config.
+        let has_shadow_config = scene
+            .world
+            .serializable_directional_lights()
+            .any(|(id, _)| {
+                scene
+                    .world
+                    .get_directional_light_record(id)
+                    .and_then(|r| r.directional_shadow_config)
+                    .is_some()
+            });
+        assert!(!has_shadow_config);
     }
 
     // ── Fixture-based integration tests ────────────────────────────────
@@ -5227,7 +7622,17 @@ mod tests {
         assert_eq!(scene.directional_lights().len(), 1);
         // v1 fixture has no shadow_config, so nothing should be enabled.
         assert!(scene.shadow_casting_directional_light_id().is_none());
-        assert!(scene.directional_shadow_configs.is_empty());
+        let has_shadow = scene
+            .world
+            .serializable_directional_lights()
+            .any(|(id, _)| {
+                scene
+                    .world
+                    .get_directional_light_record(id)
+                    .and_then(|r| r.directional_shadow_config)
+                    .is_some()
+            });
+        assert!(!has_shadow);
     }
 
     #[test]
@@ -5245,9 +7650,9 @@ mod tests {
         let caster_id = scene.shadow_casting_directional_light_id();
         assert!(caster_id.is_some());
         let cfg = scene
-            .directional_shadow_configs
-            .get(&caster_id.unwrap())
-            .copied();
+            .world
+            .get_directional_light_record(caster_id.unwrap())
+            .and_then(|r| r.directional_shadow_config);
         assert!(cfg.is_some_and(|c| {
             c.enabled
                 && c.shadow_map_size == 4096

@@ -6,6 +6,7 @@
 use crate::api::{CommandError, SceneError};
 use crate::api::{SceneAssetReference, SceneFragment, SceneFragmentNodeId};
 use crate::data::handles::MeshHandle;
+use crate::object::{ObjectMutationOutcome, ObjectRemap};
 use crate::scene::scene_world::{
     RestorableSceneSubtree, SceneNode, SceneNodeId, SceneNodeRefError, SceneWorld,
 };
@@ -22,6 +23,14 @@ pub trait Command: Send {
     fn created_node(&self) -> Option<SceneNodeId> {
         None
     }
+    /// Optional unified object mutation outcome produced by this command.
+    fn object_outcome(&self) -> Option<ObjectMutationOutcome> {
+        None
+    }
+    /// Optional object remap list for this command.
+    fn object_remaps(&self) -> Vec<ObjectRemap> {
+        Vec::new()
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -30,11 +39,15 @@ pub struct SceneNodeRemap {
     pub new: SceneNodeId,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub struct CommandResult {
     pub description: String,
     pub node_remap: Option<SceneNodeRemap>,
     pub created_node: Option<SceneNodeId>,
+    /// Unified object mutation outcome (carried from command).
+    pub object_outcome: Option<ObjectMutationOutcome>,
+    /// Object remap list (carried from command).
+    pub object_remaps: Vec<ObjectRemap>,
 }
 
 /// Bounded undo/redo history stack.
@@ -56,6 +69,9 @@ impl CommandHistory {
     /// Execute a command and push it onto the undo stack.
     /// Clears the redo stack (new action invalidates redo history).
     ///
+    /// Execution happens *before* any stack mutation. On error both
+    /// stacks are left unchanged and the redo stack is NOT cleared.
+    ///
     /// When `max_depth` is zero (zero-capacity history): executes the
     /// command, clears redo, and stores nothing. `undo` will report
     /// `NothingToUndo`.
@@ -64,11 +80,14 @@ impl CommandHistory {
         mut cmd: Box<dyn Command>,
         world: &mut SceneWorld,
     ) -> Result<CommandResult, SceneError> {
+        // Execute before mutating stacks — on error stacks are untouched.
         cmd.execute(world)?;
         let result = CommandResult {
             description: cmd.description().to_string(),
             node_remap: cmd.node_remap(),
             created_node: cmd.created_node(),
+            object_outcome: cmd.object_outcome(),
+            object_remaps: cmd.object_remaps(),
         };
         self.redo_stack.clear();
         if self.max_depth == 0 {
@@ -86,43 +105,69 @@ impl CommandHistory {
     ///
     /// Returns `CommandError::NothingToUndo` when the undo stack is
     /// empty (including zero-capacity histories).
+    ///
+    /// On undo failure the command is restored to the top of the undo
+    /// stack so history position is preserved.
     pub fn undo(&mut self, world: &mut SceneWorld) -> Result<CommandResult, SceneError> {
         let mut cmd = self
             .undo_stack
             .pop()
             .ok_or_else(|| SceneError::CommandError(CommandError::NothingToUndo))?;
-        cmd.undo(world)?;
-        let result = CommandResult {
-            description: cmd.description().to_string(),
-            node_remap: cmd.node_remap(),
-            created_node: cmd.created_node(),
-        };
-        self.redo_stack.push(cmd);
-        Ok(result)
+        match cmd.undo(world) {
+            Ok(()) => {
+                let result = CommandResult {
+                    description: cmd.description().to_string(),
+                    node_remap: cmd.node_remap(),
+                    created_node: cmd.created_node(),
+                    object_outcome: cmd.object_outcome(),
+                    object_remaps: cmd.object_remaps(),
+                };
+                self.redo_stack.push(cmd);
+                Ok(result)
+            }
+            Err(e) => {
+                // Restore command to undo stack — history position unchanged.
+                self.undo_stack.push(cmd);
+                Err(e)
+            }
+        }
     }
 
     /// Redo the most recently undone command.
     ///
     /// Returns `CommandError::NothingToRedo` when the redo stack is
     /// empty.
+    ///
+    /// On redo failure the command is restored to the top of the redo
+    /// stack so history position is preserved.
     pub fn redo(&mut self, world: &mut SceneWorld) -> Result<CommandResult, SceneError> {
         let mut cmd = self
             .redo_stack
             .pop()
             .ok_or_else(|| SceneError::CommandError(CommandError::NothingToRedo))?;
-        cmd.execute(world)?;
-        let result = CommandResult {
-            description: cmd.description().to_string(),
-            node_remap: cmd.node_remap(),
-            created_node: cmd.created_node(),
-        };
-        if self.max_depth > 0 {
-            while self.undo_stack.len() >= self.max_depth {
-                self.undo_stack.remove(0);
+        match cmd.execute(world) {
+            Ok(()) => {
+                let result = CommandResult {
+                    description: cmd.description().to_string(),
+                    node_remap: cmd.node_remap(),
+                    created_node: cmd.created_node(),
+                    object_outcome: cmd.object_outcome(),
+                    object_remaps: cmd.object_remaps(),
+                };
+                if self.max_depth > 0 {
+                    while self.undo_stack.len() >= self.max_depth {
+                        self.undo_stack.remove(0);
+                    }
+                    self.undo_stack.push(cmd);
+                }
+                Ok(result)
             }
-            self.undo_stack.push(cmd);
+            Err(e) => {
+                // Restore command to redo stack — history position unchanged.
+                self.redo_stack.push(cmd);
+                Err(e)
+            }
         }
-        Ok(result)
     }
 
     pub fn can_undo(&self) -> bool {

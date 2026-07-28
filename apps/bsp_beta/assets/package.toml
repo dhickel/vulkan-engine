@@ -1,0 +1,68 @@
+# BSP Beta — Package Manifest
+#
+# Canonical package manifest for the BSP beta dogfood application.
+# Declares the bundled BSP map, companion files, palettes, and model mappings
+# used by the BSP beta runtime for loading and rendering.
+#
+# Format version: 1
+
+format_version = 1
+asset_id = "bsp-beta-core"
+display_name = "BSP Beta Core"
+bsp_path = "maps/beta_core.bsp"
+palette_path = "palettes/project_palette.lmp"
+strict = true
+
+# ── Scale / calibration ───────────────────────────────────────────
+
+scale_override = 0.03125  # 1/32: Quake units to meters
+
+[lighting_calibration]
+overbright = 2.0
+light_scale = 1.0
+saturation = 1.0
+
+# ── Companion bindings ────────────────────────────────────────────
+
+[[companion_bindings]]
+kind = "palette"
+path = "palettes/project_palette.lmp"
+content_hash = "056225760af497967cb7fc67aba0757e915e2f461ba909d440e8073d591c5dd0"
+
+[[companion_bindings]]
+kind = "lit"
+path = "maps/beta_core.lit"
+# Content hash of the minimal QLIT v1 header (no RGB payload — map has no visible faces):
+content_hash = "0b46b6b85a8ec0a4a3b905c059f73485e06e6bf452df80823f4ebb87b029fe36"
+
+# ── Model mappings (placeholder — populated post-Phase 09) ────────
+
+# ── Compiler provenance ───────────────────────────────────────────
+
+[compiler_provenance]
+compiler_identity = "ericw-tools"
+compiler_version = "2.0.0-alpha3"
+qbsp_args = []
+vis_args = []
+light_args = []
+
+[[compiler_provenance.source_hashes]]
+path = "maps/q1_profile_core.map"
+sha256 = "2d65d0381fe6f4e03929b751340e1208c3d382e5a06cfa9a6150072d8fcde96a"
+
+[[compiler_provenance.source_hashes]]
+path = "palettes/project_palette.lmp"
+sha256 = "056225760af497967cb7fc67aba0757e915e2f461ba909d440e8073d591c5dd0"
+
+[[compiler_provenance.output_hashes]]
+path = "maps/beta_core.bsp"
+sha256 = "10f4bcade9b4e6f2afccaca8cd40be5ac5d380a2e41982f5e41dfcccb9d8e268"
+
+[[compiler_provenance.output_hashes]]
+path = "maps/beta_core.lit"
+sha256 = "0b46b6b85a8ec0a4a3b905c059f73485e06e6bf452df80823f4ebb87b029fe36"
+
+[compiler_provenance.compiler_hashes]
+qbsp_sha256 = "4a05974acf9e59f73a9c8f4e8236f3d1e0961be477dae002837e166278882f17"
+vis_sha256 = "f7f429e0ad9bebbb0ebdefea8d6cd5e13a6ad6ff9f6893126772e00b66e364ea"
+light_sha256 = "1210ee9bed8990f67e3be7e28fbfd8d210329b052ac57dba017200d2da1ca5e5"

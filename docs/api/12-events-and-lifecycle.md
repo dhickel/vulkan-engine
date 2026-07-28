@@ -54,7 +54,7 @@ Typed but deferred until later system sprints:
 
 | Family | Current status |
 |---|---|
-| `SceneEvent` | Contract exists; broad scene mutation emission is not wired yet. |
+| `SceneEvent` | `ObjectLifecycle` is available as a caller-emitted persistent snapshot. Broad automatic scene mutation emission is not wired. |
 | `AssetEvent::AssetLoading/Ready/Failed/Invalidated` | Contract exists; package load events are wired in the root runtime, broad per-asset async emission is deferred. |
 | `PhysicsEvent` | Contract exists. The `physics` crate can translate ray hits and contact records into `EngineEvent::Physics` values and emit contact records into an `EventBus`; renderer/root-runtime live physics scene loading is deferred. |
 | `AudioEvent` | Contract exists. `apps/dungeon_dogfood` demonstrates app-owned opt-in audio event emission; root-runtime and editor-wide audio emission are deferred. |
@@ -154,7 +154,23 @@ Root runtime startup ordering:
 | 6 | `SceneLoad` | `SceneLoading`, then `SceneLoaded` |
 | 7 | `Shutdown` | `ShutdownCompleted` in headless success, `ShutdownRequested` for window close/Escape intent |
 
-## 6. Mutation Safety
+## 6. Scene Object Lifecycle Events
+
+A successful object mutation can return an `ObjectLifecycleOutcome`. Convert it explicitly and emit it on the caller-owned bus at the stage/frame that fits the app loop:
+
+```rust
+let events = outcome.into_lifecycle_events(SceneObjectLifecycleAction::Removed);
+for event in events {
+    bus.emit(EventStage::PostUpdate, Some(FrameId(frame)),
+        EngineEvent::Scene(SceneEvent::ObjectLifecycle(event)));
+}
+```
+
+A lifecycle snapshot contains only persistent `SceneId`, `SceneObjectId`, `ObjectKind`, display name, and persistent parent context. It never exposes renderer runtime slots or generations. Outcome ordering is preserved: creation, restore, and duplication are parent-first; removals are descendant-first.
+
+`LegacySceneEventAdapter::translate(&event)` is an opt-in value translation for node `Created`/`Removed` compatibility events. It does not own an `EventBus` and nothing emits both forms automatically.
+
+## 7. Mutation Safety
 
 - Listener callbacks must be small and non-blocking.
 - Listener callbacks must not expect mutable renderer access.
@@ -162,7 +178,7 @@ Root runtime startup ordering:
 - Do not call into Vulkan internals, data caches, or private renderer modules from app listeners.
 - Avoid recursive event dispatch from callbacks. The alpha contract assumes staged drain from renderer/runtime/app-loop boundaries.
 
-## 7. Debugging Playbook
+## 8. Debugging Playbook
 
 - Step 1: install a bounded recorder with `Renderer::set_event_recorder` for legacy renderer-owned events, or use `engine::events::runtime_event_bus()` for app-owned events.
 - Step 2: subscribe before the event loop starts.
@@ -170,7 +186,7 @@ Root runtime startup ordering:
 - Step 4: on renderer-owned compatibility paths, confirm `renderer.update_input(...)` is called for every `winit` event; on app-owned paths, confirm `route_platform_input_to_app(...)` runs for platform input and `begin_app_frame(...)` runs once per app frame.
 - Step 5: confirm the matching render path runs once per frame: `render_scene`/`render_scene_headless` for renderer-owned compatibility, or `render_scene_with_view`/`render_scene_headless_with_view` bracketed by `begin_app_frame`/`end_app_frame` for app-owned loops.
 
-## 8. Cross-Module Links
+## 9. Cross-Module Links
 
 - Event crate: `src/events/src/lib.rs`
 - Root event helpers: `src/events.rs`
@@ -179,14 +195,15 @@ Root runtime startup ordering:
 - Root runtime lifecycle: `src/runtime.rs`
 - Dogfood consumer: `apps/dungeon_dogfood/src/events.rs`
 
-## 9. Standard References
+## 10. Standard References
 
 - Rust closures: https://doc.rust-lang.org/book/ch13-01-closures.html
 - Rust channels and shared state patterns: https://doc.rust-lang.org/book/ch16-00-concurrency.html
 
-## 10. See Also
+## 11. See Also
 
 - [Input Polling and Layered Dispatch](06-input-polling-and-listeners.md)
 - [Runtime Project Launcher](11-runtime-project-launcher.md)
 - [App-Owned Loop](15-app-owned-loop.md)
+- [Editor Object System](18-editor-object-system.md)
 - [Internal Event System and Lifecycle](../internal/10-event-system-and-lifecycle.md)

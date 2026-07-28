@@ -805,6 +805,127 @@ impl Renderer {
         }
     }
 
+    /// Retire a detached BSP mount through the renderer's fence-aware queue.
+    ///
+    /// Preflight validates every owned handle, computes the common `retire_after`
+    /// serial (`max(last_referenced, latest_submitted)`), extracts the arena
+    /// closure from the surface cache, and enqueues the closure for deferred GPU
+    /// destruction. On success, returns a [`BspRetirementAcknowledgement`].
+    ///
+    /// On preflight failure, returns a [`BspRetirementRejection`] that preserves
+    /// the intact lease and mount state.
+    ///
+    /// Available only with the `bsp` feature.
+    #[cfg(feature = "bsp")]
+    pub fn retire_bsp_mount(
+        &mut self,
+        detached: crate::api::bsp::DetachedBspMount,
+    ) -> Result<
+        crate::api::bsp::BspRetirementAcknowledgement,
+        crate::api::bsp::BspRetirementRejection,
+    > {
+        let core = &mut self.runtime.core;
+        let crate::api::bsp::DetachedBspMount {
+            state: mount_state,
+            lease,
+        } = detached;
+
+        // ── Preflight: compute retire_after ────────────────────────
+        let retire_after = crate::data::retirement::FrameSerial::new(
+            core.latest_submitted_serial.max(0),
+        );
+
+        let mesh_count = lease.mesh_handles.len();
+        let texture_count = lease.texture_handles.len();
+        let material_count = lease.material_handles.len();
+
+        // Validate every mesh handle.
+        match core.data_cache.mesh_cache.lock() {
+            Ok(mesh_cache) => {
+                for handle in &lease.mesh_handles {
+                    if mesh_cache.get_id(*handle).is_err() {
+                        return Err(bsp_retire_rejection(
+                            format!("stale or invalid mesh handle {:?}", handle),
+                            lease,
+                            mount_state,
+                        ));
+                    }
+                }
+            }
+            Err(_) => {
+                return Err(bsp_retire_rejection(
+                    "mesh_cache lock poisoned".to_string(),
+                    lease,
+                    mount_state,
+                ));
+            }
+        }
+
+        // Validate every texture handle.
+        match core.data_cache.texture_cache.lock() {
+            Ok(texture_cache) => {
+                for handle in &lease.texture_handles {
+                    if texture_cache.get_texture(*handle).is_err() {
+                        return Err(bsp_retire_rejection(
+                            format!("stale or invalid texture handle {:?}", handle),
+                            lease,
+                            mount_state,
+                        ));
+                    }
+                }
+            }
+            Err(_) => {
+                return Err(bsp_retire_rejection(
+                    "texture_cache lock poisoned".to_string(),
+                    lease,
+                    mount_state,
+                ));
+            }
+        }
+
+        // Extract the retirement closure from the surface cache.
+        let closure = match core.data_cache.bsp_surface_cache.lock() {
+            Ok(mut surface_cache) => {
+                match surface_cache.extract_retirement_closure(lease.arena_id) {
+                    Some(c) => c,
+                    None => {
+                        return Err(bsp_retire_rejection(
+                            format!("arena {} has no active payloads", lease.arena_id),
+                            lease,
+                            mount_state,
+                        ));
+                    }
+                }
+            }
+            Err(_) => {
+                return Err(bsp_retire_rejection(
+                    "bsp_surface_cache lock poisoned".to_string(),
+                    lease,
+                    mount_state,
+                ));
+            }
+        };
+
+        let arena_id = closure.arena_id;
+        let lightmap_atlas_count = if closure.lightmap_atlas.is_some() { 1 } else { 0 };
+
+        // Enqueue the closure for deferred GPU destruction.
+        core.bsp_retirement_queue.enqueue(
+            crate::data::retirement::RetirementClass::BspArenaRetirement,
+            retire_after,
+            closure,
+        );
+
+        Ok(crate::api::bsp::BspRetirementAcknowledgement {
+            arena_id,
+            retire_after,
+            mesh_count,
+            texture_count,
+            material_count,
+            lightmap_atlas_count,
+        })
+    }
+
     /// Thread: Main
     /// May Stall: No
     pub fn pump_asset_tasks(&mut self, max_steps: usize) -> Result<usize, RendererError> {
@@ -1164,6 +1285,26 @@ impl Renderer {
         }
 
         self.clear_resize_skip_state();
+
+        // Phase 07: Thread evidence request to scene before building submission.
+        #[cfg(feature = "bsp")]
+        {
+            if let Some(ref evidence_req) = self.runtime.core.bsp_evidence_request {
+                scene.set_bsp_evidence_request(
+                    evidence_req.1.corpus_identity.clone(),
+                    evidence_req.1.request_identity.clone(),
+                    evidence_req.1.visibility,
+                    frame_number,
+                );
+            } else {
+                scene.set_bsp_evidence_request(
+                    String::new(), String::new(),
+                    crate::api::bsp::BspEvidenceVisibility::NormalPvs,
+                    frame_number,
+                );
+            }
+        }
+
         let submission = build_submission_with_camera_view(scene, view);
         let viewport_size = self.viewport_size();
         let hooks_enabled = self.pre_render_hook.is_some() || self.post_render_hook.is_some();
@@ -1224,6 +1365,26 @@ impl Renderer {
         };
         self.last_hook_report = hook_report.into_inner();
         let backend_outcome = backend_result.map_err(renderer_error_from_backend)?;
+
+        // Phase 07: After rendering, check for sealed evidence report from the recording pipeline.
+        #[cfg(feature = "bsp")]
+        {
+            let evidence_collected = submission.bsp_evidence_collector.borrow_mut().take();
+            if let Some(collector) = evidence_collected {
+                let report = collector.seal();
+                let request_key = self.runtime.core.bsp_evidence_request.as_ref()
+                    .map(|(key, _)| *key)
+                    .unwrap_or(crate::api::bsp::BspEvidenceRequestKey(0));
+                self.runtime.core.bsp_evidence_report = Some((request_key, crate::api::bsp::BspEvidenceStatus::Sealed(report)));
+                self.runtime.core.bsp_evidence_frame_number = frame_number;
+                // Consume the request since evidence was collected.
+                self.runtime.core.bsp_evidence_request = None;
+            } else if self.runtime.core.bsp_evidence_request.is_some() {
+                // Request was pending but no evidence was collected (e.g., no BSP mount active).
+                let (key, _) = self.runtime.core.bsp_evidence_request.take().unwrap();
+                self.runtime.core.bsp_evidence_report = Some((key, crate::api::bsp::BspEvidenceStatus::RejectedNoMount));
+            }
+        }
 
         self.record_frame_capture_statuses();
 
@@ -1364,6 +1525,75 @@ impl Renderer {
             .map_err(|err| RendererError::InvalidState(err.message().to_string()))
     }
 
+    /// Prepare a BSP mount from extracted BSP data, uploading GPU resources.
+    ///
+    /// Available only with the `bsp` feature. Runs synchronously on the calling
+    /// thread. Returns a mount ready for [`Scene::set_bsp_mount`].
+    #[cfg(feature = "bsp")]
+    pub fn prepare_bsp_mount(
+        &mut self,
+        extracted: &bsp::extract::ExtractedBsp,
+    ) -> Result<crate::api::bsp::PreparedBspMount, RendererError> {
+        self.assets()
+            .prepare_bsp_mount(extracted)
+            .map_err(|e| RendererError::InvalidState(format!("BSP upload failed: {e}")))
+    }
+
+    /// Request a single bounded post-command evidence report for BSP static-world draws.
+    ///
+    /// Available only with the `bsp` feature. Returns an opaque request key that must be
+    /// passed to [`Self::take_bsp_frame_evidence`] to retrieve the sealed report.
+    ///
+    /// Only one pending request is allowed; a second request is rejected.
+    /// The report is populated during the next frame that renders a BSP mount.
+    #[cfg(feature = "bsp")]
+    pub fn request_bsp_frame_evidence(
+        &mut self,
+        corpus_identity: String,
+        request_identity: String,
+        visibility: crate::api::bsp::BspEvidenceVisibility,
+    ) -> Result<crate::api::bsp::BspEvidenceRequestKey, RendererError> {
+        let core = &mut self.runtime.core;
+        if core.bsp_evidence_request.is_some() {
+            return Err(RendererError::InvalidState(
+                "a BSP evidence request is already pending".to_string(),
+            ));
+        }
+        let key = crate::api::bsp::BspEvidenceRequestKey(core.bsp_evidence_next_key);
+        core.bsp_evidence_next_key = core.bsp_evidence_next_key.wrapping_add(1);
+        let request = crate::api::bsp::BspEvidenceRequest {
+            corpus_identity,
+            request_identity,
+            visibility,
+            key,
+        };
+        core.bsp_evidence_request = Some((key, request));
+        core.bsp_evidence_report = None;
+        Ok(key)
+    }
+
+    /// Retrieve the sealed evidence report for a previously submitted request.
+    ///
+    /// Available only with the `bsp` feature. The request key must match the one returned
+    /// by [`Self::request_bsp_frame_evidence`]. Each request can be taken only once;
+    /// subsequent calls return [`BspEvidenceStatus::MissingReport`].
+    #[cfg(feature = "bsp")]
+    pub fn take_bsp_frame_evidence(
+        &mut self,
+        key: crate::api::bsp::BspEvidenceRequestKey,
+    ) -> crate::api::bsp::BspEvidenceStatus {
+        let core = &mut self.runtime.core;
+        match core.bsp_evidence_report.take() {
+            Some((report_key, status)) if report_key == key => status,
+            Some((report_key, status)) => {
+                // Wrong key — put it back
+                core.bsp_evidence_report = Some((report_key, status));
+                crate::api::bsp::BspEvidenceStatus::MissingReport
+            }
+            None => crate::api::bsp::BspEvidenceStatus::MissingReport,
+        }
+    }
+
     /// Emit a lifecycle event into the bus. Does NOT drain — the caller must
     /// explicitly drain at the correct boundary via `drain_events` or
     /// `dispatch_events_for_stage`.
@@ -1385,6 +1615,19 @@ impl Renderer {
                 failure.listener, failure.sequence, failure.message
             );
         }
+    }
+}
+
+#[cfg(feature = "bsp")]
+fn bsp_retire_rejection(
+    reason: String,
+    lease: crate::api::bsp::BspResourceLease,
+    state: crate::scene::bsp_visibility::BspMountState,
+) -> crate::api::bsp::BspRetirementRejection {
+    crate::api::bsp::BspRetirementRejection {
+        reason,
+        lease,
+        state,
     }
 }
 

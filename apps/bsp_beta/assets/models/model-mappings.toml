@@ -1,0 +1,31 @@
+# BSP Beta — Model Mappings
+#
+# Maps BSP entity model references to engine model assets.
+# Format: TOML table of key → asset path.
+#
+# Precedence (highest to lowest):
+#   1. entity/<N>           — per-entity override by entity index
+#   2. model/<source>       — exact source model string match
+#   3. classname/<name>     — exact classname match
+#   4. dev_proxy            — fallback when nothing else matches
+#
+# Wildcards (*, ?) are REJECTED. All keys must be exact.
+# Keys not in the above set are rejected with a diagnostic.
+#
+# Asset paths must be relative to the package root and authorized
+# by package_io. The renderer loads them through the standard
+# asset pipeline (glTF/glb for now).
+
+[models]
+# Entity overrides: "entity/<index>" = "path"
+# "entity/5" = "assets/models/custom_door.gltf"
+
+# Exact source model match: "model/<source>" = "path"
+# "model/props/crate.mdl" = "assets/models/crate.gltf"
+
+# Exact classname match: "classname/<name>" = "path"
+# "classname/func_door" = "assets/models/door.generic.gltf"
+# "classname/func_button" = "assets/models/button.generic.gltf"
+
+# Dev proxy fallback: used when no other rule matches.
+# dev_proxy = "assets/models/dev_proxy.gltf"

@@ -56,6 +56,8 @@
 //! - Recreates swapchain with new extent
 //! - Updates viewport/scissor
 
+#[cfg(feature = "bsp")]
+use crate::data::data_cache::BspSurfaceCache;
 use crate::data::data_cache::{
     EnvMaps, EnvironmentCache, MeshCache, TextureCache, VkCache, VkDataCache, VkDescType,
     VkPipelineType, VkSamplerCache, VkShaderCache,
@@ -78,6 +80,10 @@ use crate::rendergraph::RenderGraph;
 use crate::scene::debug_scenarios;
 use crate::scene::render_submission::RenderSubmission;
 use crate::scene::scene_world::SceneWorld;
+#[cfg(feature = "bsp")]
+use crate::api::bsp::{
+    BspEvidenceRequest, BspEvidenceRequestKey, BspEvidenceStatus,
+};
 use crate::vulkan::vk_debug::{discard_frame_capture, finalize_frame_capture, PendingFrameCapture};
 use crate::vulkan::vk_descriptor::*;
 #[cfg(feature = "csm")]
@@ -177,6 +183,22 @@ pub struct VkRenderCore {
     pub(crate) texture_retirement_queue: GpuRetirementQueue<TextureRetiredPayload>,
     /// CPU bounds/geometry metadata retained to the same fence boundary.
     pub(crate) bounds_retirement_queue: GpuRetirementQueue<MeshGeometryDto>,
+    /// BSP arena retirement queue — holds complete BspRetirementClosure payloads
+    /// awaiting GPU fence completion.
+    #[cfg(feature = "bsp")]
+    pub(crate) bsp_retirement_queue: GpuRetirementQueue<crate::data::retirement::BspRetirementClosure>,
+    /// Phase 07: Pending BSP evidence request (set before submission build, consumed during recording).
+    #[cfg(feature = "bsp")]
+    pub(crate) bsp_evidence_request: Option<(BspEvidenceRequestKey, BspEvidenceRequest)>,
+    /// Phase 07: Sealed BSP evidence report (populated after geometry recording).
+    #[cfg(feature = "bsp")]
+    pub(crate) bsp_evidence_report: Option<(BspEvidenceRequestKey, BspEvidenceStatus)>,
+    /// Phase 07: Frame number that fulfilled the evidence request.
+    #[cfg(feature = "bsp")]
+    pub(crate) bsp_evidence_frame_number: u32,
+    /// Phase 07: Monotonic request key counter.
+    #[cfg(feature = "bsp")]
+    pub(crate) bsp_evidence_next_key: u64,
     pub(crate) gpu_timing: GpuTimingState,
     frame_timing_snapshot: DebugTimingSnapshot,
     pub(crate) due_frame_captures: Vec<DueFrameCapture>,
@@ -421,7 +443,7 @@ pub fn init_caches(
     let default_env = environment_cache
         .import_environment(
             crate::data::environment_import::EnvironmentSource::FaceDirectory {
-                path: "src/renderer/src/assets/sky_maps/sky".into(),
+                path: "src/renderer/src/assets/sky_maps/cc0_dungeon_hdr".into(),
                 pattern: crate::data::environment_import::FacePattern::PxNxPyNyPzNz,
             },
         )
@@ -433,6 +455,8 @@ pub fn init_caches(
         environment_cache: Mutex::new(environment_cache),
         mesh_geometry_store: Mutex::new(MeshGeometryStore::new()),
         supported_image_formats: supported_formats,
+        #[cfg(feature = "bsp")]
+        bsp_surface_cache: Mutex::new(BspSurfaceCache::new()),
     };
 
     let vulkan_cache = VkCache {
@@ -516,9 +540,11 @@ impl Drop for VkRenderCore {
                 }
             }
 
-            if let Some(imgui) = self.imgui.as_mut() {
-                imgui.renderer.destroy();
-            }
+            // The ImGui renderer owns Vulkan pipelines, descriptors, textures,
+            // and its own allocator. Drop it exactly once while the logical
+            // device is still alive; calling its explicit `destroy()` and then
+            // allowing `Drop` to run would destroy the same handles twice.
+            drop(self.imgui.take());
 
             let allocator_guard = match self.allocator.lock() {
                 Ok(guard) => guard,
@@ -1476,6 +1502,16 @@ impl VkRenderCore {
             material_retirement_queue: GpuRetirementQueue::new(),
             texture_retirement_queue: GpuRetirementQueue::new(),
             bounds_retirement_queue: GpuRetirementQueue::new(),
+            #[cfg(feature = "bsp")]
+            bsp_retirement_queue: GpuRetirementQueue::new(),
+            #[cfg(feature = "bsp")]
+            bsp_evidence_request: None,
+            #[cfg(feature = "bsp")]
+            bsp_evidence_report: None,
+            #[cfg(feature = "bsp")]
+            bsp_evidence_frame_number: 0,
+            #[cfg(feature = "bsp")]
+            bsp_evidence_next_key: 1,
             gpu_timing,
             frame_timing_snapshot: DebugTimingSnapshot::default(),
             due_frame_captures: Vec::new(),
@@ -1681,6 +1717,16 @@ impl VkRenderCore {
             material_retirement_queue: GpuRetirementQueue::new(),
             texture_retirement_queue: GpuRetirementQueue::new(),
             bounds_retirement_queue: GpuRetirementQueue::new(),
+            #[cfg(feature = "bsp")]
+            bsp_retirement_queue: GpuRetirementQueue::new(),
+            #[cfg(feature = "bsp")]
+            bsp_evidence_request: None,
+            #[cfg(feature = "bsp")]
+            bsp_evidence_report: None,
+            #[cfg(feature = "bsp")]
+            bsp_evidence_frame_number: 0,
+            #[cfg(feature = "bsp")]
+            bsp_evidence_next_key: 1,
             gpu_timing,
             frame_timing_snapshot: DebugTimingSnapshot::default(),
             due_frame_captures: Vec::new(),
@@ -1720,7 +1766,10 @@ impl VkRenderCore {
         Ok((render, scene_world))
     }
 
-    pub fn rebuild_swapchain(&mut self, new_size: Extent2D) -> Result<(), SwapchainRebuildFailure> {
+    pub(crate) fn rebuild_swapchain(
+        &mut self,
+        new_size: Extent2D,
+    ) -> Result<(), SwapchainRebuildFailure> {
         if self.surface_mode.is_headless() {
             self.window_state.update_curr_size(new_size);
             return Ok(());
@@ -2249,6 +2298,34 @@ impl VkRenderCore {
         std::mem::take(&mut self.frame_capture_statuses)
     }
 
+    /// Prepare a BSP mount from extracted BSP data, uploading GPU resources.
+    #[cfg(feature = "bsp")]
+    pub fn prepare_bsp_mount(
+        &mut self,
+        extracted: &bsp::extract::ExtractedBsp,
+    ) -> Result<crate::api::bsp::PreparedBspMount, String> {
+        use crate::vulkan::vk_types::VkQueueType;
+
+        let transfer_queue = self
+            .vulkan_cache
+            .queues
+            .get_queue(VkQueueType::Transfer);
+        let transfer_pool = self.transfer.get_local_transfer_pool().pool;
+
+        crate::api::bsp::PreparedBspMount::upload_from_extracted(
+            extracted,
+            &self.device,
+            &self.allocator,
+            transfer_pool,
+            transfer_queue,
+            &self.vulkan_cache.desc_layouts,
+            self.buffer_and_desc_limits
+                .min_uniform_buffer_offset_alignment,
+            self.frame_slot_count,
+            &self.data_cache,
+        )
+    }
+
     fn fail_due_frame_captures(&mut self, frame_number: u32, message: impl Into<String>) {
         let message = message.into();
         for capture in self.due_frame_captures.drain(..) {
@@ -2595,6 +2672,10 @@ impl VkRenderCore {
                 material_retirement_queue: &mut self.material_retirement_queue,
                 texture_retirement_queue: &mut self.texture_retirement_queue,
                 bounds_retirement_queue: &mut self.bounds_retirement_queue,
+                #[cfg(feature = "bsp")]
+                bsp_retirement_queue: &mut self.bsp_retirement_queue,
+                #[cfg(feature = "bsp")]
+                allocator: &self.allocator,
                 data_cache: &self.data_cache,
                 gpu_timing: &mut self.gpu_timing,
             };

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use engine::prelude::*;
-use engine::{camera, events, input, render};
+use engine::{camera, command, events, input, object, render};
 use engine_events as raw_events;
 use input as raw_input;
 use renderer as raw_renderer;
@@ -48,6 +48,41 @@ fn facade_and_raw_crate_imports_compile() {
     let _: Option<render::MaterialHandle> = None;
     let _: Option<render::TextureHandle> = None;
     let _: render::CaptureTarget = render::CaptureTarget::Present;
+    let _: Option<render::ObjectLifecycleOutcome> = None;
+    let _: Option<render::ObjectMutationOutcome> = None;
+    let _: Option<render::ObjectSummary> = None;
+
+    // ── Object facade module ──
+    let _: object::ObjectKind = object::ObjectKind::Node;
+    let _: Option<object::ObjectId> = None;
+    let _: Option<object::SceneObjectId> = None;
+    let _: Option<object::ObjectSummary> = None;
+    let _: Option<object::ObjectCapabilities> = None;
+    let _: Option<object::ComponentEnvelope> = None;
+    let _: Option<object::ComponentRegistry> = None;
+    let _: Option<object::ObjectQueryFilter> = None;
+    let _: Option<object::RayHit> = None;
+    let _: Option<object::Selection> = None;
+    let _: Option<object::SelectionChange> = None;
+    let _: fn(&object::ObjectId) -> object::ObjectKind = object::object_kind;
+    let _: fn(object::ObjectKind) -> &'static str = object::object_kind_label;
+
+    // ── Command facade module ──
+    let _: command::CommandHistory = command::CommandHistory::new(32);
+    let _: Option<Box<dyn command::Command>> = None;
+    let _: Option<command::CommandResult> = None;
+    let _: Option<command::DuplicateObjectsCommand> = None;
+    let _: Option<command::SetObjectTransformCommand> = None;
+
+    // ── Camera facade: EditorCamera ──
+    let _: Option<camera::EditorCamera> = None;
+    let _: Option<camera::EditorProjection> = None;
+
+    // ── Events facade: persistent lifecycle and opt-in legacy adapter ──
+    let _: events::LegacySceneEventAdapter = events::LegacySceneEventAdapter;
+    let _: Option<events::SceneObjectLifecycleEvent> = None;
+    let _: Option<events::SceneObjectLifecycleSnapshot> = None;
+    let _: Option<events::SceneObjectLifecycleAction> = None;
 
     let mut raw_input_system = raw_input::InputSystem::new();
     raw_input_system.dispatch_frame();
@@ -112,6 +147,10 @@ fn prelude_imports_common_facade_types() {
         &mut FrameClock,
     ) -> AppFrameBeginReport = begin_app_frame;
     let _: fn(&mut EventBus, u64) -> AppFrameEndReport = end_app_frame;
+    let _: Option<EditorCamera> = None;
+    let _: Option<EditorProjection> = None;
+    let _: fn(&ObjectId) -> ObjectKind = object_kind;
+    let _: fn(ObjectKind) -> &'static str = object_kind_label;
 
     fn accepts_prelude_types(
         _action: ActionId,
@@ -127,6 +166,18 @@ fn prelude_imports_common_facade_types() {
         _node: Option<SceneNodeId>,
         _controller: Option<FPSController>,
         _orbit: Option<OrbitCamera>,
+        _editor_camera: Option<EditorCamera>,
+        _editor_projection: Option<EditorProjection>,
+        _object_id: Option<ObjectId>,
+        _object_kind: Option<ObjectKind>,
+        _persistent_object_id: Option<SceneObjectId>,
+        _selection: Option<Selection>,
+        _selection_change: Option<SelectionChange>,
+        _query_filter: Option<ObjectQueryFilter>,
+        _ray_hit: Option<RayHit>,
+        _command: Option<Box<dyn Command>>,
+        _command_history: Option<CommandHistory>,
+        _command_result: Option<CommandResult>,
     ) {
     }
 
@@ -134,6 +185,18 @@ fn prelude_imports_common_facade_types() {
         ActionId::new("jump"),
         EventStage::Input,
         FrameId(0),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
         None,
         None,
         None,

@@ -36,6 +36,9 @@ Related runtime files:
 - `src/renderer/src/scene/scene_world.rs`
 - `src/renderer/src/scene/render_submission.rs`
 - `src/renderer/src/vulkan/vk_render.rs`
+- `src/renderer/src/data/bsp_import.rs` — BSP face-mesh upload pipeline (behind `bsp` feature)
+- `src/renderer/src/data/bsp_material.rs` — BSP material descriptor creation
+- `src/renderer/src/scene/bsp_visibility.rs` — BSP PVS integration, `BspMountState`
 
 ## Current Risks
 

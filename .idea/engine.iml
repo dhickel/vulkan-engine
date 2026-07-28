@@ -21,6 +21,20 @@
       <sourceFolder url="file://$MODULE_DIR$/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/apps/voxel_demo/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/apps/voxel_demo/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/apps/bsp_beta/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/apps/bsp_beta/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src/bsp/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src/bsp/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/src/bsp_runtime/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src/bsp_runtime/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/src/package_io/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src/package_io/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/src/bsp/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/apps/dungeon_dogfood/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/src/bsp_generator/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src/bsp_generator/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/tools/dungeon_gen/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

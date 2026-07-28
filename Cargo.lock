@@ -396,6 +396,64 @@ dependencies = [
 ]
 
 [[package]]
+name = "bsp"
+version = "0.1.0"
+dependencies = [
+ "glam 0.28.0",
+]
+
+[[package]]
+name = "bsp_beta"
+version = "0.1.0"
+dependencies = [
+ "bsp",
+ "bsp_generator",
+ "bsp_runtime",
+ "engine",
+ "engine_events",
+ "engine_pack",
+ "env_logger 0.11.9",
+ "glam 0.28.0",
+ "input",
+ "log",
+ "package_io",
+ "physics",
+ "renderer",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "toml",
+ "winit",
+]
+
+[[package]]
+name = "bsp_generator"
+version = "0.1.0"
+dependencies = [
+ "bsp",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "walkdir",
+]
+
+[[package]]
+name = "bsp_runtime"
+version = "0.1.0"
+dependencies = [
+ "bsp",
+ "engine_events",
+ "glam 0.28.0",
+ "log",
+ "package_io",
+ "renderer",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "built"
 version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -915,6 +973,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dungeon_gen"
+version = "0.1.0"
+dependencies = [
+ "bsp_generator",
+]
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -953,8 +1018,12 @@ dependencies = [
 name = "engine_pack"
 version = "0.1.0"
 dependencies = [
+ "bsp",
+ "bsp_generator",
+ "bsp_runtime",
  "launch_shared",
  "libc",
+ "package_io",
  "renderer",
  "serde",
  "serde_json",
@@ -1321,6 +1390,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "779ae4bf7e8421cf91c0b3b64e7e8b40b862fba4d393f59150042de7c4965a94"
 dependencies = [
  "bytemuck",
+ "libm",
  "serde",
 ]
 
@@ -2590,6 +2660,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "package_io"
+version = "0.1.0"
+
+[[package]]
 name = "parking_lot"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3118,6 +3192,7 @@ dependencies = [
  "ash",
  "ash-window",
  "backtrace",
+ "bsp",
  "bytemuck",
  "cfg-if",
  "engine_events",
@@ -3142,6 +3217,7 @@ dependencies = [
  "russimp-sys-ng",
  "serde",
  "serde_json",
+ "sha2",
  "toml",
  "vk-mem",
  "winit",

@@ -1,0 +1,8 @@
+[package]
+name = "dungeon_gen"
+version = "0.1.0"
+edition = "2021"
+description = "CLI helper for generating BSP dungeon .map files"
+
+[dependencies]
+bsp_generator = { path = "../../src/bsp_generator" }

@@ -150,4 +150,5 @@ Use true headless draw-target capture only when the event change also affects vi
 
 - [Rendering Pipeline Mental Model](01-rendering-pipeline-mental-model.md)
 - [Input winit Event Pump Integration](09-input-winit-integration.md)
+- [Scene Object Lifecycle](20-scene-object-lifecycle.md)
 - [API Events and Lifecycle](../api/12-events-and-lifecycle.md)

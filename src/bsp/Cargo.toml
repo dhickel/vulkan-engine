@@ -1,0 +1,8 @@
+[package]
+name = "bsp"
+version = "0.1.0"
+edition = "2021"
+description = "Pure byte-level BSP29/BSP2/WAD/entity parser trust boundary"
+
+[dependencies]
+glam = { version = "0.28", default-features = false, features = ["libm"] }

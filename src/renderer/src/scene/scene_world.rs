@@ -14,17 +14,26 @@ use crate::api::scene::{
     BoundsUnknownReason, DirectionalLight, DirectionalLightId, MeshBoundsEntry, PointLight,
     PointLightId, SceneAssetReference, SceneBounds, SpotLight, SpotLightId,
 };
-use crate::data::camera::{Aabb, Frustum, Ray};
+use crate::data::camera::{Aabb, AabbRayHit, Frustum, Ray};
 use crate::data::gpu_data::SceneDataUBO;
 use crate::data::handles::EnvironmentHandle;
 use crate::data::handles::MeshHandle;
+use crate::object::identity::{ObjectId, SceneRuntimeId};
+use crate::scene::object_store::{
+    mint_provenance, CreateDirectionalLightPlan, CreateNodePlan, CreatePointLightPlan,
+    CreateSpotLightPlan, ObjectHandle, ObjectRecord, RemoveDirectionalLightPlan, RemoveNodePlan,
+    RemovePointLightPlan, RemoveSpotLightPlan, SceneNodeRemovalSnapshot,
+};
 use crate::scene::render_submission::{
     FrameDirectionalLight, FrameDrawItem, FramePointLight, FrameSpotLight, RenderSubmission,
     MAX_DIRECTIONAL_LIGHTS_GPU, MAX_POINT_LIGHTS_GPU, MAX_SPOT_LIGHTS_GPU,
 };
+use engine_events::{ObjectKind, SceneObjectId};
 use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::any::Any;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SceneNodeId {
@@ -101,12 +110,13 @@ impl Default for SceneNode {
 #[derive(Clone, Debug)]
 struct SceneNodeEntry {
     generation: u32,
-    node: Option<SceneNode>,
+    node: Option<(SceneNode, ObjectRecord)>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct RestorableSceneSubtree {
     node: SceneNode,
+    record: ObjectRecord,
     children: Vec<RestorableSceneSubtree>,
 }
 
@@ -141,22 +151,24 @@ pub(crate) enum SpotLightRefError {
 #[derive(Clone, Debug)]
 struct PointLightEntry {
     generation: u32,
-    light: Option<PointLight>,
+    light: Option<(PointLight, ObjectRecord)>,
 }
 
 #[derive(Clone, Debug)]
 struct DirectionalLightEntry {
     generation: u32,
-    light: Option<DirectionalLight>,
+    light: Option<(DirectionalLight, ObjectRecord)>,
 }
 
 #[derive(Clone, Debug)]
 struct SpotLightEntry {
     generation: u32,
-    light: Option<SpotLight>,
+    light: Option<(SpotLight, ObjectRecord)>,
 }
 
 pub struct SceneWorld {
+    /// Opaque runtime provenance, minted once at construction.
+    provenance: SceneRuntimeId,
     nodes: Vec<SceneNodeEntry>,
     free_slots: Vec<u32>,
     root: Option<SceneNodeId>,
@@ -170,10 +182,24 @@ pub struct SceneWorld {
     free_spot_light_slots: Vec<u32>,
     /// ID of the directional light that casts shadows (at most one).
     shadow_casting_directional: Option<DirectionalLightId>,
+    /// Reverse index: persistent SceneObjectId → typed runtime handle.
+    reverse_index: HashMap<SceneObjectId, ObjectHandle>,
     /// When true, mesh-backed nodes outside the camera frustum are omitted
     /// from `build_submission`. Descendants are tested independently. Enabled
     /// by default.
     pub enable_frustum_culling: bool,
+    /// Published BSP mount for PVS-aware culling, light selection, and
+    /// depth-sorting. `None` when no mount is active. The lease moves with
+    /// the mount through every ownership transition.
+    #[cfg(feature = "bsp")]
+    pub(crate) bsp_mount: Option<crate::api::bsp::PublishedBspMount>,
+    /// Phase 07: Pending evidence request data for the next submission build.
+    /// Stored as (corpus_identity, request_identity, visibility).
+    #[cfg(feature = "bsp")]
+    pub(crate) pending_evidence_data: Option<(String, String, crate::api::bsp::BspEvidenceVisibility)>,
+    /// Phase 07: Frame number for the pending evidence request.
+    #[cfg(feature = "bsp")]
+    pub(crate) pending_evidence_frame: u32,
 }
 
 impl Default for SceneWorld {
@@ -185,6 +211,7 @@ impl Default for SceneWorld {
 impl SceneWorld {
     pub fn new() -> Self {
         Self {
+            provenance: mint_provenance(),
             nodes: Vec::with_capacity(256),
             free_slots: Vec::new(),
             root: None,
@@ -197,8 +224,39 @@ impl SceneWorld {
             spot_lights: Vec::with_capacity(16),
             free_spot_light_slots: Vec::new(),
             shadow_casting_directional: None,
+            reverse_index: HashMap::new(),
             enable_frustum_culling: true,
+            #[cfg(feature = "bsp")]
+            bsp_mount: None,
+            #[cfg(feature = "bsp")]
+            pending_evidence_data: None,
+            #[cfg(feature = "bsp")]
+            pending_evidence_frame: 0,
         }
+    }
+
+    /// Access the world's provenance token.
+    pub(crate) fn provenance(&self) -> SceneRuntimeId {
+        self.provenance
+    }
+
+    /// Whether an object identity was minted by this scene, regardless of
+    /// whether its slot is still live. Used to reject cross-scene snapshots.
+    pub(crate) fn owns_object_provenance(&self, id: ObjectId) -> bool {
+        id.provenance() == self.provenance
+    }
+
+    /// Test-only: artificially push a node slot's generation to u32::MAX.
+    #[doc(hidden)]
+    pub fn test_set_generation_max(&mut self, id: SceneNodeId) -> bool {
+        let Some(entry) = self.nodes.get_mut(id.slot as usize) else {
+            return false;
+        };
+        if entry.generation != id.generation || entry.node.is_none() {
+            return false;
+        }
+        entry.generation = u32::MAX;
+        true
     }
 
     pub(crate) fn root_id(&self) -> Option<SceneNodeId> {
@@ -225,7 +283,7 @@ impl SceneWorld {
             entry
                 .node
                 .as_ref()
-                .map(|node| (SceneNodeId::new(slot as u32, entry.generation), node))
+                .map(|(node, _record)| (SceneNodeId::new(slot as u32, entry.generation), node))
         })
     }
 
@@ -235,7 +293,7 @@ impl SceneWorld {
             .iter()
             .enumerate()
             .filter_map(|(slot, entry)| {
-                entry.light.as_ref().map(|light| {
+                entry.light.as_ref().map(|(light, _record)| {
                     (
                         PointLightId {
                             slot: slot as u32,
@@ -255,7 +313,7 @@ impl SceneWorld {
             .iter()
             .enumerate()
             .filter_map(|(slot, entry)| {
-                entry.light.as_ref().map(|light| {
+                entry.light.as_ref().map(|(light, _record)| {
                     (
                         DirectionalLightId {
                             slot: slot as u32,
@@ -275,7 +333,7 @@ impl SceneWorld {
             .iter()
             .enumerate()
             .filter_map(|(slot, entry)| {
-                entry.light.as_ref().map(|light| {
+                entry.light.as_ref().map(|(light, _record)| {
                     (
                         SpotLightId {
                             slot: slot as u32,
@@ -309,15 +367,72 @@ impl SceneWorld {
         if entry.generation != id.generation {
             return None;
         }
-        entry.node.as_ref()
+        entry.node.as_ref().map(|(node, _)| node)
     }
 
-    pub fn get_node_mut(&mut self, id: SceneNodeId) -> Option<&mut SceneNode> {
+    pub(crate) fn get_node_mut(&mut self, id: SceneNodeId) -> Option<&mut SceneNode> {
         let entry = self.nodes.get_mut(id.slot as usize)?;
         if entry.generation != id.generation {
             return None;
         }
-        entry.node.as_mut()
+        entry.node.as_mut().map(|(node, _)| node)
+    }
+
+    /// Get a shared reference to a node's record.
+    pub fn get_node_record(&self, id: SceneNodeId) -> Option<&ObjectRecord> {
+        let entry = self.nodes.get(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.node.as_ref().map(|(_, record)| record)
+    }
+
+    /// Replace a node's persistent identity while keeping the reverse index
+    /// synchronized. Load normalization uses this only on an unpublished
+    /// candidate world after validating scene-wide uniqueness.
+    pub(crate) fn replace_node_persistent_id(
+        &mut self,
+        id: SceneNodeId,
+        persistent_id: SceneObjectId,
+    ) -> Result<(), String> {
+        if self.validate_node_ref(id).is_err() {
+            return Err(format!("invalid node handle ({}, {})", id.slot, id.generation));
+        }
+        if let Some(existing) = self.reverse_index.get(&persistent_id) {
+            if *existing != ObjectHandle::Node(id) {
+                return Err(format!("duplicate persistent ID {persistent_id}"));
+            }
+        }
+
+        let record = self
+            .get_node_record_mut(id)
+            .expect("node was validated before persistent-ID replacement");
+        let old_id = std::mem::replace(&mut record.persistent_id, persistent_id.clone());
+        self.reverse_index.remove(&old_id);
+        self.reverse_index
+            .insert(persistent_id, ObjectHandle::Node(id));
+        Ok(())
+    }
+
+    /// Get a mutable reference to a node's record.
+    pub(crate) fn get_node_record_mut(&mut self, id: SceneNodeId) -> Option<&mut ObjectRecord> {
+        let entry = self.nodes.get_mut(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.node.as_mut().map(|(_, record)| record)
+    }
+
+    /// Get mutable references to both the node and its record.
+    pub(crate) fn get_node_with_record_mut(
+        &mut self,
+        id: SceneNodeId,
+    ) -> Option<(&mut SceneNode, &mut ObjectRecord)> {
+        let entry = self.nodes.get_mut(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.node.as_mut().map(|(node, record)| (node, record))
     }
 
     /// Invalidate all derived state (world bounds, subtree bounds) for a
@@ -346,21 +461,24 @@ impl SceneWorld {
     pub(crate) fn add_node(
         &mut self,
         parent: Option<SceneNodeId>,
-        mut node: SceneNode,
+        node: SceneNode,
     ) -> SceneNodeId {
-        let resolved_parent = parent.filter(|id| self.is_valid_node_id(*id));
-        node.parent = resolved_parent;
-        let id = self.allocate_node_slot(node);
+        // Direct world-side creators (for example command placement) provide
+        // their stable ID on the node. Co-locate it in the record before the
+        // object becomes live so save never has to synthesize identity.
+        let record = ObjectRecord::for_new_node(node.stable_id.clone());
+        let plan = self.prepare_create_node(parent, node, record);
+        self.commit_create_node(plan)
+    }
 
-        if let Some(parent_id) = resolved_parent {
-            if let Some(parent_node) = self.get_node_mut(parent_id) {
-                parent_node.children.push(id);
-            }
-        } else if self.root.is_none() {
-            self.root = Some(id);
-        }
-
-        id
+    pub(crate) fn add_node_with_record(
+        &mut self,
+        parent: Option<SceneNodeId>,
+        node: SceneNode,
+        record: ObjectRecord,
+    ) -> SceneNodeId {
+        let plan = self.prepare_create_node(parent, node, record);
+        self.commit_create_node(plan)
     }
 
     pub fn add_node_with_parts(
@@ -406,19 +524,212 @@ impl SceneWorld {
         self.add_node(parent, node)
     }
 
-    pub fn remove_node(&mut self, node_id: SceneNodeId) -> bool {
-        self.remove_node_recursive(node_id)
+    // ── Prepare / commit lifecycle ───────────────────────────────────
+
+    /// Validate and stage a node creation. Resolves parent, allocates a
+    /// slot and generation, and produces an infallible commit plan.
+    pub(crate) fn prepare_create_node(
+        &mut self,
+        parent: Option<SceneNodeId>,
+        mut node: SceneNode,
+        record: ObjectRecord,
+    ) -> CreateNodePlan {
+        let resolved_parent = parent.filter(|id| self.is_valid_node_id(*id));
+        node.parent = resolved_parent;
+
+        let (slot, generation, is_new_slot) = if let Some(free_slot) = self.free_slots.pop() {
+            let entry = &mut self.nodes[free_slot as usize];
+            debug_assert!(entry.node.is_none(), "free slot list contained a live node");
+            (free_slot, entry.generation, false)
+        } else {
+            let slot = self.nodes.len() as u32;
+            (slot, 0, true)
+        };
+
+        CreateNodePlan {
+            slot,
+            generation,
+            node,
+            record,
+            parent: resolved_parent,
+            is_new_slot,
+        }
+    }
+
+    /// Commit a node creation plan. Infallible after successful prepare.
+    pub(crate) fn commit_create_node(&mut self, plan: CreateNodePlan) -> SceneNodeId {
+        let CreateNodePlan {
+            slot,
+            generation,
+            node,
+            record,
+            parent,
+            is_new_slot,
+        } = plan;
+
+        let persistent_id = record.persistent_id.clone();
+        let id = SceneNodeId::new(slot, generation);
+
+        // Update reverse index
+        self.reverse_index
+            .insert(persistent_id, ObjectHandle::Node(id));
+
+        if is_new_slot {
+            self.nodes.push(SceneNodeEntry {
+                generation,
+                node: Some((node, record)),
+            });
+        } else {
+            let entry = &mut self.nodes[slot as usize];
+            entry.node = Some((node, record));
+        }
+
+        // Attach to parent or set as root.
+        if let Some(parent_id) = parent {
+            if let Some(parent_node) = self.get_node_mut(parent_id) {
+                parent_node.children.push(id);
+            }
+        } else if self.root.is_none() {
+            self.root = Some(id);
+        }
+
+        id
+    }
+
+    pub(crate) fn remove_node(&mut self, node_id: SceneNodeId) -> bool {
+        let plan = match self.prepare_remove_node(node_id) {
+            Some(p) => p,
+            None => return false,
+        };
+        self.commit_remove_node(plan);
+        true
+    }
+
+    /// Prepare removal: validate and snapshot the entire subtree in
+    /// post-order (children before parent). Returns the plan or `None`
+    /// when the node is not valid.
+    pub(crate) fn prepare_remove_node(&self, node_id: SceneNodeId) -> Option<RemoveNodePlan> {
+        if self.validate_node_ref(node_id).is_err() {
+            return None;
+        }
+        let mut snapshots = Vec::new();
+        self.collect_removal_snapshots(node_id, None, &mut snapshots);
+
+        let root_replaced =
+            self.root == Some(node_id) && snapshots.iter().any(|s| s.id == node_id);
+
+        Some(RemoveNodePlan {
+            snapshots,
+            root_replaced,
+        })
+    }
+
+    /// Commit a node removal plan. Infallible after successful prepare.
+    pub(crate) fn commit_remove_node(&mut self, plan: RemoveNodePlan) {
+        for snap in plan.snapshots.iter().rev() {
+            // Remove from parent's children list.
+            if let Some(parent_id) = snap.parent {
+                if let Some(parent_entry) = self.nodes.get_mut(parent_id.slot as usize) {
+                    if let Some((ref mut parent_node, _)) = parent_entry.node {
+                        parent_node.children.retain(|c| *c != snap.id);
+                    }
+                }
+            }
+
+            // Clear the slot.
+            if let Some(entry) = self.nodes.get_mut(snap.id.slot as usize) {
+                if entry.generation == snap.id.generation {
+                    // Remove from reverse index.
+                    self.reverse_index.remove(&snap.record.persistent_id);
+                    entry.node = None;
+                    if bump_generation(&mut entry.generation) {
+                        self.free_slots.push(snap.id.slot);
+                    }
+                }
+            }
+        }
+
+        if plan.root_replaced {
+            self.root = None;
+        }
+    }
+
+    /// Collect subtree snapshots in post-order (children before parent).
+    fn collect_removal_snapshots(
+        &self,
+        node_id: SceneNodeId,
+        parent_id: Option<SceneNodeId>,
+        snapshots: &mut Vec<SceneNodeRemovalSnapshot>,
+    ) {
+        let Some(entry) = self.nodes.get(node_id.slot as usize) else {
+            return;
+        };
+        if entry.generation != node_id.generation {
+            return;
+        }
+        let Some((ref node, ref record)) = entry.node else {
+            return;
+        };
+
+        let children: Vec<SceneNodeId> = node.children.clone();
+        for child_id in children {
+            if self.is_valid_node_id(child_id) {
+                self.collect_removal_snapshots(child_id, Some(node_id), snapshots);
+            }
+        }
+
+        snapshots.push(SceneNodeRemovalSnapshot {
+            id: node_id,
+            node: node.clone(),
+            record: record.clone(),
+            parent: parent_id,
+            parent_index: snapshots
+                .iter()
+                .position(|s| s.id == parent_id.unwrap_or(SceneNodeId::new(u32::MAX, 0)))
+                .unwrap_or(usize::MAX),
+        });
+    }
+
+    /// Return a subtree's live node identities in deterministic
+    /// parent-before-child order.
+    pub(crate) fn subtree_node_ids_preorder(&self, node_id: SceneNodeId) -> Vec<ObjectId> {
+        let mut ids = Vec::new();
+        self.collect_subtree_node_ids_preorder(node_id, &mut ids);
+        ids
+    }
+
+    fn collect_subtree_node_ids_preorder(&self, node_id: SceneNodeId, ids: &mut Vec<ObjectId>) {
+        let Some(id) = self.object_id_for_node(node_id) else {
+            return;
+        };
+        ids.push(id);
+        let Some(node) = self.get_node(node_id) else {
+            return;
+        };
+        for child in node.children.iter().copied() {
+            self.collect_subtree_node_ids_preorder(child, ids);
+        }
     }
 
     pub(crate) fn clone_subtree(&self, node_id: SceneNodeId) -> Option<RestorableSceneSubtree> {
-        let node = self.get_node(node_id)?.clone();
+        let entry = self.nodes.get(node_id.slot as usize)?;
+        if entry.generation != node_id.generation {
+            return None;
+        }
+        let (node, record) = entry.node.as_ref()?;
+        let node = node.clone();
+        let record = record.clone();
         let children = node
             .children
             .iter()
             .copied()
             .filter_map(|child| self.clone_subtree(child))
             .collect();
-        Some(RestorableSceneSubtree { node, children })
+        Some(RestorableSceneSubtree {
+            node,
+            record,
+            children,
+        })
     }
 
     pub(crate) fn restore_subtree(&mut self, snapshot: RestorableSceneSubtree) -> SceneNodeId {
@@ -501,7 +812,7 @@ impl SceneWorld {
         let mut closest: Option<(f32, SceneNodeId)> = None;
 
         for (slot, entry) in self.nodes.iter().enumerate() {
-            let Some(ref node) = entry.node else {
+            let Some((ref node, _)) = entry.node else {
                 continue;
             };
 
@@ -570,7 +881,9 @@ impl SceneWorld {
         // on-the-fly world transform (mirrors node_pick_bounds_exact +
         // compute_node_world_bounds but reads from scratch instead of
         // cached fields).
-        if let Some(aabb) = pick_bounds_readonly(node, &world) {
+        // Editor-pick path (from the legacy `pick` API): use editor bounds
+        // which include helper proxies for empty nodes.
+        if let Some(aabb) = pick_bounds_readonly_editor(node, &world) {
             if let Some(t) = aabb.intersect_ray(ray) {
                 if closest.map_or(true, |(best_t, _)| t < best_t) {
                     *closest = Some((t, node_id));
@@ -597,7 +910,7 @@ impl SceneWorld {
             if submission.directional_lights.len() >= MAX_DIRECTIONAL_LIGHTS_GPU {
                 break;
             }
-            let Some(light) = entry.light else { continue };
+            let Some((light, _)) = entry.light else { continue };
             let light_id = DirectionalLightId {
                 slot: slot as u32,
                 generation: entry.generation,
@@ -611,13 +924,40 @@ impl SceneWorld {
         }
         submission.directional_light = submission.directional_lights.first().copied();
 
-        // Collect first N active lights (not first N slots) so sparse slot churn
-        // does not accidentally submit zero lights.
+        let frustum = if self.enable_frustum_culling {
+            Some(Frustum::from_view_projection(
+                &(self.camera.projection * self.camera.view),
+            ))
+        } else {
+            None
+        };
+
+        #[cfg(feature = "bsp")]
+        if let Some(ref mut mount) = self.bsp_mount {
+            // Update PVS first (requires &mut mount.state).
+            let cam_pos = self.camera.cam_pos;
+            mount.state.update_pvs(cam_pos);
+
+            submission.bsp_frame_values = crate::scene::render_submission::BspFrameValuesState {
+                style_intensities: mount.state.frame_style_intensities,
+                liquid_time: mount.state.frame_liquid_time,
+                arena_id: mount.state.arena_id,
+            };
+            let bsp_lights = mount
+                .state
+                .select_frame_lights_for_camera(cam_pos, MAX_POINT_LIGHTS_GPU);
+            submission.bsp_selected_lights = bsp_lights.clone();
+            submission.point_lights.extend(bsp_lights);
+        }
+
+        // Collect first N active app lights (not first N slots) after BSP-imported
+        // lights so the shared GPU cap is deterministic: PVS-selected BSP first,
+        // then app-added dynamics in insertion/slot order.
         for entry in self.point_lights.iter() {
             if submission.point_lights.len() >= MAX_POINT_LIGHTS_GPU {
                 break;
             }
-            if let Some(light) = entry.light {
+            if let Some((light, _)) = entry.light {
                 submission.point_lights.push(FramePointLight {
                     position: light.position,
                     color: light.color,
@@ -632,7 +972,7 @@ impl SceneWorld {
             if submission.spot_lights.len() >= MAX_SPOT_LIGHTS_GPU {
                 break;
             }
-            if let Some(light) = entry.light {
+            if let Some((light, _)) = entry.light {
                 let dir = light.direction.normalize();
                 let inner_half = light.inner_cone_angle * 0.5;
                 let outer_half = light.outer_cone_angle * 0.5;
@@ -648,6 +988,20 @@ impl SceneWorld {
             }
         }
 
+        #[cfg(feature = "bsp")]
+        if let Some(ref mount) = self.bsp_mount {
+            let evidence_active = self.evidence_active();
+            let all_visible = evidence_active && self.pending_evidence_data.as_ref()
+                .map(|(_, _, vis)| matches!(vis, crate::api::bsp::BspEvidenceVisibility::AllVisible))
+                .unwrap_or(false);
+            self.collect_bsp_draw_items_from_mount(mount, &mut submission, frustum.as_ref(), evidence_active, all_visible);
+        }
+        // Phase 07: Clear the pending evidence request after submission build.
+        #[cfg(feature = "bsp")]
+        {
+            self.pending_evidence_data = None;
+        }
+
         let Some(root_id) = self.root else {
             return submission;
         };
@@ -659,35 +1013,220 @@ impl SceneWorld {
         // Parent world transform and bounds must be resolved before culling.
         self.refresh_derived_state();
 
-        // Frustum culling is enabled by default and can be disabled through
-        // the Scene facade for diagnostics or compatibility.
-        let frustum = if self.enable_frustum_culling {
-            Some(Frustum::from_view_projection(
-                &(self.camera.projection * self.camera.view),
-            ))
-        } else {
-            None
-        };
-
         self.collect_draw_items_culled(root_id, &mut submission, frustum.as_ref());
 
         submission
     }
 
-    fn allocate_node_slot(&mut self, node: SceneNode) -> SceneNodeId {
-        if let Some(slot) = self.free_slots.pop() {
-            let entry = &mut self.nodes[slot as usize];
-            debug_assert!(entry.node.is_none(), "free slot list contained a live node");
-            entry.node = Some(node);
-            return SceneNodeId::new(slot, entry.generation);
+    #[cfg(feature = "bsp")]
+    fn collect_bsp_draw_items_from_mount(
+        &self,
+        mount: &crate::api::bsp::PublishedBspMount,
+        submission: &mut RenderSubmission,
+        frustum: Option<&Frustum>,
+        evidence_active: bool,
+        all_visible: bool,
+    ) {
+        use crate::scene::bsp_visibility::{
+            classify_bsp_visibility, mounted_visibility_decision, VisibilityDecision,
+        };
+        use crate::scene::render_submission::{
+            BspBatchSemanticIdentity, BspEvidenceCollector, BspSubmissionFailure,
+        };
+        use crate::api::bsp::BspCanonicalDigest;
+
+        let state = &mount.state;
+        let diagnostics = classify_bsp_visibility(&state.mounted_batches, state);
+        submission.bsp_diagnostics = diagnostics.clone();
+        log::debug!(
+            "BSP submission: total={} eligible={} pvs_visible={} pvs_culled={} conservative={} invalid_member={}",
+            diagnostics.total_mounted,
+            diagnostics.pvs_eligible,
+            diagnostics.pvs_visible,
+            diagnostics.pvs_culled,
+            diagnostics.conservative_visible,
+            diagnostics.invalid_membership,
+        );
+
+        // Phase 07: Populate evidence collector if a request is pending.
+        if evidence_active {
+            let (corpus, req_id, visibility) = self.pending_evidence_data.as_ref().unwrap();
+            let arena_id = mount.state.arena_id;
+            let request = crate::api::bsp::BspEvidenceRequest {
+                corpus_identity: corpus.clone(),
+                request_identity: req_id.clone(),
+                visibility: *visibility,
+                key: crate::api::bsp::BspEvidenceRequestKey(0),
+            };
+            let mut collector = BspEvidenceCollector::new(&request, arena_id, self.pending_evidence_frame);
+
+            // Derive atlas bytes from upload demand.
+            collector.atlas_bytes = mount.state.mounted_batches.first()
+                .map(|_| 0u64)
+                .unwrap_or(0);
+
+            // Populate neutral identities from canonical mounted batches.
+            for (batch_index, mounted) in state.mounted_batches.iter().enumerate() {
+                let batch = &mounted.render;
+                let key = &batch.key;
+                let digest = BspCanonicalDigest::compute(
+                    key.render_class,
+                    key.material_identity,
+                    key.lightmap_page,
+                    &key.style_ids,
+                    key.model_index,
+                    &batch.face_indices,
+                );
+                let identity = BspBatchSemanticIdentity {
+                    batch_index,
+                    canonical_digest: digest.0,
+                    face_count: batch.face_indices.len() as u32,
+                    source_faces: batch.face_indices.clone(),
+                    model_index: key.model_index,
+                    is_static: key.model_index == 0 && !batch.is_inline_model,
+                };
+                if identity.is_static {
+                    collector.neutral_identities.push(identity.clone());
+                    collector.mounted_identities.push(identity);
+                } else {
+                    collector.inline_batch_count += 1;
+                    collector.inline_face_count += batch.face_indices.len() as u32;
+                }
+            }
+
+            collector.pvs_eligible = diagnostics.pvs_eligible;
+            collector.pvs_culled = diagnostics.pvs_culled;
+
+            *submission.bsp_evidence_collector.borrow_mut() = Some(collector);
         }
 
-        let slot = self.nodes.len() as u32;
-        self.nodes.push(SceneNodeEntry {
-            generation: 0,
-            node: Some(node),
-        });
-        SceneNodeId::new(slot, 0)
+        for (batch_index, mounted) in state.mounted_batches.iter().enumerate() {
+            let batch = &mounted.render;
+            let model_index = mounted.render.model_index;
+            let is_static = model_index == 0 && !batch.is_inline_model;
+
+            // Compute canonical digest for this batch (needed for evidence and identity).
+            let canonical_digest = BspCanonicalDigest::compute(
+                batch.key.render_class,
+                batch.key.material_identity,
+                batch.key.lightmap_page,
+                &batch.key.style_ids,
+                batch.key.model_index,
+                &batch.face_indices,
+            );
+
+            // --- PVS Classification ---
+            let pvs_decision = if all_visible && is_static {
+                // All-visible override: treat static PVS-eligible batches as visible.
+                VisibilityDecision::Visible
+            } else {
+                mounted_visibility_decision(mounted, state)
+            };
+
+            match pvs_decision {
+                VisibilityDecision::PvsCulled => {
+                    if evidence_active && is_static {
+                        if let Some(ref mut collector) = *submission.bsp_evidence_collector.borrow_mut() {
+                            collector.cull_decisions.push((batch_index, crate::scene::render_submission::BspCullReason::PvsCulled));
+                        }
+                    }
+                    continue;
+                }
+                VisibilityDecision::Visible => {}
+            }
+
+            // --- Inline model frustum cull ---
+            let batch_transform = if batch.is_inline_model {
+                state
+                    .inline_model_transforms
+                    .get(&batch.model_index)
+                    .copied()
+                    .unwrap_or(Mat4::IDENTITY)
+            } else {
+                Mat4::IDENTITY
+            };
+
+            if batch.is_inline_model {
+                if let Some((world_min, world_max)) = state
+                    .inline_model_bounds
+                    .get(&batch.model_index)
+                    .copied()
+                {
+                    if !crate::scene::bsp_visibility::aabb_intersects_frustum(
+                        world_min, world_max, frustum,
+                    ) {
+                        continue; // intentional frustum cull
+                    }
+                }
+            }
+
+            // --- Resource validation (fail-closed) ---
+            let mesh_id = mounted.mesh;
+            let bsp_material_id = mounted.material;
+            let source_face_first = mounted
+                .render
+                .face_indices
+                .first()
+                .copied()
+                .unwrap_or(0);
+            let source_face_count = mounted.render.face_indices.len() as u32;
+
+            // Mesh slot zero is the explicit no-mesh sentinel. BSP material
+            // slot zero is cache-issued for the first real material and must
+            // reach cache generation validation during recording.
+            if mesh_id == MeshHandle::new(0, 0) {
+                let failure = BspSubmissionFailure {
+                    batch_index,
+                    source_face_first,
+                    source_face_count,
+                    pipeline_class: None,
+                    model_index,
+                    reason: format!(
+                        "missing required BSP state: mesh={:?} material={:?}",
+                        mesh_id, bsp_material_id
+                    ),
+                };
+                if submission.bsp_failure.is_none() {
+                    submission.bsp_failure = Some(failure);
+                }
+                // Evidence: record failure for static batches.
+                if evidence_active && is_static {
+                    if let Some(ref mut collector) = *submission.bsp_evidence_collector.borrow_mut() {
+                        collector.failures.push(crate::api::bsp::BspEvidenceFailure::MissingDescriptor { batch_index });
+                    }
+                }
+                continue;
+            }
+
+            let item = crate::scene::render_submission::BspFrameDrawItem {
+                mesh_id,
+                bsp_material_id,
+                transform: batch_transform,
+                batch_index,
+                source_face_first,
+                source_face_count,
+                pipeline_class: None,
+                model_index,
+                canonical_digest: canonical_digest.0,
+            };
+
+            // Evidence: record submitted identity.
+            if evidence_active && is_static {
+                if let Some(ref mut collector) = *submission.bsp_evidence_collector.borrow_mut() {
+                    collector.submitted_identities.push(BspBatchSemanticIdentity {
+                        batch_index,
+                        canonical_digest: canonical_digest.0,
+                        face_count: source_face_count,
+                        source_faces: mounted.render.face_indices.clone(),
+                        model_index,
+                        is_static: true,
+                    });
+                }
+            }
+
+            submission.bsp_draw_items.push(item);
+            submission.culling_stats.submitted_draw_items += 1;
+        }
     }
 
     fn restore_subtree_with_parent(
@@ -695,54 +1234,21 @@ impl SceneWorld {
         snapshot: RestorableSceneSubtree,
         parent: Option<SceneNodeId>,
     ) -> SceneNodeId {
-        let RestorableSceneSubtree { mut node, children } = snapshot;
+        let RestorableSceneSubtree {
+            mut node,
+            record,
+            children,
+        } = snapshot;
         node.parent = parent;
         node.children.clear();
         node.dirty = true;
-        let restored = self.add_node(parent, node);
+        let restored = self.add_node_with_record(parent, node, record);
 
         for child in children {
             self.restore_subtree_with_parent(child, Some(restored));
         }
 
         restored
-    }
-
-    fn remove_node_recursive(&mut self, node_id: SceneNodeId) -> bool {
-        let Some((parent, children)) = self
-            .get_node(node_id)
-            .map(|node| (node.parent, node.children.clone()))
-        else {
-            return false;
-        };
-
-        // Remove descendants first so parent links can be detached while this node is still valid.
-        for child in children {
-            let _ = self.remove_node_recursive(child);
-        }
-
-        if let Some(parent_id) = parent {
-            if let Some(parent_node) = self.get_node_mut(parent_id) {
-                parent_node.children.retain(|child_id| *child_id != node_id);
-            }
-        }
-
-        if self.root == Some(node_id) {
-            self.root = None;
-        }
-
-        let Some(entry) = self.nodes.get_mut(node_id.slot as usize) else {
-            return false;
-        };
-        if entry.generation != node_id.generation || entry.node.is_none() {
-            return false;
-        }
-
-        entry.node = None;
-        if bump_generation(&mut entry.generation) {
-            self.free_slots.push(node_id.slot);
-        }
-        true
     }
 
     fn is_descendant(&self, possible_descendant: SceneNodeId, ancestor: SceneNodeId) -> bool {
@@ -1013,28 +1519,75 @@ impl SceneWorld {
     }
 
     pub(crate) fn add_point_light(&mut self, light: PointLight) -> PointLightId {
-        if let Some(slot) = self.free_point_light_slots.pop() {
-            let entry = &mut self.point_lights[slot as usize];
-            debug_assert!(
-                entry.light.is_none(),
-                "free slot list contained a live point light"
-            );
-            entry.light = Some(light);
-            return PointLightId {
-                slot,
-                generation: entry.generation,
+        let record = ObjectRecord::for_new_point_light(None, None);
+        let plan = self.prepare_create_point_light(light, record);
+        self.commit_create_point_light(plan)
+    }
+
+    pub(crate) fn add_point_light_with_record(
+        &mut self,
+        light: PointLight,
+        record: ObjectRecord,
+    ) -> PointLightId {
+        let plan = self.prepare_create_point_light(light, record);
+        self.commit_create_point_light(plan)
+    }
+
+    pub(crate) fn prepare_create_point_light(
+        &mut self,
+        light: PointLight,
+        record: ObjectRecord,
+    ) -> CreatePointLightPlan {
+        let (slot, generation, is_new_slot) =
+            if let Some(free_slot) = self.free_point_light_slots.pop() {
+                let entry = &mut self.point_lights[free_slot as usize];
+                debug_assert!(
+                    entry.light.is_none(),
+                    "free slot list contained a live point light"
+                );
+                (free_slot, entry.generation, false)
+            } else {
+                let slot = self.point_lights.len() as u32;
+                (slot, 0, true)
             };
+
+        CreatePointLightPlan {
+            slot,
+            generation,
+            light,
+            record,
+            is_new_slot,
+        }
+    }
+
+    pub(crate) fn commit_create_point_light(
+        &mut self,
+        plan: CreatePointLightPlan,
+    ) -> PointLightId {
+        let CreatePointLightPlan {
+            slot,
+            generation,
+            light,
+            record,
+            is_new_slot,
+        } = plan;
+
+        let persistent_id = record.persistent_id.clone();
+        let id = PointLightId { slot, generation };
+        self.reverse_index
+            .insert(persistent_id, ObjectHandle::PointLight(id));
+
+        if is_new_slot {
+            self.point_lights.push(PointLightEntry {
+                generation,
+                light: Some((light, record)),
+            });
+        } else {
+            let entry = &mut self.point_lights[slot as usize];
+            entry.light = Some((light, record));
         }
 
-        let slot = self.point_lights.len() as u32;
-        self.point_lights.push(PointLightEntry {
-            generation: 0,
-            light: Some(light),
-        });
-        PointLightId {
-            slot,
-            generation: 0,
-        }
+        id
     }
 
     pub(crate) fn update_point_light(&mut self, id: PointLightId, light: PointLight) -> bool {
@@ -1044,22 +1597,72 @@ impl SceneWorld {
         if entry.generation != id.generation || entry.light.is_none() {
             return false;
         }
-        entry.light = Some(light);
-        true
+        let record = entry.light.as_ref().map(|(_, r)| r.clone());
+        if let Some(record) = record {
+            entry.light = Some((light, record));
+            return true;
+        }
+        false
+    }
+
+    /// Get a point light's record.
+    pub(crate) fn get_point_light_record(&self, id: PointLightId) -> Option<&ObjectRecord> {
+        let entry = self.point_lights.get(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.light.as_ref().map(|(_, r)| r)
+    }
+
+    /// Get a mutable point light record.
+    pub(crate) fn get_point_light_record_mut(
+        &mut self,
+        id: PointLightId,
+    ) -> Option<&mut ObjectRecord> {
+        let entry = self.point_lights.get_mut(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.light.as_mut().map(|(_, r)| r)
     }
 
     pub(crate) fn remove_point_light(&mut self, id: PointLightId) -> bool {
-        let Some(entry) = self.point_lights.get_mut(id.slot as usize) else {
-            return false;
+        let plan = match self.prepare_remove_point_light(id) {
+            Some(p) => p,
+            None => return false,
         };
-        if entry.generation != id.generation || entry.light.is_none() {
-            return false;
+        self.commit_remove_point_light(plan);
+        true
+    }
+
+    pub(crate) fn prepare_remove_point_light(
+        &self,
+        id: PointLightId,
+    ) -> Option<RemovePointLightPlan> {
+        let entry = self.point_lights.get(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
         }
+        let (light, record) = entry.light.as_ref()?;
+        Some(RemovePointLightPlan {
+            id,
+            light: *light,
+            record: record.clone(),
+        })
+    }
+
+    pub(crate) fn commit_remove_point_light(&mut self, plan: RemovePointLightPlan) {
+        let Some(entry) = self.point_lights.get_mut(plan.id.slot as usize) else {
+            return;
+        };
+        if entry.generation != plan.id.generation || entry.light.is_none() {
+            return;
+        }
+        self.reverse_index.remove(&plan.record.persistent_id);
         entry.light = None;
         if bump_generation(&mut entry.generation) {
-            self.free_point_light_slots.push(id.slot);
+            self.free_point_light_slots.push(plan.id.slot);
         }
-        true
     }
 
     // Directional light handle validation and lifecycle
@@ -1081,28 +1684,75 @@ impl SceneWorld {
     }
 
     pub(crate) fn add_directional_light(&mut self, light: DirectionalLight) -> DirectionalLightId {
-        if let Some(slot) = self.free_directional_light_slots.pop() {
-            let entry = &mut self.directional_lights[slot as usize];
-            debug_assert!(
-                entry.light.is_none(),
-                "free slot list contained a live directional light"
-            );
-            entry.light = Some(light);
-            return DirectionalLightId {
-                slot,
-                generation: entry.generation,
+        let record = ObjectRecord::for_new_directional_light(None, None);
+        let plan = self.prepare_create_directional_light(light, record);
+        self.commit_create_directional_light(plan)
+    }
+
+    pub(crate) fn add_directional_light_with_record(
+        &mut self,
+        light: DirectionalLight,
+        record: ObjectRecord,
+    ) -> DirectionalLightId {
+        let plan = self.prepare_create_directional_light(light, record);
+        self.commit_create_directional_light(plan)
+    }
+
+    pub(crate) fn prepare_create_directional_light(
+        &mut self,
+        light: DirectionalLight,
+        record: ObjectRecord,
+    ) -> CreateDirectionalLightPlan {
+        let (slot, generation, is_new_slot) =
+            if let Some(free_slot) = self.free_directional_light_slots.pop() {
+                let entry = &mut self.directional_lights[free_slot as usize];
+                debug_assert!(
+                    entry.light.is_none(),
+                    "free slot list contained a live directional light"
+                );
+                (free_slot, entry.generation, false)
+            } else {
+                let slot = self.directional_lights.len() as u32;
+                (slot, 0, true)
             };
+
+        CreateDirectionalLightPlan {
+            slot,
+            generation,
+            light,
+            record,
+            is_new_slot,
+        }
+    }
+
+    pub(crate) fn commit_create_directional_light(
+        &mut self,
+        plan: CreateDirectionalLightPlan,
+    ) -> DirectionalLightId {
+        let CreateDirectionalLightPlan {
+            slot,
+            generation,
+            light,
+            record,
+            is_new_slot,
+        } = plan;
+
+        let persistent_id = record.persistent_id.clone();
+        let id = DirectionalLightId { slot, generation };
+        self.reverse_index
+            .insert(persistent_id, ObjectHandle::DirectionalLight(id));
+
+        if is_new_slot {
+            self.directional_lights.push(DirectionalLightEntry {
+                generation,
+                light: Some((light, record)),
+            });
+        } else {
+            let entry = &mut self.directional_lights[slot as usize];
+            entry.light = Some((light, record));
         }
 
-        let slot = self.directional_lights.len() as u32;
-        self.directional_lights.push(DirectionalLightEntry {
-            generation: 0,
-            light: Some(light),
-        });
-        DirectionalLightId {
-            slot,
-            generation: 0,
-        }
+        id
     }
 
     pub(crate) fn update_directional_light(
@@ -1116,37 +1766,92 @@ impl SceneWorld {
         if entry.generation != id.generation || entry.light.is_none() {
             return false;
         }
-        entry.light = Some(light);
-        true
+        let record = entry.light.as_ref().map(|(_, r)| r.clone());
+        if let Some(record) = record {
+            entry.light = Some((light, record));
+            return true;
+        }
+        false
+    }
+
+    /// Get a directional light's record.
+    pub fn get_directional_light_record(
+        &self,
+        id: DirectionalLightId,
+    ) -> Option<&ObjectRecord> {
+        let entry = self.directional_lights.get(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.light.as_ref().map(|(_, r)| r)
+    }
+
+    /// Get a mutable directional light record.
+    pub(crate) fn get_directional_light_record_mut(
+        &mut self,
+        id: DirectionalLightId,
+    ) -> Option<&mut ObjectRecord> {
+        let entry = self.directional_lights.get_mut(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.light.as_mut().map(|(_, r)| r)
     }
 
     pub(crate) fn remove_directional_light(&mut self, id: DirectionalLightId) -> bool {
-        let Some(entry) = self.directional_lights.get_mut(id.slot as usize) else {
-            return false;
+        let plan = match self.prepare_remove_directional_light(id) {
+            Some(p) => p,
+            None => return false,
         };
-        if entry.generation != id.generation || entry.light.is_none() {
-            return false;
+        self.commit_remove_directional_light(plan);
+        true
+    }
+
+    pub(crate) fn prepare_remove_directional_light(
+        &self,
+        id: DirectionalLightId,
+    ) -> Option<RemoveDirectionalLightPlan> {
+        let entry = self.directional_lights.get(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
         }
+        let (light, record) = entry.light.as_ref()?;
+        Some(RemoveDirectionalLightPlan {
+            id,
+            light: *light,
+            record: record.clone(),
+        })
+    }
+
+    pub(crate) fn commit_remove_directional_light(&mut self, plan: RemoveDirectionalLightPlan) {
+        let Some(entry) = self.directional_lights.get_mut(plan.id.slot as usize) else {
+            return;
+        };
+        if entry.generation != plan.id.generation || entry.light.is_none() {
+            return;
+        }
+        self.reverse_index.remove(&plan.record.persistent_id);
         entry.light = None;
         if bump_generation(&mut entry.generation) {
-            self.free_directional_light_slots.push(id.slot);
+            self.free_directional_light_slots.push(plan.id.slot);
         }
-        if self.shadow_casting_directional == Some(id) {
+        if self.shadow_casting_directional == Some(plan.id) {
             self.shadow_casting_directional = None;
         }
-        true
     }
 
     /// Returns the active directional light (the public facade enforces one).
     pub(crate) fn get_active_directional_light(&self) -> Option<DirectionalLight> {
-        self.directional_lights.iter().find_map(|entry| entry.light)
+        self.directional_lights
+            .iter()
+            .find_map(|entry| entry.light.as_ref().map(|(l, _)| *l))
     }
 
     /// Returns all active directional lights.
     pub(crate) fn get_active_directional_lights(&self) -> Vec<DirectionalLight> {
         self.directional_lights
             .iter()
-            .filter_map(|entry| entry.light)
+            .filter_map(|entry| entry.light.as_ref().map(|(l, _)| *l))
             .collect()
     }
 
@@ -1164,6 +1869,13 @@ impl SceneWorld {
             .count()
     }
 
+    pub(crate) fn reserve_point_light_slots(&mut self, total_slots: usize) {
+        if total_slots > self.point_lights.capacity() {
+            self.point_lights
+                .reserve(total_slots - self.point_lights.len());
+        }
+    }
+
     pub(crate) fn active_spot_light_count(&self) -> usize {
         self.spot_lights
             .iter()
@@ -1177,6 +1889,335 @@ impl SceneWorld {
 
     pub(crate) fn shadow_casting_directional(&self) -> Option<DirectionalLightId> {
         self.shadow_casting_directional
+    }
+
+    // ── Reverse-index and ObjectId conversion ─────────────────────────
+
+    /// Convert a node handle to an ObjectId.
+    pub(crate) fn object_id_for_node(&self, id: SceneNodeId) -> Option<ObjectId> {
+        let entry = self.nodes.get(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        let (_node, _record) = entry.node.as_ref()?;
+        Some(ObjectId::from_parts(
+            self.provenance,
+            ObjectKind::Node,
+            id.slot,
+            id.generation,
+        ))
+    }
+
+    /// Convert a point light handle to an ObjectId.
+    pub(crate) fn object_id_for_point_light(&self, id: PointLightId) -> Option<ObjectId> {
+        let entry = self.point_lights.get(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        let (_light, _record) = entry.light.as_ref()?;
+        Some(ObjectId::from_parts(
+            self.provenance,
+            ObjectKind::PointLight,
+            id.slot,
+            id.generation,
+        ))
+    }
+
+    /// Convert a directional light handle to an ObjectId.
+    pub(crate) fn object_id_for_directional_light(
+        &self,
+        id: DirectionalLightId,
+    ) -> Option<ObjectId> {
+        let entry = self.directional_lights.get(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        let (_light, _record) = entry.light.as_ref()?;
+        Some(ObjectId::from_parts(
+            self.provenance,
+            ObjectKind::DirectionalLight,
+            id.slot,
+            id.generation,
+        ))
+    }
+
+    /// Convert a spot light handle to an ObjectId.
+    pub(crate) fn object_id_for_spot_light(&self, id: SpotLightId) -> Option<ObjectId> {
+        let entry = self.spot_lights.get(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        let (_light, _record) = entry.light.as_ref()?;
+        Some(ObjectId::from_parts(
+            self.provenance,
+            ObjectKind::SpotLight,
+            id.slot,
+            id.generation,
+        ))
+    }
+
+    /// Resolve an ObjectId back to a typed handle.
+    /// Validation order: provenance → kind → slot bounds → generation → occupancy.
+    pub(crate) fn resolve_object(&self, id: ObjectId) -> Option<ObjectHandle> {
+        if id.provenance() != self.provenance {
+            return None;
+        }
+        match id.kind() {
+            ObjectKind::Node => {
+                let node_id = SceneNodeId::new(id.slot(), id.generation());
+                if self.validate_node_ref(node_id).is_ok() {
+                    Some(ObjectHandle::Node(node_id))
+                } else {
+                    None
+                }
+            }
+            ObjectKind::PointLight => {
+                let pl_id = PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                if self.validate_point_light_ref(pl_id).is_ok() {
+                    Some(ObjectHandle::PointLight(pl_id))
+                } else {
+                    None
+                }
+            }
+            ObjectKind::DirectionalLight => {
+                let dl_id = DirectionalLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                if self.validate_directional_light_ref(dl_id).is_ok() {
+                    Some(ObjectHandle::DirectionalLight(dl_id))
+                } else {
+                    None
+                }
+            }
+            ObjectKind::SpotLight => {
+                let sl_id = SpotLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
+                if self.validate_spot_light_ref(sl_id).is_ok() {
+                    Some(ObjectHandle::SpotLight(sl_id))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Like [`resolve_object`] but distinguishes WrongScene from other failures.
+    pub(crate) fn resolve_object_with_error(
+        &self,
+        id: ObjectId,
+    ) -> Result<ObjectHandle, crate::object::identity::ObjectError> {
+        use crate::object::identity::ObjectError;
+        if id.provenance() != self.provenance {
+            return Err(ObjectError::WrongScene {
+                object: id,
+                expected_scene: format!("{:?}", self.provenance),
+            });
+        }
+        match id.kind() {
+            ObjectKind::Node => self
+                .validate_node_ref(SceneNodeId::new(id.slot(), id.generation()))
+                .map_err(|err| match err {
+                    SceneNodeRefError::OutOfBounds => ObjectError::InvalidObject(id),
+                    SceneNodeRefError::Vacant => ObjectError::VacantObject(id),
+                    SceneNodeRefError::GenerationMismatch => ObjectError::StaleGeneration(id),
+                })
+                .map(|_| ObjectHandle::Node(SceneNodeId::new(id.slot(), id.generation()))),
+            ObjectKind::PointLight => {
+                let light = PointLightId { slot: id.slot(), generation: id.generation() };
+                self.validate_point_light_ref(light)
+                    .map_err(|err| match err {
+                        PointLightRefError::OutOfBounds => ObjectError::InvalidObject(id),
+                        PointLightRefError::Vacant => ObjectError::VacantObject(id),
+                        PointLightRefError::GenerationMismatch => ObjectError::StaleGeneration(id),
+                    })
+                    .map(|_| ObjectHandle::PointLight(light))
+            }
+            ObjectKind::DirectionalLight => {
+                let light = DirectionalLightId { slot: id.slot(), generation: id.generation() };
+                self.validate_directional_light_ref(light)
+                    .map_err(|err| match err {
+                        DirectionalLightRefError::OutOfBounds => ObjectError::InvalidObject(id),
+                        DirectionalLightRefError::Vacant => ObjectError::VacantObject(id),
+                        DirectionalLightRefError::GenerationMismatch => ObjectError::StaleGeneration(id),
+                    })
+                    .map(|_| ObjectHandle::DirectionalLight(light))
+            }
+            ObjectKind::SpotLight => {
+                let light = SpotLightId { slot: id.slot(), generation: id.generation() };
+                self.validate_spot_light_ref(light)
+                    .map_err(|err| match err {
+                        SpotLightRefError::OutOfBounds => ObjectError::InvalidObject(id),
+                        SpotLightRefError::Vacant => ObjectError::VacantObject(id),
+                        SpotLightRefError::GenerationMismatch => ObjectError::StaleGeneration(id),
+                    })
+                    .map(|_| ObjectHandle::SpotLight(light))
+            }
+        }
+    }
+
+    /// Look up an ObjectId by persistent SceneObjectId.
+    pub(crate) fn find_object_by_persistent_id(
+        &self,
+        persistent_id: &SceneObjectId,
+    ) -> Option<ObjectId> {
+        let handle = self.reverse_index.get(persistent_id)?;
+        match *handle {
+            ObjectHandle::Node(nid) => self.object_id_for_node(nid),
+            ObjectHandle::PointLight(pl) => self.object_id_for_point_light(pl),
+            ObjectHandle::DirectionalLight(dl) => self.object_id_for_directional_light(dl),
+            ObjectHandle::SpotLight(sl) => self.object_id_for_spot_light(sl),
+        }
+    }
+
+    /// Check all object invariants.
+    pub(crate) fn audit_object_invariants_impl(&self) -> Result<(), String> {
+        use std::collections::HashSet;
+
+        let mut seen_persistent = HashSet::new();
+
+        // Nodes: every occupied slot has record, every record has valid persistent ID.
+        for (slot, entry) in self.nodes.iter().enumerate() {
+            if let Some((ref node, ref record)) = entry.node {
+                if !seen_persistent.insert(record.persistent_id.clone()) {
+                    return Err(format!(
+                        "duplicate persistent ID {} in node slot {}",
+                        record.persistent_id, slot
+                    ));
+                }
+                // Check reverse index contains this persistent ID.
+                match self.reverse_index.get(&record.persistent_id) {
+                    Some(ObjectHandle::Node(nid)) => {
+                        if nid.slot != slot as u32 || nid.generation != entry.generation {
+                            return Err(format!(
+                                "reverse index mismatch for node slot {}: expected ({}, {}), got ({}, {})",
+                                slot, slot, entry.generation, nid.slot, nid.generation
+                            ));
+                        }
+                    }
+                    other => {
+                        return Err(format!(
+                            "reverse index missing or wrong kind for node slot {}: {:?}",
+                            slot, other
+                        ));
+                    }
+                }
+                // Hierarchy: parent must exist and reference this node.
+                if let Some(parent_id) = node.parent {
+                    if self.validate_node_ref(parent_id).is_err() {
+                        return Err(format!(
+                            "node slot {} has invalid parent {:?}",
+                            slot, parent_id
+                        ));
+                    }
+                }
+            } else {
+                // Vacant slot: must not be in reverse index (by slot).
+                // (We can skip because reverse index is by persistent ID, not slot.)
+            }
+        }
+
+        // Point lights.
+        for (slot, entry) in self.point_lights.iter().enumerate() {
+            if let Some((ref _light, ref record)) = entry.light {
+                if !seen_persistent.insert(record.persistent_id.clone()) {
+                    return Err(format!(
+                        "duplicate persistent ID {} in point light slot {}",
+                        record.persistent_id, slot
+                    ));
+                }
+                match self.reverse_index.get(&record.persistent_id) {
+                    Some(ObjectHandle::PointLight(pl)) => {
+                        if pl.slot != slot as u32 || pl.generation != entry.generation {
+                            return Err(format!(
+                                "reverse index mismatch for point light slot {}",
+                                slot
+                            ));
+                        }
+                    }
+                    other => {
+                        return Err(format!(
+                            "reverse index missing or wrong kind for point light slot {}: {:?}",
+                            slot, other
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Directional lights.
+        for (slot, entry) in self.directional_lights.iter().enumerate() {
+            if let Some((ref _light, ref record)) = entry.light {
+                if !seen_persistent.insert(record.persistent_id.clone()) {
+                    return Err(format!(
+                        "duplicate persistent ID {} in directional light slot {}",
+                        record.persistent_id, slot
+                    ));
+                }
+                match self.reverse_index.get(&record.persistent_id) {
+                    Some(ObjectHandle::DirectionalLight(dl)) => {
+                        if dl.slot != slot as u32 || dl.generation != entry.generation {
+                            return Err(format!(
+                                "reverse index mismatch for directional light slot {}",
+                                slot
+                            ));
+                        }
+                    }
+                    other => {
+                        return Err(format!(
+                            "reverse index missing or wrong kind for directional light slot {}: {:?}",
+                            slot, other
+                        ));
+                    }
+                }
+                // Shadow-owner validity.
+                if let Some(shadow_id) = self.shadow_casting_directional {
+                    if shadow_id.slot == slot as u32
+                        && shadow_id.generation != entry.generation
+                    {
+                        return Err(format!(
+                            "shadow-casting directional light slot {} has stale generation",
+                            slot
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Spot lights.
+        for (slot, entry) in self.spot_lights.iter().enumerate() {
+            if let Some((ref _light, ref record)) = entry.light {
+                if !seen_persistent.insert(record.persistent_id.clone()) {
+                    return Err(format!(
+                        "duplicate persistent ID {} in spot light slot {}",
+                        record.persistent_id, slot
+                    ));
+                }
+                match self.reverse_index.get(&record.persistent_id) {
+                    Some(ObjectHandle::SpotLight(sl)) => {
+                        if sl.slot != slot as u32 || sl.generation != entry.generation {
+                            return Err(format!(
+                                "reverse index mismatch for spot light slot {}",
+                                slot
+                            ));
+                        }
+                    }
+                    other => {
+                        return Err(format!(
+                            "reverse index missing or wrong kind for spot light slot {}: {:?}",
+                            slot, other
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     // ── Spot light lifecycle ────────────────────────────────────────────
@@ -1195,23 +2236,71 @@ impl SceneWorld {
     }
 
     pub(crate) fn add_spot_light(&mut self, light: SpotLight) -> SpotLightId {
-        if let Some(slot) = self.free_spot_light_slots.pop() {
-            let entry = &mut self.spot_lights[slot as usize];
-            entry.light = Some(light);
-            return SpotLightId {
-                slot,
-                generation: entry.generation,
+        let record = ObjectRecord::for_new_spot_light(None, None);
+        let plan = self.prepare_create_spot_light(light, record);
+        self.commit_create_spot_light(plan)
+    }
+
+    pub(crate) fn add_spot_light_with_record(
+        &mut self,
+        light: SpotLight,
+        record: ObjectRecord,
+    ) -> SpotLightId {
+        let plan = self.prepare_create_spot_light(light, record);
+        self.commit_create_spot_light(plan)
+    }
+
+    pub(crate) fn prepare_create_spot_light(
+        &mut self,
+        light: SpotLight,
+        record: ObjectRecord,
+    ) -> CreateSpotLightPlan {
+        let (slot, generation, is_new_slot) =
+            if let Some(free_slot) = self.free_spot_light_slots.pop() {
+                let entry = &mut self.spot_lights[free_slot as usize];
+                (free_slot, entry.generation, false)
+            } else {
+                let slot = self.spot_lights.len() as u32;
+                (slot, 0, true)
             };
-        }
-        let slot = self.spot_lights.len() as u32;
-        self.spot_lights.push(SpotLightEntry {
-            generation: 0,
-            light: Some(light),
-        });
-        SpotLightId {
+
+        CreateSpotLightPlan {
             slot,
-            generation: 0,
+            generation,
+            light,
+            record,
+            is_new_slot,
         }
+    }
+
+    pub(crate) fn commit_create_spot_light(
+        &mut self,
+        plan: CreateSpotLightPlan,
+    ) -> SpotLightId {
+        let CreateSpotLightPlan {
+            slot,
+            generation,
+            light,
+            record,
+            is_new_slot,
+        } = plan;
+
+        let persistent_id = record.persistent_id.clone();
+        let id = SpotLightId { slot, generation };
+        self.reverse_index
+            .insert(persistent_id, ObjectHandle::SpotLight(id));
+
+        if is_new_slot {
+            self.spot_lights.push(SpotLightEntry {
+                generation,
+                light: Some((light, record)),
+            });
+        } else {
+            let entry = &mut self.spot_lights[slot as usize];
+            entry.light = Some((light, record));
+        }
+
+        id
     }
 
     pub(crate) fn update_spot_light(&mut self, id: SpotLightId, light: SpotLight) -> bool {
@@ -1221,37 +2310,1428 @@ impl SceneWorld {
         if entry.generation != id.generation || entry.light.is_none() {
             return false;
         }
-        entry.light = Some(light);
+        let record = entry.light.as_ref().map(|(_, r)| r.clone());
+        if let Some(record) = record {
+            entry.light = Some((light, record));
+            return true;
+        }
+        false
+    }
+
+    /// Get a spot light's record.
+    pub(crate) fn get_spot_light_record(&self, id: SpotLightId) -> Option<&ObjectRecord> {
+        let entry = self.spot_lights.get(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.light.as_ref().map(|(_, r)| r)
+    }
+
+    /// Get a mutable spot light record.
+    pub(crate) fn get_spot_light_record_mut(
+        &mut self,
+        id: SpotLightId,
+    ) -> Option<&mut ObjectRecord> {
+        let entry = self.spot_lights.get_mut(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.light.as_mut().map(|(_, r)| r)
+    }
+
+    /// Direct access to point light slot for transform reads.
+    pub fn point_light_entry(
+        &self,
+        id: PointLightId,
+    ) -> Option<&PointLight> {
+        let entry = self.point_lights.get(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.light.as_ref().map(|(l, _)| l)
+    }
+
+    /// Direct mutable access to point light slot for transform writes.
+    pub(crate) fn point_light_entry_mut(
+        &mut self,
+        id: PointLightId,
+    ) -> Option<&mut (PointLight, ObjectRecord)> {
+        let entry = self.point_lights.get_mut(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.light.as_mut()
+    }
+
+    /// Direct access to directional light slot.
+    pub fn directional_light_entry(
+        &self,
+        id: DirectionalLightId,
+    ) -> Option<&DirectionalLight> {
+        let entry = self.directional_lights.get(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.light.as_ref().map(|(l, _)| l)
+    }
+
+    /// Direct mutable access to directional light slot.
+    pub(crate) fn directional_light_entry_mut(
+        &mut self,
+        id: DirectionalLightId,
+    ) -> Option<&mut (DirectionalLight, ObjectRecord)> {
+        let entry = self.directional_lights.get_mut(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.light.as_mut()
+    }
+
+    /// Direct access to spot light slot.
+    pub fn spot_light_entry(
+        &self,
+        id: SpotLightId,
+    ) -> Option<&SpotLight> {
+        let entry = self.spot_lights.get(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.light.as_ref().map(|(l, _)| l)
+    }
+
+    /// Direct mutable access to spot light slot.
+    pub(crate) fn spot_light_entry_mut(
+        &mut self,
+        id: SpotLightId,
+    ) -> Option<&mut (SpotLight, ObjectRecord)> {
+        let entry = self.spot_lights.get_mut(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
+        }
+        entry.light.as_mut()
+    }
+
+
+
+    pub(crate) fn remove_spot_light(&mut self, id: SpotLightId) -> bool {
+        let plan = match self.prepare_remove_spot_light(id) {
+            Some(p) => p,
+            None => return false,
+        };
+        self.commit_remove_spot_light(plan);
         true
     }
 
-    pub(crate) fn remove_spot_light(&mut self, id: SpotLightId) -> bool {
-        let Some(entry) = self.spot_lights.get_mut(id.slot as usize) else {
-            return false;
-        };
-        if entry.generation != id.generation || entry.light.is_none() {
-            return false;
+    pub(crate) fn prepare_remove_spot_light(
+        &self,
+        id: SpotLightId,
+    ) -> Option<RemoveSpotLightPlan> {
+        let entry = self.spot_lights.get(id.slot as usize)?;
+        if entry.generation != id.generation {
+            return None;
         }
+        let (light, record) = entry.light.as_ref()?;
+        Some(RemoveSpotLightPlan {
+            id,
+            light: *light,
+            record: record.clone(),
+        })
+    }
+
+    pub(crate) fn commit_remove_spot_light(&mut self, plan: RemoveSpotLightPlan) {
+        let Some(entry) = self.spot_lights.get_mut(plan.id.slot as usize) else {
+            return;
+        };
+        if entry.generation != plan.id.generation || entry.light.is_none() {
+            return;
+        }
+        self.reverse_index.remove(&plan.record.persistent_id);
         entry.light = None;
         if bump_generation(&mut entry.generation) {
-            self.free_spot_light_slots.push(id.slot);
+            self.free_spot_light_slots.push(plan.id.slot);
         }
-        true
     }
 
     pub(crate) fn get_active_spot_lights(&self) -> Vec<SpotLight> {
         self.spot_lights
             .iter()
-            .filter_map(|entry| entry.light)
+            .filter_map(|entry| entry.light.as_ref().map(|(l, _)| *l))
             .collect()
+    }
+
+    // ── BSP mount management ────────────────────────────────────────
+
+    /// Set the published BSP mount for PVS-aware culling and light selection.
+    ///
+    /// The lease-bearing [`PublishedBspMount`] owns every GPU resource.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn set_bsp_mount(
+        &mut self,
+        mount: crate::api::bsp::PublishedBspMount,
+    ) {
+        self.bsp_mount = Some(mount);
+    }
+
+    /// Clear the BSP mount, disabling PVS culling and BSP light selection.
+    ///
+    /// Deprecated: this drops the resource lease. Use [`Self::retire_bsp_mount`]
+    /// to obtain a [`DetachedBspMount`] for renderer retirement.
+    #[cfg(feature = "bsp")]
+    #[deprecated(since = "0.14.0", note = "use retire_bsp_mount() to preserve the lease")]
+    pub(crate) fn clear_bsp_mount(&mut self) {
+        let _ = self.retire_bsp_mount();
+    }
+
+    /// Detach the active BSP mount and return the lease-bearing
+    /// [`DetachedBspMount`] for renderer retirement.
+    ///
+    /// The returned mount retains the full resource lease. The caller must
+    /// pass it to the renderer's retirement path for fence-aware GPU teardown.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn retire_bsp_mount(
+        &mut self,
+    ) -> Option<crate::api::bsp::DetachedBspMount> {
+        let published = self.bsp_mount.take()?;
+        Some(crate::api::bsp::DetachedBspMount::from_published(published))
+    }
+
+    /// Return whether a BSP mount is currently published.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn has_bsp_mount(&self) -> bool {
+        self.bsp_mount.is_some()
+    }
+
+    /// Phase 07: Store a pending evidence request for population during the next
+    /// [`build_submission`] call.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn set_bsp_evidence_request(
+        &mut self,
+        corpus_identity: String,
+        request_identity: String,
+        visibility: crate::api::bsp::BspEvidenceVisibility,
+        frame_number: u32,
+    ) {
+        self.pending_evidence_data = Some((corpus_identity, request_identity, visibility));
+        self.pending_evidence_frame = frame_number;
+    }
+
+    /// Returns true if there's active evidence data (non-empty corpus).
+    #[cfg(feature = "bsp")]
+    fn evidence_active(&self) -> bool {
+        self.pending_evidence_data.as_ref()
+            .map(|(corpus, _, _)| !corpus.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Update BSP PVS for the current camera position.
+    /// Called before `build_submission` when a BSP mount is active.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn update_bsp_pvs(&mut self) {
+        let cam_pos = self.camera.cam_pos;
+        if let Some(ref mut mount) = self.bsp_mount {
+            mount.state.update_pvs(cam_pos);
+        }
+    }
+
+    /// Set per-frame BSP frame values (style intensities, liquid time).
+    ///
+    /// These are uploaded to the BSP frame-values UBO each frame.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn set_bsp_frame_values(&mut self, style_intensities: [f32; 64], liquid_time: f32) {
+        if let Some(ref mut mount) = self.bsp_mount {
+            mount.state.frame_style_intensities = style_intensities;
+            mount.state.frame_liquid_time = liquid_time;
+        }
+    }
+
+    /// Set per-model transforms for inline model draws.
+    ///
+    /// `transforms` is model_index → world-space Mat4.
+    /// Model 0 (worldspawn) is always identity.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn set_inline_model_transforms(
+        &mut self,
+        transforms: std::collections::HashMap<u32, glam::Mat4>,
+    ) {
+        if let Some(ref mut mount) = self.bsp_mount {
+            mount.state.inline_model_transforms = transforms;
+        }
+    }
+
+    /// Set per-model world-space bounds for inline model culling.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn set_inline_model_bounds(
+        &mut self,
+        bounds: std::collections::HashMap<u32, (glam::Vec3, glam::Vec3)>,
+    ) {
+        if let Some(ref mut mount) = self.bsp_mount {
+            mount.state.inline_model_bounds = bounds;
+        }
+    }
+
+    // ── Component accessors ──────────────────────────────────────────
+
+    /// Attach a prevalidated component envelope to the node's record.
+    pub(crate) fn attach_component(
+        &mut self,
+        node_id: SceneNodeId,
+        envelope: crate::object::component::ComponentEnvelope,
+    ) -> Result<(), crate::object::component::ComponentError> {
+        let record = self
+            .get_node_record_mut(node_id)
+            .ok_or_else(|| {
+                use crate::object::component::ComponentError;
+                ComponentError::InvalidEnvelope("node not found".into())
+            })?;
+        record.component_store.attach(envelope)
+    }
+
+    /// Remove a component instance from the node's record by key and instance ID.
+    pub(crate) fn remove_component(
+        &mut self,
+        node_id: SceneNodeId,
+        key: &crate::object::component::ComponentKey,
+        instance_id: &crate::object::component::ComponentInstanceId,
+    ) -> Option<crate::object::component::ComponentEnvelope> {
+        self.get_node_record_mut(node_id)
+            .and_then(|record| record.component_store.remove(key, instance_id))
+    }
+
+    /// Enumerate all component envelopes for a node.
+    pub(crate) fn component_envelopes(
+        &self,
+        node_id: SceneNodeId,
+    ) -> Option<impl Iterator<Item = &crate::object::component::ComponentEnvelope>> {
+        self.get_node_record(node_id)
+            .map(|record| record.component_store.envelopes())
+    }
+
+    /// Enumerate component envelopes of a given type for a node.
+    pub(crate) fn component_envelopes_by_key(
+        &self,
+        node_id: SceneNodeId,
+        key: &crate::object::component::ComponentKey,
+    ) -> Option<impl Iterator<Item = &crate::object::component::ComponentEnvelope>> {
+        self.get_node_record(node_id)
+            .map(|record| record.component_store.envelopes_by_key(key))
+    }
+
+    /// Get a typed component instance by key and instance ID.
+    pub(crate) fn component_downcast<T: 'static>(
+        &self,
+        node_id: SceneNodeId,
+        key: &crate::object::component::ComponentKey,
+        instance_id: &crate::object::component::ComponentInstanceId,
+    ) -> Result<&T, crate::object::component::ComponentError> {
+        let record = self
+            .get_node_record(node_id)
+            .ok_or_else(|| {
+                crate::object::component::ComponentError::InvalidEnvelope(
+                    "node not found".into(),
+                )
+            })?;
+        record.component_store.downcast::<T>(key, instance_id)
+    }
+
+    /// Iterate typed hydrated instances of a given component type on a node.
+    pub(crate) fn component_typed_instances<T: Any + Send + Sync>(
+        &self,
+        node_id: SceneNodeId,
+        key: &crate::object::component::ComponentKey,
+    ) -> Option<Vec<(crate::object::component::ComponentEnvelope, Arc<T>)>> {
+        self.get_node_record(node_id)
+            .map(|record| record.component_store.typed_instances_owned::<T>(key))
+    }
+
+    /// Get a mutable reference to the component store for a node.
+    pub(crate) fn component_store_mut(
+        &mut self,
+        node_id: SceneNodeId,
+    ) -> Option<&mut crate::object::component::ComponentStore> {
+        self.get_node_record_mut(node_id)
+            .map(|record| &mut record.component_store)
+    }
+
+    // ── Object enumeration ───────────────────────────────────────────
+
+    /// Return all occupied objects as (ObjectId, ObjectKind, persistent_id, stable_id, name, tags).
+    pub(crate) fn all_objects(&self) -> Vec<ObjectId> {
+        let mut ids: Vec<ObjectId> = Vec::new();
+
+        for (slot, entry) in self.nodes.iter().enumerate() {
+            if entry.node.is_some() {
+                ids.push(ObjectId::from_parts(
+                    self.provenance,
+                    ObjectKind::Node,
+                    slot as u32,
+                    entry.generation,
+                ));
+            }
+        }
+        for (slot, entry) in self.point_lights.iter().enumerate() {
+            if entry.light.is_some() {
+                ids.push(ObjectId::from_parts(
+                    self.provenance,
+                    ObjectKind::PointLight,
+                    slot as u32,
+                    entry.generation,
+                ));
+            }
+        }
+        for (slot, entry) in self.directional_lights.iter().enumerate() {
+            if entry.light.is_some() {
+                ids.push(ObjectId::from_parts(
+                    self.provenance,
+                    ObjectKind::DirectionalLight,
+                    slot as u32,
+                    entry.generation,
+                ));
+            }
+        }
+        for (slot, entry) in self.spot_lights.iter().enumerate() {
+            if entry.light.is_some() {
+                ids.push(ObjectId::from_parts(
+                    self.provenance,
+                    ObjectKind::SpotLight,
+                    slot as u32,
+                    entry.generation,
+                ));
+            }
+        }
+        // Stable sort by kind, then persistent ID
+        ids.sort_by(|a, b| {
+            a.kind()
+                .cmp(&b.kind())
+                .then_with(|| a.slot().cmp(&b.slot()))
+                .then_with(|| a.generation().cmp(&b.generation()))
+        });
+        ids
+    }
+
+    /// Return node name (or stable ID fallback).
+    pub(crate) fn object_name(&self, id: ObjectId) -> Option<String> {
+        match id.kind() {
+            ObjectKind::Node => {
+                let node = self.get_node(SceneNodeId::new(id.slot(), id.generation()))?;
+                Some(if node.name.is_empty() {
+                    node.stable_id.clone().unwrap_or_else(|| format!("Node {}", id.slot()))
+                } else {
+                    node.name.clone()
+                })
+            }
+            ObjectKind::PointLight => {
+                self.get_point_light_record(PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| {
+                    r.stable_id
+                        .clone()
+                        .unwrap_or_else(|| format!("PointLight {}", id.slot()))
+                })
+            }
+            ObjectKind::DirectionalLight => {
+                self.get_directional_light_record(DirectionalLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| {
+                    r.stable_id
+                        .clone()
+                        .unwrap_or_else(|| format!("DirectionalLight {}", id.slot()))
+                })
+            }
+            ObjectKind::SpotLight => {
+                self.get_spot_light_record(SpotLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| {
+                    r.stable_id
+                        .clone()
+                        .unwrap_or_else(|| format!("SpotLight {}", id.slot()))
+                })
+            }
+        }
+    }
+
+    /// Return the persistent ID for an object.
+    pub(crate) fn object_persistent_id(&self, id: ObjectId) -> Option<SceneObjectId> {
+        match id.kind() {
+            ObjectKind::Node => {
+                self.get_node_record(SceneNodeId::new(id.slot(), id.generation()))
+                    .map(|r| r.persistent_id.clone())
+            }
+            ObjectKind::PointLight => {
+                self.get_point_light_record(PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| r.persistent_id.clone())
+            }
+            ObjectKind::DirectionalLight => {
+                self.get_directional_light_record(DirectionalLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| r.persistent_id.clone())
+            }
+            ObjectKind::SpotLight => {
+                self.get_spot_light_record(SpotLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| r.persistent_id.clone())
+            }
+        }
+    }
+
+    /// Return the component store for any object (by immutable reference).
+    pub(crate) fn object_component_store(
+        &self,
+        id: ObjectId,
+    ) -> Option<&crate::object::component::ComponentStore> {
+        match id.kind() {
+            ObjectKind::Node => self
+                .get_node_record(SceneNodeId::new(id.slot(), id.generation()))
+                .map(|r| &r.component_store),
+            ObjectKind::PointLight => {
+                self.get_point_light_record(PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| &r.component_store)
+            }
+            ObjectKind::DirectionalLight => {
+                self.get_directional_light_record(DirectionalLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| &r.component_store)
+            }
+            ObjectKind::SpotLight => {
+                self.get_spot_light_record(SpotLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| &r.component_store)
+            }
+        }
+    }
+
+    /// Return the component store for any object (by mutable reference).
+    pub(crate) fn object_component_store_mut(
+        &mut self,
+        id: ObjectId,
+    ) -> Option<&mut crate::object::component::ComponentStore> {
+        match id.kind() {
+            ObjectKind::Node => self
+                .get_node_record_mut(SceneNodeId::new(id.slot(), id.generation()))
+                .map(|r| &mut r.component_store),
+            ObjectKind::PointLight => {
+                self.get_point_light_record_mut(PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| &mut r.component_store)
+            }
+            ObjectKind::DirectionalLight => {
+                self.get_directional_light_record_mut(DirectionalLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| &mut r.component_store)
+            }
+            ObjectKind::SpotLight => {
+                self.get_spot_light_record_mut(SpotLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                })
+                .map(|r| &mut r.component_store)
+            }
+        }
+    }
+
+    /// Return object visibility state.
+    pub(crate) fn object_visible(&self, id: ObjectId) -> Option<bool> {
+        match id.kind() {
+            ObjectKind::Node => self
+                .get_node_record(SceneNodeId::new(id.slot(), id.generation()))
+                .and_then(|r| r.visibility.as_ref())
+                .map(|v| v.visible),
+            _ => Some(true), // Lights are always "visible"
+        }
+    }
+
+    /// Return the layer name for an object (nodes only).
+    pub(crate) fn object_layer(&self, id: ObjectId) -> Option<String> {
+        match id.kind() {
+            ObjectKind::Node => self
+                .get_node_record(SceneNodeId::new(id.slot(), id.generation()))
+                .and_then(|r| r.visibility.as_ref())
+                .map(|v| v.layer.clone()),
+            _ => None,
+        }
+    }
+
+    // ── Subtree removal with light detachment ───────────────────────
+
+    /// Prepare removal of a node subtree, collecting surviving grouped lights
+    /// whose group parent lies in the removed set.
+    pub(crate) fn prepare_remove_node_subtree(
+        &self,
+        node_id: SceneNodeId,
+    ) -> Result<
+        (
+            RestorableSceneSubtree,
+            Vec<crate::scene::object_store::DetachedLightSnapshot>,
+        ),
+        String,
+    > {
+        // Validate
+        self.validate_node_ref(node_id).map_err(|e| format!("{e:?}"))?;
+
+        // Clone subtree
+        let subtree = self
+            .clone_subtree(node_id)
+            .ok_or_else(|| "failed to clone subtree".to_string())?;
+
+        // Collect persistent IDs of all nodes in the subtree
+        let removed_persistent_ids = self.collect_subtree_persistent_ids(&subtree);
+
+        // Find grouped lights whose group parent is in the removed set
+        let detached_lights = self.collect_grouped_lights_for_removal(&removed_persistent_ids);
+
+        Ok((subtree, detached_lights))
+    }
+
+    /// Commit subtree removal, detaching grouped lights before node removal.
+    pub(crate) fn commit_remove_node_subtree(
+        &mut self,
+        node_id: SceneNodeId,
+        detached_lights: &[crate::scene::object_store::DetachedLightSnapshot],
+    ) {
+        // Detach lights from their group parents
+        for dl in detached_lights {
+            match dl.kind {
+                ObjectKind::PointLight => {
+                    if let Some(handle) = self.reverse_index.get(&dl.persistent_id) {
+                        if let ObjectHandle::PointLight(pl_id) = *handle {
+                            if let Some(record) = self.get_point_light_record_mut(pl_id) {
+                                record.light_group_parent = None;
+                            }
+                        }
+                    }
+                }
+                ObjectKind::DirectionalLight => {
+                    if let Some(handle) = self.reverse_index.get(&dl.persistent_id) {
+                        if let ObjectHandle::DirectionalLight(dl_id) = *handle {
+                            if let Some(record) = self.get_directional_light_record_mut(dl_id) {
+                                record.light_group_parent = None;
+                            }
+                        }
+                    }
+                }
+                ObjectKind::SpotLight => {
+                    if let Some(handle) = self.reverse_index.get(&dl.persistent_id) {
+                        if let ObjectHandle::SpotLight(sl_id) = *handle {
+                            if let Some(record) = self.get_spot_light_record_mut(sl_id) {
+                                record.light_group_parent = None;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Remove the node subtree
+        self.remove_node(node_id);
+    }
+
+    /// Collect persistent IDs of all nodes in a subtree.
+    fn collect_subtree_persistent_ids(
+        &self,
+        subtree: &RestorableSceneSubtree,
+    ) -> Vec<SceneObjectId> {
+        let mut ids = vec![subtree.record.persistent_id.clone()];
+        for child in &subtree.children {
+            ids.extend(self.collect_subtree_persistent_ids(child));
+        }
+        ids
+    }
+
+    /// Collect lights whose group parent persistent ID is in `removed_ids`.
+    fn collect_grouped_lights_for_removal(
+        &self,
+        removed_ids: &[SceneObjectId],
+    ) -> Vec<crate::scene::object_store::DetachedLightSnapshot> {
+        use crate::scene::object_store::DetachedLightSnapshot;
+        let removed_set: std::collections::HashSet<&SceneObjectId> =
+            removed_ids.iter().collect();
+        let mut detached = Vec::new();
+
+        for entry in &self.point_lights {
+            if let Some((light, record)) = &entry.light {
+                if let Some(ref parent) = record.light_group_parent {
+                    if removed_set.contains(parent) {
+                        detached.push(DetachedLightSnapshot {
+                            kind: ObjectKind::PointLight,
+                            persistent_id: record.persistent_id.clone(),
+                            old_group_parent: parent.clone(),
+                            point_light: Some(*light),
+                            directional_light: None,
+                            spot_light: None,
+                        });
+                    }
+                }
+            }
+        }
+        for entry in &self.directional_lights {
+            if let Some((light, record)) = &entry.light {
+                if let Some(ref parent) = record.light_group_parent {
+                    if removed_set.contains(parent) {
+                        detached.push(DetachedLightSnapshot {
+                            kind: ObjectKind::DirectionalLight,
+                            persistent_id: record.persistent_id.clone(),
+                            old_group_parent: parent.clone(),
+                            point_light: None,
+                            directional_light: Some(*light),
+                            spot_light: None,
+                        });
+                    }
+                }
+            }
+        }
+        for entry in &self.spot_lights {
+            if let Some((light, record)) = &entry.light {
+                if let Some(ref parent) = record.light_group_parent {
+                    if removed_set.contains(parent) {
+                        detached.push(DetachedLightSnapshot {
+                            kind: ObjectKind::SpotLight,
+                            persistent_id: record.persistent_id.clone(),
+                            old_group_parent: parent.clone(),
+                            point_light: None,
+                            directional_light: None,
+                            spot_light: Some(*light),
+                        });
+                    }
+                }
+            }
+        }
+
+        detached
+    }
+
+    // ── Subtree restoration ─────────────────────────────────────────
+
+    /// Restore a subtree from a snapshot and reattach previously detached
+    /// grouped lights. Validation completes before any node or relation changes.
+    /// Validate that every persistent ID in a subtree is absent before a
+    /// restore commit. Command undo uses this during its all-or-nothing
+    /// preflight; restore itself remains infallible once this succeeds.
+    pub(crate) fn validate_restore_subtree(
+        &self,
+        subtree: &RestorableSceneSubtree,
+    ) -> Result<(), String> {
+        for persistent_id in self.collect_subtree_persistent_ids(subtree) {
+            if self.reverse_index.contains_key(&persistent_id) {
+                return Err(format!(
+                    "cannot restore subtree: persistent ID {persistent_id} already exists"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore_subtree_with_lights(
+        &mut self,
+        subtree: RestorableSceneSubtree,
+        detached_lights: &[crate::scene::object_store::DetachedLightSnapshot],
+    ) -> Result<(SceneNodeId, Vec<ObjectId>), String> {
+        self.validate_restore_subtree_with_lights(&subtree, detached_lights)?;
+        let new_root = self.restore_subtree(subtree);
+        let new_ids = self.subtree_node_ids_preorder(new_root);
+
+        for dl in detached_lights {
+            let new_parent = Some(dl.old_group_parent.clone());
+            match dl.kind {
+                ObjectKind::PointLight => {
+                    if let Some(handle) = self.reverse_index.get(&dl.persistent_id) {
+                        if let ObjectHandle::PointLight(pl_id) = *handle {
+                            if let Some(record) = self.get_point_light_record_mut(pl_id) {
+                                record.light_group_parent = new_parent.clone();
+                            }
+                        }
+                    }
+                }
+                ObjectKind::DirectionalLight => {
+                    if let Some(handle) = self.reverse_index.get(&dl.persistent_id) {
+                        if let ObjectHandle::DirectionalLight(dl_id) = *handle {
+                            if let Some(record) =
+                                self.get_directional_light_record_mut(dl_id)
+                            {
+                                record.light_group_parent = new_parent.clone();
+                            }
+                        }
+                    }
+                }
+                ObjectKind::SpotLight => {
+                    if let Some(handle) = self.reverse_index.get(&dl.persistent_id) {
+                        if let ObjectHandle::SpotLight(sl_id) = *handle {
+                            if let Some(record) = self.get_spot_light_record_mut(sl_id) {
+                                record.light_group_parent = new_parent.clone();
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok((new_root, new_ids))
+    }
+
+    fn validate_restore_subtree_with_lights(
+        &self,
+        subtree: &RestorableSceneSubtree,
+        detached_lights: &[crate::scene::object_store::DetachedLightSnapshot],
+    ) -> Result<(), String> {
+        self.validate_restore_subtree(subtree)?;
+        let subtree_ids = self.collect_subtree_persistent_ids(subtree);
+        let subtree_set: std::collections::HashSet<&SceneObjectId> = subtree_ids.iter().collect();
+        for detached in detached_lights {
+            if !subtree_set.contains(&detached.old_group_parent) {
+                return Err(format!(
+                    "cannot restore grouped light {}: parent {} is absent from snapshot",
+                    detached.persistent_id, detached.old_group_parent
+                ));
+            }
+            let Some(handle) = self.reverse_index.get(&detached.persistent_id) else {
+                return Err(format!(
+                    "cannot restore grouped light {}: light no longer exists",
+                    detached.persistent_id
+                ));
+            };
+            if handle.kind() != detached.kind {
+                return Err(format!(
+                    "cannot restore grouped light {}: kind changed",
+                    detached.persistent_id
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    // ── Duplication ──────────────────────────────────────────────────
+
+    /// Duplicate a node subtree, minting new persistent IDs and runtime
+    /// handles.  Grouped lights are never implicitly duplicated.
+    pub(crate) fn duplicate_node(
+        &mut self,
+        node_id: SceneNodeId,
+        parent: Option<SceneNodeId>,
+    ) -> Result<SceneNodeId, String> {
+        self.validate_node_ref(node_id)
+            .map_err(|e| format!("{e:?}"))?;
+
+        let subtree = self
+            .clone_subtree(node_id)
+            .ok_or_else(|| "failed to clone subtree for duplication".to_string())?;
+
+        Ok(self.duplicate_subtree(subtree, parent))
+    }
+
+    /// Recursively duplicate a `RestorableSceneSubtree`, minting new
+    /// persistent IDs for every node.
+    fn duplicate_subtree(
+        &mut self,
+        subtree: RestorableSceneSubtree,
+        parent: Option<SceneNodeId>,
+    ) -> SceneNodeId {
+        let mut new_record = subtree.record.clone();
+        // Mint new persistent ID
+        new_record.persistent_id = crate::scene::object_store::mint_persistent_id();
+        // New stable ID
+        new_record.stable_id = None;
+
+        let mut new_node = subtree.node.clone();
+        new_node.stable_id = None;
+        new_node.parent = parent;
+        new_node.children.clear();
+        new_node.dirty = true;
+
+        let new_id = self.add_node_with_record(parent, new_node, new_record);
+
+        for child in subtree.children {
+            self.duplicate_subtree(child, Some(new_id));
+        }
+
+        new_id
+    }
+
+    /// Duplicate a point light, minting a new persistent ID. Preserves
+    /// world-space state and grouping.
+    pub(crate) fn duplicate_point_light(
+        &mut self,
+        id: PointLightId,
+    ) -> Result<PointLightId, String> {
+        let entry = self
+            .point_lights
+            .get(id.slot as usize)
+            .ok_or("out of bounds".to_string())?;
+        if entry.generation != id.generation {
+            return Err("generation mismatch".to_string());
+        }
+        let (light, record) = entry
+            .light
+            .clone()
+            .ok_or("vacant".to_string())?;
+
+        let mut new_record = record.clone();
+        new_record.persistent_id = crate::scene::object_store::mint_persistent_id();
+        new_record.stable_id = None;
+
+        Ok(self.add_point_light_with_record(light, new_record))
+    }
+
+    /// Duplicate a directional light.
+    pub(crate) fn duplicate_directional_light(
+        &mut self,
+        id: DirectionalLightId,
+    ) -> Result<DirectionalLightId, String> {
+        let entry = self
+            .directional_lights
+            .get(id.slot as usize)
+            .ok_or("out of bounds".to_string())?;
+        if entry.generation != id.generation {
+            return Err("generation mismatch".to_string());
+        }
+        let (light, record) = entry
+            .light
+            .clone()
+            .ok_or("vacant".to_string())?;
+
+        let mut new_record = record.clone();
+        new_record.persistent_id = crate::scene::object_store::mint_persistent_id();
+        new_record.stable_id = None;
+        // Duplicated directional shadow config starts non-owning
+        new_record.directional_shadow_config = None;
+
+        Ok(self.add_directional_light_with_record(light, new_record))
+    }
+
+    /// Duplicate a spot light.
+    pub(crate) fn duplicate_spot_light(
+        &mut self,
+        id: SpotLightId,
+    ) -> Result<SpotLightId, String> {
+        let entry = self
+            .spot_lights
+            .get(id.slot as usize)
+            .ok_or("out of bounds".to_string())?;
+        if entry.generation != id.generation {
+            return Err("generation mismatch".to_string());
+        }
+        let (light, record) = entry
+            .light
+            .clone()
+            .ok_or("vacant".to_string())?;
+
+        let mut new_record = record.clone();
+        new_record.persistent_id = crate::scene::object_store::mint_persistent_id();
+        new_record.stable_id = None;
+
+        Ok(self.add_spot_light_with_record(light, new_record))
+    }
+
+    /// Clone the component store contents for duplication, copying JSON
+    /// unchanged unless a remap adapter is registered.
+    pub(crate) fn clone_component_store(
+        source: &crate::object::component::ComponentStore,
+    ) -> crate::object::component::ComponentStore {
+        // Just clone the store — envelopes are canonical JSON and copy as-is.
+        // Callers should use `prepare_reference_remap` with a registry if
+        // remapping is needed.
+        source.clone()
+    }
+
+    // ── Query: scratch raycast (read-only, no dirty-flag mutation) ────
+
+    /// Pure read-only raycast returning all hits in deterministic order.
+    ///
+    /// Walks the hierarchy from root, computing world transforms on the fly
+    /// into scratch maps.  Hits are sorted by distance, then
+    /// [`SceneObjectId`], then [`ObjectKind`].  Conservative-visible
+    /// (unknown-bounds) mesh-bearing nodes are excluded.
+    pub(crate) fn raycast_readonly(
+        &self,
+        ray: &Ray,
+    ) -> Vec<crate::object::query::RayHit> {
+        use crate::object::query::RayHit;
+
+        let root_id = match self.root {
+            Some(id) if self.is_valid_node_id(id) => id,
+            _ => return Vec::new(),
+        };
+
+        let mut world_transforms: std::collections::HashMap<SceneNodeId, Mat4> =
+            std::collections::HashMap::with_capacity(self.nodes.len());
+        let mut hits: Vec<RayHit> = Vec::new();
+
+        self.raycast_walk(
+            root_id,
+            Mat4::IDENTITY,
+            ray,
+            &mut world_transforms,
+            &mut hits,
+        );
+
+        crate::object::query::sort_ray_hits(&mut hits);
+        hits
+    }
+
+    /// Recursive read-only walk for raycast_all.
+    fn raycast_walk(
+        &self,
+        node_id: SceneNodeId,
+        parent_world: Mat4,
+        ray: &Ray,
+        world_transforms: &mut std::collections::HashMap<SceneNodeId, Mat4>,
+        hits: &mut Vec<crate::object::query::RayHit>,
+    ) {
+        use crate::object::query::RayHit;
+
+        let node = match self.get_node(node_id) {
+            Some(n) => n,
+            None => return,
+        };
+
+        let world = parent_world * node.local_transform;
+        world_transforms.insert(node_id, world);
+
+        // Test intersection using the same bounds logic as pick_readonly.
+        let hit_info = pick_bounds_readonly_general(node, &world)
+            .and_then(|aabb| aabb.intersect_ray_hit(ray));
+
+        if let Some(aabb_hit) = hit_info {
+            if let Some(oid) = self.object_id_for_node(node_id) {
+                if let Some(pid) = self.object_persistent_id(oid) {
+                    // Determine if this was from a proxy vs known bound.
+                    let is_proxy = node.mesh_bounds.iter().any(|e| {
+                        matches!(e.bounds, SceneBounds::Proxy(_))
+                    }) || node.local_proxy_bounds.is_some();
+
+                    hits.push(RayHit {
+                        object: oid,
+                        persistent_id: pid,
+                        kind: ObjectKind::Node,
+                        distance: aabb_hit.distance,
+                        point: aabb_hit.point,
+                        normal: aabb_hit.normal,
+                        is_proxy,
+                    });
+                }
+            }
+        }
+
+        for child_id in node.children.iter().copied() {
+            if self.is_valid_node_id(child_id) {
+                self.raycast_walk(child_id, world, ray, world_transforms, hits);
+            }
+        }
+    }
+
+    // ── Query: volume query (AABB / frustum) read-only ─────────────────
+
+    /// Collect all objects whose world-space bounds intersect `volume`.
+    pub(crate) fn volume_query_readonly(
+        &self,
+        volume: &crate::object::query::VolumeQuery,
+    ) -> Vec<crate::object::query::VolumeHit> {
+        use crate::object::query::{UnknownBoundsPolicy, VolumeHit};
+
+        let mut hits: Vec<VolumeHit> = Vec::new();
+
+        // Walk nodes.
+        if let Some(root_id) = self.root.filter(|id| self.is_valid_node_id(*id)) {
+            let mut world_transforms: std::collections::HashMap<SceneNodeId, Mat4> =
+                std::collections::HashMap::with_capacity(self.nodes.len());
+            self.volume_walk(root_id, Mat4::IDENTITY, volume, &mut world_transforms, &mut hits);
+        }
+
+        // Walk point lights (only when kind filter allows).
+        if volume.filter.allows_kind(ObjectKind::PointLight) {
+            for (slot, entry) in self.point_lights.iter().enumerate() {
+                if let Some((light, record)) = &entry.light {
+                    if self.volume_hit_point_light(light, volume, record, slot as u32, entry.generation) {
+                        if let Some(oid) = self.object_id_for_point_light(PointLightId {
+                            slot: slot as u32,
+                            generation: entry.generation,
+                        }) {
+                            hits.push(VolumeHit {
+                                object: oid,
+                                persistent_id: record.persistent_id.clone(),
+                                kind: ObjectKind::PointLight,
+                                is_bounded: true,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Directional lights have no bounded volume; treat as indeterminate when
+        // policy allows and kind filter passes.
+        if volume.filter.allows_kind(ObjectKind::DirectionalLight)
+            && (volume.unknown_bounds == UnknownBoundsPolicy::IncludeAsInfinite
+                || volume.unknown_bounds == UnknownBoundsPolicy::IncludeAsIndeterminate)
+        {
+            for (slot, entry) in self.directional_lights.iter().enumerate() {
+                if entry.light.is_some() {
+                    if let Some(oid) = self.object_id_for_directional_light(DirectionalLightId {
+                        slot: slot as u32,
+                        generation: entry.generation,
+                    }) {
+                        if let Some(pid) = self.object_persistent_id(oid) {
+                            hits.push(VolumeHit {
+                                object: oid,
+                                persistent_id: pid,
+                                kind: ObjectKind::DirectionalLight,
+                                is_bounded: false,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Walk spot lights (only when kind filter allows).
+        if volume.filter.allows_kind(ObjectKind::SpotLight) {
+            for (slot, entry) in self.spot_lights.iter().enumerate() {
+                if let Some((light, record)) = &entry.light {
+                    if self.volume_hit_spot_light(light, volume) {
+                        if let Some(oid) = self.object_id_for_spot_light(SpotLightId {
+                            slot: slot as u32,
+                            generation: entry.generation,
+                        }) {
+                            hits.push(VolumeHit {
+                                object: oid,
+                                persistent_id: record.persistent_id.clone(),
+                                kind: ObjectKind::SpotLight,
+                                is_bounded: true,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        crate::object::query::sort_volume_hits(&mut hits);
+        hits
+    }
+
+    fn volume_walk(
+        &self,
+        node_id: SceneNodeId,
+        parent_world: Mat4,
+        volume: &crate::object::query::VolumeQuery,
+        world_transforms: &mut std::collections::HashMap<SceneNodeId, Mat4>,
+        hits: &mut Vec<crate::object::query::VolumeHit>,
+    ) {
+        use crate::object::query::{UnknownBoundsPolicy, VolumeHit};
+
+        let node = match self.get_node(node_id) {
+            Some(n) => n,
+            None => return,
+        };
+
+        // Apply kind filter early.
+        if !volume.filter.allows_kind(ObjectKind::Node) {
+            // Still recurse children using the parent's world transform.
+            let world = parent_world * node.local_transform;
+            for child_id in node.children.iter().copied() {
+                if self.is_valid_node_id(child_id) {
+                    self.volume_walk(child_id, world, volume, world_transforms, hits);
+                }
+            }
+            return;
+        }
+
+        let world = parent_world * node.local_transform;
+        world_transforms.insert(node_id, world);
+
+        // Test node's world bounds against the volume.
+        // General queries must NOT create editor helper proxies.
+        if let Some(aabb) = pick_bounds_readonly_general(node, &world) {
+            if volume_intersects_aabb(&volume.volume, &aabb) {
+                if let Some(oid) = self.object_id_for_node(node_id) {
+                    if let Some(pid) = self.object_persistent_id(oid) {
+                        hits.push(VolumeHit {
+                            object: oid,
+                            persistent_id: pid,
+                            kind: ObjectKind::Node,
+                            is_bounded: true,
+                        });
+                    }
+                }
+            }
+        } else if volume.unknown_bounds == UnknownBoundsPolicy::IncludeAsInfinite
+            || volume.unknown_bounds == UnknownBoundsPolicy::IncludeAsIndeterminate
+        {
+            // Conservative-visible node or unknown bounds: include as indeterminate.
+            if let Some(oid) = self.object_id_for_node(node_id) {
+                if let Some(pid) = self.object_persistent_id(oid) {
+                    hits.push(VolumeHit {
+                        object: oid,
+                        persistent_id: pid,
+                        kind: ObjectKind::Node,
+                        is_bounded: false,
+                    });
+                }
+            }
+        }
+
+        for child_id in node.children.iter().copied() {
+            if self.is_valid_node_id(child_id) {
+                self.volume_walk(child_id, world, volume, world_transforms, hits);
+            }
+        }
+    }
+
+    fn volume_hit_point_light(
+        &self,
+        light: &PointLight,
+        volume: &crate::object::query::VolumeQuery,
+        _record: &ObjectRecord,
+        _slot: u32,
+        _generation: u32,
+    ) -> bool {
+        // Point light: small proxy sphere at position.
+        // Use a small radius proportional to the light's range or a default.
+        let radius = (light.range * 0.05).max(0.1).min(5.0);
+        let half = Vec3::splat(radius);
+        let aabb = Aabb::from_min_max(light.position - half, light.position + half);
+        volume_intersects_aabb(&volume.volume, &aabb)
+    }
+
+    fn volume_hit_spot_light(
+        &self,
+        light: &SpotLight,
+        volume: &crate::object::query::VolumeQuery,
+    ) -> bool {
+        let radius = (light.range * 0.05).max(0.1).min(5.0);
+        let half = Vec3::splat(radius);
+        let aabb = Aabb::from_min_max(light.position - half, light.position + half);
+        volume_intersects_aabb(&volume.volume, &aabb)
+    }
+
+    // ── Query: editor pick with policy ──────────────────────────────────
+
+    /// Editor-specific pick with [`EditorProxyPolicy`].
+    ///
+    /// Returns the closest hit (by t-value) among objects matching the
+    /// policy.  Directional lights are never ray-pickable (unbounded).
+    /// Point/spot lights are only included when policy allows.
+    pub(crate) fn editor_pick_readonly(
+        &self,
+        ray: &Ray,
+        policy: crate::object::query::EditorProxyPolicy,
+    ) -> Option<crate::object::query::EditorPickResult> {
+        use crate::object::query::{EditorPickResult, EditorProxyPolicy};
+
+        let mut world_transforms: std::collections::HashMap<SceneNodeId, Mat4> =
+            std::collections::HashMap::with_capacity(self.nodes.len());
+        let mut closest: Option<(f32, ObjectId, AabbRayHit)> = None;
+
+        // Walk nodes if a root exists.
+        if let Some(root_id) = self.root.filter(|id| self.is_valid_node_id(*id)) {
+            self.editor_pick_walk(
+                root_id,
+                Mat4::IDENTITY,
+                ray,
+                &mut world_transforms,
+                &mut closest,
+            );
+        }
+
+        // Point lights (if policy allows).
+        if policy == EditorProxyPolicy::NodesAndBoundedLights
+            || policy == EditorProxyPolicy::All
+        {
+            for (slot, entry) in self.point_lights.iter().enumerate() {
+                if let Some((light, _)) = &entry.light {
+                    let radius = (light.range * 0.05).max(0.1).min(5.0);
+                    let half = Vec3::splat(radius);
+                    let aabb =
+                        Aabb::from_min_max(light.position - half, light.position + half);
+                    if let Some(hit) = aabb.intersect_ray_hit(ray) {
+                        if let Some(oid) = self.object_id_for_point_light(PointLightId {
+                            slot: slot as u32,
+                            generation: entry.generation,
+                        }) {
+                            if closest
+                                .as_ref()
+                                .map_or(true, |(best_t, _, _)| hit.distance < *best_t)
+                            {
+                                closest = Some((hit.distance, oid, hit));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Spot lights (if policy allows).
+            for (slot, entry) in self.spot_lights.iter().enumerate() {
+                if let Some((light, _)) = &entry.light {
+                    let radius = (light.range * 0.05).max(0.1).min(5.0);
+                    let half = Vec3::splat(radius);
+                    let aabb =
+                        Aabb::from_min_max(light.position - half, light.position + half);
+                    if let Some(hit) = aabb.intersect_ray_hit(ray) {
+                        if let Some(oid) = self.object_id_for_spot_light(SpotLightId {
+                            slot: slot as u32,
+                            generation: entry.generation,
+                        }) {
+                            if closest
+                                .as_ref()
+                                .map_or(true, |(best_t, _, _)| hit.distance < *best_t)
+                            {
+                                closest = Some((hit.distance, oid, hit));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        closest.map(|(_, object, hit)| EditorPickResult {
+            object,
+            hit: Some(hit),
+        })
+    }
+
+    fn editor_pick_walk(
+        &self,
+        node_id: SceneNodeId,
+        parent_world: Mat4,
+        ray: &Ray,
+        world_transforms: &mut std::collections::HashMap<SceneNodeId, Mat4>,
+        closest: &mut Option<(f32, ObjectId, AabbRayHit)>,
+    ) {
+        let node = match self.get_node(node_id) {
+            Some(n) => n,
+            None => return,
+        };
+
+        let world = parent_world * node.local_transform;
+        world_transforms.insert(node_id, world);
+
+        // Editor pick: use editor bounds which include helper proxies for
+        // empty group nodes so editors can select them.
+        if let Some(aabb) = pick_bounds_readonly_editor(node, &world) {
+            if let Some(hit) = aabb.intersect_ray_hit(ray) {
+                if closest
+                    .as_ref()
+                    .map_or(true, |(best_t, _, _)| hit.distance < *best_t)
+                {
+                    if let Some(oid) = self.object_id_for_node(node_id) {
+                        *closest = Some((hit.distance, oid, hit));
+                    }
+                }
+            }
+        }
+
+        for child_id in node.children.iter().copied() {
+            if self.is_valid_node_id(child_id) {
+                self.editor_pick_walk(child_id, world, ray, world_transforms, closest);
+            }
+        }
+    }
+
+    // ── Convenience: scene provenance getter ────────────────────────────
+
+    /// Return the scene's provenance token for [`Selection`] binding.
+    pub fn provenance_token(&self) -> SceneRuntimeId {
+        self.provenance
     }
 }
 
-/// Compute a world-space pickable AABB for a node using an on-the-fly
-/// world transform (`world`).  Mirrors the logic in
-/// `node_pick_bounds_exact` + `compute_node_world_bounds` but operates
-/// on scratch data without touching cached fields.
-fn pick_bounds_readonly(node: &SceneNode, world: &Mat4) -> Option<Aabb> {
+// ── Volume intersection helpers ──────────────────────────────────────
+
+/// Test whether an [`Aabb`] intersects a [`VolumeShape`].
+fn volume_intersects_aabb(volume: &crate::object::query::VolumeShape, aabb: &Aabb) -> bool {
+    match volume {
+        crate::object::query::VolumeShape::Aabb(query_aabb) => aabb_intersects_aabb(query_aabb, aabb),
+        crate::object::query::VolumeShape::Frustum(frustum) => frustum.intersects_aabb(aabb),
+    }
+}
+
+/// Conservative AABB-AABB intersection test.
+fn aabb_intersects_aabb(a: &Aabb, b: &Aabb) -> bool {
+    a.min.x <= b.max.x
+        && a.max.x >= b.min.x
+        && a.min.y <= b.max.y
+        && a.max.y >= b.min.y
+        && a.min.z <= b.max.z
+        && a.max.z >= b.min.z
+}
+
+// ── Bounds traversal helpers (general vs editor) ─────────────────────
+
+/// Compute a world-space AABB for general queries (raycast, volume).
+///
+/// Only returns `Known` and explicit `Proxy` bounds. Does **not** create
+/// editor helper proxies for empty nodes — those are only available through
+/// the editor-pick path.
+fn pick_bounds_readonly_general(node: &SceneNode, world: &Mat4) -> Option<Aabb> {
+    // If an explicit local proxy is set and no known meshes exist, use it.
+    if let Some(proxy) = node.local_proxy_bounds {
+        return proxy.transformed(world);
+    }
+
+    // Aggregate local mesh bounds then transform.
+    let mut any_conservative = false;
+    let mut local_union: Option<Aabb> = None;
+
+    for entry in &node.mesh_bounds {
+        match &entry.bounds {
+            SceneBounds::Known(aabb) | SceneBounds::Proxy(aabb) => {
+                if aabb.is_finite() && aabb.is_ordered() {
+                    match local_union {
+                        Some(ref mut u) => {
+                            u.extend_to_enclose(aabb);
+                        }
+                        None => local_union = Some(*aabb),
+                    }
+                } else {
+                    any_conservative = true;
+                }
+            }
+            SceneBounds::ConservativeVisible(_) => {
+                any_conservative = true;
+            }
+        }
+    }
+
+    if any_conservative {
+        // Conservative-visible: no trustworthy bounds for general queries.
+        return None;
+    }
+
+    if let Some(local) = local_union {
+        return local.transformed(world);
+    }
+
+    // No known or proxy bounds at all: general queries get nothing.
+    None
+}
+
+/// Compute a world-space pickable AABB for editor queries.
+///
+/// Same as `pick_bounds_readonly_general` but adds editor helper proxies
+/// for empty non-mesh group nodes so editors can select them.
+fn pick_bounds_readonly_editor(node: &SceneNode, world: &Mat4) -> Option<Aabb> {
     // If an explicit local proxy is set and no known meshes exist, use it.
     if let Some(proxy) = node.local_proxy_bounds {
         return proxy.transformed(world);
@@ -2390,5 +4870,163 @@ mod tests {
             scene.validate_point_light_ref(id0),
             Err(PointLightRefError::GenerationMismatch)
         ));
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn bsp_mount_submits_draws_and_lights_without_scene_root() {
+        use crate::api::bsp::{BspResourceLease, PublishedBspMount};
+        use crate::data::bsp_import::MountedBspBatch;
+
+        let mut scene = SceneWorld::new();
+        let mut mount = crate::scene::bsp_visibility::BspMountState::new();
+        mount.activate();
+        let batch = bsp::geometry::RenderBatch {
+            key: bsp::geometry::BatchKey {
+                render_class: 0,
+                material_identity: 0,
+                lightmap_page: 0,
+                style_ids: [0, 255, 255, 255],
+                model_index: 0,
+            },
+            leaf_signature: Vec::new(),
+            face_indices: vec![0],
+            pvs_eligible: true,
+            is_inline_model: false,
+            model_index: 0,
+        };
+        let mesh = MeshHandle::new(7, 0);
+        let material = crate::data::handles::BspMaterialHandle::new(0, 0);
+        let mounted = MountedBspBatch::try_new(
+            &batch,
+            mesh,
+            material,
+            (Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)),
+        )
+        .expect("valid mounted batch");
+        mount
+            .set_render_assets_from_canonical(
+                &[mounted],
+                vec![mesh],
+                vec![Some(material)],
+                vec![bsp::extract::LightDescriptor {
+                    entity_index: 0,
+                    origin: Vec3::new(1.0, 0.0, 0.0),
+                    intensity: 64.0,
+                    color: [1.0, 0.5, 0.25],
+                    radius: 128.0,
+                    style: None,
+                }],
+            )
+            .expect("canonical batch publish");
+        let lease = BspResourceLease {
+            arena_id: 1,
+            mesh_handles: vec![mesh],
+            texture_handles: vec![],
+            material_handles: vec![material],
+        };
+        mount.arena_id = Some(1);
+        scene.set_bsp_mount(PublishedBspMount::new(mount, lease));
+
+        let submission = scene.build_submission();
+
+        assert_eq!(submission.bsp_draw_items.len(), 1);
+        assert_eq!(submission.bsp_draw_items[0].mesh_id, MeshHandle::new(7, 0));
+        assert_eq!(
+            submission.bsp_draw_items[0].bsp_material_id,
+            crate::data::handles::BspMaterialHandle::new(0, 0)
+        );
+        assert_eq!(submission.point_lights.len(), 1);
+        assert_eq!(submission.point_lights[0].color, Vec3::new(1.0, 0.5, 0.25));
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn bsp_mount_retirement_returns_detached_mount_and_leaves_scene_empty() {
+        use crate::api::bsp::{BspResourceLease, PublishedBspMount};
+        use crate::data::bsp_import::MountedBspBatch;
+
+        let mut scene = SceneWorld::new();
+        let mut mount = crate::scene::bsp_visibility::BspMountState::new();
+        mount.activate();
+        let batch = bsp::geometry::RenderBatch {
+            key: bsp::geometry::BatchKey {
+                render_class: 0,
+                material_identity: 0,
+                lightmap_page: 0,
+                style_ids: [0, 255, 255, 255],
+                model_index: 0,
+            },
+            leaf_signature: Vec::new(),
+            face_indices: vec![0],
+            pvs_eligible: true,
+            is_inline_model: false,
+            model_index: 0,
+        };
+        let mesh = MeshHandle::new(7, 0);
+        let material = crate::data::handles::BspMaterialHandle::new(3, 0);
+        let mounted = MountedBspBatch::try_new(
+            &batch,
+            mesh,
+            material,
+            (Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)),
+        )
+        .expect("valid mounted batch");
+        mount
+            .set_render_assets_from_canonical(&[mounted], vec![mesh], vec![Some(material)], vec![])
+            .expect("canonical batch publish");
+        let lease = BspResourceLease {
+            arena_id: 3,
+            mesh_handles: vec![mesh],
+            texture_handles: vec![],
+            material_handles: vec![material],
+        };
+        mount.arena_id = Some(3);
+        scene.set_bsp_mount(PublishedBspMount::new(mount, lease));
+        assert!(scene.has_bsp_mount());
+
+        let retired = scene.retire_bsp_mount();
+        assert!(retired.is_some());
+        assert!(!scene.has_bsp_mount());
+
+        // Scene submission after retirement should have no BSP draws.
+        let submission = scene.build_submission();
+        assert!(submission.bsp_draw_items.is_empty());
+        assert!(submission.bsp_selected_lights.is_empty());
+        assert!(submission.bsp_failure.is_none());
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn bsp_mount_retire_on_inactive_returns_none() {
+        let mut scene = SceneWorld::new();
+        assert!(!scene.has_bsp_mount());
+        let retired = scene.retire_bsp_mount();
+        assert!(retired.is_none());
+    }
+
+    #[test]
+    fn invariant_audit_detects_duplicate_persistent_id() {
+        let mut scene = SceneWorld::new();
+        let root = scene.add_node(None, SceneNode::default());
+        let child = scene.add_node(Some(root), SceneNode::default());
+
+        // Both have unique persistent IDs, so audit should pass.
+        scene
+            .audit_object_invariants()
+            .expect("invariants before corruption");
+
+        // Artificially set child's persistent ID to match root's.
+        let dup_persistent = scene
+            .get_node_record(root)
+            .map(|r| r.persistent_id.clone())
+            .unwrap();
+        if let Some(record) = scene.get_node_record_mut(child) {
+            record.persistent_id = dup_persistent;
+        }
+
+        let result = scene.audit_object_invariants();
+        assert!(result.is_err(), "audit must detect duplicate persistent ID");
+        assert!(result.unwrap_err().contains("duplicate persistent"));
     }
 }

@@ -3,6 +3,8 @@ use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 
 use super::config::FrameCaptureConfigError;
+use crate::object::component::ComponentError;
+pub use crate::object::identity::ObjectError;
 use crate::scene::scene_world::SceneNodeId;
 
 #[derive(Debug)]
@@ -178,11 +180,15 @@ pub enum SceneError {
     MissingAssetId(String),
     BadSerializedParent { node_id: String, parent_id: String },
     DuplicateSerializedNodeId(String),
+    DuplicateSerializedObjectId(String),
     DisconnectedGraph(String),
     AnimationError(AnimationError),
     CommandError(CommandError),
     SerializationError(String),
     InvalidMutation(String),
+    Object(ObjectError),
+    Component(ComponentError),
+    GenerationExhausted { resource: String, slot: u32 },
 }
 
 impl Display for SceneError {
@@ -238,12 +244,33 @@ impl Display for SceneError {
             Self::DuplicateSerializedNodeId(id) => {
                 write!(f, "duplicate serialized scene node id '{id}'")
             }
+            Self::DuplicateSerializedObjectId(id) => {
+                write!(f, "duplicate serialized object id '{id}'")
+            }
             Self::DisconnectedGraph(msg) => write!(f, "disconnected scene graph: {msg}"),
             Self::AnimationError(err) => write!(f, "animation error: {err}"),
             Self::CommandError(err) => write!(f, "command error: {err}"),
             Self::SerializationError(msg) => write!(f, "serialization error: {msg}"),
             Self::InvalidMutation(msg) => write!(f, "invalid mutation: {msg}"),
+            Self::Object(err) => write!(f, "object error: {err}"),
+            Self::Component(err) => write!(f, "component error: {err}"),
+            Self::GenerationExhausted { resource, slot } => write!(
+                f,
+                "generation counter exhausted for {resource} at slot {slot}"
+            ),
         }
+    }
+}
+
+impl From<ObjectError> for SceneError {
+    fn from(err: ObjectError) -> Self {
+        Self::Object(err)
+    }
+}
+
+impl From<ComponentError> for SceneError {
+    fn from(err: ComponentError) -> Self {
+        Self::Component(err)
     }
 }
 
@@ -261,7 +288,11 @@ impl From<CommandError> for SceneError {
 
 impl Error for SceneError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        None
+        match self {
+            Self::Object(err) => Some(err),
+            Self::Component(err) => Some(err),
+            _ => None,
+        }
     }
 }
 

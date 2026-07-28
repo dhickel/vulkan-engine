@@ -53,6 +53,34 @@ impl TextureHandle {
     }
 }
 
+#[cfg(feature = "bsp")]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BspMaterialHandle {
+    pub slot: u32,
+    pub generation: u32,
+}
+
+#[cfg(feature = "bsp")]
+impl BspMaterialHandle {
+    pub const fn new(slot: u32, generation: u32) -> Self {
+        Self { slot, generation }
+    }
+}
+
+#[cfg(feature = "bsp")]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BspTextureHandle {
+    pub slot: u32,
+    pub generation: u32,
+}
+
+#[cfg(feature = "bsp")]
+impl BspTextureHandle {
+    pub const fn new(slot: u32, generation: u32) -> Self {
+        Self { slot, generation }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EnvironmentHandle {
     pub slot: u32,

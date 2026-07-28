@@ -44,6 +44,18 @@ impl Ray {
     }
 }
 
+/// Result of a ray-vs-AABB intersection test with additional hit metadata.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct AabbRayHit {
+    /// World-unit distance from the ray origin to the entry point.
+    pub distance: f32,
+    /// The world-space hit point on (or near) the AABB surface.
+    pub point: Vec3,
+    /// The outward-facing entry-face normal. A ray starting inside the box has
+    /// no entry face, so its zero-distance hit has no normal.
+    pub normal: Option<Vec3>,
+}
+
 /// Axis-aligned bounding box for intersection testing.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Aabb {
@@ -137,10 +149,25 @@ impl Aabb {
         Some(Aabb::from_min_max(min, max))
     }
 
-    /// Ray-AABB intersection test (slab method). Returns the t-value of the
-    /// entry point if the ray hits, or None.
+    /// Ray-AABB intersection test (slab method). Returns the entry distance
+    /// if the ray hits, or `None`. This compatibility API delegates to the
+    /// rich hit path so both APIs share validation and intersection semantics.
     pub fn intersect_ray(&self, ray: &Ray) -> Option<f32> {
-        if ray.direction.length_squared() == 0.0 {
+        self.intersect_ray_hit(ray).map(|hit| hit.distance)
+    }
+
+    /// Ray-AABB intersection test with hit metadata.
+    ///
+    /// Invalid/non-finite bounds and rays are rejected. A ray beginning inside
+    /// the box reports distance zero with no synthetic entry normal. Exact
+    /// corner ties use X, then Y, then Z as the deterministic entry axis.
+    pub fn intersect_ray_hit(&self, ray: &Ray) -> Option<AabbRayHit> {
+        if !self.is_finite()
+            || !self.is_ordered()
+            || !ray.origin.is_finite()
+            || !ray.direction.is_finite()
+            || ray.direction.length_squared() == 0.0
+        {
             return None;
         }
 
@@ -150,7 +177,6 @@ impl Aabb {
             ray_axis_interval(ray.origin.y, ray.direction.y, self.min.y, self.max.y)?;
         let (tz_min, tz_max) =
             ray_axis_interval(ray.origin.z, ray.direction.z, self.min.z, self.max.z)?;
-
         let tmin = tx_min.max(ty_min).max(tz_min);
         let tmax = tx_max.min(ty_max).min(tz_max);
 
@@ -158,7 +184,32 @@ impl Aabb {
             return None;
         }
 
-        Some(tmin.max(0.0))
+        let inside = tmin < 0.0;
+        let distance = tmin.max(0.0);
+        let point = ray.origin + ray.direction * distance;
+        let normal = (!inside).then(|| {
+            let axis = if tx_min >= ty_min && tx_min >= tz_min {
+                0
+            } else if ty_min >= tz_min {
+                1
+            } else {
+                2
+            };
+            match axis {
+                0 if ray.direction.x > 0.0 => Vec3::NEG_X,
+                0 => Vec3::X,
+                1 if ray.direction.y > 0.0 => Vec3::NEG_Y,
+                1 => Vec3::Y,
+                2 if ray.direction.z > 0.0 => Vec3::NEG_Z,
+                _ => Vec3::Z,
+            }
+        });
+
+        Some(AabbRayHit {
+            distance,
+            point,
+            normal,
+        })
     }
 }
 
@@ -173,6 +224,7 @@ fn ray_axis_interval(origin: f32, direction: f32, min: f32, max: f32) -> Option<
 }
 
 /// View frustum for culling. Six planes (left, right, top, bottom, near, far).
+#[derive(Clone, Debug)]
 pub struct Frustum {
     planes: [Vec4; 6],
 }
@@ -381,7 +433,7 @@ impl Camera {
 
 #[cfg(test)]
 mod tests {
-    use super::{Aabb, Camera, CameraLookAtError, Frustum};
+    use super::{Aabb, Camera, CameraLookAtError, Frustum, Ray};
     use glam::{Mat4, Vec3};
 
     const ASSERT_EPSILON: f32 = 1.0e-4;
@@ -453,6 +505,35 @@ mod tests {
         assert!(frustum.intersects_aabb(&across_near));
         assert!(!frustum.intersects_aabb(&beyond_far));
         assert!(!frustum.intersects_aabb(&outside_right));
+    }
+
+    #[test]
+    fn aabb_hit_reports_entry_normal_and_inside_without_one() {
+        let aabb = Aabb::from_min_max(Vec3::splat(-1.0), Vec3::splat(1.0));
+        let hit = aabb
+            .intersect_ray_hit(&Ray {
+                origin: Vec3::new(0.0, 0.0, 3.0),
+                direction: Vec3::NEG_Z,
+            })
+            .expect("outside ray hits");
+        assert_eq!(hit.distance, 2.0);
+        assert_eq!(hit.normal, Some(Vec3::Z));
+
+        let inside = aabb
+            .intersect_ray_hit(&Ray {
+                origin: Vec3::ZERO,
+                direction: Vec3::X,
+            })
+            .expect("inside ray hits");
+        assert_eq!(inside.distance, 0.0);
+        assert_eq!(inside.normal, None);
+        assert_eq!(
+            aabb.intersect_ray(&Ray {
+                origin: Vec3::ZERO,
+                direction: Vec3::X,
+            }),
+            Some(0.0)
+        );
     }
 
     #[test]
@@ -574,6 +655,7 @@ impl FPSController {
 
 /// Orbiting camera for editor use. Rotates around a target point using
 /// spherical coordinates (theta, phi, radius).
+#[derive(Clone, Debug)]
 pub struct OrbitCamera {
     pub target: Vec3,
     pub theta: f32, // azimuth (horizontal rotation)
@@ -688,5 +770,325 @@ impl OrbitController {
         if scroll.abs() > 0.0 {
             camera.zoom(scroll * self.zoom_speed);
         }
+    }
+}
+
+// ── EditorCamera ─────────────────────────────────────────────────────
+
+/// Editor camera wrapping an [`OrbitCamera`] with perspective or
+/// orthographic projection support.
+///
+/// Provides `screen_to_ray` for picking, `focus_on(Aabb)` for framing,
+/// and direct access to view/projection matrices.
+#[derive(Clone, Debug)]
+pub struct EditorCamera {
+    orbit: OrbitCamera,
+    /// Projection mode.
+    pub projection_mode: EditorProjection,
+    /// Near clipping plane.
+    pub near_plane: f32,
+    /// Far clipping plane.
+    pub far_plane: f32,
+    /// Viewport aspect ratio (width / height).
+    pub aspect_ratio: f32,
+}
+
+/// Projection mode for [`EditorCamera`].
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum EditorProjection {
+    /// Perspective projection with vertical FOV in radians.
+    Perspective { fov_y: f32 },
+    /// Orthographic projection with half-height in world units.
+    Orthographic { half_height: f32 },
+}
+
+impl Default for EditorCamera {
+    fn default() -> Self {
+        Self {
+            orbit: OrbitCamera::default(),
+            projection_mode: EditorProjection::Perspective {
+                fov_y: 60.0_f32.to_radians(),
+            },
+            near_plane: 0.1,
+            far_plane: 1000.0,
+            aspect_ratio: 16.0 / 9.0,
+        }
+    }
+}
+
+impl EditorCamera {
+    /// Create a new [`EditorCamera`] with default perspective projection.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create with a specific orbit configuration.
+    pub fn with_orbit(orbit: OrbitCamera) -> Self {
+        Self {
+            orbit,
+            ..Default::default()
+        }
+    }
+
+    /// Set the projection to perspective with the given vertical FOV
+    /// (radians).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if `fov_y` is not in (0, PI) or if `near_plane` or
+    /// `far_plane` is non-finite or `near_plane >= far_plane`.
+    pub fn set_perspective(
+        &mut self,
+        fov_y: f32,
+        near_plane: f32,
+        far_plane: f32,
+    ) -> Result<(), &'static str> {
+        if fov_y <= 0.0 || fov_y >= std::f32::consts::PI {
+            return Err("fov_y must be in (0, PI)");
+        }
+        if !near_plane.is_finite() || !far_plane.is_finite() {
+            return Err("near_plane and far_plane must be finite");
+        }
+        if near_plane <= 0.0 || near_plane >= far_plane {
+            return Err("near_plane must be > 0 and < far_plane");
+        }
+        self.projection_mode = EditorProjection::Perspective { fov_y };
+        self.near_plane = near_plane;
+        self.far_plane = far_plane;
+        Ok(())
+    }
+
+    /// Set the projection to orthographic.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if `half_height` is non-finite or ≤ 0, or if
+    /// `near_plane` / `far_plane` are invalid.
+    pub fn set_orthographic(
+        &mut self,
+        half_height: f32,
+        near_plane: f32,
+        far_plane: f32,
+    ) -> Result<(), &'static str> {
+        if !half_height.is_finite() || half_height <= 0.0 {
+            return Err("half_height must be finite and > 0");
+        }
+        if !near_plane.is_finite() || !far_plane.is_finite() {
+            return Err("near_plane and far_plane must be finite");
+        }
+        if near_plane >= far_plane {
+            return Err("near_plane must be < far_plane");
+        }
+        self.projection_mode = EditorProjection::Orthographic { half_height };
+        self.near_plane = near_plane;
+        self.far_plane = far_plane;
+        Ok(())
+    }
+
+    // ── Accessors ──────────────────────────────────────────────────
+
+    /// Return the wrapped [`OrbitCamera`] for direct manipulation.
+    pub fn orbit(&self) -> &OrbitCamera {
+        &self.orbit
+    }
+
+    /// Return a mutable reference to the wrapped [`OrbitCamera`].
+    pub fn orbit_mut(&mut self) -> &mut OrbitCamera {
+        &mut self.orbit
+    }
+
+    /// Compute the projection matrix from the current mode.
+    pub fn projection_matrix(&self) -> Mat4 {
+        match self.projection_mode {
+            EditorProjection::Perspective { fov_y } => {
+                Mat4::perspective_rh(fov_y, self.aspect_ratio, self.near_plane, self.far_plane)
+            }
+            EditorProjection::Orthographic { half_height } => {
+                let half_width = half_height * self.aspect_ratio;
+                Mat4::orthographic_rh(
+                    -half_width,
+                    half_width,
+                    -half_height,
+                    half_height,
+                    self.near_plane,
+                    self.far_plane,
+                )
+            }
+        }
+    }
+
+    /// Compute the view matrix from the orbit camera.
+    pub fn view_matrix(&self) -> Mat4 {
+        self.orbit.view_matrix()
+    }
+
+    /// Combined view-projection matrix.
+    pub fn view_projection_matrix(&self) -> Mat4 {
+        self.projection_matrix() * self.view_matrix()
+    }
+
+    /// Inverse view-projection matrix for screen-to-world transforms.
+    pub fn inv_view_projection(&self) -> Mat4 {
+        self.view_projection_matrix().inverse()
+    }
+
+    /// Camera eye position in world space.
+    pub fn eye_position(&self) -> Vec3 {
+        self.orbit.eye_position()
+    }
+
+    // ── Screen-to-ray ──────────────────────────────────────────────
+
+    /// Build a world-space [`Ray`] from pixel coordinates.
+    ///
+    /// `screen_pos.0` = x pixels, `screen_pos.1` = y pixels, with
+    /// (0,0) at top-left.  `viewport_size` = (width, height) in pixels.
+    ///
+    /// - **Perspective**: ray originates at the eye, direction toward
+    ///   the un-projected world point.
+    /// - **Orthographic**: ray originates at a per-pixel point on the
+    ///   near plane, direction parallel to the view axis.  This ensures
+    ///   intersection tests produce correct world-space distances even
+    ///   though all ortho rays are parallel.
+    ///
+    /// Returns `None` if the view-projection matrix is singular or the
+    /// ray cannot be constructed.
+    pub fn screen_to_ray(
+        &self,
+        screen_pos: (f32, f32),
+        viewport_size: (u32, u32),
+    ) -> Option<Ray> {
+        let inv_vp = self.inv_view_projection();
+        if !inv_vp.is_finite() {
+            return None;
+        }
+
+        match self.projection_mode {
+            EditorProjection::Perspective { .. } => {
+                let eye = self.eye_position();
+                let ray = Ray::from_screen(screen_pos, viewport_size, inv_vp, eye);
+                if ray.direction.length_squared() < 1e-10 {
+                    return None;
+                }
+                Some(ray)
+            }
+            EditorProjection::Orthographic { .. } => {
+                // Orthographic: map screen pixel to near-plane world point.
+                let w = viewport_size.0 as f32;
+                let h = viewport_size.1 as f32;
+                if w <= 0.0 || h <= 0.0 {
+                    return None;
+                }
+                let ndc_x = (2.0 * screen_pos.0) / w - 1.0;
+                let ndc_y = 1.0 - (2.0 * screen_pos.1) / h;
+                // Near plane in NDC (Vulkan [0,1] depth).
+                let ndc_near = glam::Vec4::new(ndc_x, ndc_y, 0.0, 1.0);
+                let world_near = inv_vp * ndc_near;
+                if world_near.w.abs() < 1e-10 {
+                    return None;
+                }
+                let origin = glam::Vec3::new(world_near.x, world_near.y, world_near.z) / world_near.w;
+                // Direction is along the view axis (camera forward), not eye-relative.
+                let forward = (self.orbit.target - self.eye_position()).normalize();
+                if forward.length_squared() < 1e-10 {
+                    return None;
+                }
+                Some(Ray {
+                    origin,
+                    direction: forward,
+                })
+            }
+        }
+    }
+
+    // ── Focus on AABB ──────────────────────────────────────────────
+
+    /// Reposition the orbit target to the center of `aabb` and adjust
+    /// radius so the entire AABB fits in view.
+    ///
+    /// Returns `Err` if the AABB is non-finite or degenerate.
+    pub fn focus_on(&mut self, aabb: &Aabb) -> Result<(), &'static str> {
+        let center = aabb.center();
+        let radius = self.compute_fit_radius(aabb)?;
+        self.orbit.target = center;
+        self.orbit.radius = radius;
+        Ok(())
+    }
+
+    /// Reposition the orbit target to the aggregate center of multiple
+    /// AABBs (e.g., all selected objects) and adjust radius so the union
+    /// fits in view.
+    ///
+    /// Returns `Err` if any AABB is non-finite or the aggregate is
+    /// degenerate.
+    pub fn focus_on_many(
+        &mut self,
+        aabbs: &[Aabb],
+    ) -> Result<(), &'static str> {
+        if aabbs.is_empty() {
+            return Err("no AABBs provided");
+        }
+        // Compute the union AABB.
+        let mut union = aabbs[0];
+        for aabb in &aabbs[1..] {
+            if !aabb.is_finite() || !aabb.is_ordered() {
+                return Err("AABB is non-finite or not ordered");
+            }
+            union.extend_to_enclose(aabb);
+        }
+        if !union.is_finite() || !union.is_ordered() {
+            return Err("union AABB is non-finite or not ordered");
+        }
+        self.focus_on(&union)
+    }
+
+    /// Convert to a [`CameraView`] for scene camera submission.
+    ///
+    /// `viewport_width` and `viewport_height` are in pixels and used
+    /// to compute the aspect ratio for the projection matrix.
+    pub fn to_camera_view(&self, viewport_width: u32, viewport_height: u32) -> crate::CameraView {
+        let aspect = viewport_width as f32 / viewport_height as f32;
+        let view = self.view_matrix();
+        let proj = match self.projection_mode {
+            EditorProjection::Perspective { fov_y } => {
+                glam::Mat4::perspective_rh(fov_y, aspect, self.near_plane, self.far_plane)
+            }
+            EditorProjection::Orthographic { half_height } => {
+                let half_width = half_height * aspect;
+                glam::Mat4::orthographic_rh(
+                    -half_width, half_width,
+                    -half_height, half_height,
+                    self.near_plane, self.far_plane,
+                )
+            }
+        };
+        crate::CameraView::new(view, proj, self.eye_position())
+    }
+
+    // ── Internal helper ────────────────────────────────────────────
+
+    /// Compute a radius that fits `aabb` in view given the current
+    /// projection mode.
+    fn compute_fit_radius(&self, aabb: &Aabb) -> Result<f32, &'static str> {
+        if !aabb.is_finite() || !aabb.is_ordered() {
+            return Err("AABB is non-finite or not ordered");
+        }
+        let extents = aabb.max - aabb.min;
+        let max_extent = extents.x.max(extents.y).max(extents.z);
+        if max_extent <= 0.0 {
+            return Err("AABB is degenerate (zero extents)");
+        }
+        let required_radius = match self.projection_mode {
+            EditorProjection::Perspective { fov_y } => {
+                let half_fov = fov_y * 0.5;
+                (max_extent * 0.5) / half_fov.tan()
+            }
+            EditorProjection::Orthographic { half_height } => {
+                // For ortho, radius doesn't affect visibility, but a sensible
+                // distance helps frame the scene.
+                max_extent * 0.5 / half_height * self.orbit.radius
+            }
+        };
+        Ok((required_radius * 1.2).clamp(self.orbit.min_radius, self.orbit.max_radius))
     }
 }

@@ -33,6 +33,7 @@ This module owns:
 - API-to-backend handoff: `docs/internal/04-api-to-backend-handoff.md`
 - Vulkan frame lifecycle: `docs/internal/05-vulkan-sync-and-frame-lifecycle.md`
 - Rendergraph dependencies: `docs/internal/07-rendergraph-dependencies-and-aliasing.md`
+- BSP runtime and lifetime: `docs/internal/18-bsp-runtime-and-lifetime.md` — BSP pipeline variants, descriptor layouts, and frame-value UBO
 - Package context: `src/renderer/AGENTS.md`
 
 ## Current Risks

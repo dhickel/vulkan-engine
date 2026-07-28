@@ -1,4 +1,5 @@
 pub mod api;
+pub mod object;
 
 /// Curated alpha facade imports for quickstart-style renderer applications.
 ///
@@ -77,6 +78,7 @@ pub use api::{
     Renderer,
     RendererConfig,
     // Error root
+    CommandError,
     RendererError,
     RendererInputRouting,
     RendererInputSuppression,
@@ -92,9 +94,19 @@ pub use api::{
 };
 
 pub use animation::AnimationPlayer;
-pub use data::camera::{Aabb, Camera, FPSController, Frustum, OrbitCamera, OrbitController, Ray};
+pub use data::camera::{
+    Aabb, AabbRayHit, Camera, EditorCamera, EditorProjection, FPSController, Frustum,
+    OrbitCamera, OrbitController, Ray,
+};
+pub use object::selection::SelectionChange;
+pub use object::{ObjectLifecycleOutcome, ObjectMutationOutcome, ObjectSummary};
 pub use scene::command::{
     AddNodeCommand, Command, CommandHistory, CommandResult, PlaceAssetCommand, RemoveNodeCommand,
     SceneNodeRemap, SetTransformCommand,
+};
+pub use scene::object_commands::{
+    AttachComponentCommand, DuplicateObjectsCommand, RemoveComponentCommand,
+    RemoveObjectsCommand, ReplaceComponentStateCommand, SetComponentPropertyCommand,
+    SetObjectParentCommand, SetObjectTransformCommand,
 };
 pub use scene::scene_world::SceneWorld;

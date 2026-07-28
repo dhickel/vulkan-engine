@@ -728,6 +728,48 @@ mod tests {
     }
 
     #[test]
+    fn project_default_cc0_hdr_cubemap_is_spatial_and_high_dynamic_range() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/sky_maps/cc0_dungeon_hdr");
+        let faces = load_face_directory(&path, FacePattern::PxNxPyNyPzNz)
+            .expect("project default HDR cubemap must decode");
+
+        assert_eq!(faces.face_size, 256);
+        assert_eq!(faces.rgba32f.len(), 6 * 256 * 256 * 4);
+
+        let mut minimum = f32::INFINITY;
+        let mut maximum = f32::NEG_INFINITY;
+        let floats_per_face = 256 * 256 * 4;
+        for (face_index, face) in faces.rgba32f.chunks_exact(floats_per_face).enumerate() {
+            let mut channel_min = [f32::INFINITY; 3];
+            let mut channel_max = [f32::NEG_INFINITY; 3];
+            for pixel in face.chunks_exact(4) {
+                for channel in 0..3 {
+                    channel_min[channel] = channel_min[channel].min(pixel[channel]);
+                    channel_max[channel] = channel_max[channel].max(pixel[channel]);
+                    minimum = minimum.min(pixel[channel]);
+                    maximum = maximum.max(pixel[channel]);
+                }
+            }
+            assert!(
+                channel_max
+                    .into_iter()
+                    .zip(channel_min)
+                    .any(|(max, min)| max - min > 0.005),
+                "HDR face {face_index} is spatially flat"
+            );
+        }
+        assert!(
+            minimum < 0.1,
+            "HDR cubemap lacks dark dungeon detail: {minimum}"
+        );
+        assert!(
+            maximum > 8.0,
+            "HDR cubemap lacks bright IBL highlights: {maximum}"
+        );
+    }
+
+    #[test]
     fn face_directory_auto_aliases_detects_right_left_etc() {
         let tmp = std::env::temp_dir().join("env_import_test_auto_aliases");
         let _ = std::fs::remove_dir_all(&tmp);

@@ -238,3 +238,4 @@ else:
 - `docs/internal/01-rendering-pipeline-mental-model.md`
 - `docs/internal/04-api-to-backend-handoff.md`
 - `src/renderer/src/vulkan/AGENTS.md`
+- `docs/internal/18-bsp-runtime-and-lifetime.md` — BSP pipeline variants share the same fence-wait/descriptor-reset/frame-slot lifecycle; BSP frame-values UBO follows the identical per-frame write-once pattern

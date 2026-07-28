@@ -52,7 +52,7 @@ App-owned custom loops can instead build a `CameraView` from app camera/gameplay
 
 ### Shutdown
 
-4. **Drop `Renderer`**: device wait idle → stop worker threads → destroy frame-local shadow and presentation resources, descriptors/caches, command pools/synchronization, and allocator/device objects in ownership order. Teardown-sensitive validation is exercised by the isolated ignored GPU smoke test.
+4. **Drop `Renderer`**: device wait idle → drop the windowed ImGui renderer exactly once while its Vulkan device is live → stop worker threads → destroy frame-local shadow and presentation resources, descriptors/caches, command pools/synchronization, and allocator/device objects in ownership order. Teardown-sensitive validation is exercised by the isolated ignored GPU smoke test.
 
 ## Key Design Decisions
 

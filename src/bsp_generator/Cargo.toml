@@ -1,0 +1,19 @@
+[package]
+name = "bsp_generator"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic BSP dungeon generator — pure-Rust offline pipeline depending only on bsp"
+
+[dependencies]
+bsp = { path = "../bsp" }
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+walkdir = "2"
+serde_json = "1"
+
+[features]
+default = []
+serde = ["dep:serde"]

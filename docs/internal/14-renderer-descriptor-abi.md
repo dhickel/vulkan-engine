@@ -82,3 +82,70 @@ There is no set 3 bind and no dynamic descriptor offset.
 `src/renderer/tests/descriptor_abi.rs` checks the live Rust layout declarations, pipeline set
 order, GLSL declarations, shader manifest pairs, critical Rust sizes, and this document's CSM
 compatibility marker. Any ABI change updates all of those as one compatibility unit.
+
+## BSP descriptor ABI (feature `renderer/bsp`, Phase 01 frozen baseline)
+
+**Frozen**: 2026-07-23. Set 0 remains compatible with shared scene bindings. In-flight descriptors are never mutated for frame-varying state. Static textures use one array layer.
+
+BSP lightmapped surfaces use a dedicated descriptor path **separate from the general mesh PBR sampler ABI**. External BSP normal/gloss companions use a BSP-specific PBR fragment shader without changing this descriptor layout. BSP set 0 reuses the `SceneData` six-binding layout so scene data, prefiltered environment, BRDF LUT, and shadow map are shared. BSP set 1 is a material-specific layout with four bindings. BSP set 2 carries frame-local values.
+
+| `VkDescType` | Set/binding(s), Vulkan type, stages | Ownership and image/buffer contract | Live pipeline consumers and shader pair |
+|---|---|---|---|
+| `BspScene` | set 0: b0/b1 `UNIFORM_BUFFER`; b2–b5 `COMBINED_IMAGE_SAMPLER`; vertex+fragment | Same binding structure as `SceneData`. b0 `SceneDataUBO`, b1 `EnvironmentUBO`, b2-b3 cube env, b4 BRDF LUT, b5 shadow array. Vertex + fragment visibility. Compatible with shared scene bindings — BSP and PBR can share the same set 0 descriptor set at bind time. | BSP opaque, fullbright, alpha-mask, PBR opaque, PBR alpha-mask, sky, liquid pipelines. |
+| `BspMaterial` | set 1: b0/b1/b2 `COMBINED_IMAGE_SAMPLER`, b3 `UNIFORM_BUFFER`; fragment | b0 albedo 2D (one array layer for static textures), b1 packed material-data 2D (`R=fullbright`, `G/B=normal X/Y`, `A=gloss`; legacy uploads retain replicated mask RGB + A=255), b2 lightmap atlas `sampler2DArray` (four face-slot-local lightmap layers), b3 `BspSurfaceUniform` UBO (80 bytes Phase 06). The vertex shader must not read set 1. | All BSP fragment shaders in `bsp_shader_manifest.txt`. |
+| `BspFrameValues` | set 2: b0 `UNIFORM_BUFFER`; fragment | Frame-local BSP values: `styleIntensityPacked[16]` (64 float values packed as 16 std140 vec4s), `liquidWarpTime`, `liquidFlowTime`, `globalAnimationTime`. 288 bytes total. Written once per frame max. Per-frame-slot descriptors, never mutated in flight. | All BSP fragment shaders. |
+
+### BSP surface UBO (set 1, binding 3) — `BspSurfaceUniform`
+
+Rust and GLSL size: **80 bytes** (Phase 06 expanded; was 48 bytes in Phase 01).
+
+std140 layout:
+| offset | field | GLSL type | Rust type | Notes |
+|---|---|---|---|---|
+| 0 | `lightmapScaleBias` | `vec4` | `Vec4` | xy = atlas UV scale, zw = atlas UV offset |
+| 16 | `styleIds` | `uvec4` | `UVec4` | 4 style slot indices, 255 = unused |
+| 32 | `fullbrightBase` | `uint` | `u32` | first palette index in fullbright range |
+| 36 | `fullbrightCount` | `uint` | `u32` | number of fullbright entries |
+| 40 | `alphaThreshold` | `float` | `f32` | alpha test threshold (default 0.5) |
+| 44 | `animationFrame` | `uint` | `u32` | current animation frame layer |
+| 48 | `animationTime` | `float` | `f32` | engine time ticks (0.1s resolution) |
+| 52 | `surfaceFlags` | `uint` | `u32` | classification flags, including `SURF_UNLIT_FALLBACK` when no valid baked-lightmap layout exists |
+| 56 | `receiveMask` | `uint` | `u32` | light receive mask (RECEIVE_IBL, RECEIVE_CSM, etc.) |
+| 60 | `lightmapLayerBase` | `uint` | `u32` | first array layer for the material's four face-local style slots |
+| 64 | `liquidWarpScale` | `float` | `f32` | warp displacement scale |
+| 68 | `liquidFlowSpeed` | `float` | `f32` | flow scroll speed |
+| 72 | `_pad1` | `uvec2` | `[u32;2]` | padding to 80 B |
+
+### BSP frame values UBO (set 2, binding 0) — `BspFrameValuesUniform`
+
+Rust and GLSL size: **288 bytes** (Phase 06 additive).
+
+std140 layout:
+| offset | field | GLSL type | Notes |
+|---|---|---|---|
+| 0 | `styleIntensityPacked[16]` | `vec4[16]` | packed per-light-style intensity, style 0 defaults to 1.0 |
+| 256 | `liquidWarpTime` | `float` | monotonic seconds for warp phase |
+| 260 | `liquidFlowTime` | `float` | monotonic seconds for UV scroll |
+| 264 | `globalAnimationTime` | `float` | engine time ticks for shader animations |
+| 268 | `_pad0` | `uint` | padding |
+| 272 | `_pad1` | `vec4` | padding to 288 B |
+
+### BSP pipeline set order and push constants (Phase 06 states)
+
+| Pipeline | Descriptor set order | Depth state | Blend | Cull | Push constants / source pair |
+|---|---|---|---|---|---|
+| BSP opaque | set 0 `BspScene`, set 1 `BspMaterial`, set 2 `BspFrameValues` | write ON, LESS | off | back | `mat4 model` + `vertex_buffer_addr`, 80 B, vertex. `bsp_lightmapped.vert(.spv)` + `bsp_lightmapped.frag(.spv)`. |
+| BSP fullbright | same as opaque | same as opaque | off | back | Same shader pair; fullbright path is inside fragment. |
+| BSP alpha mask | set 0 `BspScene`, set 1 `BspMaterial`, set 2 `BspFrameValues` | write ON, LESS | off | none (two-sided) | Same push constants. `bsp_lightmapped.vert(.spv)` + `bsp_lightmapped.frag(.spv)`. |
+| BSP PBR opaque | same BSP sets/layout | write ON, LESS | off | back | Same push constants. `bsp_lightmapped.vert(.spv)` + `bsp_pbr.frag(.spv)`. Baked lightmap supplies legacy diffuse modulation; set 0 b3/b4 provide specular IBL. |
+| BSP PBR alpha mask | same BSP sets/layout | write ON, LESS | off | none (two-sided) | Same PBR shader pair with alpha test controlled by `SURF_ALPHA_MASK`. |
+| BSP sky | set 0 `BspScene`, set 1 `BspMaterial`, set 2 `BspFrameValues` (layout-compatible) | write OFF, LESS | off | back | `mat4 model` + `vertex_buffer_addr`, 80 B, vertex. `bsp_lightmapped.vert(.spv)` + `bsp_sky.frag(.spv)`. No `gl_FragDepth`. |
+| BSP liquid | set 0 `BspScene`, set 1 `BspMaterial`, set 2 `BspFrameValues` | write OFF, LESS | alpha blend | none (two-sided) | Same push constants. `bsp_lightmapped.vert(.spv)` + `bsp_liquid.frag(.spv)`. |
+
+**Frame-varying update rule (frozen)**: In-flight descriptors are never mutated. Frame-local BSP values (style intensities, animation indices, liquid parameters) are written through fresh or frame-rotated set 2 descriptors each frame, not by mutating descriptors that may still be in flight. Static albedo and packed material-data textures use one array layer — per-frame animation changes are communicated via the animationFrame/animationTime uniforms, not by rewriting texture bindings. External PBR companions are decoded and packed before allocation; they add no descriptor binding. `SURF_UNLIT_FALLBACK` suppresses atlas sampling for a face without a valid lightmap and renders its resolved material path directly.
+
+### BSP ABI exec guard
+
+BSP descriptor bindings are tested in `descriptor_abi_bsp_bindings_registered` (feature-gated behind `#[cfg(feature = "bsp")]`). BSP shader manifest is `src/renderer/src/shaders/bsp_shader_manifest.txt`.
+
+See [BSP Runtime and Lifetime](18-bsp-runtime-and-lifetime.md) for the ownership and commitment protocol that governs descriptor lifetimes.

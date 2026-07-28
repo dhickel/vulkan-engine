@@ -1,0 +1,33 @@
+# ericw-tools Q1 BSP2 compiler profile — pinned version for BSP2 fixture generation.
+#
+# Used by engine_pack compile-bsp and build_fixtures.py to produce
+# deterministic BSP2 output with colored .lit companions.
+#
+# ericw-tools must be user-supplied; not bundled with the engine.
+# Download: https://github.com/ericwa/ericw-tools/releases
+
+name = "ericw-q1-bsp2-generated"
+compiler_identity = "ericw-tools"
+required_version = "2.0.0-alpha3"
+
+# Executables — resolved via --tool-path or PATH
+qbsp_executable = "qbsp"
+vis_executable = "vis"
+light_executable = "light"
+
+# BSP2 arguments: -bsp2 on qbsp; light auto-detects BSP2 from magic.
+# ericw-tools 2.0.0-alpha3 light does not accept -bsp2 or -colored flags.
+# Pin all stages to one thread so generated .bsp/.lit bytes are reproducible.
+default_qbsp_args = ["-bsp2", "-threads", "1"]
+default_vis_args = ["-threads", "1"]
+default_light_args = ["-threads", "1", "-lit"]
+
+# Safety limits
+timeout_seconds = 300
+max_output_size = 134217728  # 128 MiB
+
+# Pinned executable hashes for verified reproducibility
+[expected_hashes]
+qbsp_sha256 = "4a05974acf9e59f73a9c8f4e8236f3d1e0961be477dae002837e166278882f17"
+vis_sha256 = "f7f429e0ad9bebbb0ebdefea8d6cd5e13a6ad6ff9f6893126772e00b66e364ea"
+light_sha256 = "1210ee9bed8990f67e3be7e28fbfd8d210329b052ac57dba017200d2da1ca5e5"

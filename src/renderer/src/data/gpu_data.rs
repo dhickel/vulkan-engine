@@ -482,6 +482,26 @@ impl VkModelPushConsts {
     }
 }
 
+#[cfg(feature = "bsp")]
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct BspModelPushConsts {
+    pub model_matrix: Mat4,
+    pub vertex_buffer_addr: vk::DeviceAddress,
+    _pad: [u32; 2],
+}
+
+#[cfg(feature = "bsp")]
+impl BspModelPushConsts {
+    pub fn new(model_matrix: Mat4, vertex_buffer_addr: vk::DeviceAddress) -> Self {
+        Self {
+            model_matrix,
+            vertex_buffer_addr,
+            _pad: [0; 2],
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Default, Copy, Clone, Pod, Zeroable)]
 pub struct GPUSceneData {
@@ -784,6 +804,198 @@ pub struct RenderObject {
     pub bounds_max: Vec3,
 }
 
+// ── Transparent draw record for sorted rendering ──────────────────────
+
+/// A self-contained transparent draw record for depth-sorted rendering.
+///
+/// Collected from both PBR/unlit and BSP liquid draws and sorted
+/// back-to-front before submission to the geometry pass.
+#[derive(Debug, Copy, Clone)]
+pub struct TransparentDrawRecord {
+    /// World-space center position for depth sorting (camera-relative).
+    pub sort_position: Vec3,
+    /// Pipeline type for bind/render dispatch.
+    pub pipeline: VkPipelineType,
+    /// Material descriptor set (set 2 for PBR, set 1 for BSP).
+    pub material_descriptor: vk::DescriptorSet,
+    /// Index count for the draw call.
+    pub index_count: u32,
+    /// First index offset.
+    pub first_index: u32,
+    /// Index buffer handle.
+    pub index_buffer: vk::Buffer,
+    /// Joint descriptor set (for PBR skinned, null otherwise).
+    pub joint_desc: vk::DescriptorSet,
+    /// World transform matrix.
+    pub transform: Mat4,
+    /// Vertex buffer device address for push constants.
+    pub vertex_buffer_addr: vk::DeviceAddress,
+    /// Material metadata buffer address (PBR only; 0 for BSP).
+    pub mat_meta_buffer_addr: vk::DeviceAddress,
+    /// Whether the draw uses UV1.
+    pub has_uv1: bool,
+    /// Stable tie-break key: (generation, source, identity).
+    pub sort_key: u64,
+}
+
+impl TransparentDrawRecord {
+    /// Build a sort key from generation, source, and identity fragments.
+    pub fn make_sort_key(generation: u32, source: u8, identity: u32) -> u64 {
+        ((generation as u64) << 32) | ((source as u64) << 24) | (identity as u64 & 0x00FF_FFFF)
+    }
+}
+
+// ── BSP surface material UBO ───────────────────────────────────────────
+
+/// Surface flags for BSP face rendering control (bitmask in std140 uint).
+#[cfg(feature = "bsp")]
+pub mod bsp_surface_flags {
+    /// Alpha-mask surface: discard pixels below alpha threshold.
+    pub const SURF_ALPHA_MASK: u32 = 1 << 0;
+    /// Sky surface: depth-test no-write, environment sampling.
+    pub const SURF_SKY: u32 = 1 << 1;
+    /// Liquid/warp surface: two-sided, translucent blend.
+    pub const SURF_LIQUID: u32 = 1 << 2;
+    /// Fullbright surface: additive emission on top of lit albedo.
+    pub const SURF_FULLBRIGHT: u32 = 1 << 3;
+    /// Surface uses the BSP PBR shader path.
+    pub const SURF_PBR: u32 = 1 << 4;
+    /// Packed material-data texture contains a tangent-space normal map.
+    pub const SURF_PBR_NORMAL: u32 = 1 << 5;
+    /// Packed material-data texture contains a gloss map.
+    pub const SURF_PBR_GLOSS: u32 = 1 << 6;
+    /// No valid baked-lightmap layout exists, so the surface renders its resolved
+    /// material directly rather than sampling an unrelated atlas texel.
+    pub const SURF_UNLIT_FALLBACK: u32 = 1 << 7;
+
+    // Receive masks: control which light sources contribute.
+    pub const RECEIVE_IBL: u32 = 1 << 8;
+    pub const RECEIVE_CSM: u32 = 1 << 9;
+    pub const RECEIVE_DYNAMIC_LIGHTS: u32 = 1 << 10;
+    pub const RECEIVE_IMPORTED_LIGHTS: u32 = 1 << 11;
+
+    /// Sealed interior defaults: dynamic only.
+    pub const SEALED_DEFAULT: u32 = RECEIVE_DYNAMIC_LIGHTS;
+    /// Outdoor defaults: IBL + CSM + Dynamic.
+    pub const OUTDOOR_DEFAULT: u32 = RECEIVE_IBL | RECEIVE_CSM | RECEIVE_DYNAMIC_LIGHTS;
+}
+
+/// GPU-visible BSP surface material parameters (std140).
+///
+/// Matches the GLSL `BspSurfaceParams` block at BSP material set 1, binding 3.
+///
+/// std140 layout (80 bytes):
+///   offset  0: lightmapScaleBias    vec4  (16 B)
+///   offset 16: styleIds             uvec4 (16 B) — 4 style IDs for texture-array slots 0-3, 255 = unused
+///   offset 32: fullbrightBase       uint  (4 B)
+///   offset 36: fullbrightCount      uint  (4 B)
+///   offset 40: alphaThreshold       float (4 B)
+///   offset 44: animationFrame       uint  (4 B)
+///   offset 48: animationTime        float (4 B)
+///   offset 52: surfaceFlags         uint  (4 B)
+///   offset 56: receiveMask          uint  (4 B)
+///   offset 60: lightmapLayerBase    uint  (4 B)
+///   offset 64: liquidWarpScale      float (4 B)
+///   offset 68: liquidFlowSpeed      float (4 B)
+///   offset 72: _pad1                uvec2 (8 B)
+///   total: 80 bytes (5 × vec4)
+#[cfg(feature = "bsp")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct BspSurfaceUniform {
+    /// xy = lightmap scale (texture-space → atlas UV), zw = atlas offset bias.
+    pub lightmap_scale_bias: Vec4,
+    /// 4 light style IDs sampled from texture-array slots 0-3 (0-63 valid, 255 = unused slot).
+    pub style_ids: UVec4,
+    /// First palette index in the fullbright emissive range.
+    pub fullbright_base: u32,
+    /// Number of palette entries in the fullbright range.
+    pub fullbright_count: u32,
+    /// Alpha test threshold (default 0.5 for alpha-mask surfaces).
+    pub alpha_threshold: f32,
+    /// Current animation frame index (texture array layer).
+    pub animation_frame: u32,
+    /// Engine time ticks (monotonic, 0.1s resolution per Quake convention).
+    pub animation_time: f32,
+    /// Surface classification and control flags (see bsp_surface_flags).
+    pub surface_flags: u32,
+    /// Receive mask controlling which light sources contribute.
+    pub receive_mask: u32,
+    /// First array layer for this material's four face-local style slots.
+    pub lightmap_layer_base: u32,
+    /// Scale factor for liquid warp displacement.
+    pub liquid_warp_scale: f32,
+    /// Flow speed multiplier for liquid UV animation.
+    pub liquid_flow_speed: f32,
+    pub _pad1: [u32; 2],
+}
+
+#[cfg(feature = "bsp")]
+impl Default for BspSurfaceUniform {
+    fn default() -> Self {
+        Self {
+            lightmap_scale_bias: Vec4::new(1.0, 1.0, 0.0, 0.0),
+            style_ids: UVec4::new(0, 255, 255, 255),
+            fullbright_base: 224,
+            fullbright_count: 32,
+            alpha_threshold: 0.5,
+            animation_frame: 0,
+            animation_time: 0.0,
+            surface_flags: 0,
+            receive_mask: bsp_surface_flags::SEALED_DEFAULT,
+            lightmap_layer_base: 0,
+            liquid_warp_scale: 0.02,
+            liquid_flow_speed: 1.0,
+            _pad1: [0, 0],
+        }
+    }
+}
+
+/// GPU-visible BSP frame-varying values (std140).
+///
+/// Bound at BSP descriptor set 2, binding 0. Written once per frame;
+/// in-flight descriptors are never mutated.
+///
+/// std140 layout (288 bytes):
+///   offset   0: styleIntensityPacked vec4[16] (256 B) — packed light styles 0-63
+///   offset 256: liquidWarpTime       float      (4 B)
+///   offset 260: liquidFlowTime       float      (4 B)
+///   offset 264: globalAnimationTime  float      (4 B)
+///   offset 268: _pad0                uint       (4 B)
+///   offset 272: _pad1                vec4       (16 B)
+///   total: 288 bytes
+#[cfg(feature = "bsp")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct BspFrameValuesUniform {
+    /// Per-light-style intensity (0.0–1.0), 64 entries matching max supported styles.
+    pub style_intensities: [f32; 64],
+    /// Liquid warp time (monotonic seconds, phase driver).
+    pub liquid_warp_time: f32,
+    /// Liquid flow time (monotonic seconds, UV scroll driver).
+    pub liquid_flow_time: f32,
+    /// Global animation time ticks (0.1s resolution, for shader-owned animations).
+    pub global_animation_time: f32,
+    pub _pad0: u32,
+    pub _pad1: [f32; 4],
+}
+
+#[cfg(feature = "bsp")]
+impl Default for BspFrameValuesUniform {
+    fn default() -> Self {
+        let mut intensities = [0.0f32; 64];
+        intensities[0] = 1.0; // static style 0 always on
+        Self {
+            style_intensities: intensities,
+            liquid_warp_time: 0.0,
+            liquid_flow_time: 0.0,
+            global_animation_time: 0.0,
+            _pad0: 0,
+            _pad1: [0.0; 4],
+        }
+    }
+}
+
 // Compile-time layout assertions for UBO std140 alignment
 const _: () = {
     assert!(
@@ -797,6 +1009,21 @@ const _: () = {
     assert!(
         std::mem::size_of::<EnvironmentUBO>() == 2048,
         "EnvironmentUBO must match the GLSL std140 block size (CSM extended)"
+    );
+    #[cfg(feature = "bsp")]
+    assert!(
+        std::mem::size_of::<BspSurfaceUniform>() == 80,
+        "BspSurfaceUniform must match the BSP GLSL std140 block size"
+    );
+    #[cfg(feature = "bsp")]
+    assert!(
+        std::mem::size_of::<BspFrameValuesUniform>() == 288,
+        "BspFrameValuesUniform must match the BSP GLSL std140 block size"
+    );
+    #[cfg(feature = "bsp")]
+    assert!(
+        std::mem::size_of::<BspModelPushConsts>() == 80,
+        "BspModelPushConsts must match the BSP pipeline push-constant range"
     );
 };
 

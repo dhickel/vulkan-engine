@@ -4,6 +4,8 @@
 //! and debug helpers.
 
 pub(crate) mod vk_commands;
+#[cfg(feature = "bsp")]
+pub mod vk_bsp;
 pub mod vk_debug;
 pub mod vk_descriptor;
 #[cfg(test)]

@@ -232,3 +232,4 @@ deallocate(sub_alloc):
 - `docs/internal/05-vulkan-sync-and-frame-lifecycle.md`
 - `docs/internal/04-api-to-backend-handoff.md`
 - `src/renderer/src/vulkan/AGENTS.md`
+- `docs/internal/18-bsp-runtime-and-lifetime.md` — BSP mesh and atlas uploads use the same `VkSubAlloc`/`VkStorageBuffer`/transfer-queue infrastructure and fence-observed retirement

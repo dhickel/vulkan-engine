@@ -213,6 +213,8 @@ pub struct VkDataCache {
     pub environment_cache: Mutex<EnvironmentCache>,
     pub(crate) mesh_geometry_store: Mutex<MeshGeometryStore>,
     pub supported_image_formats: HashSet<vk::Format>,
+    #[cfg(feature = "bsp")]
+    pub bsp_surface_cache: Mutex<BspSurfaceCache>,
 }
 
 impl VkDataCache {
@@ -252,6 +254,12 @@ impl VkDataCache {
             environment_cache.destroy(device, allocator);
         } else {
             error!("environment_cache lock poisoned during destroy");
+        }
+        #[cfg(feature = "bsp")]
+        if let Ok(mut bsp_surface_cache) = self.bsp_surface_cache.lock() {
+            bsp_surface_cache.destroy_descriptor_pool(device, allocator);
+        } else {
+            error!("bsp_surface_cache lock poisoned during destroy");
         }
     }
 
@@ -2730,13 +2738,27 @@ pub enum CoreShaderType {
     ShadowDepthFrag,
     #[cfg(feature = "instancing")]
     MetRoughInstancedVert,
+    #[cfg(feature = "bsp")]
+    BspLightmappedVert,
+    #[cfg(feature = "bsp")]
+    BspLightmappedFrag,
+    #[cfg(feature = "bsp")]
+    BspPbrFrag,
+    #[cfg(feature = "bsp")]
+    BspSkyFrag,
+    #[cfg(feature = "bsp")]
+    BspLiquidFrag,
 }
 
 impl CoreShaderType {
-    #[cfg(not(feature = "instancing"))]
-    const COUNT: usize = 13;
-    #[cfg(feature = "instancing")]
-    const COUNT: usize = 14;
+    #[cfg(all(not(feature = "instancing"), not(feature = "bsp")))]
+    pub const COUNT: usize = 13;
+    #[cfg(all(feature = "instancing", not(feature = "bsp")))]
+    pub const COUNT: usize = 14;
+    #[cfg(all(not(feature = "instancing"), feature = "bsp"))]
+    pub const COUNT: usize = 18;
+    #[cfg(all(feature = "instancing", feature = "bsp"))]
+    pub const COUNT: usize = 19;
 
     fn from_manifest_key(key: &str) -> Option<Self> {
         match key {
@@ -2755,6 +2777,16 @@ impl CoreShaderType {
             "ShadowDepthFrag" => Some(Self::ShadowDepthFrag),
             #[cfg(feature = "instancing")]
             "MetRoughInstancedVert" => Some(Self::MetRoughInstancedVert),
+            #[cfg(feature = "bsp")]
+            "BspLightmappedVert" => Some(Self::BspLightmappedVert),
+            #[cfg(feature = "bsp")]
+            "BspLightmappedFrag" => Some(Self::BspLightmappedFrag),
+            #[cfg(feature = "bsp")]
+            "BspPbrFrag" => Some(Self::BspPbrFrag),
+            #[cfg(feature = "bsp")]
+            "BspSkyFrag" => Some(Self::BspSkyFrag),
+            #[cfg(feature = "bsp")]
+            "BspLiquidFrag" => Some(Self::BspLiquidFrag),
             _ => None,
         }
     }
@@ -2762,12 +2794,36 @@ impl CoreShaderType {
 
 const CORE_SHADER_MANIFEST: &str = include_str!("../shaders/core_shader_manifest.txt");
 
+#[cfg(feature = "bsp")]
+const BSP_SHADER_MANIFEST: &str = include_str!("../shaders/bsp_shader_manifest.txt");
+
 pub fn load_core_shader_manifest() -> Result<Vec<(CoreShaderType, &'static str)>, String> {
     let mut shader_paths =
         Vec::<(CoreShaderType, &'static str)>::with_capacity(CoreShaderType::COUNT);
     let mut seen = std::collections::HashSet::with_capacity(CoreShaderType::COUNT);
 
-    for (line_index, line) in CORE_SHADER_MANIFEST.lines().enumerate() {
+    parse_shader_manifest_lines(CORE_SHADER_MANIFEST.lines(), &mut shader_paths, &mut seen)?;
+
+    #[cfg(feature = "bsp")]
+    parse_shader_manifest_lines(BSP_SHADER_MANIFEST.lines(), &mut shader_paths, &mut seen)?;
+
+    if shader_paths.len() != CoreShaderType::COUNT {
+        return Err(format!(
+            "Shader manifest size mismatch: expected {}, found {}",
+            CoreShaderType::COUNT,
+            shader_paths.len()
+        ));
+    }
+
+    Ok(shader_paths)
+}
+
+fn parse_shader_manifest_lines<'a>(
+    lines: impl Iterator<Item = &'a str>,
+    shader_paths: &mut Vec<(CoreShaderType, &'a str)>,
+    seen: &mut std::collections::HashSet<CoreShaderType>,
+) -> Result<(), String> {
+    for (line_index, line) in lines.enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
@@ -2813,16 +2869,7 @@ pub fn load_core_shader_manifest() -> Result<Vec<(CoreShaderType, &'static str)>
 
         shader_paths.push((shader_type, path));
     }
-
-    if shader_paths.len() != CoreShaderType::COUNT {
-        return Err(format!(
-            "Shader manifest size mismatch: expected {}, found {}",
-            CoreShaderType::COUNT,
-            shader_paths.len()
-        ));
-    }
-
-    Ok(shader_paths)
+    Ok(())
 }
 
 pub struct VkShaderCache {
@@ -2897,13 +2944,31 @@ pub enum VkPipelineType {
     PbrMetRoughOpaqueInstanced,
     #[cfg(feature = "instancing")]
     UnlitOpaqueInstanced,
+    #[cfg(feature = "bsp")]
+    BspOpaque,
+    #[cfg(feature = "bsp")]
+    BspFullbright,
+    #[cfg(feature = "bsp")]
+    BspAlphaMask,
+    #[cfg(feature = "bsp")]
+    BspPbrOpaque,
+    #[cfg(feature = "bsp")]
+    BspPbrAlphaMask,
+    #[cfg(feature = "bsp")]
+    BspSky,
+    #[cfg(feature = "bsp")]
+    BspLiquid,
 }
 
 impl VkPipelineType {
-    #[cfg(not(feature = "instancing"))]
+    #[cfg(all(not(feature = "instancing"), not(feature = "bsp")))]
     pub const COUNT: usize = 10;
-    #[cfg(feature = "instancing")]
+    #[cfg(all(feature = "instancing", not(feature = "bsp")))]
     pub const COUNT: usize = 12;
+    #[cfg(all(not(feature = "instancing"), feature = "bsp"))]
+    pub const COUNT: usize = 17;
+    #[cfg(all(feature = "instancing", feature = "bsp"))]
+    pub const COUNT: usize = 19;
 }
 
 //#[derive(Clone, Copy)]
@@ -3013,15 +3078,26 @@ pub enum VkDescType {
     Empty,
     #[cfg(feature = "instancing")]
     SceneDataInstanced,
+    #[cfg(feature = "bsp")]
+    BspScene,
+    #[cfg(feature = "bsp")]
+    BspMaterial,
+    #[cfg(feature = "bsp")]
+    BspFrameValues,
 }
 
 impl VkDescType {
-    #[cfg(not(feature = "instancing"))]
-    const COUNT: usize = 10;
-    #[cfg(feature = "instancing")]
-    const COUNT: usize = 11;
+    #[cfg(all(not(feature = "instancing"), not(feature = "bsp")))]
+    pub const COUNT: usize = 10;
+    #[cfg(all(feature = "instancing", not(feature = "bsp")))]
+    pub const COUNT: usize = 11;
+    #[cfg(all(not(feature = "instancing"), feature = "bsp"))]
+    pub const COUNT: usize = 13;
+    #[cfg(all(feature = "instancing", feature = "bsp"))]
+    pub const COUNT: usize = 14;
 }
 
+#[derive(Clone)]
 pub struct VkDescLayoutCache {
     layouts: [vk::DescriptorSetLayout; VkDescType::COUNT],
 }
@@ -3062,9 +3138,51 @@ impl VkDescLayoutCache {
                 9 => VkDescType::Empty,
                 #[cfg(feature = "instancing")]
                 10 => VkDescType::SceneDataInstanced,
-                _ => panic!(),
+                #[cfg(feature = "bsp")]
+                n if n == Self::bsp_scene_index() => VkDescType::BspScene,
+                #[cfg(feature = "bsp")]
+                n if n == Self::bsp_material_index() => VkDescType::BspMaterial,
+                #[cfg(feature = "bsp")]
+                n if n == Self::bsp_frame_values_index() => VkDescType::BspFrameValues,
+                _ => panic!("unexpected descriptor layout index {i}"),
             };
             debug!("\t{:?} : {:?}", typ, *set)
+        }
+    }
+
+    #[cfg(feature = "bsp")]
+    const fn bsp_scene_index() -> usize {
+        #[cfg(feature = "instancing")]
+        {
+            11
+        }
+        #[cfg(not(feature = "instancing"))]
+        {
+            10
+        }
+    }
+
+    #[cfg(feature = "bsp")]
+    const fn bsp_material_index() -> usize {
+        #[cfg(feature = "instancing")]
+        {
+            12
+        }
+        #[cfg(not(feature = "instancing"))]
+        {
+            11
+        }
+    }
+
+    #[cfg(feature = "bsp")]
+    const fn bsp_frame_values_index() -> usize {
+        #[cfg(feature = "instancing")]
+        {
+            13
+        }
+        #[cfg(not(feature = "instancing"))]
+        {
+            12
         }
     }
 }
@@ -3078,6 +3196,742 @@ impl VkDestroyable for VkDescLayoutCache {
                 unsafe { device.destroy_descriptor_set_layout(layout, None) };
             }
         }
+    }
+}
+
+/// GPU resources for a BSP lightmap atlas.
+#[cfg(feature = "bsp")]
+#[derive(Debug)]
+pub struct BspLightmapAtlasGpu {
+    /// RGBA8 2D-array image.
+    pub image: vk::Image,
+    /// 2D-array image view.
+    pub view: vk::ImageView,
+    /// VMA allocation for the image.
+    pub allocation: vk_mem::Allocation,
+    /// Linear/clamp sampler.
+    pub sampler: vk::Sampler,
+    /// Atlas dimensions.
+    pub width: u32,
+    pub height: u32,
+    pub layer_count: u32,
+}
+
+#[cfg(feature = "bsp")]
+impl BspLightmapAtlasGpu {
+    /// Destroy the atlas GPU resources.
+    pub fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {
+        unsafe {
+            if self.sampler != vk::Sampler::null() {
+                device.destroy_sampler(self.sampler, None);
+                self.sampler = vk::Sampler::null();
+            }
+            if self.view != vk::ImageView::null() {
+                device.destroy_image_view(self.view, None);
+                self.view = vk::ImageView::null();
+            }
+            if self.image != vk::Image::null() {
+                allocator.destroy_image(self.image, &mut self.allocation);
+                self.image = vk::Image::null();
+            }
+        }
+    }
+}
+
+#[cfg(feature = "bsp")]
+#[derive(Debug)]
+pub struct BspSurfaceUboGpu {
+    pub buffer: vk::Buffer,
+    pub allocation: vk_mem::Allocation,
+}
+
+#[cfg(feature = "bsp")]
+impl BspSurfaceUboGpu {
+    pub fn destroy(&mut self, allocator: &vk_mem::Allocator) {
+        if self.buffer != vk::Buffer::null() {
+            unsafe {
+                allocator.destroy_buffer(self.buffer, &mut self.allocation);
+            }
+            self.buffer = vk::Buffer::null();
+        }
+    }
+}
+
+#[cfg(feature = "bsp")]
+/// Per-mount arena owning BSP GPU resources for one candidate or active mount.
+///
+/// Each arena owns its material and frame-value descriptor pools, all sets
+/// allocated from them, surface/frame UBOs, atlas payload, and arena identity.
+/// Mesh and texture caches remain the physical owners of their payloads; the
+/// arena records only cache handles and arena association.
+pub(crate) struct BspSurfaceArena {
+    pub id: u64,
+    pub material_desc_pool: Option<vk::DescriptorPool>,
+    pub material_set_layout: Option<vk::DescriptorSetLayout>,
+    pub lightmap_atlas: Option<BspLightmapAtlasGpu>,
+    pub surface_ubo: Option<BspSurfaceUboGpu>,
+    pub frame_values_ubo: Option<BspSurfaceUboGpu>,
+    pub frame_values_desc_pool: Option<vk::DescriptorPool>,
+    pub frame_values_descriptors: Vec<vk::DescriptorSet>,
+    pub frame_values_set_layout: Option<vk::DescriptorSetLayout>,
+    pub frame_slot_count: u32,
+    pub frame_values_stride: u64,
+    /// BSP material slots owned by this arena (for rollback invalidation).
+    pub material_slots: Vec<u32>,
+    /// Mesh handles reserved by this arena (cache-owned payloads).
+    pub mesh_handles: Vec<crate::data::handles::MeshHandle>,
+    /// Texture handles reserved by this arena (cache-owned payloads).
+    pub texture_handles: Vec<crate::data::handles::TextureHandle>,
+}
+
+#[cfg(feature = "bsp")]
+impl BspSurfaceArena {
+    fn new(id: u64) -> Self {
+        Self {
+            id,
+            material_desc_pool: None,
+            material_set_layout: None,
+            lightmap_atlas: None,
+            surface_ubo: None,
+            frame_values_ubo: None,
+            frame_values_desc_pool: None,
+            frame_values_descriptors: Vec::new(),
+            frame_values_set_layout: None,
+            frame_slot_count: 0,
+            frame_values_stride: 0,
+            material_slots: Vec::new(),
+            mesh_handles: Vec::new(),
+            texture_handles: Vec::new(),
+        }
+    }
+
+    fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {
+        // Pools own their sets; destroy pools first.
+        if let Some(pool) = self.material_desc_pool.take() {
+            unsafe { device.destroy_descriptor_pool(pool, None); }
+        }
+        if let Some(pool) = self.frame_values_desc_pool.take() {
+            unsafe { device.destroy_descriptor_pool(pool, None); }
+        }
+        self.frame_values_descriptors.clear();
+        // Destroy UBOs and atlas after pools.
+        if let Some(ref mut ubo) = self.surface_ubo {
+            ubo.destroy(allocator);
+            self.surface_ubo = None;
+        }
+        if let Some(ref mut ubo) = self.frame_values_ubo {
+            ubo.destroy(allocator);
+            self.frame_values_ubo = None;
+        }
+        if let Some(ref mut atlas) = self.lightmap_atlas {
+            atlas.destroy(device, allocator);
+            self.lightmap_atlas = None;
+        }
+        self.material_set_layout = None;
+        self.frame_values_set_layout = None;
+    }
+}
+
+#[cfg(feature = "bsp")]
+/// Lazy BSP surface material cache.
+///
+/// Stores GPU-prepared BSP material records (descriptor set, surface UBO allocation,
+/// pipeline variant). Grows on first BSP material registration and is never freed
+/// until cache destruction.
+///
+/// Arena model: each mount (active A or candidate B) owns a [`BspSurfaceArena`]
+/// that holds its descriptor pools, UBOs, and atlas. Material records are
+/// associated with their creating arena; a valid slot/generation from A cannot
+/// be accepted as B. Arena destruction is the only descriptor-set release path.
+pub struct BspSurfaceCache {
+    /// Prepared BSP materials indexed by slot. A vacant entry is a terminal
+    /// tombstone or reusable slot; no handle may resolve it.
+    cached_materials: Vec<Option<BspCachedSurface>>,
+    /// Per-slot generation counters.
+    generations: Vec<u32>,
+    /// Free slot indices for reuse after retirement.
+    free_slots: Vec<u32>,
+    /// Arena registry: generation-bearing arena id → arena state.
+    arenas: std::collections::HashMap<u64, BspSurfaceArena>,
+    /// Monotonically-increasing arena id counter.
+    next_arena_id: u64,
+    /// The arena currently published to the scene (set by scene mount).
+    active_arena_id: Option<u64>,
+    /// Device handle for pool/atlas destruction.
+    device: Option<ash::Device>,
+    /// Allocator handle for UBO/atlas destruction.
+    allocator: Option<std::sync::Arc<std::sync::Mutex<vk_mem::Allocator>>>,
+}
+
+#[cfg(feature = "bsp")]
+pub struct BspCachedSurface {
+    /// GPU material descriptor set (set 1: albedo, fullbright, lightmap, UBO).
+    pub material_descriptor: vk::DescriptorSet,
+    /// UBO allocation for BspSurfaceUniform.
+    pub surf_ubo_alloc: crate::vulkan::vk_types::VkSubAlloc,
+    /// Pipeline variant for this surface.
+    pub pipeline: VkPipelineType,
+    /// Surface flags for shader classification.
+    pub surface_flags: u32,
+    /// Albedo texture handle (for retirement tracking).
+    pub albedo_tex: crate::data::handles::TextureHandle,
+    /// Fullbright mask texture handle (optional).
+    pub fullbright_tex: Option<crate::data::handles::TextureHandle>,
+    /// Lightmap atlas texture handle.
+    pub lightmap_tex: crate::data::handles::TextureHandle,
+    /// Arena that owns this material's descriptor set and UBO allocation.
+    pub arena_id: u64,
+}
+
+#[cfg(feature = "bsp")]
+impl BspSurfaceCache {
+    pub fn new() -> Self {
+        Self {
+            cached_materials: Vec::with_capacity(256),
+            generations: Vec::with_capacity(256),
+            free_slots: Vec::new(),
+            arenas: std::collections::HashMap::new(),
+            next_arena_id: 1,
+            active_arena_id: None,
+            device: None,
+            allocator: None,
+        }
+    }
+
+    // ── Arena lifecycle ──────────────────────────────────────────────
+
+    /// Allocate a generation-bearing arena identity. The caller must install
+    /// pools, UBOs, and atlas into this arena before any material allocation.
+    pub fn allocate_arena(&mut self) -> u64 {
+        let id = self.next_arena_id;
+        self.next_arena_id = self.next_arena_id.wrapping_add(1);
+        self.arenas.insert(id, BspSurfaceArena::new(id));
+        id
+    }
+
+    /// Look up an arena by identity. Returns `None` for unknown ids.
+    fn arena(&self, arena_id: u64) -> Result<&BspSurfaceArena, String> {
+        self.arenas
+            .get(&arena_id)
+            .ok_or_else(|| format!("BSP arena {arena_id} does not exist"))
+    }
+
+    fn arena_mut(&mut self, arena_id: u64) -> Result<&mut BspSurfaceArena, String> {
+        self.arenas
+            .get_mut(&arena_id)
+            .ok_or_else(|| format!("BSP arena {arena_id} does not exist"))
+    }
+
+    /// Destroy an arena and all its owned GPU resources. Pool destruction
+    /// implicitly releases all sets allocated from it. Cache-owned material
+    /// slots associated with this arena are invalidated.
+    pub fn destroy_arena(
+        &mut self,
+        arena_id: u64,
+        device: &ash::Device,
+        allocator: &vk_mem::Allocator,
+    ) {
+        if let Some(mut arena) = self.arenas.remove(&arena_id) {
+            // Invalidate all material slots owned by this arena before destroying
+            // the pool, so no handle can later reference a destroyed set.
+            for slot in arena.material_slots.drain(..) {
+                debug_assert!(
+                    self.remove_by_slot(slot).is_ok(),
+                    "arena material slot must be live exactly once"
+                );
+            }
+            arena.destroy(device, allocator);
+        }
+    }
+
+    /// True when the given arena owns any cache payloads.
+    pub fn arena_has_active_payloads(&self, arena_id: u64) -> bool {
+        self.arenas.get(&arena_id).is_some_and(|a| {
+            a.lightmap_atlas.is_some() || a.surface_ubo.is_some() || !a.material_slots.is_empty()
+        })
+    }
+
+    /// Store device and allocator handles for arena-scoped resource teardown.
+    pub fn set_device_handles(
+        &mut self,
+        device: ash::Device,
+        allocator: std::sync::Arc<std::sync::Mutex<vk_mem::Allocator>>,
+    ) {
+        self.device = Some(device);
+        self.allocator = Some(allocator);
+    }
+
+    // ── Material descriptor pool (arena-scoped) ─────────────────────
+
+    /// Initialize the BSP material descriptor pool for an arena.
+    pub fn init_material_descriptor_pool(
+        &mut self,
+        arena_id: u64,
+        material_set_layout: vk::DescriptorSetLayout,
+        pool: vk::DescriptorPool,
+    ) -> Result<(), String> {
+        let arena = self.arena_mut(arena_id)?;
+        if arena.material_desc_pool.is_some() {
+            return Err(format!(
+                "BSP arena {arena_id} already has a material descriptor pool"
+            ));
+        }
+        arena.material_set_layout = Some(material_set_layout);
+        arena.material_desc_pool = Some(pool);
+        Ok(())
+    }
+
+    /// True if the arena has an initialized material descriptor pool.
+    pub fn has_material_pool(&self, arena_id: u64) -> bool {
+        self.arenas
+            .get(&arena_id)
+            .is_some_and(|a| a.material_desc_pool.is_some())
+    }
+
+    /// Allocate a single BSP material descriptor set (set 1) from an arena's pool.
+    pub fn allocate_material_set(
+        &self,
+        arena_id: u64,
+        device: &ash::Device,
+    ) -> Result<vk::DescriptorSet, String> {
+        let arena = self.arena(arena_id)?;
+        let layout = arena
+            .material_set_layout
+            .ok_or_else(|| format!("BSP arena {arena_id} material descriptor layout not initialized"))?;
+        let pool = arena
+            .material_desc_pool
+            .ok_or_else(|| format!("BSP arena {arena_id} material descriptor pool not initialized"))?;
+
+        let alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(pool)
+            .set_layouts(std::slice::from_ref(&layout));
+
+        let sets = unsafe {
+            device
+                .allocate_descriptor_sets(&alloc_info)
+                .map_err(|err| format!("failed to allocate BSP material set: {err:?}"))?
+        };
+        Ok(sets[0])
+    }
+
+    // ── Lightmap atlas (arena-scoped) ───────────────────────────────
+
+    /// Install the lightmap atlas for an arena.
+    pub fn install_lightmap_atlas(
+        &mut self,
+        arena_id: u64,
+        atlas: BspLightmapAtlasGpu,
+    ) -> Result<(), String> {
+        let arena = self.arena_mut(arena_id)?;
+        if arena.lightmap_atlas.is_some() {
+            return Err(format!(
+                "BSP arena {arena_id} already has a lightmap atlas"
+            ));
+        }
+        arena.lightmap_atlas = Some(atlas);
+        Ok(())
+    }
+
+    /// Install the shared surface-parameter UBO for an arena.
+    pub fn install_surface_ubo(
+        &mut self,
+        arena_id: u64,
+        ubo: BspSurfaceUboGpu,
+    ) -> Result<(), String> {
+        let arena = self.arena_mut(arena_id)?;
+        if arena.surface_ubo.is_some() {
+            return Err(format!(
+                "BSP arena {arena_id} already has a surface UBO"
+            ));
+        }
+        arena.surface_ubo = Some(ubo);
+        Ok(())
+    }
+
+    // ── Frame-values (arena-scoped) ─────────────────────────────────
+
+    /// Install the frame-values UBO and per-frame-slot descriptor sets (set 2)
+    /// for an arena. The arena takes ownership of the pool for teardown.
+    pub fn install_frame_values(
+        &mut self,
+        arena_id: u64,
+        ubo: BspSurfaceUboGpu,
+        pool: vk::DescriptorPool,
+        descriptors: Vec<vk::DescriptorSet>,
+        set_layout: vk::DescriptorSetLayout,
+        frame_slot_count: u32,
+        frame_values_stride: u64,
+    ) -> Result<(), String> {
+        let arena = self.arena_mut(arena_id)?;
+        if arena.frame_values_desc_pool.is_some() {
+            return Err(format!("BSP arena {arena_id} frame-values already installed"));
+        }
+        arena.frame_values_ubo = Some(ubo);
+        arena.frame_values_desc_pool = Some(pool);
+        arena.frame_values_descriptors = descriptors;
+        arena.frame_values_set_layout = Some(set_layout);
+        arena.frame_slot_count = frame_slot_count;
+        arena.frame_values_stride = frame_values_stride;
+        Ok(())
+    }
+
+    /// Get the frame-values descriptor set for an arena's frame slot.
+    pub fn frame_values_descriptor_for_slot(
+        &self,
+        arena_id: u64,
+        slot_index: u32,
+    ) -> vk::DescriptorSet {
+        self.arenas
+            .get(&arena_id)
+            .and_then(|a| a.frame_values_descriptors.get(slot_index as usize).copied())
+            .unwrap_or(vk::DescriptorSet::null())
+    }
+
+    /// Return true if the arena has frame-values installed.
+    pub fn has_frame_values(&self, arena_id: u64) -> bool {
+        self.arenas
+            .get(&arena_id)
+            .is_some_and(|a| a.frame_values_ubo.is_some())
+    }
+
+    /// Write one immutable frame-local copy of BSP frame-varying values.
+    pub fn write_frame_values_for_slot(
+        &mut self,
+        arena_id: u64,
+        slot_index: u32,
+        values: &crate::data::gpu_data::BspFrameValuesUniform,
+    ) -> Result<(), String> {
+        let arena = self.arena(arena_id)?;
+        if arena.frame_slot_count == 0 {
+            return Err(format!("BSP arena {arena_id} frame-values slot count is zero"));
+        }
+        let slot = slot_index % arena.frame_slot_count;
+        let ubo_size = std::mem::size_of::<crate::data::gpu_data::BspFrameValuesUniform>() as u64;
+        let offset = arena
+            .frame_values_stride
+            .checked_mul(slot as u64)
+            .ok_or_else(|| "BSP frame-values slot offset overflow".to_string())?;
+        let allocator = self
+            .allocator
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "BSP allocator not initialized".to_string())?;
+        let alloc_guard = allocator
+            .lock()
+            .map_err(|_| "BSP allocator lock poisoned".to_string())?;
+        // Re-borrow arena mutably through arenas for the write.
+        let arena = self.arena_mut(arena_id)?;
+        let ubo = arena
+            .frame_values_ubo
+            .as_mut()
+            .ok_or_else(|| format!("BSP arena {arena_id} frame-values UBO not installed"))?;
+        unsafe {
+            let mapped = alloc_guard
+                .map_memory(&mut ubo.allocation)
+                .map_err(|e| format!("failed to map BSP frame-values memory: {e:?}"))?;
+            std::ptr::copy_nonoverlapping(
+                values as *const _ as *const u8,
+                (mapped as *mut u8).add(offset as usize),
+                ubo_size as usize,
+            );
+            alloc_guard.unmap_memory(&mut ubo.allocation);
+        }
+        Ok(())
+    }
+
+    // ── Material slot management ────────────────────────────────────
+
+    fn handle_for_slot(&self, slot: u32) -> crate::data::handles::BspMaterialHandle {
+        crate::data::handles::BspMaterialHandle::new(slot, self.generations[slot as usize])
+    }
+
+    /// Add a material record for the given arena and register the slot.
+    pub fn add(
+        &mut self,
+        arena_id: u64,
+        material: BspCachedSurface,
+    ) -> crate::data::handles::BspMaterialHandle {
+        assert!(
+            material.material_descriptor != vk::DescriptorSet::null(),
+            "BSP material cache requires a real descriptor set"
+        );
+        debug_assert_eq!(
+            material.arena_id, arena_id,
+            "BSP material arena_id must match the registering arena"
+        );
+        let (slot, handle) = if let Some(slot) = self.free_slots.pop() {
+            debug_assert!(
+                self.cached_materials
+                    .get(slot as usize)
+                    .is_some_and(Option::is_none),
+                "free BSP material slot contained a live payload"
+            );
+            self.cached_materials[slot as usize] = Some(material);
+            (slot, self.handle_for_slot(slot))
+        } else {
+            let slot = self.cached_materials.len() as u32;
+            self.cached_materials.push(Some(material));
+            self.generations.push(0);
+            (slot, crate::data::handles::BspMaterialHandle::new(slot, 0))
+        };
+        // Register the slot in the arena for rollback tracking.
+        if let Ok(arena) = self.arena_mut(arena_id) {
+            if !arena.material_slots.contains(&slot) {
+                arena.material_slots.push(slot);
+            }
+        }
+        handle
+    }
+
+    /// Authoritative slot + generation lookup. Rejects stale, out-of-range,
+    /// and wrong-arena handles.
+    pub fn get(
+        &self,
+        handle: crate::data::handles::BspMaterialHandle,
+    ) -> Result<&BspCachedSurface, crate::data::handles::CacheError> {
+        let slot = handle.slot as usize;
+        let Some(&gen) = self.generations.get(slot) else {
+            return Err(crate::data::handles::CacheError::OutOfBounds);
+        };
+        if gen != handle.generation {
+            return Err(crate::data::handles::CacheError::StaleHandle);
+        }
+        self.cached_materials
+            .get(slot)
+            .and_then(Option::as_ref)
+            .ok_or(crate::data::handles::CacheError::InvalidHandle)
+    }
+
+    /// Authoritative slot + generation + arena lookup. Rejects handles whose
+    /// material was created under a different arena.
+    pub fn get_with_arena(
+        &self,
+        arena_id: u64,
+        handle: crate::data::handles::BspMaterialHandle,
+    ) -> Result<&BspCachedSurface, String> {
+        let surface = self.get(handle).map_err(|e| match e {
+            crate::data::handles::CacheError::OutOfBounds => {
+                format!("BSP material handle {:?} out of bounds", handle)
+            }
+            crate::data::handles::CacheError::StaleHandle => {
+                format!("BSP material handle {:?} is stale", handle)
+            }
+            crate::data::handles::CacheError::InvalidHandle => {
+                format!("BSP material handle {:?} is invalid", handle)
+            }
+            other => format!("BSP material handle {:?}: {:?}", handle, other),
+        })?;
+        if surface.arena_id != arena_id {
+            return Err(format!(
+                "BSP material handle {:?} belongs to arena {} but was requested for arena {}",
+                handle, surface.arena_id, arena_id
+            ));
+        }
+        Ok(surface)
+    }
+
+    /// Invalidate a BSP material handle. Stale and out-of-range handles are
+    /// rejected before the slot can be changed.
+    pub fn remove(
+        &mut self,
+        handle: crate::data::handles::BspMaterialHandle,
+    ) -> Result<(), crate::data::handles::CacheError> {
+        let slot = handle.slot as usize;
+        let generation = *self
+            .generations
+            .get(slot)
+            .ok_or(crate::data::handles::CacheError::OutOfBounds)?;
+        if generation != handle.generation {
+            return Err(crate::data::handles::CacheError::StaleHandle);
+        }
+        let arena_id = self.cached_materials[slot]
+            .as_ref()
+            .ok_or(crate::data::handles::CacheError::InvalidHandle)?
+            .arena_id;
+        self.remove_by_slot(handle.slot)?;
+        if let Ok(arena) = self.arena_mut(arena_id) {
+            arena.material_slots.retain(|registered| *registered != handle.slot);
+        }
+        Ok(())
+    }
+
+    /// Remove a known live slot. Generation exhaustion terminally retires the
+    /// slot: its payload is cleared but it is not returned to the free list.
+    fn remove_by_slot(&mut self, slot: u32) -> Result<(), crate::data::handles::CacheError> {
+        let slot_index = slot as usize;
+        let next_generation = self
+            .generations
+            .get(slot_index)
+            .copied()
+            .ok_or(crate::data::handles::CacheError::OutOfBounds)?
+            .checked_add(1);
+        let material = self
+            .cached_materials
+            .get_mut(slot_index)
+            .ok_or(crate::data::handles::CacheError::OutOfBounds)?;
+        if material.is_none() {
+            return Err(crate::data::handles::CacheError::InvalidHandle);
+        }
+
+        // All fallible validation, including checked_add, has completed.
+        // At u32::MAX the slot is terminally retired rather than recycled.
+        *material = None;
+        if let Some(next_generation) = next_generation {
+            self.generations[slot_index] = next_generation;
+            self.free_slots.push(slot);
+        }
+        Ok(())
+    }
+
+    /// Destroy all resources owned by a specific arena, leaving other arenas intact.
+    /// This is the rollback-safe path: it scopes destruction to one arena identity.
+    pub fn destroy_arena_resources(
+        &mut self,
+        arena_id: u64,
+        device: &ash::Device,
+        allocator: &vk_mem::Allocator,
+    ) {
+        self.destroy_arena(arena_id, device, allocator);
+    }
+
+    /// Legacy: destroy all BSP payloads across all arenas (cache-wide teardown).
+    /// Prefer [`Self::destroy_arena_resources`] for per-mount rollback.
+    pub fn destroy_descriptor_pool(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {
+        let arena_ids: Vec<u64> = self.arenas.keys().copied().collect();
+        for id in arena_ids {
+            self.destroy_arena(id, device, allocator);
+        }
+        self.cached_materials.clear();
+        self.generations.clear();
+        self.free_slots.clear();
+        self.device = None;
+        self.allocator = None;
+    }
+
+    // ── Active arena bridge (for draw path; replaced by Phase 04) ─
+
+    /// Return the active (published) arena ID, if any.
+    pub fn active_arena_id(&self) -> Option<u64> {
+        self.active_arena_id
+    }
+
+    /// Set the active arena after publication. Phase 04 will formalize this
+    /// as part of the scene publication path.
+    pub fn set_active_arena(&mut self, arena_id: u64) {
+        self.active_arena_id = Some(arena_id);
+    }
+
+    /// Clear the active arena (unmount).
+    pub fn clear_active_arena(&mut self) {
+        self.active_arena_id = None;
+    }
+
+    /// Extract a [`BspRetirementClosure`] from the given arena.
+    ///
+    /// The caller receives ownership of every GPU resource owned by the
+    /// arena. Material slots are invalidated immediately (generation bump),
+    /// and the arena record is removed. Mesh and texture handles are listed
+    /// in the closure for deferred deallocation through their respective
+    /// caches.
+    ///
+    /// Returns `None` when the arena does not exist or has no payloads.
+    pub fn extract_retirement_closure(
+        &mut self,
+        arena_id: u64,
+    ) -> Option<crate::data::retirement::BspRetirementClosure> {
+        let arena = self.arenas.remove(&arena_id)?;
+
+        // Invalidate all material slots immediately.
+        for slot in arena.material_slots.iter().copied() {
+            debug_assert!(
+                self.remove_by_slot(slot).is_ok(),
+                "arena material slot must be live exactly once"
+            );
+        }
+
+        Some(crate::data::retirement::BspRetirementClosure {
+            arena_id,
+            lightmap_atlas: arena.lightmap_atlas,
+            surface_ubo: arena.surface_ubo,
+            frame_values_ubo: arena.frame_values_ubo,
+            material_desc_pool: arena.material_desc_pool,
+            frame_values_desc_pool: arena.frame_values_desc_pool,
+            material_slots: arena.material_slots,
+            mesh_handles: arena.mesh_handles,
+            texture_handles: arena.texture_handles,
+        })
+    }
+
+    /// Destroy a [`BspRetirementClosure`] by taking ownership.
+    ///
+    /// This is the fence-reap path: every GPU resource is destroyed in
+    /// dependency order, and mesh/texture handles are returned for the
+    /// caller to deallocate through their respective caches.
+    pub fn destroy_closure_owned(
+        &mut self,
+        closure: crate::data::retirement::BspRetirementClosure,
+        device: &ash::Device,
+        allocator: &vk_mem::Allocator,
+    ) -> (Vec<crate::data::handles::MeshHandle>, Vec<crate::data::handles::TextureHandle>) {
+        // Pool destruction releases all descriptor sets allocated from them.
+        if let Some(pool) = closure.material_desc_pool {
+            unsafe { device.destroy_descriptor_pool(pool, None); }
+        }
+        if let Some(pool) = closure.frame_values_desc_pool {
+            unsafe { device.destroy_descriptor_pool(pool, None); }
+        }
+        // Destroy UBOs.
+        if let Some(mut ubo) = closure.surface_ubo {
+            ubo.destroy(allocator);
+        }
+        if let Some(mut ubo) = closure.frame_values_ubo {
+            ubo.destroy(allocator);
+        }
+        // Destroy atlas.
+        if let Some(mut atlas) = closure.lightmap_atlas {
+            atlas.destroy(device, allocator);
+        }
+        (closure.mesh_handles, closure.texture_handles)
+    }
+
+    // ── Legacy compatibility methods (used by draw/mount code) ─────
+
+    /// Access the arena's lightmap view for draw binding.
+    pub fn lightmap_view_for_arena(&self, arena_id: u64) -> Option<vk::ImageView> {
+        self.arenas
+            .get(&arena_id)
+            .and_then(|a| a.lightmap_atlas.as_ref())
+            .map(|a| a.view)
+    }
+
+    /// Access the arena's lightmap sampler for draw binding.
+    pub fn lightmap_sampler_for_arena(&self, arena_id: u64) -> Option<vk::Sampler> {
+        self.arenas
+            .get(&arena_id)
+            .and_then(|a| a.lightmap_atlas.as_ref())
+            .map(|a| a.sampler)
+    }
+
+    /// Register mesh handles that belong to an arena (for rollback tracking).
+    pub fn register_mesh_handles(
+        &mut self,
+        arena_id: u64,
+        handles: &[crate::data::handles::MeshHandle],
+    ) -> Result<(), String> {
+        let arena = self.arena_mut(arena_id)?;
+        arena.mesh_handles.extend_from_slice(handles);
+        Ok(())
+    }
+
+    /// Register texture handles that belong to an arena (for rollback tracking).
+    pub fn register_texture_handles(
+        &mut self,
+        arena_id: u64,
+        handles: &[crate::data::handles::TextureHandle],
+    ) -> Result<(), String> {
+        let arena = self.arena_mut(arena_id)?;
+        arena.texture_handles.extend_from_slice(handles);
+        Ok(())
     }
 }
 
@@ -3470,6 +4324,74 @@ mod tests {
             checked_retired_generation(u32::MAX),
             Err(CacheError::GenerationExhausted)
         );
+    }
+
+    #[cfg(feature = "bsp")]
+    fn bsp_surface_for_test(arena_id: u64) -> BspCachedSurface {
+        use ash::vk::Handle;
+
+        BspCachedSurface {
+            material_descriptor: ash::vk::DescriptorSet::from_raw(1),
+            surf_ubo_alloc: Default::default(),
+            pipeline: VkPipelineType::BspOpaque,
+            surface_flags: 0,
+            albedo_tex: TextureHandle::new(1, 0),
+            fullbright_tex: None,
+            lightmap_tex: TextureHandle::new(2, 0),
+            arena_id,
+        }
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn bsp_surface_cache_rejects_stale_removal_before_mutation() {
+        let mut cache = BspSurfaceCache::new();
+        let arena = cache.allocate_arena();
+        let old = cache.add(arena, bsp_surface_for_test(arena));
+        cache.remove(old).expect("live handle removes");
+        let replacement = cache.add(arena, bsp_surface_for_test(arena));
+
+        assert_eq!(replacement.slot, old.slot);
+        assert_eq!(replacement.generation, old.generation + 1);
+        assert_eq!(cache.remove(old), Err(CacheError::StaleHandle));
+        assert!(cache.get(replacement).is_ok());
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn bsp_surface_cache_removal_detaches_the_old_arena_slot() {
+        let mut cache = BspSurfaceCache::new();
+        let old_arena = cache.allocate_arena();
+        let old = cache.add(old_arena, bsp_surface_for_test(old_arena));
+        cache.remove(old).expect("live handle removes");
+
+        let replacement_arena = cache.allocate_arena();
+        let replacement = cache.add(replacement_arena, bsp_surface_for_test(replacement_arena));
+        assert_eq!(replacement.slot, old.slot);
+
+        cache
+            .extract_retirement_closure(old_arena)
+            .expect("old arena remains removable");
+        assert!(cache.get(replacement).is_ok());
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn bsp_surface_cache_max_generation_retires_slot_without_reuse() {
+        let mut cache = BspSurfaceCache::new();
+        let arena = cache.allocate_arena();
+        let handle = cache.add(arena, bsp_surface_for_test(arena));
+        cache.generations[handle.slot as usize] = u32::MAX;
+        let terminal = crate::data::handles::BspMaterialHandle::new(handle.slot, u32::MAX);
+
+        cache
+            .remove(terminal)
+            .expect("terminal handle removes safely");
+        assert!(matches!(
+            cache.get(terminal),
+            Err(CacheError::InvalidHandle)
+        ));
+        assert!(!cache.free_slots.contains(&terminal.slot));
     }
 
     fn minimal_staged_import_plan() -> StagedImportPlan {

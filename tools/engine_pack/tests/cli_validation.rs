@@ -197,6 +197,8 @@ fn engine_pack_all_options_declared() {
         ("validate-package", cli::validate_package_schema()),
         ("validate-project", cli::validate_project_schema()),
         ("validate-scene", cli::validate_scene_schema()),
+        ("validate-bsp", cli::validate_bsp_schema()),
+        ("compile-bsp", cli::compile_bsp_schema()),
         ("new-app", cli::new_app_schema()),
         ("new-project", cli::new_project_schema()),
         ("new-package", cli::new_package_schema()),
@@ -538,6 +540,8 @@ fn engine_pack_help_contains_all_commands() {
         "validate-package",
         "validate-project",
         "validate-scene",
+        "validate-bsp",
+        "compile-bsp",
         "new-app",
         "new-project",
         "new-package",
@@ -560,4 +564,72 @@ fn render_help_contains_option_descriptions() {
     assert!(rendered.contains("--project"));
     assert!(rendered.contains("--headless"));
     assert!(rendered.contains("Root runtime launcher"));
+}
+
+// ────────────────────────────────────────────────────
+// BSP command CLI validation
+// ────────────────────────────────────────────────────
+
+#[test]
+fn validate_bsp_accepts_positional_and_options() {
+    use engine_pack::cli;
+    let args = svec!["test.bsp", "--palette", "palette.lmp", "--strict"];
+    let result = cli::parse_command("validate-bsp", cli::validate_bsp_schema(), &args);
+    assert!(result.is_ok());
+    assert_eq!(result.positionals, vec!["test.bsp"]);
+    assert_eq!(result.singleton_value("--palette"), Some("palette.lmp"));
+    assert!(result.flag_present("--strict"));
+}
+
+#[test]
+fn validate_bsp_accepts_equals_forms() {
+    use engine_pack::cli;
+    let args = svec!["test.bsp", "--palette=palette.lmp"];
+    let result = cli::parse_command("validate-bsp", cli::validate_bsp_schema(), &args);
+    assert!(result.is_ok());
+    assert_eq!(result.singleton_value("--palette"), Some("palette.lmp"));
+}
+
+#[test]
+fn compile_bsp_accepts_all_options() {
+    use engine_pack::cli;
+    let args = svec![
+        "source.map",
+        "--profile",
+        "profile.toml",
+        "--out",
+        "output",
+        "--palette",
+        "palette.lmp",
+        "--tool-path",
+        "/usr/local/bin",
+    ];
+    let result = cli::parse_command("compile-bsp", cli::compile_bsp_schema(), &args);
+    assert!(result.is_ok());
+    assert_eq!(result.positionals, vec!["source.map"]);
+    assert_eq!(result.singleton_value("--profile"), Some("profile.toml"));
+    assert_eq!(result.singleton_value("--out"), Some("output"));
+    assert_eq!(result.singleton_value("--palette"), Some("palette.lmp"));
+    assert_eq!(
+        result.singleton_value("--tool-path"),
+        Some("/usr/local/bin")
+    );
+}
+
+#[test]
+fn compile_bsp_rejects_duplicate_singleton() {
+    use engine_pack::cli;
+    let args = svec!["source.map", "--profile", "a.toml", "--profile", "b.toml",];
+    let result = cli::parse_command("compile-bsp", cli::compile_bsp_schema(), &args);
+    assert!(!result.is_ok());
+    assert!(result.errors.iter().any(|e| e.contains("duplicate")));
+}
+
+#[test]
+fn compile_bsp_rejects_unknown_flags() {
+    use engine_pack::cli;
+    let args = svec!["source.map", "--bogus"];
+    let result = cli::parse_command("compile-bsp", cli::compile_bsp_schema(), &args);
+    assert!(!result.is_ok());
+    assert!(result.errors.iter().any(|e| e.contains("unknown option")));
 }

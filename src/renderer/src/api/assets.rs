@@ -1181,6 +1181,70 @@ impl<'a> AssetManager<'a> {
         })
     }
 
+    /// Prepare a BSP mount from an extracted BSP, uploading face meshes,
+    /// lightmap atlas, and material descriptors to the GPU.
+    ///
+    /// This runs synchronously on the calling thread and performs all GPU
+    /// uploads inline. The returned [`super::bsp::PreparedBspMount`] is ready
+    /// for attachment to a scene via [`super::scene::Scene::set_bsp_mount`].
+    ///
+    /// Available only with the `bsp` feature.
+    #[cfg(feature = "bsp")]
+    pub fn prepare_bsp_mount(
+        &mut self,
+        extracted: &bsp::extract::ExtractedBsp,
+    ) -> Result<super::bsp::PreparedBspMount, AssetError> {
+        use crate::vulkan::vk_types::VkQueueType;
+
+        let transfer_queue = self
+            .core
+            .vulkan_cache
+            .queues
+            .get_queue(VkQueueType::Transfer);
+        let transfer_pool = self.core.transfer.get_local_transfer_pool().pool;
+
+        let extracted = extracted.clone();
+        let device = self.core.device.clone();
+        let allocator = Arc::clone(&self.core.allocator);
+        let desc_layout_cache = self.core.vulkan_cache.desc_layouts.clone();
+        let uniform_offset_alignment = self
+            .core
+            .buffer_and_desc_limits
+            .min_uniform_buffer_offset_alignment;
+        let frame_slot_count = self.core.frame_slot_count;
+        let data_cache = Arc::clone(&self.core.data_cache);
+        let (sender, receiver) = mpsc::channel();
+
+        self.load_tracker.thread_pool.execute(move || {
+            let result = super::bsp::PreparedBspMount::upload_from_extracted(
+                &extracted,
+                &device,
+                &allocator,
+                transfer_pool,
+                transfer_queue,
+                &desc_layout_cache,
+                uniform_offset_alignment,
+                frame_slot_count,
+                &data_cache,
+            )
+            .map_err(AssetError::Sync);
+            let _ = sender.send(result);
+        });
+
+        loop {
+            self.pump_transfer_submissions()?;
+            match receiver.try_recv() {
+                Ok(result) => return result,
+                Err(TryRecvError::Empty) => std::thread::yield_now(),
+                Err(TryRecvError::Disconnected) => {
+                    return Err(AssetError::Sync(
+                        "BSP upload worker disconnected before returning a result".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
     fn run_sync_upload_task<T, F>(&mut self, task: F) -> Result<T, AssetError>
     where
         T: Send + 'static,
@@ -1740,6 +1804,17 @@ fn scene_world_to_fragment(scene_world: SceneWorld) -> Result<SceneFragment, Ass
             .map_err(|err| {
                 AssetError::Internal(format!("failed to build scene fragment: {err}"))
             })?;
+
+        // Copy component envelopes from the scene record into the fragment node.
+        if let Some(record) = scene_world.get_node_record(source_node_id) {
+            if let Some(frag_node) = fragment.node_mut(fragment_node_id) {
+                frag_node.components = record
+                    .component_store
+                    .envelopes()
+                    .cloned()
+                    .collect();
+            }
+        }
 
         for child in source_node.children.iter().rev().copied() {
             stack.push((child, Some(fragment_node_id)));

@@ -124,6 +124,8 @@ pub enum RetirementClass {
     MaterialPayload,
     /// Texture geometry, view, and sampler.
     TextureGeometry,
+    /// BSP arena retirement closure (all arena-owned resources).
+    BspArenaRetirement,
 }
 
 impl std::fmt::Display for RetirementClass {
@@ -137,6 +139,7 @@ impl std::fmt::Display for RetirementClass {
             Self::MeshGeometry => write!(f, "MeshGeometry"),
             Self::MaterialPayload => write!(f, "MaterialPayload"),
             Self::TextureGeometry => write!(f, "TextureGeometry"),
+            Self::BspArenaRetirement => write!(f, "BspArenaRetirement"),
         }
     }
 }
@@ -369,6 +372,39 @@ pub struct TextureRetiredPayload {
     /// Descriptor allocator release data owned by this texture payload.
     /// Textures currently own no descriptor sets; material payloads own sampler descriptors.
     pub descriptor_release: DescriptorReleaseData,
+}
+
+// ---------------------------------------------------------------------------
+// BSP Retirement Closure
+// ---------------------------------------------------------------------------
+
+/// Complete retirement closure for one BSP mount arena.
+///
+/// Carries every arena-owned GPU resource for fence-aware destruction.
+/// Borrowed defaults are never included. The closure is enqueued once and
+/// reaped in dependency order: descriptor pools → surfaces/frames → atlas
+/// → mesh/texture/material cache slots.
+#[cfg(feature = "bsp")]
+#[derive(Debug)]
+pub struct BspRetirementClosure {
+    /// Arena identity that owns this closure.
+    pub arena_id: u64,
+    /// Lightmap atlas payload (image, view, sampler) — destroyed after pool.
+    pub lightmap_atlas: Option<crate::data::data_cache::BspLightmapAtlasGpu>,
+    /// Surface UBO buffer/allocation.
+    pub surface_ubo: Option<crate::data::data_cache::BspSurfaceUboGpu>,
+    /// Frame-values UBO buffer/allocation.
+    pub frame_values_ubo: Option<crate::data::data_cache::BspSurfaceUboGpu>,
+    /// Material descriptor pool — freed first (releases all its sets).
+    pub material_desc_pool: Option<vk::DescriptorPool>,
+    /// Frame-values descriptor pool — freed after material pool.
+    pub frame_values_desc_pool: Option<vk::DescriptorPool>,
+    /// Material slots to invalidate in the surface cache.
+    pub material_slots: Vec<u32>,
+    /// Mesh handles to deallocate from the mesh cache.
+    pub mesh_handles: Vec<crate::data::handles::MeshHandle>,
+    /// Texture handles to deallocate from the texture cache.
+    pub texture_handles: Vec<crate::data::handles::TextureHandle>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1092,5 +1128,63 @@ mod tests {
                 observed: FrameSerial(10),
             })
         ));
+    }
+
+    // ── BSP retirement closure tests ──────────────────────────────────
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn bsp_closure_is_debug() {
+        let closure = crate::data::retirement::BspRetirementClosure {
+            arena_id: 1,
+            lightmap_atlas: None,
+            surface_ubo: None,
+            frame_values_ubo: None,
+            material_desc_pool: None,
+            frame_values_desc_pool: None,
+            material_slots: vec![1, 2],
+            mesh_handles: vec![],
+            texture_handles: vec![],
+        };
+        let debug_str = format!("{:?}", closure);
+        assert!(debug_str.contains("BspRetirementClosure"));
+        assert!(debug_str.contains("arena_id: 1"));
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn bsp_closure_enqueue_reap_cycle() {
+        let mut q: GpuRetirementQueue<crate::data::retirement::BspRetirementClosure> =
+            GpuRetirementQueue::new();
+
+        let closure = crate::data::retirement::BspRetirementClosure {
+            arena_id: 7,
+            lightmap_atlas: None,
+            surface_ubo: None,
+            frame_values_ubo: None,
+            material_desc_pool: None,
+            frame_values_desc_pool: None,
+            material_slots: vec![0, 3],
+            mesh_handles: vec![],
+            texture_handles: vec![],
+        };
+
+        q.enqueue(RetirementClass::BspArenaRetirement, FrameSerial(5), closure);
+        assert_eq!(q.pending_count(), 1);
+        assert_eq!(
+            q.pending_by_class(RetirementClass::BspArenaRetirement),
+            1
+        );
+
+        // Not yet eligible
+        let reaped = q.reap_through(FrameSerial(4)).unwrap();
+        assert!(reaped.is_empty());
+        assert_eq!(q.pending_count(), 1);
+
+        // Eligible at serial 5
+        let reaped = q.reap_through(FrameSerial(5)).unwrap();
+        assert_eq!(reaped.len(), 1);
+        assert_eq!(reaped[0].payload.arena_id, 7);
+        assert!(q.is_empty());
     }
 }

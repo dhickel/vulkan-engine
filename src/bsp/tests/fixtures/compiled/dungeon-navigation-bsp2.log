@@ -1,0 +1,117 @@
+---- qbsp / ericw-tools 2.0.0-alpha3 ----
+Input file: /home/dhickel/Code/Rust/vulkan-engine/src/bsp/tests/fixtures/maps/dungeon_navigation_standard.map
+Output file: /home/dhickel/Code/Rust/vulkan-engine/src/bsp/tests/fixtures/compiled/dungeon-navigation-bsp2.bsp
+
+INFO: using built-in palette.
+---- LoadMapFile ----
+     3 entities
+     3 unique textures
+     7 texinfos
+    40 unique planes
+
+---- ProcessMapBrushes ----
+INFO: world extents calculated to 744 units
+     7 brushes
+    42 sides
+
+            0 texture frames added
+Processing hull 0...
+---- Brush_LoadEntity ----
+---- CountBrushes ----
+    7 SOLID brushes
+    7 brushes total
+    42 visible sides
+INFO: calculating BSP for 7 brushes with 42 sides
+---- BrushBSP ----
+     7 brushes
+    42 visible faces
+    56 nodes
+    56 expensive split nodes
+    57 leaves
+---- CountLeafs ----
+    43 SOLID leafs
+    14 EMPTY leafs
+    57 leafs total
+    21 max tree height
+    14 avg tree height
+---- MakeTreePortals ----
+---- CalcTreeBounds ----
+    242 tree portals
+---- FillOutside ----
+    10 outside leaves
+---- FillDetail ----
+    0 detail filled leafs
+---- BrushBSP ----
+     7 brushes
+    10 visible faces
+    32 non-visible faces
+    132 nodes
+     94 non-visible nodes
+    132 expensive split nodes
+    133 leaves
+---- CountLeafs ----
+     59 SOLID leafs
+     74 EMPTY leafs
+    133 leafs total
+    12 max tree height
+     8 avg tree height
+---- MakeTreePortals ----
+---- CalcTreeBounds ----
+    526 tree portals
+---- FillOutside ----
+    70 outside leaves
+---- FillDetail ----
+    0 detail filled leafs
+---- MakeTreePortals ----
+---- CalcTreeBounds ----
+    526 tree portals
+---- MarkVisibleSides ----
+    20 sides visible
+---- MakeFaces ----
+    20 makefaces
+     4 merged
+    16 subdivided
+---- PruneNodes ----
+    117 nodes pruned
+---- WritePortalFile ----
+    4 player-occupiable leaves
+    4 clusters of leaves
+    4 vis portals
+---- CountLeafs ----
+     4 EMPTY leafs
+    12 SOLID leafs
+    16 leafs total
+    11 max tree height
+     7 avg tree height
+---- TJunc ----
+    32 edges added by tjunctions
+    32 faces optimized through MWT
+    96 triangles computed from MWT
+    11 faces created via optimization of MWT triangles
+---- EmitFaces ----
+    91 edges
+    43 faces
+Processing hull 1...
+Processing hull 2...
+---- FinishBSPFile ----
+Writing compiled/dungeon-navigation-bsp2.bsp as Quake BSP2 bsp2
+Wrote compiled/dungeon-navigation-bsp2.bsp
+
+count   lump name    byte size 
+      1 models               64
+     29 planes              580
+     48 vertexes            576
+     15 nodes               660
+      5 texinfos            200
+     43 faces              1204
+     20 clipnodes           240
+      5 leafs               220
+     47 marksurfaces        188
+     92 edges               736
+    182 surfedges           728
+      3 textures            136
+        lightdata             0
+        visdata               0
+        entdata             196
+
+0.008s seconds elapsed

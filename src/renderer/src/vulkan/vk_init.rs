@@ -209,9 +209,16 @@ unsafe extern "system" fn vulkan_debug_callback(
         CStr::from_ptr(callback_data.p_message).to_string_lossy()
     };
 
-    println!(
-            "{message_severity:?}:\n{message_type:?} [{message_id_name} ({message_id_number})] : {message}\n",
-        );
+    let message = format!("{message_type:?} [{message_id_name} ({message_id_number})] : {message}");
+    if message_severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) {
+        log::error!("Vulkan validation: {message}");
+    } else if message_severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::WARNING) {
+        log::warn!("Vulkan validation: {message}");
+    } else if message_severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::INFO) {
+        log::info!("Vulkan validation: {message}");
+    } else {
+        log::debug!("Vulkan validation: {message}");
+    }
 
     vk::FALSE
 }

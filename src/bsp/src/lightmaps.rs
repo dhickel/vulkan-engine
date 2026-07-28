@@ -1,0 +1,589 @@
+//! Lightmap atlas layout, style slot allocation, and luxel data.
+//!
+//! Contract: `bsp-renderer-lighting.md` §2.
+
+use crate::diagnostic::{BspReport, DiagnosticCode};
+
+/// Maximum atlas page size (4096² texels).
+pub const ATLAS_PAGE_SIZE: u32 = 4096;
+/// Padding between face luxel blocks in the atlas (2 texels).
+pub const ATLAS_PADDING: u32 = 2;
+/// Maximum number of atlas pages.
+pub const MAX_ATLAS_PAGES: usize = 4;
+/// Maximum style identifier.
+pub const MAX_STYLE_IDENTIFIER: u8 = 63;
+/// Style sentinel (unused slot).
+pub const STYLE_SENTINEL: u8 = 255;
+/// Maximum styles per face.
+pub const MAX_STYLES_PER_FACE: usize = 4;
+
+/// A single RGB luxel value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Luxel {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl Luxel {
+    /// Create a luxel from equal RGB channels (monochrome).
+    #[inline]
+    pub fn from_gray(gray: u8) -> Self {
+        Luxel {
+            r: gray,
+            g: gray,
+            b: gray,
+        }
+    }
+
+    /// Create a luxel from separate RGB channels.
+    #[inline]
+    pub fn from_rgb(r: u8, g: u8, b: u8) -> Self {
+        Luxel { r, g, b }
+    }
+}
+
+/// Layout of one style layer for a face's lightmap luxels.
+#[derive(Debug, Clone)]
+pub struct StyleLightmapLayout {
+    /// BSP light style identifier.
+    pub style_id: u8,
+    /// Source slot index (0–3) in the face's `styles` array.
+    /// This determines the physical array layer: `page * 4 + source_slot`.
+    pub source_slot: u8,
+    /// Which atlas page this style's luxels live on.
+    pub page_index: u32,
+    /// Pixel coordinates of the bottom-left luxel in the atlas.
+    pub atlas_offset: (u32, u32),
+    /// Luxel count (width, height).
+    pub luxel_extents: (u32, u32),
+    /// Whether this style has decoded lightmap data.
+    pub has_data: bool,
+}
+
+/// Layout of a face's lightmap luxels within atlas pages.
+#[derive(Debug, Clone)]
+pub struct FaceLightmapLayout {
+    /// Which atlas page the first style layer lives on.
+    pub page_index: u32,
+    /// Pixel coordinates of the bottom-left luxel for the first style layer.
+    pub atlas_offset: (u32, u32),
+    /// Luxel count (width, height).
+    pub luxel_extents: (u32, u32),
+    /// Whether this face has any lightmap data.
+    pub has_data: bool,
+    /// All decoded style layers for this face, in BSP style-slot order.
+    pub style_layers: Vec<StyleLightmapLayout>,
+}
+
+impl FaceLightmapLayout {
+    /// Empty no-data layout.
+    pub fn empty() -> Self {
+        FaceLightmapLayout {
+            page_index: 0,
+            atlas_offset: (0, 0),
+            luxel_extents: (0, 0),
+            has_data: false,
+            style_layers: Vec::new(),
+        }
+    }
+}
+
+/// A single atlas page as a flat RGB8 array.
+#[derive(Debug, Clone)]
+pub struct AtlasPage {
+    /// Page index.
+    pub index: u32,
+    /// RGB8 pixel data (width × height × 3 bytes).
+    pub data: Vec<u8>,
+    /// Page width (total allocated).
+    pub width: u32,
+    /// Page height (total allocated).
+    pub height: u32,
+    /// Maximum used pixel extent in this page (width, height).
+    pub used_extent: (u32, u32),
+    /// Current write cursor position (x, y) for next face.
+    cursor: (u32, u32),
+    /// Current row height (used during packing).
+    row_height: u32,
+}
+
+impl AtlasPage {
+    /// Create a new atlas page with reserved capacity.
+    pub fn new(index: u32, width: u32, height: u32) -> Self {
+        let size = (width * height * 3) as usize;
+        AtlasPage {
+            index,
+            data: vec![0u8; size],
+            width,
+            height,
+            used_extent: (0, 0),
+            cursor: (0, 0),
+            row_height: 0,
+        }
+    }
+
+    /// The maximum pixel extent actually occupied by written luxels.
+    pub fn max_used_extent(&self) -> (u32, u32) {
+        self.used_extent
+    }
+
+    /// Try to allocate a rectangle of (w, h) luxels with padding.
+    /// Returns the atlas offset (x, y) if successful, or None if full.
+    pub fn allocate(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+        let padded_w = w + ATLAS_PADDING * 2;
+        let padded_h = h + ATLAS_PADDING * 2;
+
+        // Try to fit on current row
+        if self.cursor.0 + padded_w <= self.width && self.cursor.1 + padded_h <= self.height {
+            let offset = (self.cursor.0 + ATLAS_PADDING, self.cursor.1 + ATLAS_PADDING);
+            self.cursor.0 += padded_w;
+            self.row_height = self.row_height.max(padded_h);
+            return Some(offset);
+        }
+
+        // Move to next row
+        self.cursor.0 = 0;
+        self.cursor.1 += self.row_height;
+        self.row_height = 0;
+
+        if self.cursor.1 + padded_h <= self.height && padded_w <= self.width {
+            let offset = (ATLAS_PADDING, self.cursor.1 + ATLAS_PADDING);
+            self.cursor.0 = padded_w;
+            self.row_height = padded_h;
+            return Some(offset);
+        }
+
+        None
+    }
+
+    /// Write a luxel block at the given atlas offset and update used extent.
+    pub fn write_luxels(
+        &mut self,
+        offset: (u32, u32),
+        luxels: &[Luxel],
+        width: u32,
+        height: u32,
+    ) {
+        let end_x = offset.0.saturating_add(width);
+        let end_y = offset.1.saturating_add(height);
+        self.used_extent = (
+            self.used_extent.0.max(end_x),
+            self.used_extent.1.max(end_y),
+        );
+        for y in 0..height {
+            for x in 0..width {
+                let lx = (offset.0 + x) as usize;
+                let ly = (offset.1 + y) as usize;
+                if lx >= self.width as usize || ly >= self.height as usize {
+                    continue;
+                }
+                let src_idx = (y * width + x) as usize;
+                if src_idx < luxels.len() {
+                    let dst_idx = (ly * self.width as usize + lx) * 3;
+                    self.data[dst_idx] = luxels[src_idx].r;
+                    self.data[dst_idx + 1] = luxels[src_idx].g;
+                    self.data[dst_idx + 2] = luxels[src_idx].b;
+                }
+            }
+        }
+    }
+}
+
+/// Lightmap atlas composed of multiple pages.
+#[derive(Debug, Clone)]
+pub struct LightmapAtlas {
+    /// Atlas pages.
+    pub pages: Vec<AtlasPage>,
+    /// Face → layout mapping.
+    pub face_layouts: Vec<FaceLightmapLayout>,
+    /// Style layers present in the atlas.
+    pub styles: Vec<u8>,
+}
+
+impl LightmapAtlas {
+    /// Create an empty atlas.
+    pub fn new() -> Self {
+        LightmapAtlas {
+            pages: Vec::new(),
+            face_layouts: Vec::new(),
+            styles: vec![0], // style 0 is always present
+        }
+    }
+
+    /// Add a needed style (if not already present).
+    pub fn add_style(&mut self, style: u8) {
+        if style == STYLE_SENTINEL || style > MAX_STYLE_IDENTIFIER {
+            return;
+        }
+        if !self.styles.contains(&style) {
+            self.styles.push(style);
+            self.styles.sort_unstable();
+        }
+    }
+
+    /// Allocate and write style-0 lightmap data for a face.
+    pub fn allocate_face(
+        &mut self,
+        face_index: u32,
+        luxel_data: &[Luxel],
+        luxel_width: u32,
+        luxel_height: u32,
+    ) -> Result<FaceLightmapLayout, BspReport> {
+        let style_layout = self.allocate_face_style_with_limit(
+            face_index,
+            0,   // style_id
+            0,   // source_slot
+            luxel_data,
+            luxel_width,
+            luxel_height,
+            MAX_ATLAS_PAGES,
+        )?;
+        let mut layout = FaceLightmapLayout::empty();
+        layout.page_index = style_layout.page_index;
+        layout.atlas_offset = style_layout.atlas_offset;
+        layout.luxel_extents = style_layout.luxel_extents;
+        layout.has_data = style_layout.has_data;
+        if style_layout.has_data {
+            layout.style_layers.push(style_layout);
+        }
+        while self.face_layouts.len() <= face_index as usize {
+            self.face_layouts.push(FaceLightmapLayout::empty());
+        }
+        self.face_layouts[face_index as usize] = layout.clone();
+        Ok(layout)
+    }
+
+    /// Allocate and write one style layer for a face, honoring a page budget.
+    pub fn allocate_face_style_with_limit(
+        &mut self,
+        _face_index: u32,
+        style_id: u8,
+        source_slot: u8,
+        luxel_data: &[Luxel],
+        luxel_width: u32,
+        luxel_height: u32,
+        max_pages: usize,
+    ) -> Result<StyleLightmapLayout, BspReport> {
+        if luxel_data.is_empty() || luxel_width == 0 || luxel_height == 0 {
+            return Ok(StyleLightmapLayout {
+                style_id,
+                source_slot,
+                page_index: 0,
+                atlas_offset: (0, 0),
+                luxel_extents: (0, 0),
+                has_data: false,
+            });
+        }
+
+        let w = luxel_width.min(ATLAS_PAGE_SIZE - ATLAS_PADDING * 2);
+        let h = luxel_height.min(ATLAS_PAGE_SIZE - ATLAS_PADDING * 2);
+
+        for page_idx in 0..self.pages.len() {
+            if let Some(offset) = self.pages[page_idx].allocate(w, h) {
+                self.pages[page_idx].write_luxels(offset, luxel_data, w, h);
+                return Ok(StyleLightmapLayout {
+                    style_id,
+                    source_slot,
+                    page_index: page_idx as u32,
+                    atlas_offset: offset,
+                    luxel_extents: (w, h),
+                    has_data: true,
+                });
+            }
+        }
+
+        if self.pages.len() >= max_pages.min(MAX_ATLAS_PAGES) {
+            return Err(BspReport::fatal(
+                DiagnosticCode::AtlasPageOverflow,
+                format!("lightmap atlas page budget {} exceeded", max_pages),
+            ));
+        }
+
+        let page_index = self.pages.len() as u32;
+        let mut page = AtlasPage::new(page_index, ATLAS_PAGE_SIZE, ATLAS_PAGE_SIZE);
+        let offset = page.allocate(w, h).ok_or_else(|| {
+            BspReport::fatal(
+                DiagnosticCode::AtlasPageOverflow,
+                "cannot fit luxel block even on new atlas page",
+            )
+        })?;
+        page.write_luxels(offset, luxel_data, w, h);
+        self.pages.push(page);
+
+        Ok(StyleLightmapLayout {
+            style_id,
+            source_slot,
+            page_index,
+            atlas_offset: offset,
+            luxel_extents: (w, h),
+            has_data: true,
+        })
+    }
+
+    /// Compute the common used extent across all populated atlas pages.
+    ///
+    /// Returns `(width, height)` that is large enough for every page's
+    /// occupied region, clamped to at least 1×1. When there are no pages
+    /// the result is `(1, 1)`.
+    pub fn common_used_extent(&self) -> (u32, u32) {
+        if self.pages.is_empty() {
+            return (1, 1);
+        }
+        let mut max_w = 1u32;
+        let mut max_h = 1u32;
+        for page in &self.pages {
+            max_w = max_w.max(page.used_extent.0.max(1));
+            max_h = max_h.max(page.used_extent.1.max(1));
+        }
+        (max_w, max_h)
+    }
+
+    /// Get the face layout for a given face index.
+    pub fn get_layout(&self, face_index: u32) -> Option<&FaceLightmapLayout> {
+        self.face_layouts.get(face_index as usize)
+    }
+}
+
+impl Default for LightmapAtlas {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── Lightmap Face Kind ──
+
+/// Classification of a face by its luxel extents.
+///
+/// Used during strict validation to determine whether a face requires baked
+/// lightmap data regardless of its `SurfaceClass`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LightmapFaceKind {
+    /// No lightmap data (width == 0 or height == 0).
+    Empty,
+    /// Single vertex/sample point (width == 1 or height == 1).
+    Vertex,
+    /// Standard lightmapped surface.
+    Light,
+    /// Large/tool surface — dimensions suggest a non-renderable tool face
+    /// that should be excluded from lightmap requirements.
+    Surface,
+}
+
+impl LightmapFaceKind {
+    /// Classify a face by its luxel extents.
+    pub fn classify(luxel_extents: (u32, u32)) -> Self {
+        let (w, h) = luxel_extents;
+        if w == 0 || h == 0 {
+            return Self::Empty;
+        }
+        if w == 1 || h == 1 {
+            return Self::Vertex;
+        }
+        // Large dimensions (>= 64 in either axis) are tool/surface faces
+        // that should be excluded from lightmap requirements.
+        if w >= 64 || h >= 64 {
+            return Self::Surface;
+        }
+        Self::Light
+    }
+
+    /// Whether faces of this kind require baked lightmap data for rendering.
+    pub fn requires_baked_lightmap(self) -> bool {
+        matches!(self, Self::Light | Self::Vertex)
+    }
+}
+
+/// Decode lightmap data from BSP raw bytes into luxel arrays.
+///
+/// For monochrome source: each byte becomes equal R, G, B.
+/// For colored source (BSPX/.lit): 3 bytes per luxel (R, G, B).
+pub fn decode_lightmaps_monochrome(
+    raw_data: &[u8],
+    face_lightofs: &[i32],
+    face_luxel_extents: &[(u32, u32)],
+) -> Vec<Vec<Luxel>> {
+    let mut result: Vec<Vec<Luxel>> = Vec::with_capacity(face_lightofs.len());
+
+    for (fi, &lightofs) in face_lightofs.iter().enumerate() {
+        if lightofs < 0 {
+            result.push(Vec::new());
+            continue;
+        }
+        let start = lightofs as usize;
+        let extents = face_luxel_extents.get(fi).copied().unwrap_or((0, 0));
+        let luxel_count = (extents.0 * extents.1) as usize;
+        if luxel_count == 0 || start >= raw_data.len() {
+            result.push(Vec::new());
+            continue;
+        }
+        let end = (start + luxel_count).min(raw_data.len());
+        let luxels: Vec<Luxel> = raw_data[start..end]
+            .iter()
+            .map(|&b| Luxel::from_gray(b))
+            .collect();
+        result.push(luxels);
+    }
+
+    result
+}
+
+/// Decode colored lightmap data from RGB source (BSPX/.lit).
+pub fn decode_lightmaps_rgb(
+    rgb_data: &[u8],
+    face_lightofs: &[i32],
+    face_luxel_extents: &[(u32, u32)],
+) -> Vec<Vec<Luxel>> {
+    let mut result: Vec<Vec<Luxel>> = Vec::with_capacity(face_lightofs.len());
+
+    for (fi, &lightofs) in face_lightofs.iter().enumerate() {
+        if lightofs < 0 {
+            result.push(Vec::new());
+            continue;
+        }
+        let start = lightofs as usize * 3; // RGB data is 3 bytes per luxel
+        let extents = face_luxel_extents.get(fi).copied().unwrap_or((0, 0));
+        let luxel_count = (extents.0 * extents.1) as usize;
+        if luxel_count == 0 || start >= rgb_data.len() {
+            result.push(Vec::new());
+            continue;
+        }
+        let end = (start + luxel_count * 3).min(rgb_data.len());
+        let luxels: Vec<Luxel> = rgb_data[start..end]
+            .chunks(3)
+            .filter(|c| c.len() == 3)
+            .map(|c| Luxel::from_rgb(c[0], c[1], c[2]))
+            .collect();
+        result.push(luxels);
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atlas_page_allocates_and_writes() {
+        let mut page = AtlasPage::new(0, 256, 256);
+        let offset = page.allocate(16, 16).expect("should allocate");
+        assert_eq!(offset.0, ATLAS_PADDING);
+        assert_eq!(offset.1, ATLAS_PADDING);
+
+        let luxels: Vec<Luxel> = (0..256).map(|i| Luxel::from_rgb(i as u8, 0, 0)).collect();
+        page.write_luxels(offset, &luxels, 16, 16);
+
+        // Check first luxel was written
+        let idx = ((offset.1 as usize) * 256 + offset.0 as usize) * 3;
+        assert_eq!(page.data[idx], 0); // R
+        assert_eq!(page.data[idx + 1], 0); // G
+        assert_eq!(page.data[idx + 2], 0); // B
+    }
+
+    #[test]
+    fn atlas_page_wraps_row() {
+        let mut page = AtlasPage::new(0, 64, 256);
+        // First block: 16+4=20, fits at x=0
+        let o1 = page.allocate(16, 16).unwrap();
+        assert_eq!(o1.0, ATLAS_PADDING);
+
+        // Second block: same row, x=20
+        let o2 = page.allocate(16, 16).unwrap();
+        assert_eq!(o2.0, 20 + ATLAS_PADDING);
+
+        // Third block: same row, x=40
+        let o3 = page.allocate(16, 16).unwrap();
+        assert_eq!(o3.0, 40 + ATLAS_PADDING);
+
+        // Fourth block: should wrap to next row (since 60+20 > 64)
+        let o4 = page.allocate(16, 16).unwrap();
+        assert_eq!(o4.0, ATLAS_PADDING);
+        assert_eq!(o4.1, 20 + ATLAS_PADDING); // row height 20 (16+4)
+    }
+
+    #[test]
+    fn altas_full_reports_none() {
+        let mut page = AtlasPage::new(0, 32, 32);
+        // Can fit at most one 28x28 block (with padding = 32x32)
+        let _o1 = page.allocate(28, 28);
+        let o2 = page.allocate(4, 4);
+        assert!(o2.is_none());
+    }
+
+    #[test]
+    fn decode_monochrome_lightmaps() {
+        let raw = vec![128u8, 200, 64];
+        let lightofs = vec![0, -1, 1];
+        let extents = vec![(1, 1), (0, 0), (2, 1)];
+        let result = decode_lightmaps_monochrome(&raw, &lightofs, &extents);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].len(), 1);
+        assert_eq!(result[0][0], Luxel::from_gray(128));
+        assert!(result[1].is_empty());
+        assert_eq!(result[2].len(), 2);
+        assert_eq!(result[2][0], Luxel::from_gray(200));
+    }
+
+    #[test]
+    fn decode_rgb_lightmaps() {
+        let rgb = vec![255, 128, 64, 100, 150, 200];
+        let lightofs = vec![0, 1];
+        let extents = vec![(1, 1), (1, 1)];
+        let result = decode_lightmaps_rgb(&rgb, &lightofs, &extents);
+        assert_eq!(result[0].len(), 1);
+        assert_eq!(result[0][0], Luxel::from_rgb(255, 128, 64));
+        assert_eq!(result[1][0], Luxel::from_rgb(100, 150, 200));
+    }
+
+    #[test]
+    fn styles_sort_deterministically() {
+        let mut atlas = LightmapAtlas::new();
+        atlas.add_style(5);
+        atlas.add_style(1);
+        atlas.add_style(3);
+        assert_eq!(atlas.styles, vec![0, 1, 3, 5]);
+    }
+
+    #[test]
+    fn sentinel_style_not_added() {
+        let mut atlas = LightmapAtlas::new();
+        atlas.add_style(STYLE_SENTINEL);
+        assert_eq!(atlas.styles, vec![0]);
+    }
+
+    // ── LightmapFaceKind tests ──
+
+    #[test]
+    fn face_kind_empty() {
+        assert_eq!(LightmapFaceKind::classify((0, 0)), LightmapFaceKind::Empty);
+        assert_eq!(LightmapFaceKind::classify((16, 0)), LightmapFaceKind::Empty);
+        assert_eq!(LightmapFaceKind::classify((0, 16)), LightmapFaceKind::Empty);
+        assert!(!LightmapFaceKind::Empty.requires_baked_lightmap());
+    }
+
+    #[test]
+    fn face_kind_vertex() {
+        assert_eq!(LightmapFaceKind::classify((1, 1)), LightmapFaceKind::Vertex);
+        assert_eq!(LightmapFaceKind::classify((1, 16)), LightmapFaceKind::Vertex);
+        assert_eq!(LightmapFaceKind::classify((16, 1)), LightmapFaceKind::Vertex);
+        assert!(LightmapFaceKind::Vertex.requires_baked_lightmap());
+    }
+
+    #[test]
+    fn face_kind_light() {
+        assert_eq!(LightmapFaceKind::classify((2, 2)), LightmapFaceKind::Light);
+        assert_eq!(LightmapFaceKind::classify((16, 16)), LightmapFaceKind::Light);
+        assert_eq!(LightmapFaceKind::classify((8, 32)), LightmapFaceKind::Light);
+        assert!(LightmapFaceKind::Light.requires_baked_lightmap());
+    }
+
+    #[test]
+    fn face_kind_surface() {
+        assert_eq!(LightmapFaceKind::classify((64, 16)), LightmapFaceKind::Surface);
+        assert_eq!(LightmapFaceKind::classify((8, 64)), LightmapFaceKind::Surface);
+        assert_eq!(LightmapFaceKind::classify((64, 64)), LightmapFaceKind::Surface);
+        assert_eq!(LightmapFaceKind::classify((128, 256)), LightmapFaceKind::Surface);
+        assert!(!LightmapFaceKind::Surface.requires_baked_lightmap());
+    }
+}

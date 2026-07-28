@@ -1,4 +1,6 @@
 mod assets;
+#[cfg(feature = "bsp")]
+pub mod bsp;
 pub mod config;
 mod errors;
 pub mod event_logging;
@@ -19,11 +21,14 @@ pub use crate::data::asset_manifest::{
 pub use crate::data::asset_registry::{
     normalize_logical_key, parse_package_manifest, try_normalize_logical_key,
     validate_package_manifest_file, validate_package_manifest_str, validate_project_file,
-    validate_project_str, AssetKind,
-    AssetRegistry, AssetRegistryError, DurableAssetRecord, PackageAssetRecord, PackageManifest,
-    PackageValidationOptions, Project, ProjectPackage, ProjectSettings, ProjectValidationOptions,
+    validate_project_str, AssetKind, AssetRegistry, AssetRegistryError, DurableAssetRecord,
+    PackageAssetRecord, PackageManifest, PackageValidationOptions, Project, ProjectPackage,
+    ProjectSettings, ProjectValidationOptions,
 };
 pub use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle};
+
+#[cfg(feature = "bsp")]
+pub use crate::data::handles::{BspMaterialHandle, BspTextureHandle};
 pub use crate::data::mesh_geometry::{MeshDeformation, MeshGeometryDto, MeshLocalAabb};
 pub use crate::data::retirement::{
     FrameSerial, GpuRetirementQueue, RetirementClass, RetirementError, RetirementRecord,
@@ -33,6 +38,13 @@ pub use crate::debug_ui::{
     AppUiCallback, DebugTimingRow, DebugTimingSnapshot, DebugUiFrameContext, DebugViewCallback,
     DebugViewDescriptor, DebugViewId,
 };
+pub use crate::object::query::{
+    EditorPickResult, EditorProxyPolicy, ObjectQueryFilter, RayHit, UnknownBoundsPolicy,
+    VolumeHit, VolumeQuery, VolumeShape,
+};
+pub use crate::object::selection::{Selection, SelectionChange};
+pub use crate::object::ObjectId;
+pub use crate::object::{ObjectLifecycleOutcome, ObjectMutationOutcome, ObjectSummary};
 pub use crate::scene::SceneNodeId;
 pub use assets::{
     AssetManager, EnvironmentSource, EnvironmentState, FacePattern, PbrMaterialDesc,
@@ -49,12 +61,13 @@ pub use engine_events::{
     ActionPhase, AssetEvent, AssetId, AudioClipId, AudioEvent, ColliderId, ContactPhase,
     EngineEvent, EventBus, EventEnvelope, EventRecorder, EventSequence, EventStage, FrameId,
     InputActionEvent, LifecycleEvent, ListenerError, ListenerFailure, ListenerId, MaterialId,
-    NodeId, PackageId, PhysicsBodyId, PhysicsEvent, ProjectId, SceneEvent, SceneId, ScriptId,
-    ScriptingEvent,
+    NodeId, ObjectKind, PackageId, PhysicsBodyId, PhysicsEvent, ProjectId, SceneEvent, SceneId,
+    SceneObjectId, SceneObjectLifecycleAction, SceneObjectLifecycleEvent,
+    SceneObjectLifecycleSnapshot, ScriptId, ScriptingEvent,
 };
 pub use errors::{
     AnimationError, AssetError, CommandError, HookError, HookFailureEntry, HookFailureStage,
-    HookReport, RendererError, RendererFrameError, RendererInitError, SceneError,
+    HookReport, ObjectError, RendererError, RendererFrameError, RendererInitError, SceneError,
 };
 pub use hooks::{boxed_render_hook, BoxedRenderHook, RenderHook, RenderHookContext};
 pub use input::{
@@ -74,4 +87,9 @@ pub use scene::{
     DirectionalShadowConfig, MeshBoundsEntry, PointLight, PointLightId, Scene, SceneAssetReference,
     SceneBounds, SceneFragment, SceneFragmentMount, SceneFragmentNode, SceneFragmentNodeId,
     SceneNodeSummary, SceneValidationOptions, SpotLight, SpotLightId,
+};
+pub use crate::scene::object_commands::{
+    AttachComponentCommand, DuplicateObjectsCommand, RemoveComponentCommand,
+    RemoveObjectsCommand, ReplaceComponentStateCommand, SetComponentPropertyCommand,
+    SetObjectParentCommand, SetObjectTransformCommand,
 };

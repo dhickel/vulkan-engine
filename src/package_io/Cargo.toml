@@ -1,0 +1,7 @@
+[package]
+name = "package_io"
+version = "0.1.0"
+edition = "2021"
+description = "Canonical package trust boundary: confined loading, budget enforcement, shared resolver for runtime and tooling"
+
+[dependencies]
