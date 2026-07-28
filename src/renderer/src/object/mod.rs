@@ -9,8 +9,8 @@ pub mod identity;
 
 // Persistent vocabulary re-exports (dependency-neutral, from engine_events)
 pub use engine_events::{
-    ObjectKind, SceneObjectId, SceneObjectLifecycleAction, SceneObjectLifecycleSnapshot,
-    SceneObjectLifecycleEvent,
+    ObjectKind, SceneObjectId, SceneObjectLifecycleAction, SceneObjectLifecycleEvent,
+    SceneObjectLifecycleSnapshot,
 };
 
 // Renderer runtime types
@@ -21,10 +21,12 @@ pub use crate::scene::object_store::ObjectHandle;
 
 // Component system re-exports.
 pub use component::{
-    canonical_bytes, enforce_limits, hydrate_all, hydrate_all_by_key, hydrate_and_store,
-    hydrate_envelope, ComponentAdapter, ComponentEnvelope, ComponentError, ComponentInstanceId,
-    ComponentKey, ComponentPropertyDescriptor, ComponentPropertyType, ComponentPropertyValue,
-    ComponentRegistry, ComponentStore,
+    canonical_bytes, commit_full_state_replacement, component_properties, enforce_limits,
+    get_component_property, hydrate_all, hydrate_all_by_key, hydrate_and_store, hydrate_envelope,
+    prepare_full_state_replacement, prepare_property_edit, prepare_reference_remap,
+    ComponentAdapter, ComponentEnvelope, ComponentError, ComponentInstanceId, ComponentKey,
+    ComponentPropertyDescriptor, ComponentPropertyType, ComponentPropertyValue, ComponentRegistry,
+    ComponentStore,
 };
 
 /// Records a remapping from an old runtime [`ObjectId`] to a new one,

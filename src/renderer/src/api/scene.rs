@@ -1,5 +1,7 @@
+use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
@@ -8,8 +10,8 @@ use crate::api::assets::{AssetManager, EnvironmentSource};
 use crate::data::handles::{EnvironmentHandle, MeshHandle};
 use crate::data::validation::{ValidationArea, ValidationDiagnostic, ValidationError};
 use crate::object::component::{
-    hydrate_all, hydrate_all_by_key, ComponentKey, ComponentEnvelope, ComponentInstanceId,
-    ComponentRegistry,
+    hydrate_all, hydrate_all_by_key, hydrate_and_store, ComponentKey, ComponentEnvelope,
+    ComponentInstanceId, ComponentRegistry,
 };
 use crate::object::identity::ObjectId;
 use crate::scene::command::{Command, CommandHistory, CommandResult};
@@ -2040,9 +2042,7 @@ impl Scene {
         envelope: ComponentEnvelope,
     ) -> Result<(), SceneError> {
         self.validate_node(node)?;
-        self.world
-            .attach_component(node, envelope)
-            .map_err(|e| SceneError::InvalidMutation(format!("component attach: {e}")))
+        self.world.attach_component(node, envelope).map_err(SceneError::from)
     }
 
     /// Remove a component instance from a scene node by key and instance ID.
@@ -2095,7 +2095,39 @@ impl Scene {
     ) -> Result<&T, SceneError> {
         self.world
             .component_downcast::<T>(node, key, instance_id)
-            .map_err(|e| SceneError::InvalidMutation(format!("component downcast: {e}")))
+            .map_err(SceneError::from)
+    }
+
+    /// Return typed hydrated component instances in deterministic envelope order.
+    ///
+    /// The returned `Arc` values are runtime views only; persistence remains
+    /// represented by the paired canonical envelopes.
+    pub fn component_typed_instances<T: Any + Send + Sync>(
+        &self,
+        node: SceneNodeId,
+        key: &ComponentKey,
+    ) -> Result<Vec<(ComponentEnvelope, Arc<T>)>, SceneError> {
+        self.world
+            .component_typed_instances::<T>(node, key)
+            .ok_or(SceneError::InvalidNode(node))
+    }
+
+    /// Hydrate one component attachment using a caller-owned registry.
+    ///
+    /// Unknown types remain unchanged as opaque canonical envelopes.
+    pub fn hydrate_component(
+        &mut self,
+        node: SceneNodeId,
+        registry: &ComponentRegistry,
+        key: &ComponentKey,
+        instance_id: &ComponentInstanceId,
+    ) -> Result<(), SceneError> {
+        self.validate_node(node)?;
+        let store = self
+            .world
+            .component_store_mut(node)
+            .ok_or(SceneError::InvalidNode(node))?;
+        hydrate_and_store(registry, store, key, instance_id).map_err(SceneError::from)
     }
 
     /// Hydrate all components on a node using a caller-owned registry.
@@ -2111,9 +2143,7 @@ impl Scene {
             .world
             .component_store_mut(node)
             .ok_or_else(|| SceneError::InvalidNode(node))?;
-        hydrate_all(registry, store).map_err(|e| {
-            SceneError::InvalidMutation(format!("component hydration: {e}"))
-        })
+        hydrate_all(registry, store).map_err(SceneError::from)
     }
 
     /// Hydrate all components of a given key on a node.
@@ -2128,9 +2158,7 @@ impl Scene {
             .world
             .component_store_mut(node)
             .ok_or_else(|| SceneError::InvalidNode(node))?;
-        hydrate_all_by_key(registry, store, key).map_err(|e| {
-            SceneError::InvalidMutation(format!("component hydration by key: {e}"))
-        })
+        hydrate_all_by_key(registry, store, key).map_err(SceneError::from)
     }
 }
 

@@ -15,18 +15,19 @@
 //! - Failed edit atomicity
 //! - Lifecycle snapshot preservation
 
-use renderer::object::component::{
-    canonical_bytes, hydrate_all, hydrate_and_store, hydrate_envelope, ComponentAdapter,
-    ComponentEnvelope, ComponentError, ComponentInstanceId, ComponentKey,
-    ComponentPropertyDescriptor, ComponentPropertyType, ComponentPropertyValue,
-    ComponentRegistry, ComponentStore, MAX_ATTACHMENTS_PER_OBJECT, MAX_ENVELOPE_DATA_BYTES,
-    MAX_MIGRATION_STEPS, MAX_NESTING_DEPTH,
-};
-use renderer::{Scene, SceneNodeId};
 use engine_events::SceneObjectId;
+use renderer::object::component::{
+    canonical_bytes, commit_full_state_replacement, hydrate_all, hydrate_and_store,
+    hydrate_envelope, prepare_full_state_replacement, ComponentAdapter, ComponentEnvelope,
+    ComponentError, ComponentInstanceId, ComponentKey, ComponentPropertyDescriptor,
+    ComponentPropertyType, ComponentPropertyValue, ComponentRegistry, ComponentStore,
+    MAX_ATTACHMENTS_PER_OBJECT, MAX_ENVELOPE_DATA_BYTES, MAX_MIGRATION_STEPS, MAX_NESTING_DEPTH,
+};
+use renderer::{CommandHistory, RemoveNodeCommand, Scene, SceneNodeId};
 use serde_json::{json, Value};
 use std::any::Any;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 // ── Test Adapters ───────────────────────────────────────────────────────
@@ -41,11 +42,7 @@ impl ComponentAdapter for IntAdapter {
         self.version
     }
 
-    fn migrate(
-        &self,
-        from_version: u32,
-        json: Value,
-    ) -> Result<(u32, Value), ComponentError> {
+    fn migrate(&self, from_version: u32, json: Value) -> Result<(u32, Value), ComponentError> {
         let mut map = match json {
             Value::Object(m) => m,
             _ => {
@@ -68,27 +65,24 @@ impl ComponentAdapter for IntAdapter {
         _version: u32,
         json: &Value,
     ) -> Result<Arc<dyn Any + Send + Sync>, ComponentError> {
-        let val = json
-            .get("x")
-            .and_then(|v| v.as_i64())
-            .ok_or_else(|| ComponentError::HydrationFailed {
+        let val = json.get("x").and_then(|v| v.as_i64()).ok_or_else(|| {
+            ComponentError::HydrationFailed {
                 key: ComponentKey::new("test.int").unwrap(),
                 version: _version,
                 message: "missing 'x' field".into(),
-            })? as i32;
+            }
+        })? as i32;
         Ok(Arc::new(val))
     }
 
-    fn serialize(
-        &self,
-        value: &(dyn Any + Send + Sync),
-    ) -> Result<Value, ComponentError> {
-        let val = value
-            .downcast_ref::<i32>()
-            .ok_or_else(|| ComponentError::SerializationFailed {
-                key: ComponentKey::new("test.int").unwrap(),
-                message: "type mismatch".into(),
-            })?;
+    fn serialize(&self, value: &(dyn Any + Send + Sync)) -> Result<Value, ComponentError> {
+        let val =
+            value
+                .downcast_ref::<i32>()
+                .ok_or_else(|| ComponentError::SerializationFailed {
+                    key: ComponentKey::new("test.int").unwrap(),
+                    message: "type mismatch".into(),
+                })?;
         Ok(json!({"x": *val}))
     }
 
@@ -214,13 +208,9 @@ fn multiple_instances_same_type() {
     let key = ComponentKey::new("test.foo").unwrap();
 
     for i in 0..5 {
-        let env = ComponentEnvelope::new(
-            ComponentInstanceId::mint(),
-            key.clone(),
-            1,
-            json!({"x": i}),
-        )
-        .unwrap();
+        let env =
+            ComponentEnvelope::new(ComponentInstanceId::mint(), key.clone(), 1, json!({"x": i}))
+                .unwrap();
         store.attach(env).unwrap();
     }
 
@@ -261,12 +251,10 @@ fn duplicate_attachment_rejected() {
     let iid = ComponentInstanceId::mint();
     let key = ComponentKey::new("test.foo").unwrap();
 
-    let env1 =
-        ComponentEnvelope::new(iid.clone(), key.clone(), 1, json!({"x": 1})).unwrap();
+    let env1 = ComponentEnvelope::new(iid.clone(), key.clone(), 1, json!({"x": 1})).unwrap();
     store.attach(env1).unwrap();
 
-    let env2 =
-        ComponentEnvelope::new(iid.clone(), key.clone(), 1, json!({"x": 2})).unwrap();
+    let env2 = ComponentEnvelope::new(iid.clone(), key.clone(), 1, json!({"x": 2})).unwrap();
     assert!(matches!(
         store.attach(env2),
         Err(ComponentError::DuplicateAttachment(_))
@@ -294,19 +282,13 @@ fn deterministic_iteration_order() {
     .unwrap();
 
     store
-        .attach(
-            ComponentEnvelope::new(iid_c.clone(), key.clone(), 1, json!({"v": 3})).unwrap(),
-        )
+        .attach(ComponentEnvelope::new(iid_c.clone(), key.clone(), 1, json!({"v": 3})).unwrap())
         .unwrap();
     store
-        .attach(
-            ComponentEnvelope::new(iid_a.clone(), key.clone(), 1, json!({"v": 1})).unwrap(),
-        )
+        .attach(ComponentEnvelope::new(iid_a.clone(), key.clone(), 1, json!({"v": 1})).unwrap())
         .unwrap();
     store
-        .attach(
-            ComponentEnvelope::new(iid_b.clone(), key.clone(), 1, json!({"v": 2})).unwrap(),
-        )
+        .attach(ComponentEnvelope::new(iid_b.clone(), key.clone(), 1, json!({"v": 2})).unwrap())
         .unwrap();
 
     let order: Vec<_> = store.envelopes().map(|e| e.instance_id.clone()).collect();
@@ -468,7 +450,10 @@ fn hydrate_all_skips_unknown_types() {
 
     let count = hydrate_all(&reg, &mut store).unwrap();
     // Both envelopes were processed (1 hydrated, 1 left opaque as unknown).
-    assert_eq!(count, 2, "both envelopes processed (one hydrated, one left opaque)");
+    assert_eq!(
+        count, 2,
+        "both envelopes processed (one hydrated, one left opaque)"
+    );
 }
 
 // ── Unsupported Versions ────────────────────────────────────────────────
@@ -558,13 +543,8 @@ fn hydrate_and_store_updates_envelope_after_migration() {
 
     let mut store = ComponentStore::new();
     let key = ComponentKey::new("test.int").unwrap();
-    let env = ComponentEnvelope::new(
-        ComponentInstanceId::mint(),
-        key.clone(),
-        1,
-        json!({"x": 7}),
-    )
-    .unwrap();
+    let env = ComponentEnvelope::new(ComponentInstanceId::mint(), key.clone(), 1, json!({"x": 7}))
+        .unwrap();
     let iid = env.instance_id.clone();
     store.attach(env).unwrap();
 
@@ -617,13 +597,8 @@ fn adapter_panic_does_not_crash_process() {
 
     let mut store = ComponentStore::new();
     let key = ComponentKey::new("test.panic2").unwrap();
-    let env = ComponentEnvelope::new(
-        ComponentInstanceId::mint(),
-        key.clone(),
-        1,
-        json!({"x": 0}),
-    )
-    .unwrap();
+    let env = ComponentEnvelope::new(ComponentInstanceId::mint(), key.clone(), 1, json!({"x": 0}))
+        .unwrap();
     let iid = env.instance_id.clone();
     store.attach(env).unwrap();
 
@@ -711,13 +686,9 @@ fn too_many_attachments_rejected() {
     let key = ComponentKey::new("test.foo").unwrap();
 
     for i in 0..MAX_ATTACHMENTS_PER_OBJECT {
-        let env = ComponentEnvelope::new(
-            ComponentInstanceId::mint(),
-            key.clone(),
-            1,
-            json!({"i": i}),
-        )
-        .unwrap();
+        let env =
+            ComponentEnvelope::new(ComponentInstanceId::mint(), key.clone(), 1, json!({"i": i}))
+                .unwrap();
         store.attach(env).unwrap();
     }
 
@@ -940,6 +911,9 @@ fn scene_hydration_with_registry() {
 
     let val: &i32 = scene.component_downcast(root, &key, &iid).unwrap();
     assert_eq!(*val, 99);
+    let typed = scene.component_typed_instances::<i32>(root, &key).unwrap();
+    assert_eq!(typed.len(), 1);
+    assert_eq!(*typed[0].1, 99);
 }
 
 #[test]
@@ -1280,4 +1254,195 @@ fn property_descriptors_available() {
     assert_eq!(props[1].key, "name");
     assert_eq!(props[1].read_only, true);
     assert_eq!(props[1].property_type, ComponentPropertyType::String);
+}
+
+// ── Regression tests for review repairs ─────────────────────────────────
+
+struct PanicCurrentVersionAdapter;
+
+impl ComponentAdapter for PanicCurrentVersionAdapter {
+    fn current_version(&self) -> u32 {
+        panic!("intentional panic in current_version")
+    }
+    fn migrate(&self, _: u32, json: Value) -> Result<(u32, Value), ComponentError> {
+        Ok((1, json))
+    }
+    fn hydrate(&self, _: u32, _: &Value) -> Result<Arc<dyn Any + Send + Sync>, ComponentError> {
+        Ok(Arc::new(0_i32))
+    }
+    fn serialize(&self, _: &(dyn Any + Send + Sync)) -> Result<Value, ComponentError> {
+        Ok(json!({"x": 0}))
+    }
+    fn properties(&self) -> Vec<ComponentPropertyDescriptor> {
+        vec![]
+    }
+    fn get_property(
+        &self,
+        _: &(dyn Any + Send + Sync),
+        _: &str,
+    ) -> Result<ComponentPropertyValue, ComponentError> {
+        Ok(ComponentPropertyValue::Int(0))
+    }
+    fn set_property(
+        &self,
+        _: &mut (dyn Any + Send + Sync),
+        _: &str,
+        _: &ComponentPropertyValue,
+    ) -> Result<(), ComponentError> {
+        Ok(())
+    }
+    fn remap_references(
+        &self,
+        _: &mut (dyn Any + Send + Sync),
+        _: &HashMap<SceneObjectId, SceneObjectId>,
+    ) -> Result<(), ComponentError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn malformed_envelope_is_rejected_before_any_adapter_callback() {
+    let key = ComponentKey::new("test.current_panic").unwrap();
+    let mut registry = ComponentRegistry::new();
+    registry
+        .register(key.clone(), Box::new(PanicCurrentVersionAdapter))
+        .unwrap();
+    let malformed = ComponentEnvelope {
+        instance_id: ComponentInstanceId::mint(),
+        key: key.clone(),
+        schema_version: 0,
+        data: json!({"x": 1}),
+    };
+
+    assert!(matches!(
+        hydrate_envelope(&registry, &malformed),
+        Err(ComponentError::InvalidEnvelope(_))
+    ));
+
+    let valid =
+        ComponentEnvelope::new(ComponentInstanceId::mint(), key, 1, json!({"x": 1})).unwrap();
+    assert!(matches!(
+        hydrate_envelope(&registry, &valid),
+        Err(ComponentError::AdapterPanic { operation, .. }) if operation == "current_version"
+    ));
+}
+
+struct CountingMigrationAdapter {
+    calls: Arc<AtomicUsize>,
+}
+
+impl ComponentAdapter for CountingMigrationAdapter {
+    fn current_version(&self) -> u32 {
+        3
+    }
+    fn migrate(&self, from: u32, json: Value) -> Result<(u32, Value), ComponentError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut object = json.as_object().cloned().unwrap();
+        object.insert(format!("v{}", from + 1), json!(true));
+        Ok((from + 1, Value::Object(object)))
+    }
+    fn hydrate(&self, _: u32, json: &Value) -> Result<Arc<dyn Any + Send + Sync>, ComponentError> {
+        Ok(Arc::new(json["x"].as_i64().unwrap() as i32))
+    }
+    fn serialize(&self, value: &(dyn Any + Send + Sync)) -> Result<Value, ComponentError> {
+        Ok(json!({"x": *value.downcast_ref::<i32>().unwrap()}))
+    }
+    fn properties(&self) -> Vec<ComponentPropertyDescriptor> {
+        vec![]
+    }
+    fn get_property(
+        &self,
+        _: &(dyn Any + Send + Sync),
+        _: &str,
+    ) -> Result<ComponentPropertyValue, ComponentError> {
+        Ok(ComponentPropertyValue::Int(0))
+    }
+    fn set_property(
+        &self,
+        _: &mut (dyn Any + Send + Sync),
+        _: &str,
+        _: &ComponentPropertyValue,
+    ) -> Result<(), ComponentError> {
+        Ok(())
+    }
+    fn remap_references(
+        &self,
+        _: &mut (dyn Any + Send + Sync),
+        _: &HashMap<SceneObjectId, SceneObjectId>,
+    ) -> Result<(), ComponentError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn hydration_migrates_once_then_commits_the_matching_canonical_candidate() {
+    let key = ComponentKey::new("test.counted_migration").unwrap();
+    let instance_id = ComponentInstanceId::mint();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ComponentRegistry::new();
+    registry
+        .register(
+            key.clone(),
+            Box::new(CountingMigrationAdapter {
+                calls: Arc::clone(&calls),
+            }),
+        )
+        .unwrap();
+    let mut store = ComponentStore::new();
+    store
+        .attach(
+            ComponentEnvelope::new(instance_id.clone(), key.clone(), 1, json!({"x": 7})).unwrap(),
+        )
+        .unwrap();
+
+    hydrate_and_store(&registry, &mut store, &key, &instance_id).unwrap();
+
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let envelope = store.envelope(&key, &instance_id).unwrap();
+    assert_eq!(envelope.schema_version, 3);
+    assert_eq!(envelope.data, json!({"v2": true, "v3": true, "x": 7}));
+    assert_eq!(*store.downcast::<i32>(&key, &instance_id).unwrap(), 7);
+}
+
+#[test]
+fn full_state_prepare_commit_is_atomic_and_scene_undo_restores_envelopes() {
+    let key = ComponentKey::new("test.int").unwrap();
+    let instance_id = ComponentInstanceId::mint();
+    let mut registry = ComponentRegistry::new();
+    registry
+        .register(key.clone(), Box::new(IntAdapter { version: 1 }))
+        .unwrap();
+    let mut store = ComponentStore::new();
+    store
+        .attach(
+            ComponentEnvelope::new(instance_id.clone(), key.clone(), 1, json!({"x": 1})).unwrap(),
+        )
+        .unwrap();
+    let (candidate, hydrated) =
+        prepare_full_state_replacement(&registry, &key, &instance_id, &2_i32).unwrap();
+    commit_full_state_replacement(&mut store, candidate, hydrated).unwrap();
+    assert_eq!(*store.downcast::<i32>(&key, &instance_id).unwrap(), 2);
+
+    let mut scene = Scene::new();
+    let node = scene.create_node_default(None).unwrap();
+    scene
+        .attach_component(
+            node,
+            ComponentEnvelope::new(instance_id, key.clone(), 1, json!({"x": 2})).unwrap(),
+        )
+        .unwrap();
+    let mut history = CommandHistory::new(1);
+    scene
+        .execute_command(&mut history, Box::new(RemoveNodeCommand::new(node)))
+        .unwrap();
+    let restored = scene
+        .undo_command(&mut history)
+        .unwrap()
+        .node_remap
+        .unwrap()
+        .new;
+    assert_eq!(
+        scene.component_envelopes(restored).unwrap()[0].data,
+        json!({"x": 2})
+    );
 }

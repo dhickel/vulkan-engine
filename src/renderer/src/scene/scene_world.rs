@@ -31,7 +31,9 @@ use crate::scene::render_submission::{
 use engine_events::{ObjectKind, SceneObjectId};
 use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SceneNodeId {
@@ -2445,20 +2447,13 @@ impl SceneWorld {
     }
 
     /// Iterate typed hydrated instances of a given component type on a node.
-    pub(crate) fn component_typed_instances<T: 'static>(
+    pub(crate) fn component_typed_instances<T: Any + Send + Sync>(
         &self,
         node_id: SceneNodeId,
         key: &crate::object::component::ComponentKey,
-    ) -> Option<
-        impl Iterator<
-            Item = (
-                &crate::object::component::ComponentEnvelope,
-                &T,
-            ),
-        >,
-    > {
+    ) -> Option<Vec<(crate::object::component::ComponentEnvelope, Arc<T>)>> {
         self.get_node_record(node_id)
-            .map(|record| record.component_store.typed_instances::<T>(key))
+            .map(|record| record.component_store.typed_instances_owned::<T>(key))
     }
 
     /// Get a mutable reference to the component store for a node.

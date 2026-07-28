@@ -33,10 +33,7 @@ pub enum ComponentError {
     /// Envelope is structurally invalid (schema_version=0, empty key, etc.).
     InvalidEnvelope(String),
     /// The schema_version is not recognized by any registered adapter.
-    UnsupportedVersion {
-        key: ComponentKey,
-        version: u32,
-    },
+    UnsupportedVersion { key: ComponentKey, version: u32 },
     /// Schema version mismatch during a candidate operation.
     VersionMismatch {
         key: ComponentKey,
@@ -50,25 +47,16 @@ pub enum ComponentError {
     /// Duplicate attachment (same key + instance_id) rejected.
     DuplicateAttachment(ComponentKey),
     /// Per-object attachment limit exceeded.
-    TooManyAttachments {
-        limit: usize,
-        current: usize,
-    },
+    TooManyAttachments { limit: usize, current: usize },
     /// Single-attachment data size limit exceeded.
     DataTooLarge {
         limit_bytes: usize,
         found_bytes: usize,
     },
     /// JSON nesting depth limit exceeded.
-    NestingTooDeep {
-        limit: u32,
-        found: u32,
-    },
+    NestingTooDeep { limit: u32, found: u32 },
     /// Migration step limit exceeded.
-    TooManyMigrationSteps {
-        limit: u32,
-        attempted: u32,
-    },
+    TooManyMigrationSteps { limit: u32, attempted: u32 },
     /// Migration failed.
     MigrationFailed {
         key: ComponentKey,
@@ -82,10 +70,7 @@ pub enum ComponentError {
         message: String,
     },
     /// Serialization failed.
-    SerializationFailed {
-        key: ComponentKey,
-        message: String,
-    },
+    SerializationFailed { key: ComponentKey, message: String },
     /// Reflection get_property failed.
     GetPropertyFailed {
         key: ComponentKey,
@@ -99,10 +84,7 @@ pub enum ComponentError {
         message: String,
     },
     /// Reference remapping failed.
-    RemapFailed {
-        key: ComponentKey,
-        message: String,
-    },
+    RemapFailed { key: ComponentKey, message: String },
     /// Adapter callback panicked (caught by catch_unwind).
     AdapterPanic {
         key: ComponentKey,
@@ -117,6 +99,8 @@ pub enum ComponentError {
     NoInstancesOfType(ComponentKey),
     /// TypeId mismatch during downcast.
     TypeMismatch,
+    /// An adapter reported an invalid current schema version.
+    InvalidAdapterVersion { key: ComponentKey, version: u32 },
 }
 
 impl fmt::Display for ComponentError {
@@ -141,10 +125,9 @@ impl fmt::Display for ComponentError {
             Self::DuplicateAttachment(key) => {
                 write!(f, "duplicate attachment for key '{key}'")
             }
-            Self::TooManyAttachments { limit, current } => write!(
-                f,
-                "too many attachments: limit {limit}, current {current}"
-            ),
+            Self::TooManyAttachments { limit, current } => {
+                write!(f, "too many attachments: limit {limit}, current {current}")
+            }
             Self::DataTooLarge {
                 limit_bytes,
                 found_bytes,
@@ -152,10 +135,9 @@ impl fmt::Display for ComponentError {
                 f,
                 "attachment data too large: limit {limit_bytes}B, found {found_bytes}B"
             ),
-            Self::NestingTooDeep { limit, found } => write!(
-                f,
-                "JSON nesting too deep: limit {limit}, found {found}"
-            ),
+            Self::NestingTooDeep { limit, found } => {
+                write!(f, "JSON nesting too deep: limit {limit}, found {found}")
+            }
             Self::TooManyMigrationSteps { limit, attempted } => write!(
                 f,
                 "too many migration steps: limit {limit}, attempted {attempted}"
@@ -180,30 +162,27 @@ impl fmt::Display for ComponentError {
                 key,
                 property,
                 message,
-            } => write!(
-                f,
-                "get_property '{property}' failed for '{key}': {message}"
-            ),
+            } => write!(f, "get_property '{property}' failed for '{key}': {message}"),
             Self::SetPropertyFailed {
                 key,
                 property,
                 message,
-            } => write!(
-                f,
-                "set_property '{property}' failed for '{key}': {message}"
-            ),
+            } => write!(f, "set_property '{property}' failed for '{key}': {message}"),
             Self::RemapFailed { key, message } => {
                 write!(f, "remap_references failed for '{key}': {message}")
             }
             Self::AdapterPanic { key, operation } => {
                 write!(f, "adapter panicked during '{operation}' for '{key}'")
             }
-            Self::InstanceNotFound {
-                key,
-                instance_id,
-            } => write!(f, "instance '{instance_id}' not found for type '{key}'"),
+            Self::InstanceNotFound { key, instance_id } => {
+                write!(f, "instance '{instance_id}' not found for type '{key}'")
+            }
             Self::NoInstancesOfType(key) => write!(f, "no instances of type '{key}'"),
             Self::TypeMismatch => write!(f, "type mismatch during downcast"),
+            Self::InvalidAdapterVersion { key, version } => write!(
+                f,
+                "adapter for '{key}' reported invalid current schema version {version}"
+            ),
         }
     }
 }
@@ -319,7 +298,11 @@ impl ComponentInstanceId {
             )));
         }
         let hex_part = &s[10..];
-        if !hex_part.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) || hex_part.len() != 64 {
+        if !hex_part
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+            || hex_part.len() != 64
+        {
             return Err(ComponentError::InvalidInstanceId(format!(
                 "expected 64 lowercase hex after 'component.', got '{hex_part}'"
             )));
@@ -414,7 +397,7 @@ impl ComponentEnvelope {
             instance_id,
             key,
             schema_version,
-            data,
+            data: canonicalize_json(&data),
         };
         env.validate()?;
         Ok(env)
@@ -441,9 +424,7 @@ fn canonicalize_json(value: &Value) -> Value {
                     .collect::<serde_json::Map<String, Value>>(),
             )
         }
-        Value::Array(arr) => {
-            Value::Array(arr.iter().map(canonicalize_json).collect())
-        }
+        Value::Array(arr) => Value::Array(arr.iter().map(canonicalize_json).collect()),
         other => other.clone(),
     }
 }
@@ -460,26 +441,16 @@ pub fn canonical_bytes(value: &Value) -> Result<Vec<u8>, ComponentError> {
 /// Recursively compute the maximum nesting depth of a JSON value.
 fn nesting_depth(value: &Value) -> u32 {
     match value {
-        Value::Object(map) => {
-            1 + map
-                .values()
-                .map(|v| nesting_depth(v))
-                .max()
-                .unwrap_or(0)
-        }
-        Value::Array(arr) => {
-            1 + arr
-                .iter()
-                .map(|v| nesting_depth(v))
-                .max()
-                .unwrap_or(0)
-        }
+        Value::Object(map) => 1 + map.values().map(|v| nesting_depth(v)).max().unwrap_or(0),
+        Value::Array(arr) => 1 + arr.iter().map(|v| nesting_depth(v)).max().unwrap_or(0),
         _ => 0,
     }
 }
 
 /// Enforce all limits on a candidate envelope.
 pub fn enforce_limits(envelope: &ComponentEnvelope) -> Result<(), ComponentError> {
+    envelope.validate()?;
+
     // Check canonical data size.
     let bytes = canonical_bytes(&envelope.data)?;
     if bytes.len() > MAX_ENVELOPE_DATA_BYTES {
@@ -555,11 +526,9 @@ impl ComponentStore {
     /// Attach a prevalidated envelope.
     ///
     /// Rejects duplicate (key, instance_id) pairs and enforces the attachment limit.
-    pub fn attach(
-        &mut self,
-        envelope: ComponentEnvelope,
-    ) -> Result<(), ComponentError> {
+    pub fn attach(&mut self, mut envelope: ComponentEnvelope) -> Result<(), ComponentError> {
         enforce_limits(&envelope)?;
+        envelope.data = canonicalize_json(&envelope.data);
 
         let key = (envelope.key.clone(), envelope.instance_id.clone());
 
@@ -598,11 +567,9 @@ impl ComponentStore {
     /// Replace an existing instance's envelope atomically.
     /// Fails if the instance doesn't exist or the new envelope has a different
     /// key/instance_id pair.
-    pub fn replace(
-        &mut self,
-        envelope: ComponentEnvelope,
-    ) -> Result<(), ComponentError> {
+    pub fn replace(&mut self, mut envelope: ComponentEnvelope) -> Result<(), ComponentError> {
         enforce_limits(&envelope)?;
+        envelope.data = canonicalize_json(&envelope.data);
 
         let key = (envelope.key.clone(), envelope.instance_id.clone());
 
@@ -628,10 +595,11 @@ impl ComponentStore {
     /// Used for full-state replacements.
     pub fn swap(
         &mut self,
-        envelope: ComponentEnvelope,
+        mut envelope: ComponentEnvelope,
         hydrated: Arc<dyn Any + Send + Sync>,
     ) -> Result<(), ComponentError> {
         enforce_limits(&envelope)?;
+        envelope.data = canonicalize_json(&envelope.data);
 
         let key = (envelope.key.clone(), envelope.instance_id.clone());
 
@@ -662,12 +630,13 @@ impl ComponentStore {
         hydrated: Arc<dyn Any + Send + Sync>,
     ) -> Result<(), ComponentError> {
         let lookup = (key.clone(), instance_id.clone());
-        let entry = self.entries.get_mut(&lookup).ok_or_else(|| {
-            ComponentError::InstanceNotFound {
-                key: key.clone(),
-                instance_id: instance_id.clone(),
-            }
-        })?;
+        let entry =
+            self.entries
+                .get_mut(&lookup)
+                .ok_or_else(|| ComponentError::InstanceNotFound {
+                    key: key.clone(),
+                    instance_id: instance_id.clone(),
+                })?;
         entry.hydrated = Some(hydrated);
         Ok(())
     }
@@ -688,10 +657,7 @@ impl ComponentStore {
     }
 
     /// Iterate envelopes matching a given component key, in deterministic order.
-    pub fn envelopes_by_key(
-        &self,
-        key: &ComponentKey,
-    ) -> impl Iterator<Item = &ComponentEnvelope> {
+    pub fn envelopes_by_key(&self, key: &ComponentKey) -> impl Iterator<Item = &ComponentEnvelope> {
         let prefix = key.clone();
         let start = (prefix.clone(), self.min_instance_id());
         let end = (prefix.clone(), self.max_instance_id());
@@ -722,6 +688,30 @@ impl ComponentStore {
             })
     }
 
+    /// Clone typed hydrated instances by key in deterministic order.
+    ///
+    /// Returned values are runtime views only; their matching envelopes remain
+    /// the canonical persistent source of truth.
+    pub fn typed_instances_owned<T: Any + Send + Sync>(
+        &self,
+        key: &ComponentKey,
+    ) -> Vec<(ComponentEnvelope, Arc<T>)> {
+        let prefix = key.clone();
+        let start = (prefix.clone(), self.min_instance_id());
+        let end = (prefix.clone(), self.max_instance_id());
+        self.entries
+            .range(start..=end)
+            .filter(move |((entry_key, _), _)| entry_key == &prefix)
+            .filter_map(|(_, entry)| {
+                entry.hydrated.as_ref().and_then(|view| {
+                    Arc::downcast::<T>(Arc::clone(view))
+                        .ok()
+                        .map(|typed| (entry.envelope.clone(), typed))
+                })
+            })
+            .collect()
+    }
+
     /// Downcast a hydrated view to `T` by key and instance_id.
     pub fn downcast<T: 'static>(
         &self,
@@ -729,12 +719,13 @@ impl ComponentStore {
         instance_id: &ComponentInstanceId,
     ) -> Result<&T, ComponentError> {
         let lookup = (key.clone(), instance_id.clone());
-        let entry = self.entries.get(&lookup).ok_or_else(|| {
-            ComponentError::InstanceNotFound {
+        let entry = self
+            .entries
+            .get(&lookup)
+            .ok_or_else(|| ComponentError::InstanceNotFound {
                 key: key.clone(),
                 instance_id: instance_id.clone(),
-            }
-        })?;
+            })?;
         entry
             .hydrated
             .as_ref()
@@ -852,11 +843,7 @@ pub trait ComponentAdapter: Send + Sync {
     /// Migrate JSON data from `from_version` to the next version.
     /// Returns `(new_version, migrated_json)`.
     /// Called iteratively until `current_version` is reached.
-    fn migrate(
-        &self,
-        from_version: u32,
-        json: Value,
-    ) -> Result<(u32, Value), ComponentError>;
+    fn migrate(&self, from_version: u32, json: Value) -> Result<(u32, Value), ComponentError>;
 
     /// Hydrate (deserialize/construct) a typed instance from JSON at the
     /// given version.
@@ -867,10 +854,7 @@ pub trait ComponentAdapter: Send + Sync {
     ) -> Result<Arc<dyn Any + Send + Sync>, ComponentError>;
 
     /// Serialize a typed instance into canonical JSON.
-    fn serialize(
-        &self,
-        value: &(dyn Any + Send + Sync),
-    ) -> Result<Value, ComponentError>;
+    fn serialize(&self, value: &(dyn Any + Send + Sync)) -> Result<Value, ComponentError>;
 
     /// Return property descriptors for reflection.
     fn properties(&self) -> Vec<ComponentPropertyDescriptor>;
@@ -976,17 +960,27 @@ fn protect<T>(
 
 /// Run migration steps through the registry.
 /// Applies bounded sequential migration from `from_version` to `target_version`.
+fn adapter_current_version(
+    key: &ComponentKey,
+    adapter: &dyn ComponentAdapter,
+) -> Result<u32, ComponentError> {
+    let version = protect(key, "current_version", || Ok(adapter.current_version()))?;
+    if version == 0 {
+        return Err(ComponentError::InvalidAdapterVersion {
+            key: key.clone(),
+            version,
+        });
+    }
+    Ok(version)
+}
+
 fn migrate_through(
-    registry: &ComponentRegistry,
+    adapter: &dyn ComponentAdapter,
     key: &ComponentKey,
     from_version: u32,
     target_version: u32,
     mut json: Value,
 ) -> Result<(u32, Value), ComponentError> {
-    let adapter = registry
-        .get(key)
-        .ok_or_else(|| ComponentError::UnknownType(key.clone()))?;
-
     let mut current = from_version;
     let mut steps: u32 = 0;
 
@@ -1001,12 +995,12 @@ fn migrate_through(
         let result = protect(key, "migrate", || adapter.migrate(current, json))?;
         let (next_version, next_json) = result;
 
-        if next_version <= current {
+        if next_version <= current || next_version > target_version {
             return Err(ComponentError::MigrationFailed {
                 key: key.clone(),
                 from_version: current,
                 message: format!(
-                    "migrate returned non-increasing version: {current} -> {next_version}"
+                    "migrate must advance without exceeding target {target_version}: {current} -> {next_version}"
                 ),
             });
         }
@@ -1021,105 +1015,88 @@ fn migrate_through(
 
 // ── Hydration operations ────────────────────────────────────────────────
 
-/// Hydrate one envelope: migrate to current version, then hydrate the typed view.
+/// Build a complete hydration candidate without mutating a store.
 ///
-/// If the type is not registered, returns `Ok(None)` (opaque — canonical JSON
-/// preserved unchanged).
-///
-/// If the type is registered but the version is unsupported, returns
-/// `Err(ComponentError::UnsupportedVersion)`.
-pub fn hydrate_envelope(
+/// Structural validation and all limits run before any registry callback. An
+/// absent adapter deliberately returns `Ok(None)` so unknown envelopes remain
+/// opaque. Every successful candidate contains the canonical envelope that
+/// produced its typed view, including any bounded migration.
+fn prepare_hydration(
     registry: &ComponentRegistry,
     envelope: &ComponentEnvelope,
-) -> Result<Option<Arc<dyn Any + Send + Sync>>, ComponentError> {
+) -> Result<Option<(ComponentEnvelope, Arc<dyn Any + Send + Sync>)>, ComponentError> {
+    enforce_limits(envelope)?;
+
     let adapter = match registry.get(&envelope.key) {
-        Some(a) => a,
-        None => return Ok(None), // Opaque: unknown type, leave canonical JSON.
+        Some(adapter) => adapter,
+        None => return Ok(None),
     };
+    let current = adapter_current_version(&envelope.key, adapter)?;
 
-    let current = adapter.current_version();
-
-    // Migrate if needed.
-    let (final_version, final_json) = if envelope.schema_version == current {
-        (current, envelope.data.clone())
+    let (schema_version, data) = if envelope.schema_version == current {
+        (current, canonicalize_json(&envelope.data))
     } else if envelope.schema_version < current {
         migrate_through(
-            registry,
+            adapter,
             &envelope.key,
             envelope.schema_version,
             current,
-            envelope.data.clone(),
+            canonicalize_json(&envelope.data),
         )?
     } else {
-        // envelope.schema_version > current: the data is from a newer schema
-        // than this adapter supports.
         return Err(ComponentError::UnsupportedVersion {
             key: envelope.key.clone(),
             version: envelope.schema_version,
         });
     };
 
-    let hydrated = protect(&envelope.key, "hydrate", || {
-        adapter.hydrate(final_version, &final_json)
+    let candidate = ComponentEnvelope::new(
+        envelope.instance_id.clone(),
+        envelope.key.clone(),
+        schema_version,
+        data,
+    )?;
+    enforce_limits(&candidate)?;
+    let hydrated = protect(&candidate.key, "hydrate", || {
+        adapter.hydrate(candidate.schema_version, &candidate.data)
     })?;
 
-    Ok(Some(hydrated))
+    Ok(Some((candidate, hydrated)))
+}
+
+/// Hydrate one envelope: migrate to current version, then hydrate the typed view.
+///
+/// If the type is not registered, returns `Ok(None)` (opaque — canonical JSON
+/// preserved unchanged). This does not mutate the supplied envelope.
+pub fn hydrate_envelope(
+    registry: &ComponentRegistry,
+    envelope: &ComponentEnvelope,
+) -> Result<Option<Arc<dyn Any + Send + Sync>>, ComponentError> {
+    Ok(prepare_hydration(registry, envelope)?.map(|(_, hydrated)| hydrated))
 }
 
 /// Hydrate one envelope and store the result in the [`ComponentStore`].
+///
+/// Migration, canonicalization, and typed validation complete in a local
+/// candidate before the one map update that changes the attachment.
 pub fn hydrate_and_store(
     registry: &ComponentRegistry,
     store: &mut ComponentStore,
     key: &ComponentKey,
     instance_id: &ComponentInstanceId,
 ) -> Result<(), ComponentError> {
-    let envelope = store
-        .envelope(key, instance_id)
-        .cloned()
-        .ok_or_else(|| ComponentError::InstanceNotFound {
+    let envelope = store.envelope(key, instance_id).cloned().ok_or_else(|| {
+        ComponentError::InstanceNotFound {
             key: key.clone(),
             instance_id: instance_id.clone(),
-        })?;
-
-    match hydrate_envelope(registry, &envelope)? {
-        Some(hydrated) => {
-            // If migration happened, update the canonical envelope atomically.
-            let adapter = registry
-                .get(&envelope.key)
-                .ok_or_else(|| ComponentError::UnknownType(envelope.key.clone()))?;
-            let current = adapter.current_version();
-
-            if envelope.schema_version != current {
-                // We need to migrate the envelope data to current.
-                let (_, migrated_json) = if envelope.schema_version < current {
-                    migrate_through(
-                        registry,
-                        &envelope.key,
-                        envelope.schema_version,
-                        current,
-                        envelope.data.clone(),
-                    )?
-                } else {
-                    return Err(ComponentError::UnsupportedVersion {
-                        key: envelope.key.clone(),
-                        version: envelope.schema_version,
-                    });
-                };
-
-                let migrated_envelope = ComponentEnvelope::new(
-                    envelope.instance_id.clone(),
-                    envelope.key.clone(),
-                    current,
-                    canonicalize_json(&migrated_json),
-                )?;
-                enforce_limits(&migrated_envelope)?;
-                store.swap(migrated_envelope, hydrated)?;
-            } else {
-                store.set_hydrated(key, instance_id, hydrated)?;
-            }
         }
-        None => {
-            // Opaque: unknown type. Leave canonical JSON unchanged.
+    })?;
+
+    if let Some((candidate, hydrated)) = prepare_hydration(registry, &envelope)? {
+        if candidate.schema_version != envelope.schema_version || candidate.data != envelope.data {
+            store.swap(candidate, hydrated)?;
+        } else {
+            store.set_hydrated(key, instance_id, hydrated)?;
         }
     }
 
@@ -1179,25 +1156,20 @@ pub fn prepare_full_state_replacement(
     key: &ComponentKey,
     instance_id: &ComponentInstanceId,
     typed_value: &(dyn Any + Send + Sync),
-) -> Result<ComponentEnvelope, ComponentError> {
+) -> Result<(ComponentEnvelope, Arc<dyn Any + Send + Sync>), ComponentError> {
     let adapter = registry
         .get(key)
         .ok_or_else(|| ComponentError::UnknownType(key.clone()))?;
-
-    let current = adapter.current_version();
+    let current = adapter_current_version(key, adapter)?;
 
     let json = protect(key, "serialize", || adapter.serialize(typed_value))?;
-    let canonical = canonicalize_json(&json);
-    let hydrated = protect(key, "hydrate", || adapter.hydrate(current, &canonical))?;
-
-    let envelope = ComponentEnvelope::new(instance_id.clone(), key.clone(), current, canonical)?;
+    let envelope = ComponentEnvelope::new(instance_id.clone(), key.clone(), current, json)?;
     enforce_limits(&envelope)?;
+    let hydrated = protect(key, "hydrate", || {
+        adapter.hydrate(envelope.schema_version, &envelope.data)
+    })?;
 
-    // The hydrated instance must match (we just round-tripped it).
-    // Store the hydrated view for the swap.
-    drop(hydrated);
-
-    Ok(envelope)
+    Ok((envelope, hydrated))
 }
 
 /// Commit a full-state replacement: swap the canonical envelope and hydrated
@@ -1208,6 +1180,84 @@ pub fn commit_full_state_replacement(
     hydrated: Arc<dyn Any + Send + Sync>,
 ) -> Result<(), ComponentError> {
     store.swap(envelope, hydrated)
+}
+
+/// Return reflection descriptors through the panic-contained registry boundary.
+pub fn component_properties(
+    registry: &ComponentRegistry,
+    key: &ComponentKey,
+) -> Result<Vec<ComponentPropertyDescriptor>, ComponentError> {
+    let adapter = registry
+        .get(key)
+        .ok_or_else(|| ComponentError::UnknownType(key.clone()))?;
+    protect(key, "properties", || Ok(adapter.properties()))
+}
+
+/// Read one reflected property from an existing hydrated view.
+pub fn get_component_property(
+    registry: &ComponentRegistry,
+    store: &ComponentStore,
+    key: &ComponentKey,
+    instance_id: &ComponentInstanceId,
+    property: &str,
+) -> Result<ComponentPropertyValue, ComponentError> {
+    let adapter = registry
+        .get(key)
+        .ok_or_else(|| ComponentError::UnknownType(key.clone()))?;
+    let entry = store
+        .entries
+        .get(&(key.clone(), instance_id.clone()))
+        .ok_or_else(|| ComponentError::InstanceNotFound {
+            key: key.clone(),
+            instance_id: instance_id.clone(),
+        })?;
+    let value = entry
+        .hydrated
+        .as_ref()
+        .ok_or(ComponentError::TypeMismatch)?;
+    protect(key, "get_property", || {
+        adapter.get_property(value.as_ref(), property)
+    })
+}
+
+/// Prepare a reference-remapped full-state candidate from canonical JSON.
+/// The caller commits it with [`commit_full_state_replacement`] only after all
+/// surrounding duplication work has also succeeded.
+pub fn prepare_reference_remap(
+    registry: &ComponentRegistry,
+    store: &ComponentStore,
+    key: &ComponentKey,
+    instance_id: &ComponentInstanceId,
+    mapping: &HashMap<SceneObjectId, SceneObjectId>,
+) -> Result<(ComponentEnvelope, Arc<dyn Any + Send + Sync>), ComponentError> {
+    let adapter = registry
+        .get(key)
+        .ok_or_else(|| ComponentError::UnknownType(key.clone()))?;
+    let existing =
+        store
+            .envelope(key, instance_id)
+            .ok_or_else(|| ComponentError::InstanceNotFound {
+                key: key.clone(),
+                instance_id: instance_id.clone(),
+            })?;
+    let (base, mut candidate) = prepare_hydration(registry, existing)?
+        .ok_or_else(|| ComponentError::UnknownType(key.clone()))?;
+    let candidate_mut =
+        Arc::get_mut(&mut candidate).ok_or_else(|| ComponentError::RemapFailed {
+            key: key.clone(),
+            message: "failed to get mutable candidate reference".into(),
+        })?;
+    protect(key, "remap_references", || {
+        adapter.remap_references(candidate_mut, mapping)
+    })?;
+
+    let json = protect(key, "serialize", || adapter.serialize(candidate.as_ref()))?;
+    let envelope = ComponentEnvelope::new(base.instance_id, base.key, base.schema_version, json)?;
+    enforce_limits(&envelope)?;
+    let hydrated = protect(key, "hydrate", || {
+        adapter.hydrate(envelope.schema_version, &envelope.data)
+    })?;
+    Ok((envelope, hydrated))
 }
 
 /// Perform a typed property edit: validate and serialize completely before
@@ -1225,27 +1275,31 @@ pub fn prepare_property_edit<T: Any + Send + Sync>(
         .get(key)
         .ok_or_else(|| ComponentError::UnknownType(key.clone()))?;
 
-    // Clone the existing hydrated instance, apply the edit, serialize, validate.
-    let existing = store.downcast::<T>(key, instance_id)?;
-
-    // We need a mutable clone to apply the edit.
-    // Since we can't clone a &T without T: Clone, we re-hydrate from the canonical data.
-    let current = adapter.current_version();
-    let existing_json = protect(key, "serialize", || adapter.serialize(existing))?;
-    let canonical = canonicalize_json(&existing_json);
-    let mut cloned: Arc<dyn Any + Send + Sync> =
-        protect(key, "hydrate", || adapter.hydrate(current, &canonical))?;
+    // Canonical JSON, rather than a possibly stale runtime view, is the
+    // source of the edit candidate. Rehydrate it into an isolated value.
+    let existing =
+        store
+            .envelope(key, instance_id)
+            .ok_or_else(|| ComponentError::InstanceNotFound {
+                key: key.clone(),
+                instance_id: instance_id.clone(),
+            })?;
+    let (current_envelope, mut cloned) = prepare_hydration(registry, existing)?
+        .ok_or_else(|| ComponentError::UnknownType(key.clone()))?;
+    if cloned.downcast_ref::<T>().is_none() {
+        return Err(ComponentError::TypeMismatch);
+    }
+    let current = current_envelope.schema_version;
 
     // Apply the property edit on the cloned instance.
     {
         // Safety: we hold the only mutable reference to the cloned value.
-        let cloned_mut = Arc::get_mut(&mut cloned).ok_or_else(|| {
-            ComponentError::SetPropertyFailed {
+        let cloned_mut =
+            Arc::get_mut(&mut cloned).ok_or_else(|| ComponentError::SetPropertyFailed {
                 key: key.clone(),
                 property: prop_key.to_string(),
                 message: "failed to get mutable reference".into(),
-            }
-        })?;
+            })?;
         protect(key, "set_property", || {
             adapter.set_property(cloned_mut, prop_key, prop_value)
         })?;
@@ -1258,12 +1312,7 @@ pub fn prepare_property_edit<T: Any + Send + Sync>(
     // Hydrate to validate.
     let validated = protect(key, "hydrate", || adapter.hydrate(current, &canonical))?;
 
-    let envelope = ComponentEnvelope::new(
-        instance_id.clone(),
-        key.clone(),
-        current,
-        canonical,
-    )?;
+    let envelope = ComponentEnvelope::new(instance_id.clone(), key.clone(), current, canonical)?;
     enforce_limits(&envelope)?;
 
     Ok((envelope, validated))
@@ -1337,18 +1386,14 @@ mod tests {
     fn invalid_instance_ids() {
         assert!(ComponentInstanceId::new("not.component.xxx").is_err());
         assert!(ComponentInstanceId::new("component.short").is_err());
-        assert!(
-            ComponentInstanceId::new(
-                "component.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg"
-            )
-            .is_err()
-        );
-        assert!(
-            ComponentInstanceId::new(
-                "component.0123456789abcdef0123456789abcdef0123456789abcdef0123456789ABCDEF"
-            )
-            .is_err()
-        );
+        assert!(ComponentInstanceId::new(
+            "component.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg"
+        )
+        .is_err());
+        assert!(ComponentInstanceId::new(
+            "component.0123456789abcdef0123456789abcdef0123456789abcdef0123456789ABCDEF"
+        )
+        .is_err());
     }
 
     #[test]
@@ -1502,21 +1547,9 @@ mod tests {
         let key = ComponentKey::new("test.foo").unwrap();
 
         let env1 = make_envelope(json!({"x": 1}));
-        let env1 = ComponentEnvelope::new(
-            env1.instance_id,
-            key.clone(),
-            1,
-            env1.data,
-        )
-        .unwrap();
+        let env1 = ComponentEnvelope::new(env1.instance_id, key.clone(), 1, env1.data).unwrap();
         let env2 = make_envelope(json!({"x": 2}));
-        let env2 = ComponentEnvelope::new(
-            env2.instance_id,
-            key.clone(),
-            1,
-            env2.data,
-        )
-        .unwrap();
+        let env2 = ComponentEnvelope::new(env2.instance_id, key.clone(), 1, env2.data).unwrap();
 
         store.attach(env1).unwrap();
         store.attach(env2).unwrap();
@@ -1674,18 +1707,16 @@ mod tests {
             self.version
         }
 
-        fn migrate(
-            &self,
-            from_version: u32,
-            json: Value,
-        ) -> Result<(u32, Value), ComponentError> {
+        fn migrate(&self, from_version: u32, json: Value) -> Result<(u32, Value), ComponentError> {
             let mut map = match json {
                 Value::Object(m) => m,
-                _ => return Err(ComponentError::MigrationFailed {
-                    key: ComponentKey::new("test.foo").unwrap(),
-                    from_version,
-                    message: "not an object".into(),
-                }),
+                _ => {
+                    return Err(ComponentError::MigrationFailed {
+                        key: ComponentKey::new("test.foo").unwrap(),
+                        from_version,
+                        message: "not an object".into(),
+                    })
+                }
             };
             map.insert(
                 "migrated_from".to_string(),
@@ -1703,16 +1734,14 @@ mod tests {
             Ok(Arc::new(val))
         }
 
-        fn serialize(
-            &self,
-            value: &(dyn Any + Send + Sync),
-        ) -> Result<Value, ComponentError> {
-            let val = value
-                .downcast_ref::<i32>()
-                .ok_or_else(|| ComponentError::SerializationFailed {
-                    key: ComponentKey::new("test.foo").unwrap(),
-                    message: "type mismatch".into(),
-                })?;
+        fn serialize(&self, value: &(dyn Any + Send + Sync)) -> Result<Value, ComponentError> {
+            let val =
+                value
+                    .downcast_ref::<i32>()
+                    .ok_or_else(|| ComponentError::SerializationFailed {
+                        key: ComponentKey::new("test.foo").unwrap(),
+                        message: "type mismatch".into(),
+                    })?;
             Ok(json!({"x": *val}))
         }
 
@@ -1955,13 +1984,9 @@ mod tests {
 
         let mut store = ComponentStore::new();
         let key = ComponentKey::new("test.foo").unwrap();
-        let env = ComponentEnvelope::new(
-            ComponentInstanceId::mint(),
-            key.clone(),
-            1,
-            json!({"x": 7}),
-        )
-        .unwrap();
+        let env =
+            ComponentEnvelope::new(ComponentInstanceId::mint(), key.clone(), 1, json!({"x": 7}))
+                .unwrap();
         let iid = env.instance_id.clone();
         store.attach(env).unwrap();
 
@@ -1970,7 +1995,11 @@ mod tests {
         // After migration, the canonical envelope should be at version 3.
         let updated_env = store.envelope(&key, &iid).unwrap();
         assert_eq!(updated_env.schema_version, 3);
-        assert!(updated_env.data.as_object().unwrap().contains_key("migrated_from"));
+        assert!(updated_env
+            .data
+            .as_object()
+            .unwrap()
+            .contains_key("migrated_from"));
     }
 
     #[test]
@@ -1981,7 +2010,9 @@ mod tests {
         // from 1 to a very high version.
         reg.register(
             ComponentKey::new("test.foo").unwrap(),
-            Box::new(TestAdapter { version: MAX_MIGRATION_STEPS + 10 }),
+            Box::new(TestAdapter {
+                version: MAX_MIGRATION_STEPS + 10,
+            }),
         )
         .unwrap();
 
@@ -2021,10 +2052,7 @@ mod tests {
         ) -> Result<Arc<dyn Any + Send + Sync>, ComponentError> {
             panic!("intentional panic in hydrate");
         }
-        fn serialize(
-            &self,
-            _value: &(dyn Any + Send + Sync),
-        ) -> Result<Value, ComponentError> {
+        fn serialize(&self, _value: &(dyn Any + Send + Sync)) -> Result<Value, ComponentError> {
             Ok(json!({"x": 0}))
         }
         fn properties(&self) -> Vec<ComponentPropertyDescriptor> {
@@ -2152,26 +2180,17 @@ mod tests {
 
         // Attach out of order.
         store
-            .attach(
-                ComponentEnvelope::new(iid3.clone(), key.clone(), 1, json!({"v": 3})).unwrap(),
-            )
+            .attach(ComponentEnvelope::new(iid3.clone(), key.clone(), 1, json!({"v": 3})).unwrap())
             .unwrap();
         store
-            .attach(
-                ComponentEnvelope::new(iid1.clone(), key.clone(), 1, json!({"v": 1})).unwrap(),
-            )
+            .attach(ComponentEnvelope::new(iid1.clone(), key.clone(), 1, json!({"v": 1})).unwrap())
             .unwrap();
         store
-            .attach(
-                ComponentEnvelope::new(iid2.clone(), key.clone(), 1, json!({"v": 2})).unwrap(),
-            )
+            .attach(ComponentEnvelope::new(iid2.clone(), key.clone(), 1, json!({"v": 2})).unwrap())
             .unwrap();
 
         // Iteration order should be sorted by (key, instance_id).
-        let ids: Vec<_> = store
-            .envelopes()
-            .map(|e| e.instance_id.clone())
-            .collect();
+        let ids: Vec<_> = store.envelopes().map(|e| e.instance_id.clone()).collect();
         assert_eq!(ids, vec![iid1, iid2, iid3]);
     }
 }
