@@ -57,7 +57,7 @@ The event system lives in the standalone `engine_events` crate. It has zero depe
 ```rust
 use engine::prelude::{runtime_event_bus, EventBus};
 
-let mut events = runtime_event_bus();
+let mut events = runtime_event_bus();p
 ```
 
 `runtime_event_bus()` creates a caller-owned `EventBus` with a bounded recorder already attached. Use this bus for all app lifecycle, input action, and subsystem events. Custom apps should **never** interact with the renderer's internal bus.
