@@ -2728,6 +2728,8 @@ version = "0.1.0"
 dependencies = [
  "engine_events",
  "rapier3d",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

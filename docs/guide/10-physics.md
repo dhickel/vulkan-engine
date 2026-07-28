@@ -401,6 +401,7 @@ All errors are typed `PhysicsError` variants:
 | `DuplicateBodyId` | Body ID already exists in the world |
 | `DuplicateColliderId` | Collider ID already exists |
 | `MissingBody` | Collider references a body ID that doesn't exist |
+| `MissingCollider` | Collider ID does not exist in the world |
 | `NonFiniteValue` | A numeric field contains NaN or infinity |
 | `NonPositiveDimension` | A dimension (radius, half_extent) is ≤ 0 |
 | `NonPositiveDeltaTime` | Step dt is ≤ 0 |
@@ -416,14 +417,206 @@ All errors are typed `PhysicsError` variants:
 | `ConvexHullInsufficientPoints` | Fewer than 4 unique points |
 | `ConvexHullDegenerate` | Points are coplanar or zero-volume |
 
+## Atomic Body+Collider Registration
+
+> Provenance: `G-10-ATOMIC` — Excerpt
+
+Register a body and its colliders in one validated, transactional call:
+
+```rust
+use physics::{BodyRegistrationRequest, BodyDescriptor, ColliderDescriptor, BodyKind, ColliderShape};
+
+let outcome = world.register_body(BodyRegistrationRequest {
+    body: BodyDescriptor::new("body.hero", BodyKind::Dynamic, [0.0, 2.0, 0.0]),
+    colliders: vec![
+        ColliderDescriptor::new(
+            "collider.hero_torso",
+            "body.hero",
+            ColliderShape::CapsuleY {
+                half_height: 0.8,
+                radius: 0.4,
+            },
+        ),
+        ColliderDescriptor::new(
+            "collider.hero_head",
+            "body.hero",
+            ColliderShape::Sphere { radius: 0.25 },
+        )
+        .translation([0.0, 1.2, 0.0]),
+    ],
+})?;
+
+// outcome.body_id, outcome.collider_ids
+```
+
+All IDs, shapes, parent references, transforms, and body-kind compatibility are
+validated before any Rapier object is inserted.  On failure, the world is
+unchanged.
+
+## Body Reconfiguration
+
+Change a body's kind in place without losing pose, velocities, or sleep state:
+
+```rust
+use physics::BodyMode;
+
+world.reconfigure_body_mode(&player_id, BodyMode::Kinematic)?;
+```
+
+Bodies with attached `TriMeshStatic` colliders cannot be changed to `Dynamic`
+or `Kinematic` — the call returns `TrimeshOnDynamicBody`.
+
+## Collider Replacement
+
+Swap a collider's shape and properties without disrupting the parent body:
+
+```rust
+use physics::ColliderReplacementRequest;
+
+world.replace_collider(ColliderReplacementRequest {
+    collider_id: collider_id.clone(),
+    shape: ColliderShape::Cuboid {
+        half_extents: [0.4, 0.8, 0.4],
+    },
+    is_trigger: false,
+    translation: [0.0; 3],
+    rotation: [0.0, 0.0, 0.0, 1.0],
+})?;
+```
+
+Validation runs before the old collider is removed; a failed replacement leaves
+the world intact.
+
+## Targeted Removal with Outcomes
+
+Both `remove_body_with_outcome` and `remove_collider_with_outcome` return a
+[`RemovalOutcome`] containing sorted exit records for every active pair that
+ended:
+
+```rust
+let outcome = world.remove_body_with_outcome(&player_id).unwrap();
+// outcome.removed_body, outcome.removed_colliders, outcome.exited_pairs
+
+// Active pairs are removed individually — no global contact clearing.
+// The bool-returning remove_body / remove_collider remain as compat shims.
+```
+
+## Force, Impulse, Velocity, and Teleport
+
+```rust
+// Apply forces (dynamic bodies only)
+world.apply_force(&player_id, [0.0, 100.0, 0.0])?;
+world.apply_impulse(&player_id, [0.0, 50.0, 0.0])?;
+world.apply_torque_impulse(&player_id, [1.0, 0.0, 0.0])?;
+
+// Velocity control
+world.set_linear_velocity(&player_id, [5.0, 0.0, 0.0])?;
+world.set_angular_velocity(&player_id, [0.0, 1.0, 0.0])?;
+
+// Sleep / wake
+world.wake_body(&player_id)?;
+world.sleep_body(&player_id)?;
+
+// Teleport (kinematic-safe)
+world.teleport_body(&player_id, BodyPose {
+    translation: [10.0, 0.0, 0.0],
+    rotation: [0.0, 0.0, 0.0, 1.0],
+})?;
+```
+
+Forces and impulses on static or kinematic bodies are silently ignored.
+
+## Body Introspection
+
+```rust
+world.body_is_static(&id);
+world.body_is_dynamic(&id);
+world.body_is_kinematic(&id);
+world.body_exists(&id);
+world.body_linear_velocity(&id);   // None if missing
+world.body_angular_velocity(&id);  // None if missing
+```
+
+## Sweep and Overlap Queries
+
+```rust
+use physics::ColliderShape;
+
+// Sweep a shape through space
+let hit = world.sweep_test(
+    &ColliderShape::Sphere { radius: 0.5 },
+    BodyPose { translation: [0.0, 5.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0] },
+    [0.0, -10.0, 0.0],
+)?;
+
+// Overlap queries
+let overlaps = world.overlap_sphere([0.0, 0.0, 0.0], 5.0)?;
+let overlaps = world.overlap_aabb([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0])?;
+
+// Results are deterministic: sorted by Rapier handle.
+```
+
+## Character Controller
+
+A Rapier-backed kinematic character controller with step/slope handling:
+
+```rust
+use physics::{CharacterConfig, CharacterController};
+
+let config = CharacterConfig {
+    max_slope_climb_angle: 0.785398,  // radians
+    slide: true,
+    autostep_max_height: 0.3,
+    autostep_min_width: 0.2,
+    autostep: true,
+    ..Default::default()
+};
+
+let mut controller = CharacterController::new(
+    &world, body_id, collider_id, config,
+)?;
+
+// Each fixed step:
+let actual = controller.move_and_slide(
+    &mut world,
+    [desired_x, desired_y, desired_z],
+    1.0 / 60.0,
+)?;
+
+if controller.is_on_floor() {
+    // grounded
+}
+```
+
+## Versioned Config DTOs
+
+Serializable, Rapier-free configuration DTOs for bodies, colliders, and
+character controllers:
+
+```rust
+use physics::components::{
+    BodyConfigV1, ColliderConfigV1, CharacterConfigV1,
+    BodyKindConfigV1, ColliderShapeConfigV1,
+};
+
+let body = BodyConfigV1 {
+    body_id: "body.hero".into(),
+    kind: BodyKindConfigV1::Dynamic,
+    ..Default::default()
+};
+
+let json = serde_json::to_string(&body)?;
+let round: BodyConfigV1 = serde_json::from_str(&json)?;
+```
+
 ## What's Not Yet Implemented
 
 - Joints and constraints
-- Character controllers
-- Continuous collision detection (CCD) configuration via public API
+- CCD configuration via public API
 - Engine-level collision metadata (material properties, sound triggers)
-- Scene integration (auto-creating physics bodies from scene nodes)
-- Physics-driven rendering callbacks
+- Scene-persistence integration for physics components
+- Automatic scene-to-physics body instantiation
+- Physics debug drawing (gated behind `debug-lines` feature, not yet integrated)
 
 These are tracked in future sprint work. No public item in the physics crate is currently marked deprecated.
 

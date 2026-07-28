@@ -61,6 +61,44 @@ insertion into the collider set. A failure leaves no side effects on `PhysicsWor
 The public payload preserves model-space coordinates; the app-owned bridge owns
 instance transforms.
 
+### 3.1 Character Controller
+
+A Rapier-backed kinematic character controller is exposed via `CharacterController`
+in `character.rs`. It wraps `KinematicCharacterController` and provides
+`move_and_slide` with slope/step configuration. The controller references
+durable `PhysicsBodyId` / `PhysicsColliderId`; Rapier handles are private.
+
+### 3.2 Atomic Registration and Reconfiguration
+
+`register_body(BodyRegistrationRequest)` validates body + collider descriptors,
+builds Rapier objects, and commits atomically. `reconfigure_body_mode` changes a
+body's kind in place. `replace_collider` swaps a collider's shape while preserving
+the parent body.
+
+### 3.3 Targeted Removal
+
+`remove_body_with_outcome` / `remove_collider_with_outcome` return `RemovalOutcome`
+with sorted exit records for active pairs. The existing `remove_body` / `remove_collider`
+bool-returning methods remain as compatibility shims.
+
+### 3.4 Force, Impulse, and Velocity
+
+Typed `apply_force`, `apply_impulse`, `apply_torque_impulse`, `wake_body`,
+`sleep_body`, `set_linear_velocity`, `set_angular_velocity`, and `teleport_body`
+methods are available. Static/kinematic bodies are silently ignored for mutation
+operations without error.
+
+### 3.5 Queries
+
+`query.rs` provides `sweep_test`, `overlap_sphere`, and `overlap_aabb` with
+deterministic result ordering by Rapier entity handle.
+
+### 3.6 Versioned Config DTOs
+
+`components.rs` defines serde-enabled `BodyConfigV1`, `ColliderConfigV1`,
+`CharacterConfigV1` and shape config DTOs. No Rapier handles or engine-private
+types are included.
+
 ## 4. Collision Metadata Validation
 
 Package manifests may include manually authored collision metadata under `assets.metadata.collision`:

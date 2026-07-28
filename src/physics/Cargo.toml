@@ -6,3 +6,7 @@ edition = "2021"
 [dependencies]
 engine_events = { path = "../events" }
 rapier3d = "0.21"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
