@@ -16,3 +16,5 @@ ShadowDepthFrag=src/renderer/src/shaders/shadow_depth.frag.spv
 MetRoughInstancedVert=src/renderer/src/shaders/pbr_base_instanced.vert.spv
 DebugLineVert=src/renderer/src/shaders/debug_line.vert.spv
 DebugLineFrag=src/renderer/src/shaders/debug_line.frag.spv
+SpriteVert=src/renderer/src/shaders/sprite.vert.spv
+SpriteFrag=src/renderer/src/shaders/sprite.frag.spv

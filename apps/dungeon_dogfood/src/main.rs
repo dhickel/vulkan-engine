@@ -331,6 +331,9 @@ fn run() -> Result<(), AppError> {
     // Seed collider recipes from explicit policy assignments.
     let mut bridge = seed_collider_bridge(&mut renderer, &_level_scene, level);
 
+    // Seed level geometry colliders directly into the shared physics world.
+    collision::seed_level_colliders(&mut bridge.world, &level);
+
     // Create component-driven physics bridge sharing the mesh bridge's world.
     let mut physics_bridge = PhysicsBridge::new();
     // Register mesh-collider body-node mappings for unified writeback.
@@ -650,6 +653,11 @@ fn render_frame(
         for _ in 0..time_update.fixed_step_count {
             *previous_player_position = player.position;
 
+            // Sync scene transforms → physics bodies before character movement.
+            if let Err(err) = physics_bridge.sync_bodies(&mut bridge.world, scene) {
+                log::warn!("Physics bridge sync bodies failed: {}", err);
+            }
+
             // Compute per-step desired translation from input direction.
             let guard = player.ingest_movement_intent(
                 world_horizontal_dir,
@@ -736,6 +744,15 @@ fn render_frame(
         );
     }
 
+    // Write back physics→scene transforms before rendering so the renderer
+    // sees the authoritative physics state for this frame.
+    if let Err(err) = bridge.writeback_dynamic_transforms(scene) {
+        log::warn!("Transform writeback failed: {}", err);
+    }
+    if let Err(err) = physics_bridge.sync_transforms(&bridge.world, scene) {
+        log::warn!("Physics bridge sync transforms failed: {}", err);
+    }
+
     // Render one simulation step behind and interpolate toward the current
     // authoritative state using the accumulator remainder. The previous state
     // persists across display frames, including frames that run zero steps.
@@ -764,14 +781,6 @@ fn render_frame(
     let serials = renderer.retirement_serials();
     if let Err(err) = bridge.reap_retired(FrameSerial::new(serials.latest_completed)) {
         log::warn!("Collider recipe reaping failed: {}", err);
-    }
-
-    // Write back dynamic/kinematic physics body poses to scene nodes.
-    if let Err(err) = bridge.writeback_dynamic_transforms(scene) {
-        log::warn!("Transform writeback failed: {}", err);
-    }
-    if let Err(err) = physics_bridge.sync_transforms(&bridge.world, scene) {
-        log::warn!("Physics bridge sync transforms failed: {}", err);
     }
 
     Ok(outcome)

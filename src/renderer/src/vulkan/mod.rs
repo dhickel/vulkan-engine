@@ -23,3 +23,5 @@ pub mod vk_types;
 pub mod vk_util;
 #[cfg(feature = "debug-draw")]
 pub(crate) mod vk_debug_lines;
+#[cfg(feature = "sprites-2d")]
+pub(crate) mod vk_sprites;

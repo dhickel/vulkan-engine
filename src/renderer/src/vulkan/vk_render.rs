@@ -214,6 +214,9 @@ pub struct VkRenderCore {
     /// Debug line rendering backend. Only present when `debug-draw` is enabled.
     #[cfg(feature = "debug-draw")]
     pub(crate) debug_lines: crate::vulkan::vk_debug_lines::VkDebugLines,
+    /// Sprite batch rendering backend. Only present when `sprites-2d` is enabled.
+    #[cfg(feature = "sprites-2d")]
+    pub(crate) sprites: crate::vulkan::vk_sprites::VkSprites,
 }
 
 pub struct VkRender {

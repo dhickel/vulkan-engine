@@ -787,6 +787,20 @@ pub fn init_pipeline_cache(
         );
     }
 
+    #[cfg(feature = "sprites-2d")]
+    {
+        let (pipeline, layout) = init_sprite_pipeline(
+            device,
+            shader_cache,
+            draw_color_format,
+            draw_depth_format,
+        )?;
+        stage.push_single(
+            VkPipelineType::Sprites,
+            OwnedPipeline::new(device.clone(), pipeline, layout),
+        );
+    }
+
     stage.commit()
 }
 
@@ -1224,6 +1238,71 @@ fn init_debug_lines_pipeline(
         depth_format: Some(depth_format),
         depth_test: Some((true, vk::CompareOp::LESS_OR_EQUAL)),
         blend: BlendingMode::Disabled,
+        layout,
+    };
+
+    let pipeline = create_pipeline_from_spec(device, &spec).map_err(|err| {
+        unsafe { device.destroy_pipeline_layout(layout, None) };
+        err
+    })?;
+
+    Ok((pipeline, layout))
+}
+
+// ---------------------------------------------------------------------------
+// Sprite pipeline (behind `sprites-2d` feature flag)
+// ---------------------------------------------------------------------------
+
+/// Push constants for sprite draw (VP matrix + buffer device address).
+#[cfg(feature = "sprites-2d")]
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PushConstSprites {
+    pub view_projection: glam::Mat4,
+    pub vertex_buffer_addr: vk::DeviceAddress,
+}
+
+// SAFETY: Mat4 is 16×f32 with no internal padding; DeviceAddress is u64.
+// struct is repr(C) with Mat4 at offset 0 (align 4) and u64 at offset 64
+// (align 8). Total size 72 = 9×8, no trailing padding.
+#[cfg(feature = "sprites-2d")]
+unsafe impl bytemuck::Zeroable for PushConstSprites {}
+#[cfg(feature = "sprites-2d")]
+unsafe impl bytemuck::Pod for PushConstSprites {}
+
+#[cfg(feature = "sprites-2d")]
+fn init_sprite_pipeline(
+    device: &ash::Device,
+    shader_cache: &VkShaderCache,
+    color_format: vk::Format,
+    depth_format: vk::Format,
+) -> Result<(vk::Pipeline, vk::PipelineLayout), String> {
+    let vert_shader = shader_cache.get_core_shader(CoreShaderType::SpriteVert);
+    let frag_shader = shader_cache.get_core_shader(CoreShaderType::SpriteFrag);
+
+    let push_const_size = std::mem::size_of::<PushConstSprites>() as u32;
+    let push_constant_range = [vk::PushConstantRange::default()
+        .stage_flags(vk::ShaderStageFlags::VERTEX)
+        .offset(0)
+        .size(push_const_size)];
+
+    let layout_info = vk_util::pipeline_layout_create_info()
+        .set_layouts(&[])
+        .push_constant_ranges(&push_constant_range);
+    let layout = unsafe { device.create_pipeline_layout(&layout_info, None) }
+        .map_err(|err| format!("failed to create sprite pipeline layout: {err:?}"))?;
+
+    let spec = PipelineSpec {
+        vert_module: vert_shader,
+        frag_module: frag_shader,
+        topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+        polygon_mode: vk::PolygonMode::FILL,
+        cull_mode: vk::CullModeFlags::NONE,
+        front_face: vk::FrontFace::CLOCKWISE,
+        color_attachment_format: Some(color_format),
+        depth_format: Some(depth_format),
+        depth_test: Some((true, vk::CompareOp::LESS_OR_EQUAL)),
+        blend: BlendingMode::AlphaBlend,
         layout,
     };
 
