@@ -10,7 +10,7 @@ use crate::{
     PhysicsWorld,
 };
 use rapier3d::na;
-use rapier3d::parry::query::details::ShapeCastOptions;
+use rapier3d::parry::query::{cast_shapes, details::ShapeCastOptions};
 use rapier3d::prelude::*;
 
 // ── Public result types ──────────────────────────────────────────────
@@ -61,20 +61,39 @@ impl PhysicsWorld {
             max_time_of_impact: f32::MAX,
             target_distance: 0.0,
             stop_at_penetration: true,
-            compute_impact_geometry_on_penetration: false,
+            compute_impact_geometry_on_penetration: true,
         };
 
-        self.query_pipeline.update(&self.colliders);
-
-        let hit = self.query_pipeline.cast_shape(
-            &self.bodies,
-            &self.colliders,
-            &start_isometry,
-            &direction,
-            sweep_shape.shape(),
-            options,
-            QueryFilter::default(),
-        );
+        // Evaluate each supported collider and choose by TOI then raw handle.
+        // Rapier's broad-phase query returns only one equal-TOI candidate, so
+        // using it directly would leave the tie-break order unspecified.
+        let hit = self
+            .colliders
+            .iter()
+            .filter_map(|(collider_handle, collider)| {
+                cast_shapes(
+                    &start_isometry,
+                    &direction,
+                    sweep_shape.shape(),
+                    collider.position(),
+                    &na::Vector3::zeros(),
+                    collider.shape(),
+                    options,
+                )
+                .ok()
+                .flatten()
+                .map(|shape_hit| (collider_handle, shape_hit))
+            })
+            .min_by(|(left_handle, left_hit), (right_handle, right_hit)| {
+                left_hit
+                    .time_of_impact
+                    .total_cmp(&right_hit.time_of_impact)
+                    .then_with(|| {
+                        left_handle
+                            .into_raw_parts()
+                            .cmp(&right_handle.into_raw_parts())
+                    })
+            });
 
         Ok(hit.map(|(collider_handle, shape_hit)| {
             let collider = self
@@ -88,9 +107,13 @@ impl PhysicsWorld {
                 .and_then(|h| self.body_id_for_handle(h))
                 .cloned()
                 .unwrap_or_else(|| PhysicsBodyId::new("unknown"));
-            let hit_point_na =
-                start_isometry.translation.vector + direction * shape_hit.time_of_impact;
-            let normal_na = na::Vector3::new(0.0, 1.0, 0.0); // shape-cast normal not exposed
+            let impact_pose = na::Isometry3::translation(
+                direction.x * shape_hit.time_of_impact,
+                direction.y * shape_hit.time_of_impact,
+                direction.z * shape_hit.time_of_impact,
+            ) * start_isometry;
+            let hit_point_na = impact_pose * shape_hit.witness1;
+            let normal_na = impact_pose.rotation * shape_hit.normal1.into_inner();
             SweepHit {
                 body,
                 collider,
@@ -117,7 +140,7 @@ impl PhysicsWorld {
         let shape = ColliderBuilder::ball(radius).build();
         let pos = na::Isometry3::translation(center[0], center[1], center[2]);
 
-        let mut results: Vec<OverlapResult> = Vec::new();
+        let mut results: Vec<(ColliderHandle, OverlapResult)> = Vec::new();
         self.query_pipeline.intersections_with_shape(
             &self.bodies,
             &self.colliders,
@@ -133,17 +156,20 @@ impl PhysicsWorld {
                         .and_then(|h| self.body_id_for_handle(h))
                         .cloned()
                         .unwrap_or_else(|| PhysicsBodyId::new("unknown"));
-                    results.push(OverlapResult {
-                        body: body_id,
-                        collider: collider_id.clone(),
-                    });
+                    results.push((
+                        handle,
+                        OverlapResult {
+                            body: body_id,
+                            collider: collider_id.clone(),
+                        },
+                    ));
                 }
                 true
             },
         );
 
-        results.sort();
-        Ok(results)
+        results.sort_by_key(|(handle, _)| handle.into_raw_parts());
+        Ok(results.into_iter().map(|(_, result)| result).collect())
     }
 
     /// Return every collider whose AABB overlaps the given AABB.
@@ -176,7 +202,7 @@ impl PhysicsWorld {
             na::Point3::new(max[0], max[1], max[2]),
         );
 
-        let mut results: Vec<OverlapResult> = Vec::new();
+        let mut results: Vec<(ColliderHandle, OverlapResult)> = Vec::new();
         self.query_pipeline
             .colliders_with_aabb_intersecting_aabb(&aabb, |handle| {
                 if let Some(collider_id) = self.collider_id_for_handle(*handle) {
@@ -187,16 +213,19 @@ impl PhysicsWorld {
                         .and_then(|h| self.body_id_for_handle(h))
                         .cloned()
                         .unwrap_or_else(|| PhysicsBodyId::new("unknown"));
-                    results.push(OverlapResult {
-                        body: body_id,
-                        collider: collider_id.clone(),
-                    });
+                    results.push((
+                        *handle,
+                        OverlapResult {
+                            body: body_id,
+                            collider: collider_id.clone(),
+                        },
+                    ));
                 }
                 true
             });
 
-        results.sort();
-        Ok(results)
+        results.sort_by_key(|(handle, _)| handle.into_raw_parts());
+        Ok(results.into_iter().map(|(_, result)| result).collect())
     }
 }
 
@@ -209,7 +238,11 @@ fn pose_isometry(pose: &BodyPose) -> na::Isometry3<f32> {
         pose.rotation[2],
     ));
     na::Isometry3::from_parts(
-        na::Translation3::new(pose.translation[0], pose.translation[1], pose.translation[2]),
+        na::Translation3::new(
+            pose.translation[0],
+            pose.translation[1],
+            pose.translation[2],
+        ),
         rotation,
     )
 }

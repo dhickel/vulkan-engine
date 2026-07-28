@@ -174,6 +174,7 @@ pub enum PhysicsError {
     DuplicateColliderId(PhysicsColliderId),
     MissingBody(PhysicsBodyId),
     MissingCollider(PhysicsColliderId),
+    CharacterRequiresKinematicBody(PhysicsBodyId),
     NonFiniteValue { field: &'static str },
     NonPositiveDimension { field: &'static str },
     NonPositiveDeltaTime,
@@ -197,6 +198,9 @@ impl std::fmt::Display for PhysicsError {
             PhysicsError::DuplicateColliderId(id) => write!(f, "duplicate collider id: {id}"),
             PhysicsError::MissingBody(id) => write!(f, "missing body: {id}"),
             PhysicsError::MissingCollider(id) => write!(f, "missing collider: {id}"),
+            PhysicsError::CharacterRequiresKinematicBody(id) => {
+                write!(f, "character controller requires kinematic body: {id}")
+            }
             PhysicsError::NonFiniteValue { field } => write!(f, "non-finite value in {field}"),
             PhysicsError::NonPositiveDimension { field } => {
                 write!(f, "non-positive dimension in {field}")
@@ -386,6 +390,15 @@ impl BspConvexPiece {
 
 type PairKey = (PhysicsColliderId, PhysicsColliderId);
 
+/// Velocity/sleep state Rapier cannot retain for fixed or position-based
+/// kinematic bodies. It is restored if the body becomes dynamic again.
+#[derive(Copy, Clone)]
+struct ReconfiguredBodyState {
+    linear_velocity: na::Vector3<f32>,
+    angular_velocity: na::Vector3<f32>,
+    sleeping: bool,
+}
+
 /// Physics world wrapping rapier3d while preserving durable engine-facing IDs.
 pub struct PhysicsWorld {
     pub(crate) bodies: RigidBodySet,
@@ -404,6 +417,7 @@ pub struct PhysicsWorld {
     body_ids: Vec<(RigidBodyHandle, PhysicsBodyId)>,
     collider_handles: BTreeMap<PhysicsColliderId, ColliderHandle>,
     collider_ids: Vec<(ColliderHandle, PhysicsColliderId)>,
+    reconfigured_body_states: BTreeMap<PhysicsBodyId, ReconfiguredBodyState>,
     active_pairs: BTreeMap<PairKey, PhysicsContactKind>,
     last_contacts: Vec<PhysicsContactRecord>,
 }
@@ -427,6 +441,7 @@ impl PhysicsWorld {
             body_ids: Vec::new(),
             collider_handles: BTreeMap::new(),
             collider_ids: Vec::new(),
+            reconfigured_body_states: BTreeMap::new(),
             active_pairs: BTreeMap::new(),
             last_contacts: Vec::new(),
         }
@@ -580,6 +595,7 @@ impl PhysicsWorld {
         let handle = self.collider_handles.remove(id)?;
         let exited = self.remove_pairs_involving_collider(id);
         self.last_contacts.extend(exited.clone());
+        self.last_contacts.sort();
         self.colliders
             .remove(handle, &mut self.island_manager, &mut self.bodies, true);
         self.collider_ids
@@ -604,10 +620,7 @@ impl PhysicsWorld {
     /// Removes a body, returning a [`RemovalOutcome`] with sorted exit records.
     ///
     /// Returns `None` when the body ID does not exist.
-    pub fn remove_body_with_outcome(
-        &mut self,
-        id: &PhysicsBodyId,
-    ) -> Option<RemovalOutcome> {
+    pub fn remove_body_with_outcome(&mut self, id: &PhysicsBodyId) -> Option<RemovalOutcome> {
         let handle = self.body_handles.remove(id)?;
         let attached: Vec<(PhysicsColliderId, ColliderHandle)> = self
             .collider_ids
@@ -627,12 +640,14 @@ impl PhysicsWorld {
             let mut exited = self.remove_pairs_involving_collider(collider_id);
             exited_pairs.append(&mut exited);
             self.collider_handles.remove(collider_id);
-            self.collider_ids
-                .retain(|(c, _)| *c != *collider_handle);
+            self.collider_ids.retain(|(c, _)| *c != *collider_handle);
             removed_collider_ids.push(collider_id.clone());
         }
 
-        self.last_contacts.append(&mut exited_pairs.clone());
+        exited_pairs.sort();
+        removed_collider_ids.sort();
+        self.last_contacts.extend(exited_pairs.iter().cloned());
+        self.last_contacts.sort();
 
         self.bodies.remove(
             handle,
@@ -643,6 +658,7 @@ impl PhysicsWorld {
             true,
         );
         self.body_ids.retain(|(candidate, _)| *candidate != handle);
+        self.reconfigured_body_states.remove(id);
         self.query_pipeline.update(&self.colliders);
 
         Some(RemovalOutcome {
@@ -803,43 +819,34 @@ impl PhysicsWorld {
         request: BodyRegistrationRequest,
     ) -> Result<RegistrationOutcome, PhysicsError> {
         // ── Phase 1: validate everything ─────────────────────────
-        let body_descriptor = &request.body;
-        validate_vec3("body.translation", body_descriptor.translation)?;
-        if self.body_handles.contains_key(&body_descriptor.id) {
-            return Err(PhysicsError::DuplicateBodyId(body_descriptor.id.clone()));
+        let body_id = request.body.id.clone();
+        let body_kind = request.body.kind;
+        validate_vec3("body.translation", request.body.translation)?;
+        if self.body_handles.contains_key(&body_id) {
+            return Err(PhysicsError::DuplicateBodyId(body_id));
         }
 
-        // Validate each collider descriptor.
+        // A registration owns exactly one body and its colliders. Validate
+        // every descriptor, including duplicate request-local IDs, before
+        // constructing any runtime object.
+        let mut request_collider_ids = BTreeSet::new();
         for c in &request.colliders {
             validate_vec3("collider.translation", c.translation)?;
             validate_rotation(c.rotation)?;
-            if self.collider_handles.contains_key(&c.id) {
+            if !request_collider_ids.insert(c.id.clone())
+                || self.collider_handles.contains_key(&c.id)
+            {
                 return Err(PhysicsError::DuplicateColliderId(c.id.clone()));
             }
-            // Validate parent consistency: must reference either
-            //  (a) the body being registered now, or
-            //  (b) an already-existing body.
-            let parent_exists = c.parent_body == body_descriptor.id
-                || self.body_handles.contains_key(&c.parent_body);
-            if !parent_exists {
+            if c.parent_body != body_id {
                 return Err(PhysicsError::MissingBody(c.parent_body.clone()));
             }
-            // Validate shape geometry.
-            validate_collider_shape(
-                &c.shape,
-                if c.parent_body == body_descriptor.id {
-                    body_descriptor.kind
-                } else {
-                    // Look up the existing body's kind.
-                    let bh = self.body_handles[&c.parent_body];
-                    body_kind_from_rapier(self.bodies.get(bh).unwrap())
-                },
-            )?;
+            validate_collider_shape(&c.shape, body_kind)?;
         }
 
         // ── Phase 2: build Rapier objects ────────────────────────
-        let translation = vec3(body_descriptor.translation);
-        let rapier_body = match body_descriptor.kind {
+        let translation = vec3(request.body.translation);
+        let rapier_body = match body_kind {
             BodyKind::Static => RigidBodyBuilder::fixed(),
             BodyKind::Dynamic => RigidBodyBuilder::dynamic(),
             BodyKind::Kinematic => RigidBodyBuilder::kinematic_position_based(),
@@ -867,31 +874,14 @@ impl PhysicsWorld {
 
         // ── Phase 3: commit ──────────────────────────────────────
         let body_handle = self.bodies.insert(rapier_body);
-        self.body_handles
-            .insert(body_descriptor.id.clone(), body_handle);
-        self.body_ids
-            .push((body_handle, body_descriptor.id.clone()));
+        self.body_handles.insert(body_id.clone(), body_handle);
+        self.body_ids.push((body_handle, body_id.clone()));
 
         let mut collider_ids = Vec::new();
         for (collider_id, builder) in rapier_colliders {
-            let parent_handle = if request.colliders
-                .iter()
-                .any(|c| c.id == collider_id && c.parent_body == request.body.id)
-            {
-                body_handle
-            } else {
-                self.body_handles[&request
-                    .colliders
-                    .iter()
-                    .find(|c| c.id == collider_id)
-                    .unwrap()
-                    .parent_body]
-            };
-            let chandle = self.colliders.insert_with_parent(
-                builder.build(),
-                parent_handle,
-                &mut self.bodies,
-            );
+            let chandle =
+                self.colliders
+                    .insert_with_parent(builder.build(), body_handle, &mut self.bodies);
             self.collider_handles.insert(collider_id.clone(), chandle);
             self.collider_ids.push((chandle, collider_id.clone()));
             collider_ids.push(collider_id);
@@ -900,7 +890,7 @@ impl PhysicsWorld {
         self.query_pipeline.update(&self.colliders);
 
         Ok(RegistrationOutcome {
-            body_id: body_descriptor.id.clone(),
+            body_id,
             collider_ids,
         })
     }
@@ -929,32 +919,54 @@ impl PhysicsWorld {
 
         // If switching from Static to Dynamic/Kinematic, check for TriMeshStatic colliders.
         if body.is_fixed() && mode != BodyMode::Static {
-            let has_trimesh = self
-                .collider_ids
-                .iter()
-                .any(|(ch, _)| {
-                    self.colliders
-                        .get(*ch)
-                        .map_or(false, |c| c.parent() == Some(handle))
-                        && matches!(
-                            self.colliders.get(*ch).map(|c| c.shape().as_typed_shape()),
-                            Some(rapier3d::prelude::TypedShape::TriMesh(_))
-                        )
-                });
+            let has_trimesh = self.collider_ids.iter().any(|(ch, _)| {
+                self.colliders
+                    .get(*ch)
+                    .map_or(false, |c| c.parent() == Some(handle))
+                    && matches!(
+                        self.colliders.get(*ch).map(|c| c.shape().as_typed_shape()),
+                        Some(rapier3d::prelude::TypedShape::TriMesh(_))
+                    )
+            });
             if has_trimesh {
                 return Err(PhysicsError::TrimeshOnDynamicBody);
             }
         }
 
+        let previous =
+            self.reconfigured_body_states
+                .get(id)
+                .copied()
+                .unwrap_or(ReconfiguredBodyState {
+                    linear_velocity: *body.linvel(),
+                    angular_velocity: *body.angvel(),
+                    sleeping: body.is_sleeping(),
+                });
+        let pose = *body.position();
+
         let body = self
             .bodies
             .get_mut(handle)
             .ok_or_else(|| PhysicsError::MissingBody(id.clone()))?;
+        let target_type = match mode {
+            BodyMode::Static => RigidBodyType::Fixed,
+            BodyMode::Dynamic => RigidBodyType::Dynamic,
+            BodyMode::Kinematic => RigidBodyType::KinematicPositionBased,
+        };
+        body.set_body_type(target_type, false);
+        body.set_position(pose, true);
 
-        match mode {
-            BodyMode::Static => body.set_body_type(RigidBodyType::Fixed, true),
-            BodyMode::Dynamic => body.set_body_type(RigidBodyType::Dynamic, true),
-            BodyMode::Kinematic => body.set_body_type(RigidBodyType::KinematicPositionBased, true),
+        if mode == BodyMode::Dynamic {
+            body.set_linvel(previous.linear_velocity, false);
+            body.set_angvel(previous.angular_velocity, false);
+            if previous.sleeping {
+                body.sleep();
+            } else {
+                body.wake_up(true);
+            }
+            self.reconfigured_body_states.remove(id);
+        } else {
+            self.reconfigured_body_states.insert(id.clone(), previous);
         }
 
         Ok(())
@@ -984,9 +996,9 @@ impl PhysicsWorld {
             .get(old_handle)
             .ok_or_else(|| PhysicsError::MissingCollider(request.collider_id.clone()))?;
 
-        let body_handle = old_collider.parent().ok_or_else(|| {
-            PhysicsError::MissingCollider(request.collider_id.clone())
-        })?;
+        let body_handle = old_collider
+            .parent()
+            .ok_or_else(|| PhysicsError::MissingCollider(request.collider_id.clone()))?;
 
         // Validate shape + body kind compatibility.
         let body_kind = self
@@ -1020,15 +1032,12 @@ impl PhysicsWorld {
             .remove(old_handle, &mut self.island_manager, &mut self.bodies, true);
 
         // Insert new collider.
-        let new_handle = self.colliders.insert_with_parent(
-            builder.build(),
-            body_handle,
-            &mut self.bodies,
-        );
+        let new_handle =
+            self.colliders
+                .insert_with_parent(builder.build(), body_handle, &mut self.bodies);
 
         // Update handle mapping.
-        self.collider_ids
-            .retain(|(c, _)| *c != old_handle);
+        self.collider_ids.retain(|(c, _)| *c != old_handle);
         self.collider_ids
             .push((new_handle, request.collider_id.clone()));
         self.collider_handles
@@ -1043,11 +1052,7 @@ impl PhysicsWorld {
     /// Apply a force at the body's center of mass.
     ///
     /// Static and kinematic bodies are silently ignored.
-    pub fn apply_force(
-        &mut self,
-        id: &PhysicsBodyId,
-        force: [f32; 3],
-    ) -> Result<(), PhysicsError> {
+    pub fn apply_force(&mut self, id: &PhysicsBodyId, force: [f32; 3]) -> Result<(), PhysicsError> {
         validate_vec3("force", force)?;
         let handle = *self
             .body_handles
@@ -1105,14 +1110,14 @@ impl PhysicsWorld {
 
     /// Wake a sleeping body.
     ///
-    /// Static bodies are ignored; the call succeeds for dynamic and kinematic bodies.
+    /// Static and kinematic bodies are silently ignored.
     pub fn wake_body(&mut self, id: &PhysicsBodyId) -> Result<(), PhysicsError> {
         let handle = *self
             .body_handles
             .get(id)
             .ok_or_else(|| PhysicsError::MissingBody(id.clone()))?;
         if let Some(body) = self.bodies.get_mut(handle) {
-            if !body.is_fixed() {
+            if body.is_dynamic() {
                 body.wake_up(true);
             }
         }
@@ -1137,7 +1142,7 @@ impl PhysicsWorld {
 
     /// Set the linear velocity of a body.
     ///
-    /// Returns `Ok(())` for static bodies (no mutation), `Ok(())` when applied.
+    /// Static and kinematic bodies are silently ignored.
     pub fn set_linear_velocity(
         &mut self,
         id: &PhysicsBodyId,
@@ -1149,7 +1154,7 @@ impl PhysicsWorld {
             .get(id)
             .ok_or_else(|| PhysicsError::MissingBody(id.clone()))?;
         if let Some(body) = self.bodies.get_mut(handle) {
-            if !body.is_fixed() {
+            if body.is_dynamic() {
                 body.set_linvel(vec3(velocity), true);
             }
         }
@@ -1158,7 +1163,7 @@ impl PhysicsWorld {
 
     /// Set the angular velocity of a body.
     ///
-    /// Returns `Ok(())` for static bodies (no mutation), `Ok(())` when applied.
+    /// Static and kinematic bodies are silently ignored.
     pub fn set_angular_velocity(
         &mut self,
         id: &PhysicsBodyId,
@@ -1170,23 +1175,35 @@ impl PhysicsWorld {
             .get(id)
             .ok_or_else(|| PhysicsError::MissingBody(id.clone()))?;
         if let Some(body) = self.bodies.get_mut(handle) {
-            if !body.is_fixed() {
+            if body.is_dynamic() {
                 body.set_angvel(vec3(velocity), true);
             }
         }
         Ok(())
     }
 
-    /// Teleport a body to a new pose, preserving velocities.
+    /// Teleport a dynamic body to a new pose, preserving velocities.
     ///
-    /// For kinematic bodies, `set_next_kinematic_position` is also called.
-    /// Fails when the body does not exist or the pose is invalid.
+    /// Static and kinematic bodies are silently ignored. Invalid poses and
+    /// missing IDs still return their normal validation errors.
     pub fn teleport_body(
         &mut self,
         id: &PhysicsBodyId,
         pose: BodyPose,
     ) -> Result<(), PhysicsError> {
-        self.set_body_pose_by_id(id, pose)
+        validate_vec3("body.translation", pose.translation)?;
+        validate_rotation(pose.rotation)?;
+        let handle = *self
+            .body_handles
+            .get(id)
+            .ok_or_else(|| PhysicsError::MissingBody(id.clone()))?;
+        if let Some(body) = self.bodies.get_mut(handle) {
+            if body.is_dynamic() {
+                body.set_position(pose_isometry(pose), true);
+                self.query_pipeline.update(&self.colliders);
+            }
+        }
+        Ok(())
     }
 
     // ── Body introspection ───────────────────────────────────────
@@ -1219,7 +1236,12 @@ impl PhysicsWorld {
     pub fn body_linear_velocity(&self, id: &PhysicsBodyId) -> Option<[f32; 3]> {
         let handle = *self.body_handles.get(id)?;
         let body = self.bodies.get(handle)?;
-        let v = body.linvel();
+        let v = self
+            .reconfigured_body_states
+            .get(id)
+            .filter(|_| !body.is_dynamic())
+            .map(|state| state.linear_velocity)
+            .unwrap_or(*body.linvel());
         Some([v.x, v.y, v.z])
     }
 
@@ -1227,7 +1249,12 @@ impl PhysicsWorld {
     pub fn body_angular_velocity(&self, id: &PhysicsBodyId) -> Option<[f32; 3]> {
         let handle = *self.body_handles.get(id)?;
         let body = self.bodies.get(handle)?;
-        let v = body.angvel();
+        let v = self
+            .reconfigured_body_states
+            .get(id)
+            .filter(|_| !body.is_dynamic())
+            .map(|state| state.angular_velocity)
+            .unwrap_or(*body.angvel());
         Some([v.x, v.y, v.z])
     }
 
@@ -1242,25 +1269,16 @@ impl PhysicsWorld {
         self.body_handles.get(id).copied()
     }
 
-    pub(crate) fn collider_handle_for(
-        &self,
-        id: &PhysicsColliderId,
-    ) -> Option<ColliderHandle> {
+    pub(crate) fn collider_handle_for(&self, id: &PhysicsColliderId) -> Option<ColliderHandle> {
         self.collider_handles.get(id).copied()
     }
 
-    pub(crate) fn collider_parent_body(
-        &self,
-        handle: ColliderHandle,
-    ) -> Option<RigidBodyHandle> {
+    pub(crate) fn collider_parent_body(&self, handle: ColliderHandle) -> Option<RigidBodyHandle> {
         self.colliders.get(handle)?.parent()
     }
 
     #[allow(dead_code)]
-    pub(crate) fn body_position(
-        &self,
-        handle: RigidBodyHandle,
-    ) -> na::Isometry3<f32> {
+    pub(crate) fn body_position(&self, handle: RigidBodyHandle) -> na::Isometry3<f32> {
         self.bodies
             .get(handle)
             .map(|b| *b.position())
@@ -1342,7 +1360,7 @@ fn record(
 }
 
 /// Validates shape geometry and body-kind compatibility without mutating a world.
-pub(crate) fn validate_collider_shape(
+pub fn validate_collider_shape(
     shape: &ColliderShape,
     body_kind: BodyKind,
 ) -> Result<(), PhysicsError> {

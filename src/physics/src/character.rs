@@ -3,7 +3,9 @@
 //! Wraps `rapier3d::control::KinematicCharacterController` behind durable
 //! engine IDs.  Rapier handles are never exposed publicly.
 
-use crate::{validate_positive, PhysicsBodyId, PhysicsColliderId, PhysicsError, PhysicsWorld};
+use crate::{
+    validate_positive, validate_vec3, PhysicsBodyId, PhysicsColliderId, PhysicsError, PhysicsWorld,
+};
 use rapier3d::control::{
     CharacterAutostep, CharacterCollision, CharacterLength, EffectiveCharacterMovement,
     KinematicCharacterController,
@@ -57,6 +59,8 @@ impl CharacterConfig {
         )?;
         validate_positive("character.step_height", config.step_height)?;
         validate_positive("character.min_width", config.min_width)?;
+        validate_positive("character.max_width", config.max_width)?;
+        validate_vec3("character.offset.translation", config.offset.translation)?;
         if config.min_width > config.max_width {
             return Err(PhysicsError::NonPositiveDimension {
                 field: "character.min_width > max_width",
@@ -99,19 +103,22 @@ impl CharacterController {
         collider_id: PhysicsColliderId,
         config: CharacterConfig,
     ) -> Result<Self, PhysicsError> {
-        // Verify body and collider exist.
+        // Verify body, collider, and their ownership before constructing the
+        // controller. Character motion only drives position-based kinematics.
         let body_handle = world
             .body_handle_for(&body_id)
             .ok_or_else(|| PhysicsError::MissingBody(body_id.clone()))?;
+        if !world.body_is_kinematic(&body_id) {
+            return Err(PhysicsError::CharacterRequiresKinematicBody(body_id));
+        }
         let collider_handle = world
             .collider_handle_for(&collider_id)
-            .ok_or_else(|| PhysicsError::MissingBody(body_id.clone()))?;
+            .ok_or_else(|| PhysicsError::MissingCollider(collider_id.clone()))?;
 
-        // Verify the collider belongs to this body.
-        let parent_ok = world.collider_parent_body(collider_handle) == Some(body_handle);
-        if !parent_ok {
-            return Err(PhysicsError::MissingBody(body_id));
+        if world.collider_parent_body(collider_handle) != Some(body_handle) {
+            return Err(PhysicsError::MissingCollider(collider_id));
         }
+        validate_character_config(&config)?;
 
         let mut controller = KinematicCharacterController::default();
         controller.max_slope_climb_angle = config.max_slope_climb_angle;
@@ -144,9 +151,8 @@ impl CharacterController {
         desired_translation: [f32; 3],
         dt: f32,
     ) -> Result<[f32; 3], PhysicsError> {
-        if dt <= 0.0 {
-            return Err(PhysicsError::NonPositiveDeltaTime);
-        }
+        validate_positive("character.dt", dt).map_err(|_| PhysicsError::NonPositiveDeltaTime)?;
+        validate_vec3("character.desired_translation", desired_translation)?;
 
         let body_handle = world
             .body_handle_for(&self.body_id)
@@ -181,21 +187,21 @@ impl CharacterController {
             character_shape,
             &body_pos,
             desired,
-            QueryFilter::default(),
+            QueryFilter::default().exclude_collider(collider_handle),
             |_collision: CharacterCollision| {
                 // Collision events are consumed internally; callers use
                 // PhysicsWorld::last_contact_records() for contact data.
             },
         );
 
-        // Update body position.
+        // `result.translation` is a delta. Move the body by that delta rather
+        // than assigning the collider's world-space position, which preserves
+        // authored collider-local offsets.
         let new_translation = result.translation;
-        let mut new_pos = body_pos;
-        new_pos.translation.vector = new_translation;
         if let Some(body) = world.bodies.get_mut(body_handle) {
-            if body.is_kinematic() {
-                body.set_next_kinematic_position(new_pos);
-            }
+            let mut new_pos = *body.position();
+            new_pos.translation.vector += new_translation;
+            body.set_next_kinematic_position(new_pos);
             body.set_position(new_pos, true);
         }
 
@@ -205,8 +211,7 @@ impl CharacterController {
         self.on_floor = result.grounded;
         self.is_sliding = result.is_sliding_down_slope;
 
-        let delta = new_translation - body_pos.translation.vector;
-        Ok([delta.x, delta.y, delta.z])
+        Ok([new_translation.x, new_translation.y, new_translation.z])
     }
 
     /// Whether the character was on the ground after the last movement.
@@ -238,6 +243,11 @@ impl CharacterController {
     ///
     /// Changes take effect on the next [`move_and_slide`](Self::move_and_slide) call.
     pub fn set_config(&mut self, config: CharacterConfig) {
+        // Configuration is validated at construction. This infallible legacy
+        // setter retains its API; invalid values are ignored.
+        if validate_character_config(&config).is_err() {
+            return;
+        }
         self.controller.max_slope_climb_angle = config.max_slope_climb_angle;
         self.controller.min_slope_slide_angle = config.min_slope_slide_angle;
         self.controller.slide = config.slide;
@@ -250,10 +260,30 @@ impl CharacterController {
     }
 }
 
+fn validate_character_config(config: &CharacterConfig) -> Result<(), PhysicsError> {
+    validate_positive(
+        "character.max_slope_climb_angle",
+        config.max_slope_climb_angle,
+    )?;
+    validate_positive(
+        "character.min_slope_slide_angle",
+        config.min_slope_slide_angle,
+    )?;
+    validate_vec3("character.offset", config.offset)?;
+    if config.autostep {
+        validate_positive("character.autostep_max_height", config.autostep_max_height)?;
+        validate_positive("character.autostep_min_width", config.autostep_min_width)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::character::{CharacterConfig, CharacterController};
-    use crate::{BodyDescriptor, BodyKind, ColliderDescriptor, ColliderShape, PhysicsBodyId, PhysicsColliderId, PhysicsError, PhysicsWorld};
+    use crate::{
+        BodyDescriptor, BodyKind, ColliderDescriptor, ColliderShape, PhysicsBodyId,
+        PhysicsColliderId, PhysicsError, PhysicsWorld,
+    };
 
     fn setup_character_world() -> (PhysicsWorld, PhysicsBodyId, PhysicsColliderId) {
         let mut world = PhysicsWorld::new();
@@ -282,7 +312,7 @@ mod tests {
             .create_body(BodyDescriptor::new(
                 "body.character",
                 BodyKind::Kinematic,
-                [0.0, 1.0, 0.0],
+                [0.0, 1.5, 0.0],
             ))
             .unwrap();
         let collider_id = world
@@ -304,8 +334,7 @@ mod tests {
         let (world, body_id, collider_id) = setup_character_world();
         let config = CharacterConfig::default();
         let mut controller =
-            CharacterController::new(&world, body_id.clone(), collider_id.clone(), config)
-                .unwrap();
+            CharacterController::new(&world, body_id.clone(), collider_id.clone(), config).unwrap();
 
         let mut world = world;
         world.step(1.0 / 60.0).unwrap();
@@ -322,8 +351,7 @@ mod tests {
         let (world, body_id, collider_id) = setup_character_world();
         let config = CharacterConfig::default();
         let mut controller =
-            CharacterController::new(&world, body_id.clone(), collider_id.clone(), config)
-                .unwrap();
+            CharacterController::new(&world, body_id.clone(), collider_id.clone(), config).unwrap();
 
         let mut world = world;
         world.step(1.0 / 60.0).unwrap();
@@ -405,8 +433,7 @@ mod tests {
         let (world, body_id, collider_id) = setup_character_world();
         let config = CharacterConfig::default();
         let mut controller =
-            CharacterController::new(&world, body_id.clone(), collider_id.clone(), config)
-                .unwrap();
+            CharacterController::new(&world, body_id.clone(), collider_id.clone(), config).unwrap();
 
         let mut new_config = CharacterConfig::default();
         new_config.max_slope_climb_angle = 0.2;

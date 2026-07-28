@@ -7,8 +7,8 @@
 use physics::{
     BodyDescriptor, BodyKind, BodyMode, BodyPose, BodyRegistrationRequest, CharacterConfig,
     CharacterController, ColliderDescriptor, ColliderReplacementRequest, ColliderShape,
-    PhysicsBodyId, PhysicsColliderId, PhysicsContactPhase, PhysicsError, PhysicsWorld,
-    RayQuery, RegistrationOutcome, RemovalOutcome,
+    PhysicsBodyId, PhysicsColliderId, PhysicsContactPhase, PhysicsError, PhysicsWorld, RayQuery,
+    RegistrationOutcome, RemovalOutcome,
 };
 
 // ── Atomic registration ─────────────────────────────────────────────
@@ -31,7 +31,10 @@ fn atomic_body_and_collider_registration() {
     let outcome: RegistrationOutcome = world.register_body(request).unwrap();
     assert_eq!(outcome.body_id, PhysicsBodyId::new("body.hero"));
     assert_eq!(outcome.collider_ids.len(), 1);
-    assert_eq!(outcome.collider_ids[0], PhysicsColliderId::new("collider.hero"));
+    assert_eq!(
+        outcome.collider_ids[0],
+        PhysicsColliderId::new("collider.hero")
+    );
 
     assert!(world.body_exists(&PhysicsBodyId::new("body.hero")));
     assert!(world.collider_exists(&PhysicsColliderId::new("collider.hero")));
@@ -53,7 +56,10 @@ fn atomic_registration_duplicate_body_rejected() {
     };
     let err = world.register_body(request2).unwrap_err();
     assert!(matches!(err, PhysicsError::DuplicateBodyId(_)));
-    assert_eq!(err, PhysicsError::DuplicateBodyId(PhysicsBodyId::new("body.hero")));
+    assert_eq!(
+        err,
+        PhysicsError::DuplicateBodyId(PhysicsBodyId::new("body.hero"))
+    );
 }
 
 #[test]
@@ -61,7 +67,11 @@ fn atomic_registration_duplicate_collider_rejected() {
     let mut world = PhysicsWorld::new();
     // Create a body and collider first to establish the duplicate
     world
-        .create_body(BodyDescriptor::new("body.existing", BodyKind::Static, [0.0; 3]))
+        .create_body(BodyDescriptor::new(
+            "body.existing",
+            BodyKind::Static,
+            [0.0; 3],
+        ))
         .unwrap();
     world
         .create_collider(ColliderDescriptor::new(
@@ -112,10 +122,7 @@ fn atomic_registration_invalid_shape_rejected() {
         )],
     };
     let err = world.register_body(request).unwrap_err();
-    assert!(matches!(
-        err,
-        PhysicsError::NonPositiveDimension { .. }
-    ));
+    assert!(matches!(err, PhysicsError::NonPositiveDimension { .. }));
 }
 
 #[test]
@@ -134,8 +141,38 @@ fn atomic_registration_failure_leaves_world_unchanged() {
     let _ = world.register_body(request).unwrap_err();
 
     // World must be unchanged.
-    assert_eq!(world.body_exists(&PhysicsBodyId::new("body.hero")), body_before);
+    assert_eq!(
+        world.body_exists(&PhysicsBodyId::new("body.hero")),
+        body_before
+    );
     assert!(!world.collider_exists(&PhysicsColliderId::new("collider.bad")));
+}
+
+#[test]
+fn atomic_registration_duplicate_request_collider_is_transactional() {
+    let mut world = PhysicsWorld::new();
+    let request = BodyRegistrationRequest {
+        body: BodyDescriptor::new("body.hero", BodyKind::Dynamic, [0.0; 3]),
+        colliders: vec![
+            ColliderDescriptor::new(
+                "collider.duplicate",
+                "body.hero",
+                ColliderShape::Sphere { radius: 1.0 },
+            ),
+            ColliderDescriptor::new(
+                "collider.duplicate",
+                "body.hero",
+                ColliderShape::Sphere { radius: 0.5 },
+            ),
+        ],
+    };
+
+    assert!(matches!(
+        world.register_body(request),
+        Err(PhysicsError::DuplicateColliderId(_))
+    ));
+    assert!(!world.body_exists(&PhysicsBodyId::new("body.hero")));
+    assert!(!world.collider_exists(&PhysicsColliderId::new("collider.duplicate")));
 }
 
 #[test]
@@ -183,6 +220,62 @@ fn reconfigure_dynamic_to_static_preserves_pose() {
 }
 
 #[test]
+fn reconfigure_round_trip_preserves_velocity_and_sleep() {
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(0.0, 0.0, 0.0);
+    let body = world
+        .create_body(BodyDescriptor::new(
+            "body.test",
+            BodyKind::Dynamic,
+            [1.0, 2.0, 3.0],
+        ))
+        .unwrap();
+    world
+        .create_collider(ColliderDescriptor::new(
+            "collider.test",
+            body.clone(),
+            ColliderShape::Sphere { radius: 0.5 },
+        ))
+        .unwrap();
+    world.set_linear_velocity(&body, [2.0, 3.0, 4.0]).unwrap();
+    world.set_angular_velocity(&body, [0.0, 1.0, 2.0]).unwrap();
+
+    world
+        .reconfigure_body_mode(&body, BodyMode::Static)
+        .unwrap();
+    assert_eq!(world.body_position_by_id(&body), Some([1.0, 2.0, 3.0]));
+    assert_eq!(world.body_linear_velocity(&body), Some([2.0, 3.0, 4.0]));
+    assert_eq!(world.body_angular_velocity(&body), Some([0.0, 1.0, 2.0]));
+
+    world
+        .reconfigure_body_mode(&body, BodyMode::Kinematic)
+        .unwrap();
+    assert_eq!(world.body_linear_velocity(&body), Some([2.0, 3.0, 4.0]));
+    world
+        .reconfigure_body_mode(&body, BodyMode::Dynamic)
+        .unwrap();
+    assert_eq!(world.body_linear_velocity(&body), Some([2.0, 3.0, 4.0]));
+    assert_eq!(world.body_angular_velocity(&body), Some([0.0, 1.0, 2.0]));
+
+    world.sleep_body(&body).unwrap();
+    world
+        .reconfigure_body_mode(&body, BodyMode::Static)
+        .unwrap();
+    world
+        .reconfigure_body_mode(&body, BodyMode::Kinematic)
+        .unwrap();
+    world
+        .reconfigure_body_mode(&body, BodyMode::Dynamic)
+        .unwrap();
+    world.set_gravity(0.0, -10.0, 0.0);
+    world.step(1.0).unwrap();
+    assert_eq!(world.body_position_by_id(&body), Some([1.0, 2.0, 3.0]));
+    world.wake_body(&body).unwrap();
+    world.step(1.0).unwrap();
+    assert!(world.body_position_by_id(&body).unwrap()[1] < 2.0);
+}
+
+#[test]
 fn reconfigure_missing_body_errors() {
     let mut world = PhysicsWorld::new();
     let err = world
@@ -195,7 +288,11 @@ fn reconfigure_missing_body_errors() {
 fn reconfigure_static_with_trimesh_to_dynamic_rejected() {
     let mut world = PhysicsWorld::new();
     world
-        .create_body(BodyDescriptor::new("body.floor", BodyKind::Static, [0.0; 3]))
+        .create_body(BodyDescriptor::new(
+            "body.floor",
+            BodyKind::Static,
+            [0.0; 3],
+        ))
         .unwrap();
     world
         .create_collider(ColliderDescriptor::new(
@@ -220,7 +317,11 @@ fn reconfigure_static_with_trimesh_to_dynamic_rejected() {
 fn replace_collider_swaps_shape() {
     let mut world = PhysicsWorld::new();
     let body = world
-        .create_body(BodyDescriptor::new("body.test", BodyKind::Dynamic, [0.0; 3]))
+        .create_body(BodyDescriptor::new(
+            "body.test",
+            BodyKind::Dynamic,
+            [0.0; 3],
+        ))
         .unwrap();
     let collider = world
         .create_collider(ColliderDescriptor::new(
@@ -267,7 +368,11 @@ fn replace_missing_collider_errors() {
 fn replace_collider_invalid_shape_rejected_and_unchanged() {
     let mut world = PhysicsWorld::new();
     let body = world
-        .create_body(BodyDescriptor::new("body.test", BodyKind::Dynamic, [0.0; 3]))
+        .create_body(BodyDescriptor::new(
+            "body.test",
+            BodyKind::Dynamic,
+            [0.0; 3],
+        ))
         .unwrap();
     let collider = world
         .create_collider(ColliderDescriptor::new(
@@ -295,7 +400,11 @@ fn replace_collider_invalid_shape_rejected_and_unchanged() {
 fn replace_collider_trimesh_on_dynamic_rejected() {
     let mut world = PhysicsWorld::new();
     let body = world
-        .create_body(BodyDescriptor::new("body.test", BodyKind::Dynamic, [0.0; 3]))
+        .create_body(BodyDescriptor::new(
+            "body.test",
+            BodyKind::Dynamic,
+            [0.0; 3],
+        ))
         .unwrap();
     let collider = world
         .create_collider(ColliderDescriptor::new(
@@ -361,7 +470,10 @@ fn remove_body_with_outcome_returns_exit_records() {
         .unwrap();
 
     assert_eq!(outcome.removed_body, Some(PhysicsBodyId::new("body.a")));
-    assert_eq!(outcome.removed_colliders, vec![PhysicsColliderId::new("collider.a")]);
+    assert_eq!(
+        outcome.removed_colliders,
+        vec![PhysicsColliderId::new("collider.a")]
+    );
     // Exit records should be generated for the removed pairs
     assert!(!outcome.exited_pairs.is_empty());
     assert!(outcome
@@ -407,7 +519,10 @@ fn remove_collider_with_outcome_returns_exit_records() {
         .unwrap();
 
     assert_eq!(outcome.removed_body, None);
-    assert_eq!(outcome.removed_colliders, vec![PhysicsColliderId::new("collider.a")]);
+    assert_eq!(
+        outcome.removed_colliders,
+        vec![PhysicsColliderId::new("collider.a")]
+    );
     assert!(!outcome.exited_pairs.is_empty());
 }
 
@@ -426,7 +541,11 @@ fn remove_with_outcome_missing_is_none() {
 fn bool_removal_still_works_as_compat() {
     let mut world = PhysicsWorld::new();
     let body = world
-        .create_body(BodyDescriptor::new("body.test", BodyKind::Dynamic, [0.0; 3]))
+        .create_body(BodyDescriptor::new(
+            "body.test",
+            BodyKind::Dynamic,
+            [0.0; 3],
+        ))
         .unwrap();
     let collider = world
         .create_collider(ColliderDescriptor::new(
@@ -449,7 +568,11 @@ fn apply_force_affects_dynamic_body() {
     let mut world = PhysicsWorld::new();
     world.set_gravity(0.0, 0.0, 0.0);
     let body = world
-        .create_body(BodyDescriptor::new("body.test", BodyKind::Dynamic, [0.0; 3]))
+        .create_body(BodyDescriptor::new(
+            "body.test",
+            BodyKind::Dynamic,
+            [0.0; 3],
+        ))
         .unwrap();
     world
         .create_collider(ColliderDescriptor::new(
@@ -471,7 +594,11 @@ fn apply_impulse_changes_velocity_immediately() {
     let mut world = PhysicsWorld::new();
     world.set_gravity(0.0, 0.0, 0.0);
     let body = world
-        .create_body(BodyDescriptor::new("body.test", BodyKind::Dynamic, [0.0; 3]))
+        .create_body(BodyDescriptor::new(
+            "body.test",
+            BodyKind::Dynamic,
+            [0.0; 3],
+        ))
         .unwrap();
     world
         .create_collider(ColliderDescriptor::new(
@@ -491,12 +618,18 @@ fn apply_impulse_changes_velocity_immediately() {
 fn force_and_impulse_on_static_body_noop() {
     let mut world = PhysicsWorld::new();
     let body = world
-        .create_body(BodyDescriptor::new("body.floor", BodyKind::Static, [0.0; 3]))
+        .create_body(BodyDescriptor::new(
+            "body.floor",
+            BodyKind::Static,
+            [0.0; 3],
+        ))
         .unwrap();
 
     world.apply_force(&body, [100.0, 0.0, 0.0]).unwrap();
     world.apply_impulse(&body, [100.0, 0.0, 0.0]).unwrap();
-    world.apply_torque_impulse(&body, [100.0, 0.0, 0.0]).unwrap();
+    world
+        .apply_torque_impulse(&body, [100.0, 0.0, 0.0])
+        .unwrap();
 
     // No error, but no movement either
     assert!(world.body_is_static(&body));
@@ -506,7 +639,11 @@ fn force_and_impulse_on_static_body_noop() {
 fn velocity_set_on_dynamic_body() {
     let mut world = PhysicsWorld::new();
     let body = world
-        .create_body(BodyDescriptor::new("body.test", BodyKind::Dynamic, [0.0; 3]))
+        .create_body(BodyDescriptor::new(
+            "body.test",
+            BodyKind::Dynamic,
+            [0.0; 3],
+        ))
         .unwrap();
 
     world.set_linear_velocity(&body, [5.0, 0.0, 0.0]).unwrap();
@@ -523,7 +660,11 @@ fn velocity_set_on_dynamic_body() {
 fn velocity_on_static_body_silent_noop() {
     let mut world = PhysicsWorld::new();
     let body = world
-        .create_body(BodyDescriptor::new("body.floor", BodyKind::Static, [0.0; 3]))
+        .create_body(BodyDescriptor::new(
+            "body.floor",
+            BodyKind::Static,
+            [0.0; 3],
+        ))
         .unwrap();
 
     world.set_linear_velocity(&body, [5.0, 0.0, 0.0]).unwrap();
@@ -535,7 +676,11 @@ fn velocity_on_static_body_silent_noop() {
 fn wake_and_sleep_body() {
     let mut world = PhysicsWorld::new();
     let body = world
-        .create_body(BodyDescriptor::new("body.test", BodyKind::Dynamic, [0.0; 3]))
+        .create_body(BodyDescriptor::new(
+            "body.test",
+            BodyKind::Dynamic,
+            [0.0; 3],
+        ))
         .unwrap();
 
     world.sleep_body(&body).unwrap();
@@ -544,10 +689,51 @@ fn wake_and_sleep_body() {
 }
 
 #[test]
+fn static_and_kinematic_control_operations_are_noops() {
+    let mut world = PhysicsWorld::new();
+    for (name, kind) in [
+        ("static", BodyKind::Static),
+        ("kinematic", BodyKind::Kinematic),
+    ] {
+        let body = world
+            .create_body(BodyDescriptor::new(
+                format!("body.{name}"),
+                kind,
+                [1.0, 2.0, 3.0],
+            ))
+            .unwrap();
+        world.apply_force(&body, [1.0, 2.0, 3.0]).unwrap();
+        world.apply_impulse(&body, [1.0, 2.0, 3.0]).unwrap();
+        world.apply_torque_impulse(&body, [1.0, 2.0, 3.0]).unwrap();
+        world.wake_body(&body).unwrap();
+        world.sleep_body(&body).unwrap();
+        world.set_linear_velocity(&body, [4.0, 5.0, 6.0]).unwrap();
+        world.set_angular_velocity(&body, [7.0, 8.0, 9.0]).unwrap();
+        world
+            .teleport_body(
+                &body,
+                BodyPose {
+                    translation: [10.0, 20.0, 30.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                },
+            )
+            .unwrap();
+
+        assert_eq!(world.body_position_by_id(&body), Some([1.0, 2.0, 3.0]));
+        assert_eq!(world.body_linear_velocity(&body), Some([0.0, 0.0, 0.0]));
+        assert_eq!(world.body_angular_velocity(&body), Some([0.0, 0.0, 0.0]));
+    }
+}
+
+#[test]
 fn teleport_body_changes_position() {
     let mut world = PhysicsWorld::new();
     let body = world
-        .create_body(BodyDescriptor::new("body.test", BodyKind::Kinematic, [1.0, 2.0, 3.0]))
+        .create_body(BodyDescriptor::new(
+            "body.test",
+            BodyKind::Dynamic,
+            [1.0, 2.0, 3.0],
+        ))
         .unwrap();
 
     world
@@ -568,7 +754,11 @@ fn teleport_body_changes_position() {
 fn teleport_body_invalid_pose_rejected() {
     let mut world = PhysicsWorld::new();
     let body = world
-        .create_body(BodyDescriptor::new("body.test", BodyKind::Dynamic, [0.0; 3]))
+        .create_body(BodyDescriptor::new(
+            "body.test",
+            BodyKind::Dynamic,
+            [0.0; 3],
+        ))
         .unwrap();
 
     let err = world
@@ -589,7 +779,11 @@ fn teleport_body_invalid_pose_rejected() {
 fn overlap_sphere_finds_intersecting_colliders() {
     let mut world = PhysicsWorld::new();
     world
-        .create_body(BodyDescriptor::new("body.a", BodyKind::Static, [0.0, 0.0, 0.0]))
+        .create_body(BodyDescriptor::new(
+            "body.a",
+            BodyKind::Static,
+            [0.0, 0.0, 0.0],
+        ))
         .unwrap();
     let collider_a = world
         .create_collider(ColliderDescriptor::new(
@@ -600,7 +794,11 @@ fn overlap_sphere_finds_intersecting_colliders() {
         .unwrap();
 
     world
-        .create_body(BodyDescriptor::new("body.b", BodyKind::Static, [10.0, 0.0, 0.0]))
+        .create_body(BodyDescriptor::new(
+            "body.b",
+            BodyKind::Static,
+            [10.0, 0.0, 0.0],
+        ))
         .unwrap();
     let _collider_b = world
         .create_collider(ColliderDescriptor::new(
@@ -618,7 +816,11 @@ fn overlap_sphere_finds_intersecting_colliders() {
 fn overlap_sphere_empty_when_no_overlap() {
     let mut world = PhysicsWorld::new();
     world
-        .create_body(BodyDescriptor::new("body.a", BodyKind::Static, [10.0, 0.0, 0.0]))
+        .create_body(BodyDescriptor::new(
+            "body.a",
+            BodyKind::Static,
+            [10.0, 0.0, 0.0],
+        ))
         .unwrap();
     world
         .create_collider(ColliderDescriptor::new(
@@ -636,7 +838,11 @@ fn overlap_sphere_empty_when_no_overlap() {
 fn overlap_aabb_finds_intersecting_colliders() {
     let mut world = PhysicsWorld::new();
     world
-        .create_body(BodyDescriptor::new("body.a", BodyKind::Static, [0.0, 0.0, 0.0]))
+        .create_body(BodyDescriptor::new(
+            "body.a",
+            BodyKind::Static,
+            [0.0, 0.0, 0.0],
+        ))
         .unwrap();
     let collider_a = world
         .create_collider(ColliderDescriptor::new(
@@ -667,7 +873,11 @@ fn overlap_aabb_invalid_range_rejected() {
 fn sweep_test_hits_static_collider() {
     let mut world = PhysicsWorld::new();
     world
-        .create_body(BodyDescriptor::new("body.floor", BodyKind::Static, [0.0, 0.0, 0.0]))
+        .create_body(BodyDescriptor::new(
+            "body.floor",
+            BodyKind::Static,
+            [0.0, 0.0, 0.0],
+        ))
         .unwrap();
     let collider = world
         .create_collider(ColliderDescriptor::new(
@@ -696,10 +906,44 @@ fn sweep_test_hits_static_collider() {
 }
 
 #[test]
+fn sweep_test_uses_handle_order_for_equal_toi() {
+    let mut world = PhysicsWorld::new();
+    for (body_id, collider_id) in [("body.z", "collider.z"), ("body.a", "collider.a")] {
+        world
+            .create_body(BodyDescriptor::new(body_id, BodyKind::Static, [0.0; 3]))
+            .unwrap();
+        world
+            .create_collider(ColliderDescriptor::new(
+                collider_id,
+                body_id,
+                ColliderShape::Sphere { radius: 1.0 },
+            ))
+            .unwrap();
+    }
+
+    let hit = world
+        .sweep_test(
+            &ColliderShape::Sphere { radius: 0.5 },
+            BodyPose {
+                translation: [0.0, 5.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+            },
+            [0.0, -10.0, 0.0],
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(hit.collider, PhysicsColliderId::new("collider.z"));
+}
+
+#[test]
 fn sweep_test_miss_returns_none() {
     let mut world = PhysicsWorld::new();
     world
-        .create_body(BodyDescriptor::new("body.a", BodyKind::Static, [10.0, 0.0, 0.0]))
+        .create_body(BodyDescriptor::new(
+            "body.a",
+            BodyKind::Static,
+            [10.0, 0.0, 0.0],
+        ))
         .unwrap();
     world
         .create_collider(ColliderDescriptor::new(
@@ -731,7 +975,11 @@ fn overlap_results_are_deterministically_sorted() {
         let body_id = PhysicsBodyId::new(format!("body.{i}"));
         let collider_id = PhysicsColliderId::new(format!("collider.{i}"));
         world
-            .create_body(BodyDescriptor::new(body_id.clone(), BodyKind::Static, [0.0; 3]))
+            .create_body(BodyDescriptor::new(
+                body_id.clone(),
+                BodyKind::Static,
+                [0.0; 3],
+            ))
             .unwrap();
         world
             .create_collider(ColliderDescriptor::new(
@@ -745,22 +993,68 @@ fn overlap_results_are_deterministically_sorted() {
     let results1 = world.overlap_sphere([0.0, 0.0, 0.0], 100.0).unwrap();
     let results2 = world.overlap_sphere([0.0, 0.0, 0.0], 100.0).unwrap();
     assert_eq!(results1, results2, "overlap results must be deterministic");
-    assert!(results1.windows(2).all(|w| w[0] <= w[1]), "results must be sorted");
+    assert!(
+        results1.windows(2).all(|w| w[0] <= w[1]),
+        "results must be sorted"
+    );
 }
 
 // ── Body introspection ───────────────────────────────────────────────
 
 #[test]
+fn overlap_results_follow_rapier_handle_order() {
+    let mut world = PhysicsWorld::new();
+    for (body_id, collider_id) in [("body.z", "collider.z"), ("body.a", "collider.a")] {
+        world
+            .create_body(BodyDescriptor::new(body_id, BodyKind::Static, [0.0; 3]))
+            .unwrap();
+        world
+            .create_collider(ColliderDescriptor::new(
+                collider_id,
+                body_id,
+                ColliderShape::Sphere { radius: 1.0 },
+            ))
+            .unwrap();
+    }
+
+    let colliders: Vec<_> = world
+        .overlap_sphere([0.0; 3], 2.0)
+        .unwrap()
+        .into_iter()
+        .map(|result| result.collider)
+        .collect();
+    assert_eq!(
+        colliders,
+        vec![
+            PhysicsColliderId::new("collider.z"),
+            PhysicsColliderId::new("collider.a"),
+        ]
+    );
+}
+
+#[test]
 fn body_kind_queries() {
     let mut world = PhysicsWorld::new();
     let s = world
-        .create_body(BodyDescriptor::new("body.static", BodyKind::Static, [0.0; 3]))
+        .create_body(BodyDescriptor::new(
+            "body.static",
+            BodyKind::Static,
+            [0.0; 3],
+        ))
         .unwrap();
     let d = world
-        .create_body(BodyDescriptor::new("body.dynamic", BodyKind::Dynamic, [0.0; 3]))
+        .create_body(BodyDescriptor::new(
+            "body.dynamic",
+            BodyKind::Dynamic,
+            [0.0; 3],
+        ))
         .unwrap();
     let k = world
-        .create_body(BodyDescriptor::new("body.kinematic", BodyKind::Kinematic, [0.0; 3]))
+        .create_body(BodyDescriptor::new(
+            "body.kinematic",
+            BodyKind::Kinematic,
+            [0.0; 3],
+        ))
         .unwrap();
 
     assert!(world.body_is_static(&s));
@@ -796,7 +1090,11 @@ fn character_controller_move_and_slide_ground_detection() {
 
     // Static floor
     world
-        .create_body(BodyDescriptor::new("body.floor", BodyKind::Static, [0.0, -0.5, 0.0]))
+        .create_body(BodyDescriptor::new(
+            "body.floor",
+            BodyKind::Static,
+            [0.0, -0.5, 0.0],
+        ))
         .unwrap();
     world
         .create_collider(ColliderDescriptor::new(
@@ -813,7 +1111,7 @@ fn character_controller_move_and_slide_ground_detection() {
         .create_body(BodyDescriptor::new(
             "body.character",
             BodyKind::Kinematic,
-            [0.0, 1.0, 0.0],
+            [0.0, 1.5, 0.0],
         ))
         .unwrap();
     let collider_id = world
@@ -840,7 +1138,11 @@ fn character_controller_move_and_slide_ground_detection() {
 
     assert!(controller.is_on_floor(), "character should be on floor");
     let pos = world.body_position_by_id(&body_id).unwrap();
-    assert!(pos[1] > -0.5, "character should rest on top of floor, got {:?}", pos);
+    assert!(
+        pos[1] > -0.5,
+        "character should rest on top of floor, got {:?}",
+        pos
+    );
 }
 
 #[test]
@@ -850,7 +1152,11 @@ fn character_controller_horizontal_slide() {
 
     // Floor
     world
-        .create_body(BodyDescriptor::new("body.floor", BodyKind::Static, [0.0, -0.5, 0.0]))
+        .create_body(BodyDescriptor::new(
+            "body.floor",
+            BodyKind::Static,
+            [0.0, -0.5, 0.0],
+        ))
         .unwrap();
     world
         .create_collider(ColliderDescriptor::new(
@@ -864,7 +1170,11 @@ fn character_controller_horizontal_slide() {
 
     // Wall
     world
-        .create_body(BodyDescriptor::new("body.wall", BodyKind::Static, [3.0, 0.5, 0.0]))
+        .create_body(BodyDescriptor::new(
+            "body.wall",
+            BodyKind::Static,
+            [3.0, 0.5, 0.0],
+        ))
         .unwrap();
     world
         .create_collider(ColliderDescriptor::new(
@@ -880,7 +1190,7 @@ fn character_controller_horizontal_slide() {
         .create_body(BodyDescriptor::new(
             "body.character",
             BodyKind::Kinematic,
-            [0.0, 1.0, 0.0],
+            [0.0, 1.5, 0.0],
         ))
         .unwrap();
     let collider_id = world
@@ -920,7 +1230,11 @@ fn character_controller_horizontal_slide() {
 fn character_controller_missing_body_rejected() {
     let mut world = PhysicsWorld::new();
     world
-        .create_body(BodyDescriptor::new("body.floor", BodyKind::Static, [0.0; 3]))
+        .create_body(BodyDescriptor::new(
+            "body.floor",
+            BodyKind::Static,
+            [0.0; 3],
+        ))
         .unwrap();
     world
         .create_collider(ColliderDescriptor::new(
@@ -946,7 +1260,11 @@ fn character_controller_missing_body_rejected() {
 fn character_controller_wrong_parent_rejected() {
     let mut world = PhysicsWorld::new();
     world
-        .create_body(BodyDescriptor::new("body.a", BodyKind::Kinematic, [0.0, 1.0, 0.0]))
+        .create_body(BodyDescriptor::new(
+            "body.a",
+            BodyKind::Kinematic,
+            [0.0, 1.0, 0.0],
+        ))
         .unwrap();
     world
         .create_collider(ColliderDescriptor::new(
@@ -987,7 +1305,11 @@ fn character_controller_wrong_parent_rejected() {
 fn existing_create_body_and_collider_still_work() {
     let mut world = PhysicsWorld::new();
     let body = world
-        .create_body(BodyDescriptor::new("body.test", BodyKind::Dynamic, [1.0, 2.0, 3.0]))
+        .create_body(BodyDescriptor::new(
+            "body.test",
+            BodyKind::Dynamic,
+            [1.0, 2.0, 3.0],
+        ))
         .unwrap();
     let collider = world
         .create_collider(ColliderDescriptor::new(
@@ -1004,7 +1326,11 @@ fn existing_create_body_and_collider_still_work() {
 fn existing_ray_query_still_works() {
     let mut world = PhysicsWorld::new();
     world
-        .create_body(BodyDescriptor::new("body.target", BodyKind::Static, [0.0, 0.0, 0.0]))
+        .create_body(BodyDescriptor::new(
+            "body.target",
+            BodyKind::Static,
+            [0.0, 0.0, 0.0],
+        ))
         .unwrap();
     world
         .create_collider(ColliderDescriptor::new(

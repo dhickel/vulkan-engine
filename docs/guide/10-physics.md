@@ -402,6 +402,7 @@ All errors are typed `PhysicsError` variants:
 | `DuplicateColliderId` | Collider ID already exists |
 | `MissingBody` | Collider references a body ID that doesn't exist |
 | `MissingCollider` | Collider ID does not exist in the world |
+| `CharacterRequiresKinematicBody` | Character controller body is not kinematic |
 | `NonFiniteValue` | A numeric field contains NaN or infinity |
 | `NonPositiveDimension` | A dimension (radius, half_extent) is ≤ 0 |
 | `NonPositiveDeltaTime` | Step dt is ≤ 0 |
@@ -517,14 +518,17 @@ world.set_angular_velocity(&player_id, [0.0, 1.0, 0.0])?;
 world.wake_body(&player_id)?;
 world.sleep_body(&player_id)?;
 
-// Teleport (kinematic-safe)
+// Teleport a dynamic body
 world.teleport_body(&player_id, BodyPose {
     translation: [10.0, 0.0, 0.0],
     rotation: [0.0, 0.0, 0.0, 1.0],
 })?;
 ```
 
-Forces and impulses on static or kinematic bodies are silently ignored.
+Force, impulse, wake, sleep, velocity, and teleport requests on static or
+kinematic bodies are silently ignored without mutation. Use the existing
+`set_body_pose_by_id` API when application code needs to reposition a
+kinematic body directly.
 
 ## Body Introspection
 
