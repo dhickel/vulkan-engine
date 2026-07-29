@@ -306,7 +306,13 @@ fn run_strict_capture_test(
 
     // ── Frozen camera ──────────────────────────────────────────────────
     let camera_label = acceptance_camera_label().unwrap_or_else(|| "spawn".to_string());
-    let (eye, look_at) = frozen_camera_for_label(&camera_label, &extracted);
+    let (eye, look_at) = match frozen_camera_for_label(&camera_label, &extracted) {
+        Ok(camera) => camera,
+        Err(error) => {
+            log::error!("Invalid acceptance camera '{camera_label}': {error}");
+            std::process::exit(1);
+        }
+    };
 
     renderer
         .set_camera_look_at(eye, look_at, Vec3::Y)
@@ -418,18 +424,32 @@ fn run_strict_capture_test(
 
 /// Return a frozen camera (eye, look_at) for the given semantic label.
 ///
-/// Uses the authored spawn entity and spatial witnesses from the selected
-/// Phase 08 corpus entry to produce fixed position, orientation, and look
-/// target. Cameras in solid space or with non-finite data are rejected.
+/// Generated maps provide an authored, eye-height `info_player_start`; adding
+/// another eye-height offset or deriving an approximate map-center coordinate
+/// can place a camera outside the sealed hull. Spawn and corridor therefore use
+/// that verified origin. Junction uses the valid point entity nearest the
+/// compiled geometry center. Every selected origin is checked against compiled
+/// BSP contents before it is accepted.
 #[cfg(feature = "bsp")]
 fn frozen_camera_for_label(
     label: &str,
     extracted: &bsp::extract::ExtractedBsp,
-) -> (glam::Vec3, glam::Vec3) {
+) -> Result<(glam::Vec3, glam::Vec3), String> {
+    use bsp::{point_contents_with_transform, PointContents};
     use glam::Vec3;
 
-    // Find info_player_start for the spawn camera.
-    let player_start = extracted
+    let contents_at = |point: Vec3| {
+        point_contents_with_transform(
+            point,
+            &extracted.visibility.nodes,
+            &extracted.visibility.leaves,
+            &extracted.visibility.planes,
+            &extracted.transform,
+        )
+    };
+    let valid_origin = |point: Vec3| point.is_finite() && contents_at(point) != PointContents::Solid;
+
+    let spawn = extracted
         .entity_descriptors
         .iter()
         .find(|entity| {
@@ -439,52 +459,56 @@ fn frozen_camera_for_label(
             )
         })
         .and_then(|entity| entity.origin)
-        .filter(|origin| origin.is_finite());
+        .filter(|origin| valid_origin(*origin))
+        .ok_or_else(|| "missing a non-solid info_player_start origin".to_string())?;
 
-    // Compute map center from entity origins as fallback reference.
-    let origins: Vec<Vec3> = extracted
+    let point_origins: Vec<Vec3> = extracted
         .entity_descriptors
         .iter()
-        .filter_map(|e| e.origin)
-        .filter(|o| o.is_finite())
+        .filter_map(|entity| entity.origin)
+        .filter(|origin| valid_origin(*origin))
         .collect();
-    let map_center = if origins.is_empty() {
-        Vec3::ZERO
-    } else {
-        let sum: Vec3 = origins.iter().sum();
-        sum / origins.len() as f32
+    if point_origins.is_empty() {
+        return Err("no non-solid point-entity origins are available".to_string());
+    }
+
+    let mut vertices = extracted
+        .face_geometries
+        .iter()
+        .flat_map(|face| face.vertices.iter().copied());
+    let first_vertex = vertices
+        .next()
+        .ok_or_else(|| "compiled BSP has no face vertices for camera selection".to_string())?;
+    let (mins, maxs) = vertices.fold((first_vertex, first_vertex), |(mins, maxs), vertex| {
+        (mins.min(vertex), maxs.max(vertex))
+    });
+    let map_center = (mins + maxs) * 0.5;
+
+    let eye = match label {
+        "spawn" | "corridor" => spawn,
+        "junction" => point_origins
+            .into_iter()
+            .min_by(|left, right| {
+                left.distance_squared(map_center)
+                    .total_cmp(&right.distance_squared(map_center))
+            })
+            .expect("point_origins was checked non-empty"),
+        _ => return Err(format!("unknown acceptance camera label '{label}'")),
     };
 
-    let spawn_pos = player_start.unwrap_or(map_center);
+    let cardinal_directions = [Vec3::Z, Vec3::X, Vec3::NEG_Z, Vec3::NEG_X];
+    let (direction, clear_distance) = cardinal_directions
+        .into_iter()
+        .map(|direction| {
+            let clear_distance = [0.4064, 0.8128, 1.2192, 1.6256, 2.032]
+                .into_iter()
+                .take_while(|distance| contents_at(eye + direction * *distance) != PointContents::Solid)
+                .last()
+                .unwrap_or(0.4064);
+            (direction, clear_distance)
+        })
+        .max_by(|(_, left), (_, right)| left.total_cmp(right))
+        .expect("cardinal direction list is non-empty");
 
-    match label {
-        "spawn" => {
-            // At spawn, face toward map interior (+Z direction from spawn).
-            let eye = spawn_pos + Vec3::new(0.0, 2.0, 0.0); // eye height
-            let look = eye + Vec3::Z * 5.0;
-            (eye, look)
-        }
-        "corridor" => {
-            // Position at a corridor midpoint between spawn and map edge.
-            let eye = Vec3::new(
-                map_center.x * 0.5,
-                spawn_pos.y + 2.0,
-                map_center.z * 1.5,
-            );
-            let look = eye + Vec3::X * 5.0; // look along corridor
-            (eye, look)
-        }
-        "junction" => {
-            // Position at the map center, looking toward a junction.
-            let eye = Vec3::new(map_center.x, map_center.y + 2.0, map_center.z);
-            let look = eye + Vec3::NEG_Z * 5.0; // look at another junction
-            (eye, look)
-        }
-        _ => {
-            log::warn!("Unknown camera label '{}'; using spawn", label);
-            let eye = spawn_pos + Vec3::new(0.0, 2.0, 0.0);
-            let look = eye + Vec3::Z * 5.0;
-            (eye, look)
-        }
-    }
+    Ok((eye, eye + direction * clear_distance))
 }

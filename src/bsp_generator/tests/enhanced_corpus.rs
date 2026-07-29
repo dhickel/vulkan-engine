@@ -444,44 +444,15 @@ struct CorpusResult {
 
 // ── Test: Execute all 12 corpus configurations ────────────────────────────
 
-/// Try to generate with a given seed; if it fails, try nearby fallback seeds.
-/// Returns (map_text, meta, actual_seed_used).
-fn generate_with_fallback(
-    primary_seed: u64,
+/// Generate exactly the frozen seed/configuration pair for a corpus entry.
+///
+/// A corpus configuration must never substitute a different seed: doing so
+/// would hide a generation failure and invalidate its reproducibility proof.
+fn generate_corpus_entry(
+    seed: u64,
     config: &EnhancedConfig,
-    entry_name: &str,
-) -> Result<(String, EnhancedMetadata, u64), String> {
-    // Try primary seed first, then fallback seeds spaced by large offsets.
-    // Generate fallback candidates dynamically to cover a wide range.
-    let max_attempts = 50u64;
-    let mut last_error = String::new();
-
-    // Try primary seed
-    match generate_enhanced(primary_seed, config.clone()) {
-        Ok((map, meta)) => return Ok((map, meta, primary_seed)),
-        Err(e) => {
-            last_error = format!("{e:?}");
-        }
-    }
-
-    // Try fallback seeds: spaced offsets + linear scan
-    for offset in 1..max_attempts {
-        let seed = primary_seed.wrapping_add(offset * 10007); // large prime offset
-        match generate_enhanced(seed, config.clone()) {
-            Ok((map, meta)) => {
-                eprintln!(
-                    "  [fallback] {}: primary seed {primary_seed} failed, using fallback seed {seed} (attempt {offset})",
-                    entry_name
-                );
-                return Ok((map, meta, seed));
-            }
-            Err(e) => {
-                last_error = format!("{e:?}");
-            }
-        }
-    }
-
-    Err(last_error)
+) -> Result<(String, EnhancedMetadata), String> {
+    generate_enhanced(seed, config.clone()).map_err(|error| format!("{error:?}"))
 }
 
 #[test]
@@ -502,8 +473,8 @@ fn enhanced_corpus_all_12_configurations() {
 
         let gen_start = std::time::Instant::now();
 
-        // 1. Generate .map via Enhanced v2 pipeline (with fallback)
-        let (map_text, meta, actual_seed) = match generate_with_fallback(entry.seed, &entry.config, entry.name) {
+        // 1. Generate the exact frozen seed/configuration pair.
+        let (map_text, meta) = match generate_corpus_entry(entry.seed, &entry.config) {
             Ok(result) => result,
             Err(e) => {
                 let result = CorpusResult {
@@ -537,7 +508,7 @@ fn enhanced_corpus_all_12_configurations() {
                     compilation_duration_ms: 0,
                 };
                 results.push(result);
-                eprintln!("  FAIL: generation error after fallback seeds exhausted");
+                eprintln!("  FAIL: generation error");
                 continue;
             }
         };
@@ -706,7 +677,7 @@ fn enhanced_corpus_all_12_configurations() {
 
         results.push(CorpusResult {
             name: entry.name.to_string(),
-            seed: actual_seed,
+            seed: entry.seed,
             room_count: meta.room_count,
             route_count: meta.route_count,
             transition_count: meta.transition_count,
