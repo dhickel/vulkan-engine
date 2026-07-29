@@ -17,5 +17,6 @@ pub mod profile;
 pub mod reservation;
 pub mod routing;
 pub mod seed;
+pub mod theme;
 pub mod topology;
 pub mod transition;
