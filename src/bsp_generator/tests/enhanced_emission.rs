@@ -3,6 +3,9 @@
 
 use bsp_generator::enhanced::config::EnhancedConfig;
 use bsp_generator::enhanced::pipeline::generate_enhanced;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[test]
 fn enhanced_emission_produces_worldspawn_with_wad() {
@@ -123,4 +126,102 @@ fn enhanced_emission_textures_from_theme() {
         map.contains("bs_ceil"),
         "missing base_stone ceiling texture"
     );
+}
+
+fn ericw_bin() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home/dhickel".into()))
+        .join(".local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin")
+}
+
+fn contains_prohibited_qbsp_diagnostic(output: &str) -> bool {
+    let normalized = output.to_ascii_lowercase();
+    [
+        "warning:",
+        "no filling performed",
+        "leak file written",
+        "no entities in empty space",
+        "pointfile",
+        "error:",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+/// Cross the real compiler boundary: successful exit alone is insufficient,
+/// because ericw-tools reports leaks and skipped filling as warnings while
+/// still writing a BSP and returning status 0.
+#[test]
+fn compile_map_and_validate() {
+    let tools = ericw_bin();
+    if !tools.join("qbsp").is_file() {
+        eprintln!("SKIP: pinned ericw-tools qbsp is not installed");
+        return;
+    }
+
+    let work = std::env::temp_dir().join(format!(
+        "bsp-generator-enhanced-emission-{}",
+        std::process::id()
+    ));
+    if work.exists() {
+        fs::remove_dir_all(&work).unwrap();
+    }
+    fs::create_dir_all(&work).unwrap();
+
+    let (map, _) = generate_enhanced(42, EnhancedConfig::nominal()).unwrap();
+    fs::write(work.join("test_map.map"), map).unwrap();
+
+    let theme_builder =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("themes/cc0_dungeon_v2/build.py");
+    let theme = Command::new("python3")
+        .arg(theme_builder)
+        .arg(&work)
+        .output()
+        .expect("run the Enhanced v2 CC0 theme builder");
+    assert!(
+        theme.status.success(),
+        "theme build failed:\n{}{}",
+        String::from_utf8_lossy(&theme.stdout),
+        String::from_utf8_lossy(&theme.stderr)
+    );
+
+    let output = Command::new(tools.join("qbsp"))
+        .args(["-bsp2", "-threads", "1", "test_map.map"])
+        .current_dir(&work)
+        .output()
+        .expect("run pinned qbsp");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        output.status.success(),
+        "qbsp failed with status {:?}:\n{combined}",
+        output.status.code()
+    );
+    assert!(
+        !contains_prohibited_qbsp_diagnostic(&combined),
+        "qbsp emitted a prohibited warning/leak diagnostic:\n{combined}"
+    );
+    assert!(work.join("test_map.bsp").is_file(), "qbsp wrote no BSP");
+    assert!(
+        !work.join("test_map.pts").exists(),
+        "qbsp wrote a leak pointfile"
+    );
+    assert!(
+        !work.join("test_map.leak.prt").exists(),
+        "qbsp wrote leak portals"
+    );
+
+    let calculation = combined
+        .lines()
+        .find(|line| line.contains("INFO: calculating BSP"))
+        .unwrap_or("INFO: calculating BSP (summary unavailable)");
+    eprintln!(
+        "qbsp clean: status=0; {}; BSP2 written; no warnings, skipped fill, .pts, or .leak.prt",
+        calculation.trim()
+    );
+
+    fs::remove_dir_all(work).unwrap();
 }

@@ -13,7 +13,7 @@ use crate::junction;
 use super::config::EnhancedConfig;
 use super::error::EnhancedError;
 use super::features::FeatureResult;
-use super::intent::RoomId;
+use super::intent::{RoomId, RouteId};
 use super::placement::{CandidateSocket, PlacedRoom, PlacementResult, WallDirection};
 use super::theme::{cc0_dungeon_v2_theme, TextureRole, ThemeAssignment};
 use super::topology::TopologyResult;
@@ -46,10 +46,21 @@ struct CorridorCell {
     ceiling_bottom: i32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct WallSpan {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PortalThroat {
+    wall: WallDirection,
+    wall_rect: (i32, i32, i32, i32),
+    exterior_rect: (i32, i32, i32, i32),
+    opening: Opening,
     floor_z: i32,
-    shell_top: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RouteCellSet {
+    route_id: RouteId,
+    span: CorridorCell,
+    cells: BTreeSet<Cell>,
+    portals: Vec<PortalThroat>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -59,6 +70,23 @@ struct GridRect<T> {
     y0: i32,
     y1: i32,
     value: T,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct GridBox {
+    x0: i32,
+    x1: i32,
+    y0: i32,
+    y1: i32,
+    z0: i32,
+    z1: i32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ShellTextures<'a> {
+    floor: &'a str,
+    wall: &'a str,
+    ceiling: &'a str,
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
@@ -80,8 +108,9 @@ pub fn emit_map(
     // Build room-owned cell set for corridor slab culling
     let room_owned_cells = build_room_owned_cells(&placement.rooms);
 
-    // Build corridor cell map from route envelopes
-    let corridor_cells = build_corridor_cells(topology, &room_map);
+    // Preserve route ownership until emission. Horizontal routes are unioned
+    // only after their vertical spans have separated the two layers.
+    let corridor_routes = build_corridor_route_cells(topology, &room_map, &socket_map);
 
     // ── Emit ──────────────────────────────────────────────────────────
     let mut out = String::new();
@@ -90,22 +119,21 @@ pub fn emit_map(
 
     // Emit room brushes
     for room in &placement.rooms {
-        emit_room_brushes(
-            &mut out,
-            room,
-            topology,
-            &room_map,
-            &socket_map,
-            &corridor_cells,
-            theme,
-        )?;
+        emit_room_brushes(&mut out, room, topology, &room_map, &socket_map, theme)?;
     }
 
     // Emit corridor geometry (only in non-room cells)
-    emit_corridor_brushes(&mut out, topology, &room_map, &room_owned_cells, theme);
+    emit_corridor_brushes(&mut out, &corridor_routes, &room_owned_cells, theme);
 
     // Emit stair transitions
-    emit_stair_transitions(&mut out, topology, &room_map, &socket_map, theme);
+    emit_stair_transitions(
+        &mut out,
+        topology,
+        &room_map,
+        &socket_map,
+        &room_owned_cells,
+        theme,
+    );
 
     out.push_str("}\n");
 
@@ -136,7 +164,6 @@ fn emit_room_brushes(
     topology: &TopologyResult,
     _room_map: &BTreeMap<RoomId, &PlacedRoom>,
     socket_map: &BTreeMap<super::intent::SocketId, &CandidateSocket>,
-    corridor_cells: &BTreeMap<Cell, CorridorCell>,
     theme: &ThemeAssignment,
 ) -> Result<(), EnhancedError> {
     let (x0, y0, x1, y1) = room.shell;
@@ -172,14 +199,7 @@ fn emit_room_brushes(
         WallDirection::West,
     ] {
         let wall_openings = openings.get(wall_dir).map(|v| v.as_slice()).unwrap_or(&[]);
-        emit_split_wall(
-            out,
-            room,
-            *wall_dir,
-            wall_openings,
-            corridor_cells,
-            wall_tex,
-        );
+        emit_split_wall(out, room, *wall_dir, wall_openings, wall_tex);
     }
 
     Ok(())
@@ -191,61 +211,43 @@ fn collect_room_openings(
     socket_map: &BTreeMap<super::intent::SocketId, &CandidateSocket>,
 ) -> BTreeMap<WallDirection, Vec<Opening>> {
     let mut openings: BTreeMap<WallDirection, Vec<Opening>> = BTreeMap::new();
-    let z0 = room.floor_z + Q;
-    let zh = room.dims.2 as i32;
-    let z1 = z0 + zh - Q;
-
-    let mut add_opening = |wall: WallDirection, anchor: (i32, i32, i32)| {
-        let half = CORRIDOR_WIDTH / 2;
-        let op = match wall {
-            WallDirection::North | WallDirection::South => Opening {
-                tangent_min: (anchor.0 - half).max(room.shell.0 + Q),
-                tangent_max: (anchor.0 + half).min(room.shell.2 - Q),
-                bottom: z0,
-                top: (z0 + CORRIDOR_HEIGHT).min(z1),
-            },
-            WallDirection::East | WallDirection::West => Opening {
-                tangent_min: (anchor.1 - half).max(room.shell.1 + Q),
-                tangent_max: (anchor.1 + half).min(room.shell.3 - Q),
-                bottom: z0,
-                top: (z0 + CORRIDOR_HEIGHT).min(z1),
-            },
-        };
-        if op.tangent_min < op.tangent_max && op.bottom < op.top {
-            openings.entry(wall).or_default().push(op);
+    let mut add_socket = |socket: &CandidateSocket| {
+        if let Some(portal) = portal_throat(room, socket) {
+            openings
+                .entry(portal.wall)
+                .or_default()
+                .push(portal.opening);
         }
     };
 
     // Corridor route apertures
     for route in &topology.routes {
-        for &(socket_id, is_source) in &[(route.source_socket, true), (route.target_socket, false)]
-        {
+        for &(socket_id, expected_room) in &[
+            (route.source_socket, route.source_room),
+            (route.target_socket, route.target_room),
+        ] {
             if let Some(socket) = socket_map.get(&socket_id) {
-                let expected_room = if is_source {
-                    route.source_room
-                } else {
-                    route.target_room
-                };
                 if socket.room == room.id && socket.room == expected_room {
-                    add_opening(socket.wall, socket.anchor);
+                    add_socket(socket);
                 }
             }
         }
     }
 
     // Transition (stair) apertures
-    for t in &topology.transitions {
-        for &(socket_id, is_lower) in &[(t.lower_socket, true), (t.upper_socket, false)] {
+    for transition in &topology.transitions {
+        for &(socket_id, expected_room) in &[
+            (transition.lower_socket, transition.lower_room),
+            (transition.upper_socket, transition.upper_room),
+        ] {
             if let Some(socket) = socket_map.get(&socket_id) {
-                let expected_room = if is_lower { t.lower_room } else { t.upper_room };
                 if socket.room == room.id && socket.room == expected_room {
-                    add_opening(socket.wall, socket.anchor);
+                    add_socket(socket);
                 }
             }
         }
     }
 
-    // Deduplicate and sort
     for ops in openings.values_mut() {
         ops.sort_unstable_by_key(|o| (o.tangent_min, o.tangent_max, o.bottom, o.top));
         ops.dedup();
@@ -253,12 +255,70 @@ fn collect_room_openings(
     openings
 }
 
+/// Derive the one canonical 64×80 portal throat used by both the room wall
+/// mask and the connector shell. Sharing this descriptor prevents the two
+/// sides of a socket from drifting by one wall cell or one vertical quantum.
+fn portal_throat(room: &PlacedRoom, socket: &CandidateSocket) -> Option<PortalThroat> {
+    if socket.room != room.id {
+        return None;
+    }
+    let (x0, y0, x1, y1) = room.shell;
+    let width = i32::try_from(socket.width).ok()?;
+    let bottom = room.floor_z + Q;
+    let top = (bottom + CORRIDOR_HEIGHT).min(room.floor_z + room.dims.2 as i32 - Q);
+    let (anchor_tangent, inner_min, inner_max) = match socket.wall {
+        WallDirection::North | WallDirection::South => (socket.anchor.0, x0 + Q, x1 - Q),
+        WallDirection::East | WallDirection::West => (socket.anchor.1, y0 + Q, y1 - Q),
+    };
+    // Odd-quantum room spans place the semantic midpoint eight units off the
+    // construction grid. Canonicalize the whole aperture to four complete
+    // cells; independently flooring each bound in the old wall mask shifted
+    // the room opening away from the connector throat and left an 8-unit slit.
+    let tangent_min =
+        ((anchor_tangent - width / 2).div_euclid(Q) * Q).clamp(inner_min, inner_max - width);
+    let tangent_max = tangent_min + width;
+    if tangent_min >= tangent_max || bottom >= top {
+        return None;
+    }
+
+    let (wall_rect, exterior_rect) = match socket.wall {
+        WallDirection::North => (
+            (tangent_min, y1 - Q, tangent_max, y1),
+            (tangent_min, y1, tangent_max, y1 + Q),
+        ),
+        WallDirection::South => (
+            (tangent_min, y0, tangent_max, y0 + Q),
+            (tangent_min, y0 - Q, tangent_max, y0),
+        ),
+        WallDirection::East => (
+            (x1 - Q, tangent_min, x1, tangent_max),
+            (x1, tangent_min, x1 + Q, tangent_max),
+        ),
+        WallDirection::West => (
+            (x0, tangent_min, x0 + Q, tangent_max),
+            (x0 - Q, tangent_min, x0, tangent_max),
+        ),
+    };
+
+    Some(PortalThroat {
+        wall: socket.wall,
+        wall_rect,
+        exterior_rect,
+        opening: Opening {
+            tangent_min,
+            tangent_max,
+            bottom,
+            top,
+        },
+        floor_z: room.floor_z,
+    })
+}
+
 fn emit_split_wall(
     out: &mut String,
     room: &PlacedRoom,
     wall: WallDirection,
     openings: &[Opening],
-    corridor_cells: &BTreeMap<Cell, CorridorCell>,
     texture: &str,
 ) {
     let (x0, y0, x1, y1) = room.shell;
@@ -286,24 +346,6 @@ fn emit_split_wall(
     for op in openings {
         for z_cell in op.bottom.div_euclid(Q)..op.top.div_euclid(Q) {
             for t_cell in op.tangent_min.div_euclid(Q)..op.tangent_max.div_euclid(Q) {
-                solid_cells.remove(&(t_cell, z_cell));
-            }
-        }
-    }
-
-    // Remove cells that corridor wall cells also claim (for turning chambers)
-    let opening_bottom = z0 + Q;
-    let opening_limit = room.floor_z + room.dims.2 as i32 - Q;
-    for t_cell in tangent_min.div_euclid(Q)..tangent_max.div_euclid(Q) {
-        let wall_cell = match wall {
-            WallDirection::West => (x0.div_euclid(Q), t_cell),
-            WallDirection::East => (x1.div_euclid(Q) - 1, t_cell),
-            WallDirection::South => (t_cell, y0.div_euclid(Q)),
-            WallDirection::North => (t_cell, y1.div_euclid(Q) - 1),
-        };
-        if let Some(cc) = corridor_cells.get(&wall_cell) {
-            let op_top = cc.ceiling_bottom.min(opening_limit);
-            for z_cell in opening_bottom.div_euclid(Q)..op_top.div_euclid(Q) {
                 solid_cells.remove(&(t_cell, z_cell));
             }
         }
@@ -345,135 +387,220 @@ fn build_room_owned_cells(rooms: &[PlacedRoom]) -> BTreeSet<Cell> {
     cells
 }
 
-fn build_corridor_cells(
+fn build_corridor_route_cells(
     topology: &TopologyResult,
-    _room_map: &BTreeMap<RoomId, &PlacedRoom>,
-) -> BTreeMap<Cell, CorridorCell> {
-    let mut cells = BTreeMap::new();
+    room_map: &BTreeMap<RoomId, &PlacedRoom>,
+    socket_map: &BTreeMap<super::intent::SocketId, &CandidateSocket>,
+) -> Vec<RouteCellSet> {
+    topology
+        .routes
+        .iter()
+        .map(|route| {
+            let floor_z = route.headroom.0 - Q;
+            let span = CorridorCell {
+                floor_z,
+                ceiling_bottom: route.headroom.1,
+            };
+            let mut cells = BTreeSet::new();
+            for &envelope in &route.envelopes {
+                insert_rect_cells(&mut cells, envelope);
+            }
 
-    for route in &topology.routes {
-        // Determine floor_z from the route's headroom
-        let floor_z = route.headroom.0 - Q;
-        let ceiling_bottom = floor_z + Q + CORRIDOR_HEIGHT;
-
-        let span = CorridorCell {
-            floor_z,
-            ceiling_bottom,
-        };
-
-        for &(ex0, ey0, ex1, ey1) in &route.envelopes {
-            let qx0 = ex0.div_euclid(Q);
-            let qy0 = ey0.div_euclid(Q);
-            let qx1 = ex1.div_euclid(Q);
-            let qy1 = ey1.div_euclid(Q);
-
-            for gy in qy0..qy1 {
-                for gx in qx0..qx1 {
-                    cells.insert((gx, gy), span);
+            let mut portals = Vec::with_capacity(2);
+            for &(socket_id, room_id) in &[
+                (route.source_socket, route.source_room),
+                (route.target_socket, route.target_room),
+            ] {
+                if let (Some(room), Some(socket)) =
+                    (room_map.get(&room_id), socket_map.get(&socket_id))
+                {
+                    if let Some(portal) = portal_throat(room, socket) {
+                        // Every route owns an explicit exterior approach cell.
+                        // The separate throat slab below continues across the
+                        // full 16-unit room-wall thickness.
+                        insert_rect_cells(&mut cells, portal.exterior_rect);
+                        portals.push(portal);
+                    }
                 }
             }
+
+            RouteCellSet {
+                route_id: route.id,
+                span,
+                cells,
+                portals,
+            }
+        })
+        .collect()
+}
+
+fn insert_rect_cells(cells: &mut BTreeSet<Cell>, rect: (i32, i32, i32, i32)) {
+    let (x0, y0, x1, y1) = rect;
+    for gy in y0.div_euclid(Q)..y1.div_euclid(Q) {
+        for gx in x0.div_euclid(Q)..x1.div_euclid(Q) {
+            cells.insert((gx, gy));
         }
     }
-
-    cells
 }
 
 fn emit_corridor_brushes(
     out: &mut String,
-    topology: &TopologyResult,
-    room_map: &BTreeMap<RoomId, &PlacedRoom>,
+    routes: &[RouteCellSet],
     room_owned_cells: &BTreeSet<Cell>,
     _theme: &ThemeAssignment,
 ) {
-    let corridor_cells = build_corridor_cells(topology, room_map);
+    // Same-layer routes intentionally form junction unions. The span is the
+    // outer key, so projected overlap on the other layer can never overwrite
+    // or inherit this layer's floor/ceiling values.
+    let mut layers: BTreeMap<CorridorCell, (BTreeSet<Cell>, Vec<PortalThroat>)> = BTreeMap::new();
+    for route in routes {
+        let (cells, portals) = layers.entry(route.span).or_default();
+        cells.extend(
+            route
+                .cells
+                .iter()
+                .copied()
+                .filter(|cell| !room_owned_cells.contains(cell)),
+        );
+        portals.extend(route.portals.iter().cloned());
+    }
 
-    // Only emit corridor geometry in cells NOT owned by rooms
-    let shell_cells: BTreeMap<Cell, CorridorCell> = corridor_cells
-        .iter()
-        .filter(|(cell, _)| !room_owned_cells.contains(cell))
-        .map(|(&c, &s)| (c, s))
-        .collect();
+    for (span, (cells, mut portals)) in layers {
+        portals.sort_by_key(|portal| {
+            (
+                portal.floor_z,
+                portal.wall,
+                portal.wall_rect,
+                portal.opening.clone(),
+            )
+        });
+        portals.dedup();
+        emit_cell_shell(
+            out,
+            &cells,
+            span.floor_z,
+            span.ceiling_bottom,
+            &portals,
+            ShellTextures {
+                floor: "conn_floor",
+                wall: "conn_wall",
+                ceiling: "conn_ceil",
+            },
+        );
+    }
+}
 
-    if shell_cells.is_empty() {
+/// Emit a sealed shell around a set of open XY cells. Boundary walls occupy
+/// the adjacent solid cell, including endpoint room-wall cells. Portal masks
+/// are then removed from those walls and replaced by floor/ceiling throat
+/// slabs spanning exactly the room's 16-unit wall thickness.
+fn emit_cell_shell(
+    out: &mut String,
+    cells: &BTreeSet<Cell>,
+    floor_z: i32,
+    ceiling_bottom: i32,
+    portals: &[PortalThroat],
+    textures: ShellTextures<'_>,
+) {
+    if cells.is_empty() {
         return;
     }
 
-    // Get the connector palette for corridor textures
-    let conn_floor = "conn_floor";
-    let conn_wall = "conn_wall";
-    let conn_ceil = "conn_ceil";
-
-    // Floor brushes
-    let floor_cells: BTreeMap<Cell, i32> = shell_cells
-        .iter()
-        .map(|(&cell, span)| (cell, span.floor_z))
-        .collect();
-    for rect in merge_cells(&floor_cells) {
+    let valued: BTreeMap<Cell, u8> = cells.iter().map(|&cell| (cell, 0)).collect();
+    for rect in merge_cells(&valued) {
         emit_solid_brush(
             out,
             rect.x0 * Q,
             rect.y0 * Q,
-            rect.value,
+            floor_z,
             rect.x1 * Q,
             rect.y1 * Q,
-            rect.value + Q,
-            conn_floor,
+            floor_z + Q,
+            textures.floor,
         );
-    }
-
-    // Ceiling brushes
-    let ceil_z: BTreeMap<Cell, i32> = shell_cells
-        .iter()
-        .map(|(&cell, span)| (cell, span.ceiling_bottom))
-        .collect();
-    for rect in merge_cells(&ceil_z) {
         emit_solid_brush(
             out,
             rect.x0 * Q,
             rect.y0 * Q,
-            rect.value,
+            ceiling_bottom,
             rect.x1 * Q,
             rect.y1 * Q,
-            rect.value + Q,
-            conn_ceil,
+            ceiling_bottom + Q,
+            textures.ceiling,
         );
     }
 
-    // Boundary walls
-    let mut wall_cells: BTreeMap<Cell, WallSpan> = BTreeMap::new();
-    for (&cell, &cc) in &shell_cells {
-        let span = WallSpan {
-            floor_z: cc.floor_z,
-            shell_top: cc.ceiling_bottom + Q,
-        };
+    let mut wall_voxels = BTreeSet::new();
+    let shell_top = ceiling_bottom + Q;
+    for &cell in cells {
         for neighbor in [
             (cell.0 - 1, cell.1),
             (cell.0 + 1, cell.1),
             (cell.0, cell.1 - 1),
             (cell.0, cell.1 + 1),
         ] {
-            if shell_cells.contains_key(&neighbor) || room_owned_cells.contains(&neighbor) {
+            if cells.contains(&neighbor) {
                 continue;
             }
-            wall_cells
-                .entry(neighbor)
-                .and_modify(|existing| {
-                    existing.shell_top = existing.shell_top.max(span.shell_top);
-                })
-                .or_insert(span);
+            for gz in floor_z.div_euclid(Q)..shell_top.div_euclid(Q) {
+                wall_voxels.insert((neighbor.0, neighbor.1, gz));
+            }
         }
     }
 
-    for rect in merge_cells(&wall_cells) {
+    for portal in portals {
+        let (x0, y0, x1, y1) = portal.wall_rect;
+        // Remove the clear opening plus the two connector-owned slab cells.
+        // The slabs are emitted below with their role-specific textures.
+        for gy in y0.div_euclid(Q)..y1.div_euclid(Q) {
+            for gx in x0.div_euclid(Q)..x1.div_euclid(Q) {
+                for gz in portal.floor_z.div_euclid(Q)..(portal.floor_z + Q).div_euclid(Q) {
+                    wall_voxels.remove(&(gx, gy, gz));
+                }
+                for gz in portal.opening.bottom.div_euclid(Q)..portal.opening.top.div_euclid(Q) {
+                    wall_voxels.remove(&(gx, gy, gz));
+                }
+                for gz in portal.opening.top.div_euclid(Q)..(portal.opening.top + Q).div_euclid(Q) {
+                    wall_voxels.remove(&(gx, gy, gz));
+                }
+            }
+        }
+    }
+
+    for cube in merge_voxels(&wall_voxels) {
         emit_solid_brush(
             out,
-            rect.x0 * Q,
-            rect.y0 * Q,
-            rect.value.floor_z,
-            rect.x1 * Q,
-            rect.y1 * Q,
-            rect.value.shell_top,
-            conn_wall,
+            cube.x0 * Q,
+            cube.y0 * Q,
+            cube.z0 * Q,
+            cube.x1 * Q,
+            cube.y1 * Q,
+            cube.z1 * Q,
+            textures.wall,
+        );
+    }
+
+    for portal in portals {
+        let (x0, y0, x1, y1) = portal.wall_rect;
+        emit_solid_brush(
+            out,
+            x0,
+            y0,
+            portal.floor_z,
+            x1,
+            y1,
+            portal.floor_z + Q,
+            textures.floor,
+        );
+        emit_solid_brush(
+            out,
+            x0,
+            y0,
+            portal.opening.top,
+            x1,
+            y1,
+            portal.opening.top + Q,
+            textures.ceiling,
         );
     }
 }
@@ -485,220 +612,73 @@ fn emit_stair_transitions(
     topology: &TopologyResult,
     room_map: &BTreeMap<RoomId, &PlacedRoom>,
     socket_map: &BTreeMap<super::intent::SocketId, &CandidateSocket>,
+    room_owned_cells: &BTreeSet<Cell>,
     _theme: &ThemeAssignment,
 ) {
-    let conn_floor = "conn_floor";
-    let conn_wall = "conn_wall";
-    let conn_ceil = "conn_ceil";
-
-    for t in &topology.transitions {
-        let Some(lower_room) = room_map.get(&t.lower_room) else {
+    for transition in &topology.transitions {
+        let Some(lower_room) = room_map.get(&transition.lower_room) else {
             continue;
         };
-        let Some(upper_room) = room_map.get(&t.upper_room) else {
+        let Some(upper_room) = room_map.get(&transition.upper_room) else {
             continue;
         };
 
-        let (fx0, fy0, fx1, fy1) = t.footprint;
-        let lower_z = lower_room.floor_z;
-        let upper_top = upper_room.floor_z + upper_room.dims.2 as i32;
+        // The protected footprint describes transition-owned open volume, not
+        // four unconditional outer walls. Remove room projections and let the
+        // cell-shell boundary follow each actual room wall instead. That makes
+        // both stair apertures true abutting interfaces even when the sockets
+        // lie on different sides of the footprint bounding rectangle.
+        let mut cells = BTreeSet::new();
+        insert_rect_cells(&mut cells, transition.footprint);
+        cells.retain(|cell| !room_owned_cells.contains(cell));
 
-        // Stairwell floor at lower room level
-        emit_solid_brush(out, fx0, fy0, lower_z, fx1, fy1, lower_z + Q, conn_floor);
-
-        // Stairwell ceiling at upper room ceiling level
-        emit_solid_brush(out, fx0, fy0, upper_top - Q, fx1, fy1, upper_top, conn_ceil);
-
-        // Stairwell walls (with apertures at socket positions)
-        let wall_z0 = lower_z + Q;
-        let wall_z1 = upper_top - Q;
-
-        // Collect stairwell wall openings from both sockets
-        let mut north_ops: Vec<Opening> = Vec::new();
-        let mut south_ops: Vec<Opening> = Vec::new();
-        let mut east_ops: Vec<Opening> = Vec::new();
-        let mut west_ops: Vec<Opening> = Vec::new();
-
-        for &socket_id in &[t.lower_socket, t.upper_socket] {
+        let mut portals = Vec::with_capacity(2);
+        for &(room, socket_id) in &[
+            (*lower_room, transition.lower_socket),
+            (*upper_room, transition.upper_socket),
+        ] {
             if let Some(socket) = socket_map.get(&socket_id) {
-                let half = CORRIDOR_WIDTH / 2;
-                match socket.wall {
-                    WallDirection::North => north_ops.push(Opening {
-                        tangent_min: socket.anchor.0 - half,
-                        tangent_max: socket.anchor.0 + half,
-                        bottom: lower_z + Q,
-                        top: upper_top - Q,
-                    }),
-                    WallDirection::South => south_ops.push(Opening {
-                        tangent_min: socket.anchor.0 - half,
-                        tangent_max: socket.anchor.0 + half,
-                        bottom: lower_z + Q,
-                        top: upper_top - Q,
-                    }),
-                    WallDirection::East => east_ops.push(Opening {
-                        tangent_min: socket.anchor.1 - half,
-                        tangent_max: socket.anchor.1 + half,
-                        bottom: lower_z + Q,
-                        top: upper_top - Q,
-                    }),
-                    WallDirection::West => west_ops.push(Opening {
-                        tangent_min: socket.anchor.1 - half,
-                        tangent_max: socket.anchor.1 + half,
-                        bottom: lower_z + Q,
-                        top: upper_top - Q,
-                    }),
+                if let Some(portal) = portal_throat(room, socket) {
+                    insert_rect_cells(&mut cells, portal.exterior_rect);
+                    portals.push(portal);
                 }
             }
         }
 
-        // Emit each stairwell wall with apertures
-        emit_wall_with_openings(
+        let upper_top = upper_room.floor_z + upper_room.dims.2 as i32;
+        emit_cell_shell(
             out,
-            fx0,
-            fy0,
-            fx1,
-            fy1,
-            wall_z0,
-            wall_z1,
-            &north_ops,
-            WallDirection::North,
-            fx0,
-            fy0,
-            fx1,
-            fy1,
-            conn_wall,
-        );
-        emit_wall_with_openings(
-            out,
-            fx0,
-            fy0,
-            fx1,
-            fy1,
-            wall_z0,
-            wall_z1,
-            &south_ops,
-            WallDirection::South,
-            fx0,
-            fy0,
-            fx1,
-            fy1,
-            conn_wall,
-        );
-        emit_wall_with_openings(
-            out,
-            fx0,
-            fy0,
-            fx1,
-            fy1,
-            wall_z0,
-            wall_z1,
-            &east_ops,
-            WallDirection::East,
-            fx0,
-            fy0,
-            fx1,
-            fy1,
-            conn_wall,
-        );
-        emit_wall_with_openings(
-            out,
-            fx0,
-            fy0,
-            fx1,
-            fy1,
-            wall_z0,
-            wall_z1,
-            &west_ops,
-            WallDirection::West,
-            fx0,
-            fy0,
-            fx1,
-            fy1,
-            conn_wall,
+            &cells,
+            lower_room.floor_z,
+            upper_top - Q,
+            &portals,
+            ShellTextures {
+                floor: "conn_floor",
+                wall: "conn_wall",
+                ceiling: "conn_ceil",
+            },
         );
 
         // Stair steps (treads)
-        for &(tx, ty, tz) in &t.treads {
-            let tread_depth = t.tread_depth;
-            let step_width = 64;
-            let half_w = step_width / 2;
-            // Determine step orientation from the socket positions
-            let lower_sock = socket_map.get(&t.lower_socket);
-            let upper_sock = socket_map.get(&t.upper_socket);
-            let (sx0, sy0, sx1, sy1) = if let (Some(ls), Some(us)) = (lower_sock, upper_sock) {
-                let dx = (us.anchor.0 - ls.anchor.0).abs();
-                let dy = (us.anchor.1 - ls.anchor.1).abs();
-                if dx >= dy {
-                    // Horizontal stair — steps span in Y
-                    (tx, ty - half_w, tx + tread_depth, ty + half_w)
+        for &(tx, ty, tz) in &transition.treads {
+            let tread_depth = transition.tread_depth;
+            let half_w = CORRIDOR_WIDTH / 2;
+            let lower_socket = socket_map.get(&transition.lower_socket);
+            let upper_socket = socket_map.get(&transition.upper_socket);
+            let (sx0, sy0, sx1, sy1) =
+                if let (Some(lower), Some(upper)) = (lower_socket, upper_socket) {
+                    let dx = (upper.anchor.0 - lower.anchor.0).abs();
+                    let dy = (upper.anchor.1 - lower.anchor.1).abs();
+                    if dx >= dy {
+                        (tx, ty - half_w, tx + tread_depth, ty + half_w)
+                    } else {
+                        (tx - half_w, ty, tx + half_w, ty + tread_depth)
+                    }
                 } else {
-                    // Vertical stair — steps span in X
-                    (tx - half_w, ty, tx + half_w, ty + tread_depth)
-                }
-            } else {
-                // Fallback: horizontal
-                (tx, ty - half_w, tx + tread_depth, ty + half_w)
-            };
-            emit_solid_brush(out, sx0, sy0, tz, sx1, sy1, tz + Q, conn_floor);
+                    (tx, ty - half_w, tx + tread_depth, ty + half_w)
+                };
+            emit_solid_brush(out, sx0, sy0, tz, sx1, sy1, tz + Q, "conn_floor");
         }
-    }
-}
-
-fn emit_wall_with_openings(
-    out: &mut String,
-    fx0: i32,
-    fy0: i32,
-    fx1: i32,
-    fy1: i32,
-    z0: i32,
-    z1: i32,
-    openings: &[Opening],
-    wall: WallDirection,
-    _bound_x0: i32,
-    _bound_y0: i32,
-    _bound_x1: i32,
-    _bound_y1: i32,
-    texture: &str,
-) {
-    let (tangent_min, tangent_max, _bx0, _by0, _bx1, _by1) = match wall {
-        WallDirection::North => (fx0, fx1, fx0, fy1 - Q, fx1, fy1),
-        WallDirection::South => (fx0, fx1, fx0, fy0, fx1, fy0 + Q),
-        WallDirection::East => (fy0, fy1, fx1 - Q, fy0 + Q, fx1, fy1 - Q),
-        WallDirection::West => (fy0, fy1, fx0, fy0 + Q, fx0 + Q, fy1 - Q),
-    };
-
-    let mut solid_cells: BTreeMap<Cell, ()> = BTreeMap::new();
-    for t_cell in tangent_min.div_euclid(Q)..tangent_max.div_euclid(Q) {
-        for z_cell in z0.div_euclid(Q)..z1.div_euclid(Q) {
-            solid_cells.insert((t_cell, z_cell), ());
-        }
-    }
-
-    for op in openings {
-        if op.tangent_min >= op.tangent_max || op.bottom >= op.top {
-            continue;
-        }
-        for z_cell in op.bottom.div_euclid(Q)..op.top.div_euclid(Q) {
-            for t_cell in op.tangent_min.div_euclid(Q)..op.tangent_max.div_euclid(Q) {
-                solid_cells.remove(&(t_cell, z_cell));
-            }
-        }
-    }
-
-    for rect in merge_cells_void(&solid_cells) {
-        let t0 = rect.x0 * Q;
-        let t1 = rect.x1 * Q;
-        let bz0 = rect.y0 * Q;
-        let bz1 = rect.y1 * Q;
-
-        let (rbx0, rby0, rbx1, rby1) = match wall {
-            WallDirection::North => (t0, fy1 - Q, t1, fy1),
-            WallDirection::South => (t0, fy0, t1, fy0 + Q),
-            WallDirection::East => (fx1 - Q, t0, fx1, t1),
-            WallDirection::West => (fx0, t0, fx0 + Q, t1),
-        };
-
-        emit_solid_brush(out, rbx0, rby0, bz0, rbx1, rby1, bz1, texture);
     }
 }
 
@@ -772,6 +752,48 @@ fn merge_cells_void(cells: &BTreeMap<Cell, ()>) -> Vec<GridRect<()>> {
             value: (),
         })
         .collect()
+}
+
+fn merge_voxels(voxels: &BTreeSet<(i32, i32, i32)>) -> Vec<GridBox> {
+    let mut slices: BTreeMap<i32, BTreeMap<Cell, u8>> = BTreeMap::new();
+    for &(x, y, z) in voxels {
+        slices.entry(z).or_default().insert((x, y), 0);
+    }
+
+    let mut active: BTreeMap<(i32, i32, i32, i32), GridBox> = BTreeMap::new();
+    let mut finished = Vec::new();
+    let mut previous_z = None;
+    for (z, cells) in slices {
+        if previous_z.is_some_and(|previous| z != previous + 1) {
+            finished.extend(active.into_values());
+            active = BTreeMap::new();
+        }
+
+        let mut next = BTreeMap::new();
+        for rect in merge_cells(&cells) {
+            let key = (rect.x0, rect.x1, rect.y0, rect.y1);
+            let cube = if let Some(mut cube) = active.remove(&key) {
+                cube.z1 = z + 1;
+                cube
+            } else {
+                GridBox {
+                    x0: rect.x0,
+                    x1: rect.x1,
+                    y0: rect.y0,
+                    y1: rect.y1,
+                    z0: z,
+                    z1: z + 1,
+                }
+            };
+            next.insert(key, cube);
+        }
+        finished.extend(active.into_values());
+        active = next;
+        previous_z = Some(z);
+    }
+    finished.extend(active.into_values());
+    finished.sort_unstable();
+    finished
 }
 
 // ── Solid brush emission ───────────────────────────────────────────────────
@@ -936,6 +958,68 @@ mod tests {
         let map = emit_map(&cfg, &placement, &topology, &theme, &features).unwrap();
         // Should have stairwell geometry with connector textures
         assert!(map.contains("conn_floor") || map.contains("conn_wall"));
+    }
+
+    #[test]
+    fn route_cells_preserve_identity_and_vertical_layer() {
+        let (_cfg, placement, topology, _theme, _features) = build_full_pipeline(42);
+        let room_map: BTreeMap<RoomId, &PlacedRoom> =
+            placement.rooms.iter().map(|room| (room.id, room)).collect();
+        let socket_map: BTreeMap<super::super::intent::SocketId, &CandidateSocket> = placement
+            .sockets
+            .iter()
+            .map(|socket| (socket.id, socket))
+            .collect();
+        let routes = build_corridor_route_cells(&topology, &room_map, &socket_map);
+
+        assert_eq!(routes.len(), topology.routes.len());
+        assert_eq!(
+            routes
+                .iter()
+                .map(|route| route.route_id)
+                .collect::<BTreeSet<_>>(),
+            topology
+                .routes
+                .iter()
+                .map(|route| route.id)
+                .collect::<BTreeSet<_>>()
+        );
+        assert_eq!(
+            routes
+                .iter()
+                .map(|route| route.span.floor_z)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([0, 192])
+        );
+        assert!(routes
+            .iter()
+            .all(|route| !route.cells.is_empty() && route.portals.len() == 2));
+    }
+
+    #[test]
+    fn odd_quantum_room_portal_uses_the_same_four_cells_on_both_sides() {
+        let room = PlacedRoom {
+            id: RoomId(1),
+            layer: super::super::intent::LayerId(0),
+            floor_z: 0,
+            shell: (1632, 544, 1776, 672),
+            dims: (144, 128, 176),
+        };
+        let socket = CandidateSocket {
+            id: super::super::intent::SocketId(5),
+            room: room.id,
+            wall: WallDirection::South,
+            anchor: (1704, 544, 56),
+            width: 64,
+            transition_capable: true,
+        };
+
+        let portal = portal_throat(&room, &socket).unwrap();
+        assert_eq!(portal.wall_rect, (1664, 544, 1728, 560));
+        assert_eq!(portal.exterior_rect, (1664, 528, 1728, 544));
+        assert_eq!(portal.opening.tangent_min, 1664);
+        assert_eq!(portal.opening.tangent_max, 1728);
+        assert_eq!((portal.opening.bottom, portal.opening.top), (16, 96));
     }
 
     #[test]

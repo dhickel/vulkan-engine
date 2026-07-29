@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use super::config::EnhancedConfig;
 use super::error::EnhancedError;
 use super::intent::{IdAllocator, RoomId, RouteId, RouteIntent, SocketId, TransitionIntent};
-use super::placement::{CandidateSocket, PlacedRoom, PlacementResult};
+use super::placement::{CandidateSocket, PlacedRoom, PlacementResult, WallDirection};
 use super::reservation::{OwnerKind, Transaction};
 use super::seed::EnhancedStageRng;
 use super::{routing, transition};
@@ -28,6 +28,13 @@ struct RoomPair {
     a: RoomId,
     b: RoomId,
     distance: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SocketRouteApproach {
+    face: (i32, i32),
+    exterior: (i32, i32),
+    envelope: (i32, i32, i32, i32),
 }
 
 pub fn build_topology(
@@ -250,9 +257,11 @@ fn try_route_pair(
             continue;
         }
         let mark = tx.mark();
+        let source_approach = socket_route_approach(source);
+        let target_approach = socket_route_approach(target);
         let result = routing::route_sockets(
-            (source.anchor.0, source.anchor.1),
-            (target.anchor.0, target.anchor.1),
+            source_approach.exterior,
+            target_approach.exterior,
             &tx.grid,
             extent,
             524_288,
@@ -272,8 +281,10 @@ fn try_route_pair(
             continue;
         }
         let mut reserved = true;
-        for envelope in &route.segments {
-            let (x0, y0, x1, y1) = envelope.envelope;
+        for (x0, y0, x1, y1) in std::iter::once(source_approach.envelope)
+            .chain(route.segments.iter().map(|segment| segment.envelope))
+            .chain(std::iter::once(target_approach.envelope))
+        {
             if tx
                 .reserve_route_rect_allow_rooms(x0, y0, x1 - x0, y1 - y0, id, &[pair.a, pair.b])
                 .is_err()
@@ -293,15 +304,21 @@ fn try_route_pair(
             target_socket: target.id,
             source_room: pair.a,
             target_room: pair.b,
-            path: route
-                .segments
-                .iter()
-                .map(|segment| (segment.start, segment.end))
+            path: std::iter::once((source_approach.face, source_approach.exterior))
+                .chain(
+                    route
+                        .segments
+                        .iter()
+                        .map(|segment| (segment.start, segment.end)),
+                )
+                .chain(std::iter::once((
+                    target_approach.exterior,
+                    target_approach.face,
+                )))
                 .collect(),
-            envelopes: route
-                .segments
-                .iter()
-                .map(|segment| segment.envelope)
+            envelopes: std::iter::once(source_approach.envelope)
+                .chain(route.segments.iter().map(|segment| segment.envelope))
+                .chain(std::iter::once(target_approach.envelope))
                 .collect(),
             headroom: (floor + 16, floor + 96),
         });
@@ -501,4 +518,56 @@ fn same_pair(a: RoomId, b: RoomId, c: RoomId, d: RoomId) -> bool {
 }
 fn manhattan(a: (i32, i32, i32), b: (i32, i32, i32)) -> u32 {
     (a.0 - b.0).unsigned_abs() + (a.1 - b.1).unsigned_abs()
+}
+
+/// Return the canonical face point, one-cell exterior endpoint, and exact
+/// 64-unit-wide approach reservation for a socket. Routing starts outside the
+/// room instead of being allowed to consume a socket while walking through
+/// that room and exiting through an unrelated wall.
+fn socket_route_approach(socket: &CandidateSocket) -> SocketRouteApproach {
+    let q = crate::config::CONSTRUCTION_QUANTUM as i32;
+    let width = socket.width as i32;
+    let half = width / 2;
+    let canonical_tangent = match socket.wall {
+        WallDirection::North | WallDirection::South => {
+            (socket.anchor.0 - half).div_euclid(q) * q + half
+        }
+        WallDirection::East | WallDirection::West => {
+            (socket.anchor.1 - half).div_euclid(q) * q + half
+        }
+    };
+    match socket.wall {
+        WallDirection::North => {
+            let face = (canonical_tangent, socket.anchor.1);
+            SocketRouteApproach {
+                face,
+                exterior: (face.0, face.1 + q),
+                envelope: (face.0 - half, face.1, face.0 + half, face.1 + q),
+            }
+        }
+        WallDirection::South => {
+            let face = (canonical_tangent, socket.anchor.1);
+            SocketRouteApproach {
+                face,
+                exterior: (face.0, face.1 - q),
+                envelope: (face.0 - half, face.1 - q, face.0 + half, face.1),
+            }
+        }
+        WallDirection::East => {
+            let face = (socket.anchor.0, canonical_tangent);
+            SocketRouteApproach {
+                face,
+                exterior: (face.0 + q, face.1),
+                envelope: (face.0, face.1 - half, face.0 + q, face.1 + half),
+            }
+        }
+        WallDirection::West => {
+            let face = (socket.anchor.0, canonical_tangent);
+            SocketRouteApproach {
+                face,
+                exterior: (face.0 - q, face.1),
+                envelope: (face.0 - q, face.1 - half, face.0, face.1 + half),
+            }
+        }
+    }
 }
