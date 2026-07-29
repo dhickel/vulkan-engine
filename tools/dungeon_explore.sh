@@ -18,9 +18,20 @@ cd "$repo_root"
 
 cache_root=".internal-dev/captures/bsp-dungeon-generator"
 
-WAD_PATH="${DUNGEON_WAD_PATH:-src/bsp_generator/themes/cc0_stone_beta/cc0_stone_beta.wad}"
-PALETTE_PATH="${DUNGEON_PALETTE_PATH:-src/bsp_generator/themes/cc0_stone_beta/palette.lmp}"
-TEXTURES_DIR="${DUNGEON_TEXTURES_DIR:-src/bsp_generator/themes/cc0_stone_beta/textures}"
+# Theme paths differ by class
+if [[ "$CLASS" == "m2" ]]; then
+  DEFAULT_WAD_PATH="src/bsp_generator/themes/cc0_dungeon_v2/cc0_dungeon_v2.wad"
+  DEFAULT_PALETTE_PATH="src/bsp_generator/themes/cc0_dungeon_v2/palette.lmp"
+  DEFAULT_TEXTURES_DIR="src/bsp_generator/themes/cc0_dungeon_v2/textures"
+else
+  DEFAULT_WAD_PATH="src/bsp_generator/themes/cc0_stone_beta/cc0_stone_beta.wad"
+  DEFAULT_PALETTE_PATH="src/bsp_generator/themes/cc0_stone_beta/palette.lmp"
+  DEFAULT_TEXTURES_DIR="src/bsp_generator/themes/cc0_stone_beta/textures"
+fi
+
+WAD_PATH="${DUNGEON_WAD_PATH:-$DEFAULT_WAD_PATH}"
+PALETTE_PATH="${DUNGEON_PALETTE_PATH:-$DEFAULT_PALETTE_PATH}"
+TEXTURES_DIR="${DUNGEON_TEXTURES_DIR:-$DEFAULT_TEXTURES_DIR}"
 PROFILE_PATH="${DUNGEON_PROFILE_PATH:-tools/bsp_authoring/ericw-q1-bsp2-generated-profile.toml}"
 DEFAULT_TOOL_PATH="${DUNGEON_TOOL_PATH:-$HOME/.local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin}"
 
@@ -124,40 +135,71 @@ build_cache() {
   local tmp_dir; tmp_dir="$(mktemp -d -t dungeon-explore-${class}-${seed}-XXXXXX)"
   trap 'rm -rf "$tmp_dir"' RETURN
 
-  local map_path="$tmp_dir/${class}-seed-${seed}.map"
-  local out_dir="$tmp_dir/compiled"
+  if [[ "$class" == "m2" ]]; then
+    # Enhanced v2: use engine_pack enhanced-dungeon (generate + compile + publish atomically)
+    echo "  $(dim "generating+compiling") $(bold "$class") seed $(bold "$seed") via engine_pack..."
+    local out_dir="$tmp_dir/out"
+    local compile_args=(
+      run -q -p engine_pack -- enhanced-dungeon
+      --seed "$seed"
+      --out "$out_dir"
+      --name "${class}-seed-${seed}"
+    )
+    if [[ -x "$DEFAULT_TOOL_PATH/qbsp" && -x "$DEFAULT_TOOL_PATH/vis" && -x "$DEFAULT_TOOL_PATH/light" ]]; then
+      compile_args+=(--tool-path "$DEFAULT_TOOL_PATH")
+    fi
+    cargo "${compile_args[@]}" || {
+      echo "  $(red "✗") engine_pack enhanced-dungeon failed" >&2; return 1
+    }
 
-  echo "  $(dim "generating") $(bold "$class") seed $(bold "$seed")..."
-  cargo run -q -p dungeon_gen -- --seed "$seed" --class "$class" --out "$map_path" || {
-    echo "  $(red "✗") generation failed" >&2; return 1
-  }
+    local published_name="${class}-seed-${seed}"
+    local compiled_bsp="$out_dir/${published_name}.bsp"
+    local compiled_lit="$out_dir/${published_name}.lit"
+    [[ -f "$compiled_bsp" && -f "$compiled_lit" ]] || {
+      echo "  $(red "✗") compiler did not produce the required BSP/LIT pair" >&2
+      return 1
+    }
+    rm -f "$bsp" "$lit" "$manifest"
+    cp "$compiled_bsp" "$bsp"
+    cp "$compiled_lit" "$lit"
+    rm -rf "$tmp_dir"
+  else
+    # Legacy v1: use dungeon_gen + engine_pack compile-bsp
+    local map_path="$tmp_dir/${class}-seed-${seed}.map"
+    local out_dir="$tmp_dir/compiled"
 
-  local compile_args=(
-    run -q -p engine_pack -- compile-bsp "$map_path"
-    --profile "$PROFILE_PATH"
-    --out "$out_dir"
-    --palette "$PALETTE_PATH"
-    --wad "$WAD_PATH"
-  )
-  if [[ -x "$DEFAULT_TOOL_PATH/qbsp" && -x "$DEFAULT_TOOL_PATH/vis" && -x "$DEFAULT_TOOL_PATH/light" ]]; then
-    compile_args+=(--tool-path "$DEFAULT_TOOL_PATH")
+    echo "  $(dim "generating") $(bold "$class") seed $(bold "$seed")..."
+    cargo run -q -p dungeon_gen -- --seed "$seed" --class "$class" --out "$map_path" || {
+      echo "  $(red "✗") generation failed" >&2; return 1
+    }
+
+    local compile_args=(
+      run -q -p engine_pack -- compile-bsp "$map_path"
+      --profile "$PROFILE_PATH"
+      --out "$out_dir"
+      --palette "$PALETTE_PATH"
+      --wad "$WAD_PATH"
+    )
+    if [[ -x "$DEFAULT_TOOL_PATH/qbsp" && -x "$DEFAULT_TOOL_PATH/vis" && -x "$DEFAULT_TOOL_PATH/light" ]]; then
+      compile_args+=(--tool-path "$DEFAULT_TOOL_PATH")
+    fi
+
+    echo "  $(dim "compiling") $(bold "BSP2")..."
+    cargo "${compile_args[@]}" || {
+      echo "  $(red "✗") compilation failed" >&2; return 1
+    }
+
+    local compiled_bsp="$out_dir/${class}-seed-${seed}.bsp"
+    local compiled_lit="$out_dir/${class}-seed-${seed}.lit"
+    [[ -f "$compiled_bsp" && -f "$compiled_lit" ]] || {
+      echo "  $(red "✗") compiler did not produce the required BSP/LIT pair" >&2
+      return 1
+    }
+    rm -f "$bsp" "$lit" "$manifest"
+    cp "$compiled_bsp" "$bsp"
+    cp "$compiled_lit" "$lit"
+    rm -rf "$tmp_dir"
   fi
-
-  echo "  $(dim "compiling") $(bold "BSP2")..."
-  cargo "${compile_args[@]}" || {
-    echo "  $(red "✗") compilation failed" >&2; return 1
-  }
-
-  local compiled_bsp="$out_dir/${class}-seed-${seed}.bsp"
-  local compiled_lit="$out_dir/${class}-seed-${seed}.lit"
-  [[ -f "$compiled_bsp" && -f "$compiled_lit" ]] || {
-    echo "  $(red "✗") compiler did not produce the required BSP/LIT pair" >&2
-    return 1
-  }
-  rm -f "$bsp" "$lit" "$manifest"
-  cp "$compiled_bsp" "$bsp"
-  cp "$compiled_lit" "$lit"
-  rm -rf "$tmp_dir"
   trap - RETURN
 
   local palette_sha256; palette_sha256="$(calc_sha256 "$PALETTE_PATH")"
