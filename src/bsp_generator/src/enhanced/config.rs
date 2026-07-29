@@ -69,6 +69,8 @@ pub struct EnhancedConfig {
     placement_candidates: u32,
     /// Maximum placement attempts per room.
     max_placement_attempts: u32,
+    /// Maximum pillars allowed per room (0 = no pillars).
+    max_pillars_per_room: u32,
 }
 
 impl EnhancedConfig {
@@ -101,6 +103,30 @@ impl EnhancedConfig {
         xy_extent: u32,
         placement_candidates: u32,
         max_placement_attempts: u32,
+    ) -> Result<Self, EnhancedError> {
+        Self::with_full_params(
+            room_count,
+            loop_count,
+            vertical_edges,
+            tread_depth,
+            xy_extent,
+            placement_candidates,
+            max_placement_attempts,
+            2, // default max_pillars_per_room
+        )
+    }
+
+    /// Create and validate an Enhanced v2 configuration with all parameters
+    /// including feature variance.
+    pub fn with_full_params(
+        room_count: u32,
+        loop_count: u32,
+        vertical_edges: u32,
+        tread_depth: i32,
+        xy_extent: u32,
+        placement_candidates: u32,
+        max_placement_attempts: u32,
+        max_pillars_per_room: u32,
     ) -> Result<Self, EnhancedError> {
         if room_count < M2_ROOM_COUNT_MIN || room_count > M2_ROOM_COUNT_MAX {
             return Err(EnhancedError::ConfigOutOfRange {
@@ -184,6 +210,16 @@ impl EnhancedConfig {
             });
         }
 
+        // Validate max_pillars_per_room (0 = no pillars, bounded at 8)
+        if max_pillars_per_room > 8 {
+            return Err(EnhancedError::ConfigOutOfRange {
+                field: "max_pillars_per_room",
+                value: max_pillars_per_room as u64,
+                min: 0,
+                max: 8,
+            });
+        }
+
         Ok(Self {
             room_count,
             loop_count,
@@ -192,23 +228,25 @@ impl EnhancedConfig {
             xy_extent,
             placement_candidates,
             max_placement_attempts,
+            max_pillars_per_room,
         })
     }
 
     /// Nominal M2 Enhanced configuration.
     pub fn nominal() -> Self {
-        Self::new(28, 3, 1, ENHANCED_TREAD_DEFAULT, 2048).expect("nominal config")
+        Self::with_full_params(28, 3, 1, ENHANCED_TREAD_DEFAULT, 2048, 32, 96, 2)
+            .expect("nominal config")
     }
 
     /// Minimal M2 Enhanced configuration (17 rooms, 1 loop, 1024 extent).
     pub fn minimal() -> Self {
-        Self::with_placement_params(17, 1, 1, ENHANCED_TREAD_DEFAULT, 1024, 32, 96)
+        Self::with_full_params(17, 1, 1, ENHANCED_TREAD_DEFAULT, 1024, 32, 96, 1)
             .expect("minimal config")
     }
 
     /// Maximal M2 Enhanced configuration (40 rooms, 6 loops, 3072 extent).
     pub fn maximal() -> Self {
-        Self::with_placement_params(40, 6, 3, ENHANCED_TREAD_DEFAULT, 3072, 32, 96)
+        Self::with_full_params(40, 6, 3, ENHANCED_TREAD_DEFAULT, 3072, 32, 96, 4)
             .expect("maximal config")
     }
 
@@ -233,6 +271,9 @@ impl EnhancedConfig {
     }
     pub fn max_placement_attempts(&self) -> u32 {
         self.max_placement_attempts
+    }
+    pub fn max_pillars_per_room(&self) -> u32 {
+        self.max_pillars_per_room
     }
     pub fn layer_count(&self) -> u32 {
         ENHANCED_LAYER_COUNT

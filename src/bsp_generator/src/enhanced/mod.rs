@@ -9,6 +9,7 @@
 pub mod config;
 pub mod emission;
 pub mod error;
+pub mod features;
 pub mod intent;
 pub mod occupancy;
 pub mod pipeline;
