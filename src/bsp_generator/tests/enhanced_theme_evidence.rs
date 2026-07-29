@@ -185,6 +185,7 @@ fn theme_cc0_provenance_populated() {
     let t = theme();
     assert!(t.cc0_provenance.contains("CC0"));
     assert!(t.cc0_provenance.contains("project-authored"));
+    assert_ne!(t.wad_sha256, [0; 32], "theme must declare its WAD identity");
 }
 
 // ── Role derivation ────────────────────────────────────────────────────
@@ -1113,6 +1114,11 @@ fn build_wad_hash_reproducible() {
     let hash_a: [u8; 32] = Sha256::digest(&wad_a).into();
     let hash_b: [u8; 32] = Sha256::digest(&wad_b).into();
     assert_eq!(hash_a, hash_b, "WAD SHA-256 differs between builds");
+    assert_eq!(
+        hash_a,
+        theme().wad_sha256,
+        "WAD hash differs from package identity"
+    );
 }
 
 // ── Legacy unchanged ───────────────────────────────────────────────────

@@ -188,17 +188,12 @@ impl ThemePackage {
 const CC0_PROVENANCE: &str =
     "CC0 1.0 Universal — project-authored procedural textures for the Vulkan Engine project.";
 
-// NOTE: `wad_sha256` is a placeholder; the canonical hash is asserted at test
-// time from the deterministic build output.
-
-/// The CC0 Dungeon v2 theme — three room palettes plus a dedicated connector.
-pub const CC0_DUNGEON_V2: ThemePackage = ThemePackage {
-    wad_basename: "cc0_dungeon_v2.wad",
-    wad_sha256: [0u8; 32],
-    palettes: Vec::new(), // populated below
-    skip_name: "skip",
-    cc0_provenance: CC0_PROVENANCE,
-};
+/// SHA-256 of `cc0_dungeon_v2.wad` produced by the checked-in deterministic
+/// builder. The evidence suite regenerates the WAD and checks this value.
+const CC0_DUNGEON_V2_WAD_SHA256: [u8; 32] = [
+    0xb8, 0x99, 0xae, 0x81, 0x65, 0x74, 0x4f, 0xdc, 0x2d, 0x92, 0xf9, 0xfe, 0x4d, 0x03, 0xd5, 0xb5,
+    0x2c, 0x33, 0xeb, 0xfd, 0xdc, 0x22, 0x88, 0x22, 0xc7, 0x07, 0x90, 0xe1, 0x20, 0xcd, 0x34, 0x96,
+];
 
 // Palette IDs are allocated in canonical declaration order.
 const PID_BASE_STONE: u32 = 0;
@@ -262,8 +257,11 @@ const fn build_palettes() -> [PaletteDefinition; 4] {
 /// callers should use this once and treat the result as immutable.
 pub fn cc0_dungeon_v2_theme() -> ThemePackage {
     ThemePackage {
+        wad_basename: "cc0_dungeon_v2.wad",
+        wad_sha256: CC0_DUNGEON_V2_WAD_SHA256,
         palettes: build_palettes().to_vec(),
-        ..CC0_DUNGEON_V2
+        skip_name: "skip",
+        cc0_provenance: CC0_PROVENANCE,
     }
 }
 
@@ -444,7 +442,7 @@ pub fn derive_zones(
     // Sort by (distance, RoomId)
     let mut ordered: Vec<(u32, RoomId)> = rooms
         .iter()
-        .map(|r| (distances.get(&r.id).copied().unwrap_or(0), r.id))
+        .map(|r| (distances.get(&r.id).copied().unwrap_or(u32::MAX), r.id))
         .collect();
     ordered.sort();
 
@@ -621,15 +619,22 @@ pub fn assign_by_zone(
             connector
         };
 
+        let is_fallback = palette.id == base.id
+            && src_zone == tgt_zone
+            && src_zone.map(|z| z.0 as usize).unwrap_or(0) >= room_palettes.len();
         route_palettes_map.insert(
             route.id,
             PaletteAssignment {
                 palette_id: palette.id,
                 palette_name: palette.name.to_string(),
-                is_fallback: palette.id == base.id
-                    && src_zone == tgt_zone
-                    && src_zone.map(|z| z.0 as usize).unwrap_or(0) >= room_palettes.len(),
-                fallback_reason: None,
+                is_fallback,
+                fallback_reason: is_fallback.then(|| {
+                    format!(
+                        "zone {} out of range [0..{})",
+                        src_zone.unwrap_or(ZoneId(0)).0,
+                        room_palettes.len()
+                    )
+                }),
             },
         );
     }
@@ -658,15 +663,22 @@ pub fn assign_by_zone(
             connector
         };
 
+        let is_fallback = palette.id == base.id
+            && lower_zone == upper_zone
+            && lower_zone.map(|z| z.0 as usize).unwrap_or(0) >= room_palettes.len();
         transition_palettes_map.insert(
             t.id,
             PaletteAssignment {
                 palette_id: palette.id,
                 palette_name: palette.name.to_string(),
-                is_fallback: palette.id == base.id
-                    && lower_zone == upper_zone
-                    && lower_zone.map(|z| z.0 as usize).unwrap_or(0) >= room_palettes.len(),
-                fallback_reason: None,
+                is_fallback,
+                fallback_reason: is_fallback.then(|| {
+                    format!(
+                        "zone {} out of range [0..{})",
+                        lower_zone.unwrap_or(ZoneId(0)).0,
+                        room_palettes.len()
+                    )
+                }),
             },
         );
     }
