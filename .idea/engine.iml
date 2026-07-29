@@ -35,6 +35,9 @@
       <sourceFolder url="file://$MODULE_DIR$/src/bsp_generator/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src/bsp_generator/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/tools/dungeon_gen/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src/audio/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/src/events/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/src/physics/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

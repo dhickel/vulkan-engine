@@ -432,6 +432,7 @@ name = "bsp_generator"
 version = "0.1.0"
 dependencies = [
  "bsp",
+ "glam 0.28.0",
  "serde",
  "serde_json",
  "sha2",

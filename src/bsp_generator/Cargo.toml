@@ -13,6 +13,7 @@ serde = { version = "1", features = ["derive"], optional = true }
 tempfile = "3"
 walkdir = "2"
 serde_json = "1"
+glam = { version = "0.28", default-features = false, features = ["libm"] }
 
 [features]
 default = []
