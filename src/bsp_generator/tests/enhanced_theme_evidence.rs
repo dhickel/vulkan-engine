@@ -319,7 +319,7 @@ fn zone_derivation_deterministic() {
 
 #[test]
 fn zone_derivation_ids_within_bounds() {
-    let (_, rooms, topology, mut rng) = build_nominal(42);
+    let (_, rooms, topology, rng) = build_nominal(42);
     for pcount in 1..=5 {
         let zones = derive_zones(&rooms, &topology, &mut rng.clone(), pcount);
         for z in zones.values() {
