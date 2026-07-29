@@ -16,6 +16,32 @@ fn enhanced_emission_produces_worldspawn_with_wad() {
 }
 
 #[test]
+fn enhanced_emission_worldspawn_contains_canonical_minlight() {
+    let expected_worldspawn = concat!(
+        "{\n",
+        "\"classname\" \"worldspawn\"\n",
+        "\"wad\" \"cc0_dungeon_v2.wad\"\n",
+        "\"_minlight\" \"16\"\n",
+    );
+
+    for seed in [42, 99] {
+        let (map, _meta) = generate_enhanced(seed, EnhancedConfig::nominal()).unwrap();
+        // The fixed worldspawn prefix places the key in Enhanced v2's
+        // deterministic world entity, rather than merely somewhere in map text.
+        assert!(
+            map.starts_with(expected_worldspawn),
+            "seed {seed} has an unexpected worldspawn:\n{}",
+            &map[..map.find("\n{\n").unwrap_or(map.len())]
+        );
+        assert_eq!(
+            map.matches("\"_minlight\" \"16\"").count(),
+            1,
+            "seed {seed} must emit exactly one worldspawn _minlight key"
+        );
+    }
+}
+
+#[test]
 fn enhanced_emission_has_spawn_and_lights() {
     let (map, meta) = generate_enhanced(42, EnhancedConfig::nominal()).unwrap();
     assert!(map.contains("\"classname\" \"info_player_start\""));
@@ -152,6 +178,8 @@ fn contains_prohibited_qbsp_diagnostic(output: &str) -> bool {
 /// still writing a BSP and returning status 0.
 #[test]
 fn compile_map_and_validate() {
+    use bsp::{BspLoader, LoadOptions};
+
     let tools = ericw_bin();
     if !tools.join("qbsp").is_file() {
         eprintln!("SKIP: pinned ericw-tools qbsp is not installed");
@@ -184,6 +212,7 @@ fn compile_map_and_validate() {
         String::from_utf8_lossy(&theme.stderr)
     );
 
+    // ── Stage 1: qbsp ──────────────────────────────────────────────────
     let output = Command::new(tools.join("qbsp"))
         .args(["-bsp2", "-threads", "1", "test_map.map"])
         .current_dir(&work)
@@ -222,6 +251,117 @@ fn compile_map_and_validate() {
         "qbsp clean: status=0; {}; BSP2 written; no warnings, skipped fill, .pts, or .leak.prt",
         calculation.trim()
     );
+
+    // ── Stage 2: vis ───────────────────────────────────────────────────
+    let vis_out = Command::new(tools.join("vis"))
+        .args(["-threads", "1", "test_map.bsp"])
+        .current_dir(&work)
+        .output()
+        .expect("run pinned vis");
+    let vis_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&vis_out.stdout),
+        String::from_utf8_lossy(&vis_out.stderr)
+    );
+    assert!(
+        vis_out.status.success(),
+        "vis failed with status {:?}:\n{vis_combined}",
+        vis_out.status.code()
+    );
+    assert!(
+        !contains_prohibited_qbsp_diagnostic(&vis_combined),
+        "vis emitted a prohibited warning/error diagnostic:\n{vis_combined}"
+    );
+    eprintln!("vis clean");
+
+    // ── Stage 3: light -lit ────────────────────────────────────────────
+    let light_out = Command::new(tools.join("light"))
+        .args(["-threads", "1", "-lit", "test_map.bsp"])
+        .current_dir(&work)
+        .output()
+        .expect("run pinned light");
+    let light_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&light_out.stdout),
+        String::from_utf8_lossy(&light_out.stderr)
+    );
+    assert!(
+        light_out.status.success(),
+        "light failed with status {:?}:\n{light_combined}",
+        light_out.status.code()
+    );
+    assert!(
+        !contains_prohibited_qbsp_diagnostic(&light_combined),
+        "light emitted a prohibited warning/error diagnostic:\n{light_combined}"
+    );
+    eprintln!("light -lit clean");
+
+    // ── QLIT v1 companion ──────────────────────────────────────────────
+    let lit_path = work.join("test_map.lit");
+    assert!(
+        lit_path.is_file(),
+        "light -lit did not produce test_map.lit"
+    );
+    let lit_data = fs::read(&lit_path).expect("read .lit");
+    assert!(
+        lit_data.len() > 8,
+        ".lit file too small for QLIT v1 header + data: {} bytes",
+        lit_data.len()
+    );
+    assert_eq!(&lit_data[0..4], b"QLIT", ".lit magic must be 'QLIT'");
+    let lit_version = u32::from_le_bytes([lit_data[4], lit_data[5], lit_data[6], lit_data[7]]);
+    assert_eq!(lit_version, 1, ".lit version must be 1, got {lit_version}");
+    let lit_rgb_payload = lit_data.len() - 8;
+    assert!(lit_rgb_payload > 0, ".lit contains no RGB payload");
+    eprintln!(
+        "QLIT v1 companion: {} bytes header + {} bytes RGB payload",
+        8, lit_rgb_payload
+    );
+
+    // ── Strict-reload and lightofs coverage ─────────────────────────────
+    let palette = Path::new(env!("CARGO_MANIFEST_DIR")).join("themes/cc0_dungeon_v2/palette.lmp");
+    let palette_bytes = fs::read(&palette).expect("read palette");
+    let wad_path = work.join("cc0_dungeon_v2.wad");
+    let wad_bytes = fs::read(&wad_path).expect("read WAD");
+    let bsp_bytes = fs::read(work.join("test_map.bsp")).expect("read BSP");
+
+    let options = LoadOptions {
+        strict: true,
+        palette: Some(palette_bytes),
+        lit_data: Some(lit_data),
+        wad_archives: vec![("cc0_dungeon_v2.wad".to_string(), wad_bytes)],
+        texture_overrides: Vec::new(),
+        source_identity: "test_map.map".to_string(),
+    };
+    let world = BspLoader::load(&bsp_bytes, &options).expect("strict load must succeed");
+    assert!(
+        world.diagnostics.is_empty(),
+        "strict reload had diagnostics: {:?}",
+        world.diagnostics
+    );
+
+    let face_count = world.faces.len();
+    assert!(face_count > 0, "BSP has no faces");
+    let mut missing_lightofs: Vec<(usize, i32)> = Vec::new();
+    for (i, face) in world.faces.iter().enumerate() {
+        if face.lightofs < 0 {
+            missing_lightofs.push((i, face.lightofs));
+        }
+        // This static generated map must use style 0 for every lightmapped face.
+        assert_eq!(
+            face.styles[0], 0,
+            "face {i} has lightofs={} but style[0]={} instead of static style 0",
+            face.lightofs, face.styles[0]
+        );
+    }
+    assert!(
+        missing_lightofs.is_empty(),
+        "{} / {face_count} faces have lightofs < 0 (missing lightmap data); \
+         first 5: {:?}",
+        missing_lightofs.len(),
+        &missing_lightofs[..missing_lightofs.len().min(5)]
+    );
+    eprintln!("Lightmap coverage: {face_count} faces, all have lightofs >= 0 and valid style 0");
 
     fs::remove_dir_all(work).unwrap();
 }

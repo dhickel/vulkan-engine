@@ -22,6 +22,14 @@ const Q: i32 = CONSTRUCTION_QUANTUM as i32;
 const CORRIDOR_WIDTH: i32 = 64;
 const CORRIDOR_HEIGHT: i32 = 80;
 
+/// Minimum baked light level added to worldspawn so that ericw-tools `light`
+/// always produces lightmap data for sealed connector and stair surfaces.
+/// Without this, completely unilluminated faces receive `lightofs < 0` and
+/// the renderer falls back to a frozen neutral-albedo modulation, making
+/// dark connector geometry appear full-bright. Value 16 matches the proven
+/// source-map experiment (same seed, same face count, 0 missing lightmaps).
+const WORLDSPAWN_MINLIGHT: i32 = 16;
+
 // ── Opening descriptor ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -116,6 +124,7 @@ pub fn emit_map(
     let mut out = String::new();
     out.push_str("{\n\"classname\" \"worldspawn\"\n");
     out.push_str(&format!("\"wad\" \"{wad}\"\n"));
+    out.push_str(&format!("\"_minlight\" \"{WORLDSPAWN_MINLIGHT}\"\n"));
 
     // Emit room brushes
     for room in &placement.rooms {
