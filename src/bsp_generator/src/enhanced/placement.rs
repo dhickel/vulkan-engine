@@ -60,7 +60,7 @@ pub struct CandidateSocket {
 }
 
 /// The result of room placement — handoff to Phase 04 topology.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacementResult {
     pub rooms: Vec<PlacedRoom>,
     pub sockets: Vec<CandidateSocket>,
@@ -98,7 +98,8 @@ struct PlacementJournal {
 ///      - On first non-overlapping candidate: reserve, commit, break.
 ///    - If no candidate accepted: checkpoint is already up-to-date; return
 ///      exhaustion error with the count of rooms placed and total attempts.
-/// 4. Derive candidate sockets for every committed room.
+/// 4. After all room reservations commit, derive candidate sockets in room-ID
+///    order.
 /// 5. Sort all outputs by ID for canonical ordering.
 ///
 /// # Determinism
@@ -208,19 +209,14 @@ pub fn place_rooms(
                     // Reserve in grid
                     grid.reserve_rect(cx0, cy0, cx1 - cx0, cy1 - cy0, candidate.id)?;
 
-                    // Derive sockets for this room
-                    let room_sockets = derive_sockets(candidate, &mut alloc)?;
-
-                    // Commit
+                    // Commit the accepted candidate. Sockets are derived only
+                    // after every room placement has committed, below.
                     if *layer == lower_layer {
                         lower_rooms.push(candidate.id);
                     } else {
                         upper_rooms.push(candidate.id);
                     }
                     rooms.push(candidate.clone());
-                    for s in &room_sockets {
-                        sockets.push(s.clone());
-                    }
                     placed = true;
                     break;
                 }
@@ -248,6 +244,13 @@ pub fn place_rooms(
                 total_attempts,
             });
         }
+    }
+
+    // ── Derive sockets only from the fully committed room set ──────────
+    // Room IDs are allocation order, so this produces stable N/S/E/W socket
+    // blocks independent of candidate rejection history.
+    for room in &rooms {
+        sockets.extend(derive_sockets(room, &mut alloc)?);
     }
 
     // ── Sort for canonical order ───────────────────────────────────────
@@ -837,22 +840,86 @@ mod tests {
 
     #[test]
     fn replay_byte_identical() {
-        // Prove structural equality from same seed
         let cfg = EnhancedConfig::nominal();
         let a = place_rooms(&cfg, seed_rng(12345)).unwrap();
         let b = place_rooms(&cfg, seed_rng(12345)).unwrap();
 
-        assert_eq!(a.rooms, b.rooms);
-        assert_eq!(a.sockets, b.sockets);
-        assert_eq!(a.lower_rooms, b.lower_rooms);
-        assert_eq!(a.upper_rooms, b.upper_rooms);
-        // Also verify the grid cell contents are identical
-        for room in &a.rooms {
-            let (x0, y0, x1, y1) = room.shell;
-            let a_empty = a.grid.is_rect_empty(x0, y0, x1 - x0, y1 - y0).unwrap();
-            let b_empty = b.grid.is_rect_empty(x0, y0, x1 - x0, y1 - y0).unwrap();
-            assert_eq!(a_empty, b_empty);
-        }
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn placement_journal_restores_every_mutable_component() {
+        let mut grid = OccupancyGrid::new(512, 512).unwrap();
+        let mut rooms = Vec::new();
+        let mut sockets = Vec::new();
+        let mut lower_rooms = Vec::new();
+        let mut upper_rooms = Vec::new();
+        let mut alloc = IdAllocator::new();
+        let lower = alloc.next_layer().unwrap();
+        let upper = alloc.next_layer().unwrap();
+        let first_id = alloc.next_room().unwrap();
+        let first_socket_id = alloc.next_socket().unwrap();
+        let first = PlacedRoom {
+            id: first_id,
+            layer: lower,
+            floor_z: ENHANCED_LOWER_FLOOR_Z,
+            shell: (0, 0, 112, 112),
+            dims: (112, 112, ENHANCED_ROOM_HEIGHT as u32),
+        };
+        grid.reserve_rect(0, 0, 112, 112, first_id).unwrap();
+        rooms.push(first.clone());
+        lower_rooms.push(first_id);
+        sockets.push(CandidateSocket {
+            id: first_socket_id,
+            room: first_id,
+            wall: WallDirection::North,
+            anchor: (56, 112, 56),
+            width: SOCKET_APERTURE as u32,
+            transition_capable: true,
+        });
+        let journal = snapshot(&grid, &rooms, &sockets, &lower_rooms, &upper_rooms, &alloc);
+
+        let rejected_id = alloc.next_room().unwrap();
+        let rejected_socket_id = alloc.next_socket().unwrap();
+        grid.reserve_rect(128, 0, 112, 112, rejected_id).unwrap();
+        rooms.push(PlacedRoom {
+            id: rejected_id,
+            layer: upper,
+            floor_z: ENHANCED_UPPER_FLOOR_Z,
+            shell: (128, 0, 240, 112),
+            dims: (112, 112, ENHANCED_ROOM_HEIGHT as u32),
+        });
+        upper_rooms.push(rejected_id);
+        sockets.push(CandidateSocket {
+            id: rejected_socket_id,
+            room: rejected_id,
+            wall: WallDirection::South,
+            anchor: (184, 0, 248),
+            width: SOCKET_APERTURE as u32,
+            transition_capable: true,
+        });
+
+        restore(
+            journal,
+            &mut grid,
+            &mut rooms,
+            &mut sockets,
+            &mut lower_rooms,
+            &mut upper_rooms,
+            &mut alloc,
+        );
+
+        assert_eq!(rooms, vec![first]);
+        assert_eq!(lower_rooms, vec![first_id]);
+        assert!(upper_rooms.is_empty());
+        assert_eq!(sockets.len(), 1);
+        assert_eq!(
+            grid.owned_cell_count(),
+            (112 / Q) as usize * (112 / Q) as usize
+        );
+        assert!(grid.is_rect_empty(128, 0, 112, 112).unwrap());
+        assert_eq!(alloc.next_room().unwrap(), rejected_id);
+        assert_eq!(alloc.next_socket().unwrap(), rejected_socket_id);
     }
 
     #[test]

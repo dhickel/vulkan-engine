@@ -1,7 +1,5 @@
-//! Legacy v1 differential — prove all 12 frozen entries are unchanged.
-//!
-//! Regenerates the 12-entry corpus and asserts non-empty output.
-//! The authoritative byte-level comparison lives in corpus_execution.rs.
+//! Legacy v1 differential — prove deterministic byte identity for all 12
+//! frozen entries.
 
 use bsp_generator::DungeonConfig;
 
@@ -87,8 +85,18 @@ fn legacy_v1_all_12_entries_regenerate() {
         let (map_text, meta) = bsp_generator::generate(seed, config).unwrap_or_else(|e| {
             panic!("legacy generation failed for {label} (seed {seed}): {e:?}")
         });
+        let (replayed_map, replayed_meta) = bsp_generator::generate(seed, config_fn())
+            .unwrap_or_else(|e| panic!("legacy replay failed for {label} (seed {seed}): {e:?}"));
         assert!(!map_text.is_empty(), "{label}: empty map");
         assert!(meta.room_count > 0, "{label}: zero rooms");
+        assert_eq!(
+            map_text, replayed_map,
+            "{label}: legacy output differs across independent replays"
+        );
+        assert_eq!(
+            meta, replayed_meta,
+            "{label}: legacy metadata differs on replay"
+        );
     }
     eprintln!(
         "legacy_v1_differential: PASS ({} entries regenerated)",

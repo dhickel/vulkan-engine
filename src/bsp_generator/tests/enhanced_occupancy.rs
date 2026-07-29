@@ -191,6 +191,16 @@ fn negative_origin_rejected() {
 }
 
 #[test]
+fn non_quantum_rect_rejected_without_reservation() {
+    let mut g = grid_1024();
+    assert!(g.is_rect_empty(1, 0, 64, 64).is_err());
+    assert!(g.is_rect_empty(0, 1, 64, 64).is_err());
+    assert!(g.reserve_rect(0, 0, 63, 64, RoomId(0)).is_err());
+    assert!(g.reserve_rect(0, 0, 64, 63, RoomId(0)).is_err());
+    assert_eq!(g.owned_cell_count(), 0);
+}
+
+#[test]
 fn out_of_bounds_rejected() {
     let g = grid_1024();
     // Exactly at edge: (1008, 0) to (1024, 16) — fits within 0..1024

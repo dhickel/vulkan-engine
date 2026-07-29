@@ -42,7 +42,7 @@ impl GridCheckpoint {
 /// The grid covers `[0, width)` × `[0, height)` in Quake units at
 /// [`CONSTRUCTION_QUANTUM`] cell resolution. All public coordinates must
 /// be quantum-aligned.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OccupancyGrid {
     /// Grid dimensions in cells.
     cells_x: u32,
@@ -120,27 +120,73 @@ impl OccupancyGrid {
         Ok((self.cells_x as usize) * (cy as usize) + (cx as usize))
     }
 
+    /// Convert and validate a Quake-space rectangle into grid-cell space.
+    fn rect_cells(
+        &self,
+        x0: i32,
+        y0: i32,
+        w: i32,
+        h: i32,
+    ) -> Result<(u32, u32, u32, u32), EnhancedError> {
+        if x0 < 0 || y0 < 0 {
+            return Err(EnhancedError::ContractViolation {
+                detail: format!("negative rect origin: ({}, {})", x0, y0),
+            });
+        }
+        if w <= 0 || h <= 0 {
+            return Err(EnhancedError::ContractViolation {
+                detail: format!("non-positive rect: {}×{} at ({}, {})", w, h, x0, y0),
+            });
+        }
+
+        let quantum = Q as i32;
+        if x0 % quantum != 0 || y0 % quantum != 0 || w % quantum != 0 || h % quantum != 0 {
+            return Err(EnhancedError::ContractViolation {
+                detail: format!(
+                    "rect must be quantum-aligned: ({}, {}) {}×{} (quantum {})",
+                    x0, y0, w, h, Q,
+                ),
+            });
+        }
+
+        let qx0 = (x0 as u32) / Q;
+        let qy0 = (y0 as u32) / Q;
+        let qw = (w as u32) / Q;
+        let qh = (h as u32) / Q;
+        let qx1 = qx0
+            .checked_add(qw)
+            .ok_or(EnhancedError::ArithmeticOverflow {
+                operation: "rect_x_extent",
+            })?;
+        let qy1 = qy0
+            .checked_add(qh)
+            .ok_or(EnhancedError::ArithmeticOverflow {
+                operation: "rect_y_extent",
+            })?;
+
+        if qx1 > self.cells_x || qy1 > self.cells_y {
+            return Err(EnhancedError::ContractViolation {
+                detail: format!(
+                    "rect ({}, {}) {}×{} exceeds grid {}×{}",
+                    x0,
+                    y0,
+                    w,
+                    h,
+                    self.cells_x * Q,
+                    self.cells_y * Q,
+                ),
+            });
+        }
+        Ok((qx0, qy0, qw, qh))
+    }
+
     /// Check whether a rectangular region is entirely unclaimed.
     ///
     /// All coordinates are in Quake units and must be quantum-aligned.
     /// `x0`, `y0` are the minimum-corner position; `w`, `h` are positive
     /// multiples of the quantum.
     pub fn is_rect_empty(&self, x0: i32, y0: i32, w: i32, h: i32) -> Result<bool, EnhancedError> {
-        if x0 < 0 || y0 < 0 {
-            return Err(EnhancedError::ContractViolation {
-                detail: format!("negative rect origin: ({}, {})", x0, y0),
-            });
-        }
-        let qx0 = (x0 as u32) / Q;
-        let qy0 = (y0 as u32) / Q;
-        let qw = (w as u32) / Q;
-        let qh = (h as u32) / Q;
-
-        if qw == 0 || qh == 0 {
-            return Err(EnhancedError::ContractViolation {
-                detail: format!("zero-area rect: {}×{} at ({}, {})", w, h, x0, y0),
-            });
-        }
+        let (qx0, qy0, qw, qh) = self.rect_cells(x0, y0, w, h)?;
 
         for dy in 0..qh {
             for dx in 0..qw {
@@ -165,21 +211,7 @@ impl OccupancyGrid {
         h: i32,
         owner: RoomId,
     ) -> Result<(), EnhancedError> {
-        if x0 < 0 || y0 < 0 {
-            return Err(EnhancedError::ContractViolation {
-                detail: format!("negative rect origin: ({}, {})", x0, y0),
-            });
-        }
-        let qx0 = (x0 as u32) / Q;
-        let qy0 = (y0 as u32) / Q;
-        let qw = (w as u32) / Q;
-        let qh = (h as u32) / Q;
-
-        if qw == 0 || qh == 0 {
-            return Err(EnhancedError::ContractViolation {
-                detail: format!("zero-area rect: {}×{} at ({}, {})", w, h, x0, y0),
-            });
-        }
+        let (qx0, qy0, qw, qh) = self.rect_cells(x0, y0, w, h)?;
 
         // Two-pass: first check all cells, then write.
         // This avoids partial reservation on conflict.
@@ -291,6 +323,15 @@ mod tests {
         let g = make_grid();
         assert!(g.is_rect_empty(-16, 0, 64, 64).is_err());
         assert!(g.is_rect_empty(0, -16, 64, 64).is_err());
+    }
+
+    #[test]
+    fn non_quantum_rect_rejected() {
+        let mut g = make_grid();
+        assert!(g.is_rect_empty(1, 0, 64, 64).is_err());
+        assert!(g.is_rect_empty(0, 1, 64, 64).is_err());
+        assert!(g.reserve_rect(0, 0, 63, 64, RoomId(0)).is_err());
+        assert!(g.reserve_rect(0, 0, 64, 63, RoomId(0)).is_err());
     }
 
     #[test]

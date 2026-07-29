@@ -72,10 +72,7 @@ fn replay_from_same_seed_byte_identical() {
     let cfg = EnhancedConfig::nominal();
     let a = place_rooms(&cfg, seed_rng(12345)).unwrap();
     let b = place_rooms(&cfg, seed_rng(12345)).unwrap();
-    assert_eq!(a.rooms, b.rooms, "rooms differ on replay");
-    assert_eq!(a.sockets, b.sockets, "sockets differ on replay");
-    assert_eq!(a.lower_rooms, b.lower_rooms);
-    assert_eq!(a.upper_rooms, b.upper_rooms);
+    assert_eq!(a, b, "placement results differ on replay");
 }
 
 #[test]
@@ -405,7 +402,24 @@ fn socket_transition_capable() {
 fn sockets_canonical_order() {
     let cfg = EnhancedConfig::nominal();
     let result = place_rooms(&cfg, seed_rng(43)).unwrap();
-    // Sockets should be sorted by ID (ascending)
+    for room in &result.rooms {
+        let walls: Vec<_> = result
+            .sockets
+            .iter()
+            .filter(|socket| socket.room == room.id)
+            .map(|socket| socket.wall)
+            .collect();
+        let mut expected = Vec::new();
+        let width = room.shell.2 - room.shell.0;
+        let height = room.shell.3 - room.shell.1;
+        if width >= MIN_WALL_FOR_SOCKET {
+            expected.extend([WallDirection::North, WallDirection::South]);
+        }
+        if height >= MIN_WALL_FOR_SOCKET {
+            expected.extend([WallDirection::East, WallDirection::West]);
+        }
+        assert_eq!(walls, expected);
+    }
     for w in result.sockets.windows(2) {
         assert!(w[0].id <= w[1].id);
     }
