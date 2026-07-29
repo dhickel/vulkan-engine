@@ -68,6 +68,7 @@ fn run(args: Vec<String>) -> CliResult<String> {
         "scan-assets" => scan_assets_cmd(rest),
         "add-asset" => add_asset_cmd(rest),
         "pack" => pack_cmd(rest),
+        "enhanced-dungeon" => enhanced_dungeon_cmd(rest),
         "-h" | "--help" | "help" => Ok(cli::global_help()),
         other => Err(CliError::Usage(format!(
             "unknown command '{other}'\n\n{}",
@@ -593,6 +594,243 @@ fn compile_bsp_cmd(args: &[String]) -> CliResult<String> {
             profile.compiler_identity,
             profile_family,
             manifest_sha256
+        ))
+    })();
+
+    if result.is_err() {
+        cleanup_staging(&staging);
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// enhanced-dungeon — generate, compile, and publish an Enhanced v2 dungeon
+// ---------------------------------------------------------------------------
+
+/// Default compiler profile bundled with engine_pack.
+const DEFAULT_BSP2_PROFILE: &str = include_str!("../../bsp_authoring/ericw-q1-bsp2-generated-profile.toml");
+
+/// Resolve the CC0 Stone Beta theme directory relative to the bsp_generator crate.
+fn cc0_stone_beta_dir() -> PathBuf {
+    // bsp_generator's Cargo.toml is at src/bsp_generator/
+    // The theme dir is at src/bsp_generator/themes/cc0_stone_beta/
+    // From engine_pack (tools/engine_pack/), that's ../../src/bsp_generator/themes/cc0_stone_beta/
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../src/bsp_generator/themes/cc0_stone_beta")
+}
+
+fn enhanced_dungeon_cmd(args: &[String]) -> CliResult<String> {
+    let parsed = cli::parse_command("enhanced-dungeon", cli::enhanced_dungeon_schema(), args);
+    let parsed = parsed.into_result().map_err(CliError::Usage)?;
+
+    let seed_str = require_option("--seed", &parsed)?;
+    let seed: u64 = seed_str.parse().map_err(|_| {
+        CliError::Usage(format!("invalid --seed value: '{seed_str}'"))
+    })?;
+
+    let out_dir = PathBuf::from(require_option("--out", &parsed)?);
+    let tool_path = parsed.singleton_value("--tool-path").map(PathBuf::from);
+    let name = parsed
+        .singleton_value("--name")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "enhanced_dungeon".to_string());
+
+    // Build EnhancedConfig from optional overrides, falling back to nominal
+    let rooms: u32 = parsed
+        .singleton_value("--rooms")
+        .map(|s| {
+            s.parse()
+                .map_err(|_| CliError::Usage(format!("invalid --rooms: '{s}'")))
+        })
+        .unwrap_or(Ok(28))?;
+    let loops: u32 = parsed
+        .singleton_value("--loops")
+        .map(|s| {
+            s.parse()
+                .map_err(|_| CliError::Usage(format!("invalid --loops: '{s}'")))
+        })
+        .unwrap_or(Ok(3))?;
+    let vertical_edges: u32 = parsed
+        .singleton_value("--vertical-edges")
+        .map(|s| {
+            s.parse()
+                .map_err(|_| CliError::Usage(format!("invalid --vertical-edges: '{s}'")))
+        })
+        .unwrap_or(Ok(1))?;
+
+    let config = bsp_generator::enhanced::config::EnhancedConfig::new(
+        rooms,
+        loops,
+        vertical_edges,
+        bsp_generator::enhanced::config::ENHANCED_TREAD_DEFAULT,
+        2048,
+    )
+    .map_err(|err| {
+        CliError::Usage(format!("invalid enhanced config: {err}"))
+    })?;
+
+    // ── Read or use default profile ───────────────────────────────
+    let profile_content = if let Some(profile_path) = parsed.singleton_value("--profile") {
+        std::fs::read_to_string(&profile_path).map_err(|err| {
+            io_error("enhanced-dungeon.profile", Path::new(&profile_path), err)
+        })?
+    } else {
+        DEFAULT_BSP2_PROFILE.to_string()
+    };
+    let profile = compiler::parse_compiler_profile(&profile_content).map_err(|msg| {
+        CliError::Validation(internal_error(
+            "bsp.profile",
+            format!("invalid compiler profile: {msg}"),
+        ))
+    })?;
+
+    // ── Resolve theme assets ──────────────────────────────────────
+    let theme_dir = cc0_stone_beta_dir();
+    let palette_path = theme_dir.join("palette.lmp");
+    let wad_path = theme_dir.join("cc0_stone_beta.wad");
+
+    for input in [&palette_path, &wad_path] {
+        let path = input.as_path();
+        compiler::validate_input_regular(path).map_err(|err| {
+            CliError::Validation(ValidationError::single(
+                ValidationDiagnostic::new(
+                    "enhanced-dungeon.input",
+                    ValidationArea::Asset,
+                    format!("invalid theme asset: {err}"),
+                )
+                .with_path(path),
+            ))
+        })?;
+    }
+
+    // ── Check destination ─────────────────────────────────────────
+    if path_exists_no_follow(&out_dir) {
+        return Err(CliError::FsTx(fs_tx::FsTxError::ExistingTarget(
+            out_dir.clone(),
+        )));
+    }
+
+    // ── Recover orphaned staging ──────────────────────────────────
+    fs_tx::recover_orphaned_staging(&out_dir);
+
+    // ── Create staging ────────────────────────────────────────────
+    let staging = create_staging_sibling(&out_dir).map_err(CliError::FsTx)?;
+
+    let result = (|| -> CliResult<String> {
+        // 1. Generate enhanced map
+        let (map_text, meta) = bsp_generator::generate_enhanced(seed, config.clone())
+            .map_err(|err| {
+                CliError::Validation(internal_error(
+                    "enhanced-dungeon.generate",
+                    format!("generation failed: {err}"),
+                ))
+            })?;
+
+        // 2. Write .map source into staging
+        let map_filename = format!("{name}.map");
+        let map_path = staging.join(&map_filename);
+        std::fs::write(&map_path, &map_text)
+            .map_err(|err| io_error("enhanced-dungeon.write_map", &map_path, err))?;
+
+        // 3. Compile
+        let work_dir = staging.join(".compile-work");
+        std::fs::create_dir_all(&work_dir)
+            .map_err(|err| io_error("enhanced-dungeon.workdir", &work_dir, err))?;
+
+        let compile_result = compiler::compile_map(
+            &map_path,
+            &profile,
+            &work_dir,
+            &palette_path,
+            tool_path.as_deref(),
+            &[wad_path.clone()],
+        )
+        .map_err(|err| {
+            CliError::Validation(ValidationError::single(
+                ValidationDiagnostic::new(
+                    "enhanced-dungeon.compile",
+                    ValidationArea::Asset,
+                    format!("compilation failed: {err}"),
+                )
+                .with_path(&map_path),
+            ))
+        })?;
+
+        // Clean up work directory
+        let _ = std::fs::remove_dir_all(&work_dir);
+
+        // 4. Stage compiled .bsp
+        let bsp_path = staging.join(format!("{name}.bsp"));
+        std::fs::write(&bsp_path, &compile_result.bsp_data)
+            .map_err(|err| io_error("enhanced-dungeon.write_bsp", &bsp_path, err))?;
+
+        // 5. Stage .lit companion
+        if let Some(ref lit_data) = compile_result.lit_data {
+            let lit_path = staging.join(format!("{name}.lit"));
+            std::fs::write(&lit_path, lit_data)
+                .map_err(|err| io_error("enhanced-dungeon.write_lit", &lit_path, err))?;
+        }
+
+        // 6. Stage palette
+        let palette_bytes = std::fs::read(&palette_path)
+            .map_err(|err| io_error("enhanced-dungeon.read_palette", &palette_path, err))?;
+        let palette_staged = staging.join("palette.lmp");
+        std::fs::write(&palette_staged, &palette_bytes)
+            .map_err(|err| io_error("enhanced-dungeon.write_palette", &palette_staged, err))?;
+
+        // 7. Stage WAD
+        let wad_basename = wad_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("cc0_stone_beta.wad");
+        let wad_staged = staging.join(wad_basename);
+        std::fs::copy(&wad_path, &wad_staged)
+            .map_err(|err| io_error("enhanced-dungeon.copy_wad", &wad_path, err))?;
+
+        // 8. Write metadata.json
+        let metadata = serde_json::json!({
+            "format_version": 1,
+            "generator": "bsp_generator::enhanced",
+            "seed": seed,
+            "config": {
+                "rooms": rooms,
+                "loops": loops,
+                "vertical_edges": vertical_edges,
+                "tread_depth": bsp_generator::enhanced::config::ENHANCED_TREAD_DEFAULT,
+                "xy_extent": 2048_u32,
+            },
+            "output": {
+                "room_count": meta.room_count,
+                "route_count": meta.route_count,
+                "transition_count": meta.transition_count,
+                "lower_floor_z": meta.lower_floor_z,
+                "upper_floor_z": meta.upper_floor_z,
+                "spawn_origin": meta.spawn_origin,
+                "light_count": meta.light_count,
+                "pillar_count": meta.pillar_count,
+            },
+            "compiler": {
+                "identity": compile_result.provenance.compiler_identity,
+                "version": compile_result.provenance.compiler_version,
+            },
+            "map_filename": map_filename,
+        });
+        let metadata_path = staging.join("metadata.json");
+        std::fs::write(
+            &metadata_path,
+            serde_json::to_string_pretty(&metadata).unwrap(),
+        )
+        .map_err(|err| io_error("enhanced-dungeon.write_metadata", &metadata_path, err))?;
+
+        // 9. Publish atomically
+        publish_staging(&staging, &out_dir).map_err(CliError::FsTx)?;
+
+        Ok(format!(
+            "published[enhanced-dungeon]: seed={seed} -> {}/ ({} rooms, {} routes, {} transitions)",
+            out_dir.display(),
+            meta.room_count,
+            meta.route_count,
+            meta.transition_count,
         ))
     })();
 

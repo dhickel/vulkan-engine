@@ -189,6 +189,92 @@ pub fn add_asset_schema() -> &'static [CliOption] {
     ]
 }
 
+/// Schema for `enhanced-dungeon --seed <u64> --out <dir> [--tool-path <dir>] [--rooms <n>] [--loops <n>] [--vertical-edges <n>]`
+pub fn enhanced_dungeon_schema() -> &'static [CliOption] {
+    &[
+        CliOption {
+            name: "--seed",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Master seed for deterministic generation",
+            value_placeholder: Some("<u64>"),
+        },
+        CliOption {
+            name: "--out",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Output directory for published artifact set",
+            value_placeholder: Some("<dir>"),
+        },
+        CliOption {
+            name: "--tool-path",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Directory containing qbsp, vis, light executables",
+            value_placeholder: Some("<dir>"),
+        },
+        CliOption {
+            name: "--rooms",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Number of rooms (M2 range: 17-40, default: 28)",
+            value_placeholder: Some("<n>"),
+        },
+        CliOption {
+            name: "--loops",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Number of horizontal loops (default: 3)",
+            value_placeholder: Some("<n>"),
+        },
+        CliOption {
+            name: "--vertical-edges",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Number of vertical transitions (1-3, default: 1)",
+            value_placeholder: Some("<n>"),
+        },
+        CliOption {
+            name: "--name",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Base name for output files (default: 'enhanced_dungeon')",
+            value_placeholder: Some("<name>"),
+        },
+        CliOption {
+            name: "--profile",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Compiler profile TOML (default: bundled ericw-q1-bsp2-generated)",
+            value_placeholder: Some("<profile.toml>"),
+        },
+    ]
+}
+
 /// Schema for `pack <engine.project.toml> --out <dir>`
 pub fn pack_schema() -> &'static [CliOption] {
     &[CliOption {
@@ -298,7 +384,7 @@ pub struct CommandSchema {
     pub options: &'static [CliOption],
 }
 
-pub fn command_schemas() -> [CommandSchema; 11] {
+pub fn command_schemas() -> [CommandSchema; 12] {
     [
         CommandSchema {
             name: "validate-package",
@@ -365,6 +451,12 @@ pub fn command_schemas() -> [CommandSchema; 11] {
             usage: "engine_pack pack <engine.project.toml> --out <dir>",
             description: "Validate and publish a project package into a new output directory.",
             options: pack_schema(),
+        },
+        CommandSchema {
+            name: "enhanced-dungeon",
+            usage: "engine_pack enhanced-dungeon --seed <u64> --out <dir> [--tool-path <dir>] [--rooms <n>] [--loops <n>] [--vertical-edges <n>] [--name <name>]",
+            description: "Generate, compile, and publish an Enhanced v2 dungeon.",
+            options: enhanced_dungeon_schema(),
         },
     ]
 }
@@ -473,6 +565,7 @@ mod tests {
             "scan-assets",
             "add-asset",
             "pack",
+            "enhanced-dungeon",
         ] {
             assert!(help.contains(cmd), "help missing command: {cmd}");
         }

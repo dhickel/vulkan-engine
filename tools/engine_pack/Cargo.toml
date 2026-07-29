@@ -12,9 +12,7 @@ serde_json = "=1.0.145"
 toml = "=0.8.23"
 bsp = { path = "../../src/bsp" }
 bsp_runtime = { path = "../../src/bsp_runtime" }
+bsp_generator = { path = "../../src/bsp_generator" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-[dev-dependencies]
-bsp_generator = { path = "../../src/bsp_generator" }
