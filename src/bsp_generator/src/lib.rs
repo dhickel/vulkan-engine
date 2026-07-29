@@ -38,6 +38,7 @@
 
 pub mod config;
 pub mod emission;
+pub mod enhanced;
 pub mod error;
 pub mod geometry;
 pub mod intent;
