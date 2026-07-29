@@ -13,7 +13,7 @@ const Q: i32 = 16;
 
 /// Emit a complete Enhanced v2 .map file.
 pub fn emit_map(
-    config: &EnhancedConfig,
+    _config: &EnhancedConfig,
     rooms: &[PlacedRoom],
     topology: &TopologyResult,
     _wad_basename: &str,
@@ -204,7 +204,9 @@ mod tests {
             seed.stage_seed(super::super::seed::tags::LAYER_PLACEMENT),
         )
         .unwrap();
-        let mut topo_rng = seed.stage_seed(super::super::seed::tags::VERTICAL_TOPOLOGY);
+        let mut topo_rng = seed
+            .stage_seed(super::super::seed::tags::VERTICAL_TOPOLOGY)
+            .rng();
         let topo = build_topology(&cfg, &placement, &mut topo_rng).unwrap();
         let map = emit_map(&cfg, &placement.rooms, &topo, "cc0_stone_beta.wad").unwrap();
         assert!(!map.is_empty());

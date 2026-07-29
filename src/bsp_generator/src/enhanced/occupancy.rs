@@ -6,7 +6,7 @@
 use crate::config::CONSTRUCTION_QUANTUM;
 
 use super::error::EnhancedError;
-use super::intent::RoomId;
+use super::intent::{ReservationId, RoomId, RouteId, TransitionId};
 
 const Q: u32 = CONSTRUCTION_QUANTUM;
 
@@ -17,6 +17,12 @@ pub enum Owner {
     Empty,
     /// Owned by a room shell.
     Room(RoomId),
+    /// Owned by a horizontal route.
+    Route(RouteId),
+    /// Owned by a vertical transition (stair).
+    Transition(TransitionId),
+    /// A generic reservation (used for partial staging).
+    Reservation(ReservationId),
 }
 
 /// A snapshot of the grid for checkpoint/rollback.
@@ -93,6 +99,16 @@ impl OccupancyGrid {
     /// Number of cells along the Y axis.
     pub fn cells_y(&self) -> u32 {
         self.cells_y
+    }
+
+    /// Read-only access to the cell array (for manual checks).
+    pub fn cells(&self) -> &[Owner] {
+        &self.cells
+    }
+
+    /// Mutable access to the cell array (for manual writes).
+    pub fn cells_mut(&mut self) -> &mut [Owner] {
+        &mut self.cells
     }
 
     /// Capture a full checkpoint of the grid.
@@ -199,10 +215,35 @@ impl OccupancyGrid {
         Ok(true)
     }
 
+    /// Reserve a rectangular region for a generic owner.
+    ///
+    /// All coordinates are in Quake units and must be quantum-aligned.
+    /// V2: lenient — overwrites any existing owner without error
+    /// (used for routes and transitions which can share cells).
+    pub fn reserve_rect_owner(
+        &mut self,
+        x0: i32,
+        y0: i32,
+        w: i32,
+        h: i32,
+        owner: Owner,
+    ) -> Result<(), EnhancedError> {
+        let (qx0, qy0, qw, qh) = self.rect_cells(x0, y0, w, h)?;
+
+        for dy in 0..qh {
+            for dx in 0..qw {
+                let idx = self.cell_index(qx0 + dx, qy0 + dy)?;
+                self.cells[idx] = owner;
+            }
+        }
+        Ok(())
+    }
+
     /// Reserve a rectangular region for a room.
     ///
     /// All coordinates are in Quake units and must be quantum-aligned.
-    /// Returns an error if any cell in the region is already owned.
+    /// Returns an error if any cell in the region is already owned by
+    /// another room (rooms must not overlap).
     pub fn reserve_rect(
         &mut self,
         x0: i32,
@@ -213,13 +254,75 @@ impl OccupancyGrid {
     ) -> Result<(), EnhancedError> {
         let (qx0, qy0, qw, qh) = self.rect_cells(x0, y0, w, h)?;
 
-        // Two-pass: first check all cells, then write.
-        // This avoids partial reservation on conflict.
+        // Two-pass: first check all cells for room-room conflicts only.
         for dy in 0..qh {
             for dx in 0..qw {
                 let idx = self.cell_index(qx0 + dx, qy0 + dy)?;
                 match self.cells[idx] {
                     Owner::Empty => {}
+                    Owner::Room(_) => {
+                        return Err(EnhancedError::ContractViolation {
+                            detail: format!(
+                                "cell ({}, {}) already owned by another room",
+                                (qx0 + dx) * Q,
+                                (qy0 + dy) * Q,
+                            ),
+                        });
+                    }
+                    _ => {} // Routes/transitions can coexist with rooms
+                }
+            }
+        }
+
+        for dy in 0..qh {
+            for dx in 0..qw {
+                let idx = self.cell_index(qx0 + dx, qy0 + dy)?;
+                self.cells[idx] = Owner::Room(owner);
+            }
+        }
+        Ok(())
+    }
+
+    /// Check whether a single cell at the given Quake coordinates is empty
+    /// or owned by any of the given room IDs.
+    ///
+    /// Coordinates must be quantum-aligned.
+    pub fn is_cell_empty_or_owned_by(
+        &self,
+        qx: i32,
+        qy: i32,
+        allowed_rooms: &[RoomId],
+    ) -> Result<bool, EnhancedError> {
+        let cx = (qx as u32) / Q;
+        let cy = (qy as u32) / Q;
+        let idx = self.cell_index(cx, cy)?;
+        match self.cells[idx] {
+            Owner::Empty => Ok(true),
+            Owner::Room(rid) => Ok(allowed_rooms.contains(&rid)),
+            Owner::Route(_) | Owner::Transition(_) | Owner::Reservation(_) => Ok(false),
+        }
+    }
+
+    /// Reserve a rectangular region, allowing cells already owned by the
+    /// given `allowed_rooms` to be overwritten.
+    pub fn reserve_rect_allow_rooms(
+        &mut self,
+        x0: i32,
+        y0: i32,
+        w: i32,
+        h: i32,
+        owner: Owner,
+        allowed_rooms: &[RoomId],
+    ) -> Result<(), EnhancedError> {
+        let (qx0, qy0, qw, qh) = self.rect_cells(x0, y0, w, h)?;
+
+        // Two-pass: first check all cells
+        for dy in 0..qh {
+            for dx in 0..qw {
+                let idx = self.cell_index(qx0 + dx, qy0 + dy)?;
+                match self.cells[idx] {
+                    Owner::Empty => {}
+                    Owner::Room(rid) if allowed_rooms.contains(&rid) => {}
                     other => {
                         return Err(EnhancedError::ContractViolation {
                             detail: format!(
@@ -237,7 +340,7 @@ impl OccupancyGrid {
         for dy in 0..qh {
             for dx in 0..qw {
                 let idx = self.cell_index(qx0 + dx, qy0 + dy)?;
-                self.cells[idx] = Owner::Room(owner);
+                self.cells[idx] = owner;
             }
         }
         Ok(())

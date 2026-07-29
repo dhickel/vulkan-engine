@@ -33,6 +33,7 @@ newtype_id!(RoomId, "RoomId");
 newtype_id!(SocketId, "SocketId");
 newtype_id!(RouteId, "RouteId");
 newtype_id!(TransitionId, "TransitionId");
+newtype_id!(ReservationId, "ReservationId");
 newtype_id!(ZoneId, "ZoneId");
 newtype_id!(PaletteId, "PaletteId");
 
@@ -46,6 +47,7 @@ pub struct IdAllocator {
     next_socket: u32,
     next_route: u32,
     next_transition: u32,
+    next_reservation: u32,
     next_zone: u32,
     next_palette: u32,
 }
@@ -58,6 +60,7 @@ impl IdAllocator {
             next_socket: 0,
             next_route: 0,
             next_transition: 0,
+            next_reservation: 0,
             next_zone: 0,
             next_palette: 0,
         }
@@ -96,6 +99,12 @@ impl IdAllocator {
         Ok(TransitionId(Self::checked_inc(
             &mut self.next_transition,
             "transition_id",
+        )?))
+    }
+    pub fn next_reservation(&mut self) -> Result<ReservationId, EnhancedError> {
+        Ok(ReservationId(Self::checked_inc(
+            &mut self.next_reservation,
+            "reservation_id",
         )?))
     }
     pub fn next_zone(&mut self) -> Result<ZoneId, EnhancedError> {

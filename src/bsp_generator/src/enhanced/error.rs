@@ -38,6 +38,22 @@ pub enum EnhancedError {
         height: u32,
         xy_extent: u32,
     },
+    /// Topology construction exhausted all backtracking alternatives.
+    TopologyExhausted {
+        detail: String,
+    },
+    /// A* routing exhausted its expansion budget.
+    RouteExhausted {
+        expansions: u32,
+    },
+    /// A stair transition reservation failed (no compatible socket pair).
+    TransitionReservationFailed {
+        detail: String,
+    },
+    /// Post-commit topology validation failed.
+    TopologyValidationFailed {
+        detail: String,
+    },
 }
 
 impl fmt::Display for EnhancedError {
@@ -95,6 +111,18 @@ impl fmt::Display for EnhancedError {
                     "room {} ({}×{}) cannot fit within xy_extent {}",
                     room_index, width, height, xy_extent
                 )
+            }
+            Self::TopologyExhausted { detail } => {
+                write!(f, "topology exhausted: {}", detail)
+            }
+            Self::RouteExhausted { expansions } => {
+                write!(f, "A* routing exhausted after {} expansions", expansions)
+            }
+            Self::TransitionReservationFailed { detail } => {
+                write!(f, "transition reservation failed: {}", detail)
+            }
+            Self::TopologyValidationFailed { detail } => {
+                write!(f, "topology validation failed: {}", detail)
             }
         }
     }
