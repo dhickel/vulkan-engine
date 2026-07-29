@@ -182,6 +182,8 @@ impl EnhancedStageRng {
         }
     }
 }
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

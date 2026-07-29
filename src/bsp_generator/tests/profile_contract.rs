@@ -1,10 +1,7 @@
 //! Profile contract tests — strict validation of Enhanced v2 types.
 
 use bsp_generator::enhanced::config::EnhancedConfig;
-use bsp_generator::enhanced::error::EnhancedError;
-use bsp_generator::enhanced::intent::{
-    validate_sorted_ids, IdAllocator, LayerId, RoomId, RoomIntent,
-};
+use bsp_generator::enhanced::intent::{validate_sorted_ids, IdAllocator, RoomId};
 use bsp_generator::enhanced::profile::{GenerationProfile, GenerationRequest};
 use bsp_generator::enhanced::seed::{tags, EnhancedSeed};
 
