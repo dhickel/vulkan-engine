@@ -19,6 +19,8 @@ All construction parameters, bounds, and serialization rules are frozen in `.int
 
 ## Source Layout
 
+### Legacy v1
+
 ```
 src/
   lib.rs          — crate root, generate(), GenerationMetadata, re-exports
@@ -61,6 +63,45 @@ themes/cc0_stone_beta/
   textures/             — PBR companion PNGs
 ```
 
+### Enhanced v2
+
+```
+src/enhanced/
+  mod.rs          — module declarations
+  profile.rs      — GenerationProfile (LegacyV1 | EnhancedV2), GenerationRequest
+  config.rs       — EnhancedConfig, frozen vertical contract constants
+  error.rs        — EnhancedError typed variants
+  seed.rs         — EnhancedSeed, EnhancedStageSeed, EnhancedStageRng
+                     (domain "dungeon-gen/v2", 6 frozen stage tags)
+  intent.rs       — typed newtype IDs (LayerId, RoomId, SocketId, RouteId,
+                     TransitionId, ReservationId, ZoneId, PaletteId),
+                     IdAllocator, RouteIntent, TransitionIntent
+  occupancy.rs    — OccupancyGrid with owner-bearing projected XY cells,
+                     GridCheckpoint snapshots
+  placement.rs    — place_rooms() — RNG-driven two-layer placement with
+                     balanced membership, transactional journal rollback,
+                     socket derivation from committed room walls
+  topology.rs     — build_topology() — per-layer MST + loop edges,
+                     canonical socket-pair backtracking, stair reservations
+  routing.rs      — route_sockets() — width-aware A* corridor routing
+  reservation.rs  — Transaction with mark/rollback/commit, socket claims,
+                     loop budget tracking
+  transition.rs   — reserve_transitions() — 12-tread direct stair reservations
+  theme.rs        — ThemePackage (frozen CC0 Dungeon v2), PaletteDefinition,
+                     RoomRole derivation, AssignmentStrategy, zone partitioning
+  features.rs     — apply_features() — corridor width (64/80/96),
+                     ceiling height (128/144/176), pillars, spawn/light origins
+  emission.rs     — emit_map() — explicit room shells, wall aperture masking,
+                     corridor union, stairwell sealing, canonical .map text
+  metadata.rs     — re-exports EnhancedMetadata from pipeline
+  pipeline.rs     — generate_enhanced() — full pipeline entry point
+
+themes/cc0_dungeon_v2/
+  build.py              — deterministic asset generator
+  palette.lmp           — 768-byte Quake palette
+  cc0_dungeon_v2.wad    — WAD2 texture archive
+```
+
 ## Key Design Rules
 
 1. **No renderer/Vulkan/windowing deps**: This crate is an offline pipeline. If you need BSP loading or rendering, use `bsp_runtime` + `renderer` downstream.
@@ -99,6 +140,120 @@ The `corpus_execution` test requires `ericw-tools 2.0.0-alpha3` installed at `~/
 - Non-solid `point_contents` at room centers, point-entity origins, corridor centers, portal throats, and junction centers
 - Deterministic byte-identical output across duplicate runs
 - Face/entity ceilings and M2 tier separation (static-batch ceiling enforcement remains tracked by GitHub #57)
+
+## Enhanced v2 Pipeline
+
+The Enhanced v2 generator is an additive profile that produces M2-only, two-layer
+dungeons with stairs, theme palette assignment, and corridor/ceiling/pillar
+variance. It lives in `src/enhanced/` and is structurally disjoint from Legacy v1.
+
+### Quick Start
+
+```rust
+use bsp_generator::enhanced::pipeline::generate_enhanced;
+use bsp_generator::enhanced::config::EnhancedConfig;
+
+// Generate a nominal M2 two-layer dungeon (28 rooms, 3 loops, 1 stair)
+let cfg = EnhancedConfig::nominal();
+let (map_text, meta) = generate_enhanced(42, cfg)?;
+
+assert_eq!(meta.room_count, 28);
+assert!(meta.transition_count > 0);
+assert!(meta.light_count > 0);
+```
+
+### EnhancedConfig API
+
+`EnhancedConfig` validates at construction — no separate `validate()` step:
+
+```rust
+use bsp_generator::enhanced::config::EnhancedConfig;
+
+// Full validation at construction
+let cfg = EnhancedConfig::new(28, 3, 1, 16, 2048)?;
+
+// With explicit placement and feature parameters
+let cfg = EnhancedConfig::with_full_params(
+    28,   // room_count   (17–40, M2 only)
+    3,    // loop_count   (1–6)
+    1,    // vertical_edges (1–3)
+    16,   // tread_depth  (16 or 32)
+    2048, // xy_extent    (≤ 3072, multiple of 16)
+    32,   // placement_candidates
+    96,   // max_placement_attempts
+    2,    // max_pillars_per_room (0–8)
+)?;
+```
+
+**Convenience constructors:**
+- `EnhancedConfig::nominal()` — 28 rooms, 3 loops, 1 stair, 2048²
+- `EnhancedConfig::minimal()` — 17 rooms, 1 loop, 1 stair, 1024²
+- `EnhancedConfig::maximal()` — 40 rooms, 6 loops, 3 stairs, 3072²
+
+### Vertical Contract (frozen)
+
+| parameter | value |
+|-----------|-------|
+| lower floor Z | 0 |
+| upper floor Z | 192 |
+| room height (both layers) | 176 |
+| riser | 16 |
+| tread (default) | 16 |
+| tread (alternative) | 32 |
+| total Z span | 368 (≤ 384 M2 max) |
+| layer count | 2 (frozen) |
+
+### RNG Domains
+
+Enhanced v2 uses domain separator `"dungeon-gen/v2"` — **independent** from
+Legacy v1's `"dungeon-gen/v1"`. Stage tags are:
+
+| tag | stage |
+|-----|-------|
+| `layer-placement` | two-layer room placement |
+| `vertical-topology` | topology and transition selection |
+| `vertical-routing` | reserved for future vertical routing |
+| `theme-assignment` | palette assignment |
+| `feature-placement` | pillars, ceiling variance |
+| `corridor-variance` | per-route corridor width |
+
+### Theme Package
+
+The Enhanced v2 theme is `themes/cc0_dungeon_v2/cc0_dungeon_v2.wad` — a
+distinct CC0 theme from Legacy v1's `cc0_stone_beta.wad`. Both are project-authored,
+CC0-licensed, and deterministically built via `build.py`.
+
+### Key Differences from Legacy v1
+
+| aspect | Legacy v1 | Enhanced v2 |
+|--------|-----------|-------------|
+| domain | `"dungeon-gen/v1"` | `"dungeon-gen/v2"` |
+| map classes | M1 + M2 | M2 only |
+| layers | 1 (flat) | 2 (lower + upper) |
+| vertical connections | none | stairs (12-tread sealed shells) |
+| config type | `DungeonConfig` + `validate()` | `EnhancedConfig` (validates at construction) |
+| entry point | `generate(seed, config)` | `generate_enhanced(seed, config)` |
+| room placement | same-layer, no membership balancing | two-layer, balanced membership |
+| topology | Kruskal MST + loops (flat) | per-layer MST + loops + stair reservations |
+| theme | CC0 Stone Beta (uniform) | CC0 Dungeon v2 (Uniform + ByZone strategies) |
+| corridor width | fixed 64 | per-route variance (64/80/96) |
+| ceiling height | fixed (z_span) | per-room variance (128/144/176) |
+| pillars | none | per-room freestanding pillars |
+| room roles | none | Entry / Hub / DeadEnd / Side |
+| error type | `GeneratorError` | `EnhancedError` |
+| metadata | `GenerationMetadata` | `EnhancedMetadata` |
+
+### Corpus Evidence
+
+Enhanced v2 tests live in the enhanced module (inline `#[cfg(test)] mod tests`)
+and the `pipeline.rs` integration tests. Run with:
+
+```bash
+cargo test -p bsp_generator
+```
+
+Key tests include determinism (`generate_deterministic`), nominal/minimal/maximal
+config generation, metadata population, and configuration validation errors.
 
 ## Adding a New Configuration Preset
 

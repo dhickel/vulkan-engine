@@ -430,6 +430,154 @@ pub const CORRIDOR_WIDTH: u32 = 64;    // Minimum clear interior width (4 quanta
 pub const CORRIDOR_HEIGHT: u32 = 80;   // Minimum clear interior height (5 quanta)
 ```
 
+## Enhanced v2 API
+
+The Enhanced v2 profile lives in `bsp_generator::enhanced`. It produces M2-only,
+two-layer dungeons with stairs, theme variance, and corridor/ceiling/pillar
+features.
+
+### `generate_enhanced()`
+
+```rust
+pub fn generate_enhanced(
+    seed: u64,
+    config: EnhancedConfig,
+) -> Result<(String, EnhancedMetadata), EnhancedError>
+```
+
+The Enhanced v2 entry point. Runs the full pipeline:
+
+```text
+EnhancedConfig → placement → topology → theme assignment →
+feature variance → emission → (map_text, metadata)
+```
+
+**Determinism guarantee:** Two calls with identical `(seed, config)` produce
+byte-identical `.map` output. The Enhanced v2 RNG domain (`"dungeon-gen/v2"`) is
+independent from Legacy v1.
+
+### `EnhancedConfig`
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnhancedConfig { /* private fields */ }
+```
+
+Validated M2-only two-layer configuration. Validates all fields at construction —
+no separate `validate()` step.
+
+**Constructors:**
+
+| constructor | description |
+|-------------|-------------|
+| `EnhancedConfig::new(room_count, loop_count, vertical_edges, tread_depth, xy_extent)` | standard constructor |
+| `EnhancedConfig::with_placement_params(..., candidates, attempts)` | with placement tuning |
+| `EnhancedConfig::with_full_params(..., candidates, attempts, max_pillars)` | full parameter set |
+| `EnhancedConfig::nominal()` | 28 rooms, 3 loops, 1 stair, 2048² |
+| `EnhancedConfig::minimal()` | 17 rooms, 1 loop, 1 stair, 1024² |
+| `EnhancedConfig::maximal()` | 40 rooms, 6 loops, 3 stairs, 3072² |
+
+**Accessors:**
+
+| accessor | return type | description |
+|----------|-------------|-------------|
+| `room_count()` | `u32` | total rooms (17–40) |
+| `loop_count()` | `u32` | extra loop edges (1–6) |
+| `vertical_edges()` | `u32` | stair connections (1–3) |
+| `tread_depth()` | `i32` | stair tread depth (16 or 32) |
+| `xy_extent()` | `u32` | XY bounds per axis |
+| `placement_candidates()` | `u32` | candidates per room attempt |
+| `max_placement_attempts()` | `u32` | max attempts per room |
+| `max_pillars_per_room()` | `u32` | max pillars per room (0–8) |
+| `layer_count()` | `u32` | always returns 2 |
+| `lower_floor_z()` | `i32` | always returns 0 |
+| `upper_floor_z()` | `i32` | always returns 192 |
+| `room_height()` | `i32` | always returns 176 |
+| `riser()` | `i32` | always returns 16 |
+
+### `EnhancedMetadata`
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnhancedMetadata {
+    pub room_count: u32,
+    pub route_count: u32,
+    pub transition_count: u32,
+    pub lower_floor_z: i32,
+    pub upper_floor_z: i32,
+    pub spawn_origin: (i32, i32, i32),
+    pub light_count: u32,
+    pub pillar_count: u32,
+    pub seed: u64,
+}
+```
+
+### `EnhancedError`
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnhancedError {
+    ConfigOutOfRange { field: &'static str, value: u64, min: u64, max: u64 },
+    WrongProfile { expected: &'static str },
+    ArithmeticOverflow { operation: &'static str },
+    DuplicateId { kind: &'static str, id: u32 },
+    IdOutOfOrder { kind: &'static str, id: u32, previous: u32 },
+    ContractViolation { detail: String },
+    PlacementExhausted { rooms_placed: u32, total_attempts: u32 },
+    RoomTooLarge { room_index: u32, width: u32, height: u32, xy_extent: u32 },
+    TopologyExhausted { detail: String },
+    RouteExhausted { expansions: u32 },
+    TransitionReservationFailed { detail: String },
+    TopologyValidationFailed { detail: String },
+}
+```
+
+### `GenerationProfile`
+
+```rust
+pub enum GenerationProfile {
+    LegacyV1,
+    EnhancedV2,
+}
+```
+
+Dispatch discriminator for the `GenerationRequest` enum. Each variant carries
+its own config type (`DungeonConfig` for LegacyV1, `EnhancedConfig` for
+EnhancedV2).
+
+### Enhanced RNG Types
+
+```rust
+// Master seed
+pub struct EnhancedSeed(u64);
+
+// Stage sub-seed (32-byte SHA-256 digest)
+pub struct EnhancedStageSeed { pub digest: [u8; 32] }
+
+// SHA-256-chained deterministic RNG
+pub struct EnhancedStageRng { /* private */ }
+```
+
+Domain separator: `"dungeon-gen/v2"`. Stage tags: `layer-placement`,
+`vertical-topology`, `vertical-routing`, `theme-assignment`,
+`feature-placement`, `corridor-variance`.
+
+### Enhanced Constants
+
+```rust
+pub const ENHANCED_LOWER_FLOOR_Z: i32 = 0;
+pub const ENHANCED_UPPER_FLOOR_Z: i32 = 192;
+pub const ENHANCED_ROOM_HEIGHT: i32 = 176;
+pub const ENHANCED_RISER: i32 = 16;
+pub const ENHANCED_TREAD_DEFAULT: i32 = 16;
+pub const ENHANCED_TREAD_ALTERNATIVE: i32 = 32;
+pub const ENHANCED_LAYER_COUNT: u32 = 2;
+pub const ENHANCED_MIN_ROOM_SPAN: i32 = 112;
+pub const ENHANCED_MAX_ROOM_SPAN: i32 = 256;
+pub const SOCKET_APERTURE: i32 = 64;
+pub const SOCKET_CORNER_MARGIN: i32 = 32;
+```
+
 ## Features
 
 | feature | description |

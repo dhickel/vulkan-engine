@@ -204,6 +204,76 @@ All 12 frozen configurations (8 nominal seeds + 4 boundary configs) compile warn
 cargo test -p bsp_generator --test corpus_execution
 ```
 
+## Enhanced v2 Two-Layer Dungeons
+
+The `bsp_generator` crate also provides an **Enhanced v2** profile that produces
+M2-only, two-layer dungeons with stairs, theme palette assignment, and
+per-room corridor/ceiling/pillar variance.
+
+### Key Features
+
+- **Two layers**: lower floor at Z=0, upper floor at Z=192, 176-unit room height
+- **Stairs**: 12-tread staircases connecting rooms across layers
+- **Corridor variance**: per-route widths of 64, 80, or 96 Quake units
+- **Ceiling variance**: per-room ceiling heights of 128, 144, or 176 Quake units
+- **Pillars**: up to 8 freestanding axis-aligned pillars per room
+- **Theme roles**: rooms get typed roles (Entry, Hub, DeadEnd, Side) with
+  palette assignment via Uniform or ByZone strategies
+- **CC0 Dungeon v2 theme**: separate theme WAD from Legacy v1
+
+### CLI Usage
+
+```bash
+# Generate an enhanced dungeon through engine_pack
+engine_pack enhanced-dungeon --seed 42 --config nominal \
+    --output my_enhanced_dungeon.map
+```
+
+### Quick Start
+
+```rust
+use bsp_generator::enhanced::pipeline::generate_enhanced;
+use bsp_generator::enhanced::config::EnhancedConfig;
+
+// Nominal M2 two-layer dungeon
+let cfg = EnhancedConfig::nominal();
+let (map_text, meta) = generate_enhanced(42, cfg)?;
+
+// Minimal M2 (17 rooms, compact 1024² bounds)
+let cfg = EnhancedConfig::minimal();
+let (map_text, meta) = generate_enhanced(17, cfg)?;
+
+// Maximal M2 (40 rooms, 6 loops, 3 stairs, full 3072² bounds)
+let cfg = EnhancedConfig::maximal();
+let (map_text, meta) = generate_enhanced(200, cfg)?;
+```
+
+### EnhancedConfig Fields
+
+| field | default | range | description |
+|-------|---------|-------|-------------|
+| `room_count` | 28 | 17–40 | total rooms across both layers |
+| `loop_count` | 3 | 1–6 | extra loop edges beyond spanning tree |
+| `vertical_edges` | 1 | 1–3 | number of stair connections |
+| `tread_depth` | 16 | 16 or 32 | stair tread depth in Quake units |
+| `xy_extent` | 2048 | ≤ 3072, multiple of 16 | XY bounds per axis |
+| `max_pillars_per_room` | 2 | 0–8 | maximum pillars per room |
+
+### Cross-Layer Guarantees
+
+- Rooms on different layers never overlap in XY projection
+- Each layer is independently connected (per-layer spanning tree)
+- Stair transitions seal both layers together — the whole dungeon is connected
+- 12 treads × 16-unit riser = 192-unit climb (exactly the inter-layer offset)
+- Socket portals are 64 units wide with 32-unit corner margins
+- All rooms have 176-unit height (≥ 80-unit required headroom for portals)
+
+### Theme
+
+The CC0 Dungeon v2 theme at `src/bsp_generator/themes/cc0_dungeon_v2/` provides
+a separate set of CC0 textures from Legacy v1's CC0 Stone Beta. Both themes are
+project-authored and deterministically built.
+
 ## Limitations (Beta) and Known Issues
 
 ### Generator Design Limitations

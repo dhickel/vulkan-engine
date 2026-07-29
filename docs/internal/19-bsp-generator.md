@@ -344,7 +344,124 @@ All values below are frozen in `bsp-dungeon-generation.md` and must not change w
 | domain separator | seed derivation | `"dungeon-gen/v1"` |
 | stage tags | seed derivation | `room-placement`, `corridor-routing`, `entity-placement`, `light-placement` |
 
-## 14. See Also
+## 14. Enhanced v2 Pipeline
+
+The Enhanced v2 profile (`src/bsp_generator/src/enhanced/`) is a structurally
+disjoint pipeline from Legacy v1. It produces M2-only, two-layer dungeons with
+stairs, theme palette assignment, and corridor/ceiling/pillar variance.
+
+### 14.1 Architecture
+
+```text
+EnhancedConfig  (validates at construction, no separate validate())
+    │
+    │  EnhancedSeed::new(seed)
+    ▼
+EnhancedSeed ──► stage_seed("layer-placement")   ──► EnhancedStageRng
+    │                                               place_rooms()
+    ├── stage_seed("vertical-topology") ──► EnhancedStageRng
+    │                                          build_topology()
+    ├── stage_seed("theme-assignment")  ──► EnhancedStageRng
+    │                                          assign_uniform() / assign_by_zone()
+    ├── stage_seed("feature-placement") ──► EnhancedStageRng
+    │   stage_seed("corridor-variance") ──► EnhancedStageRng
+    │                                          apply_features()
+    ▼
+emit_map() ──► String  (.map bytes)
+```
+
+### 14.2 Module Map
+
+| module | responsibility | key types |
+|--------|---------------|-----------|
+| `profile.rs` | profile dispatch | `GenerationProfile`, `GenerationRequest` |
+| `config.rs` | configuration and vertical contract | `EnhancedConfig`, frozen constants |
+| `seed.rs` | deterministic RNG (domain `"dungeon-gen/v2"`) | `EnhancedSeed`, `EnhancedStageSeed`, `EnhancedStageRng` |
+| `intent.rs` | typed IDs and intent records | `LayerId`, `RoomId`, `SocketId`, `RouteId`, `TransitionId`, `ReservationId`, `ZoneId`, `PaletteId`, `IdAllocator`, `RouteIntent`, `TransitionIntent` |
+| `error.rs` | typed errors | `EnhancedError` (12 variants) |
+| `occupancy.rs` | projected XY occupancy grid | `OccupancyGrid`, `Owner`, `GridCheckpoint` |
+| `placement.rs` | two-layer room placement | `PlacedRoom`, `CandidateSocket`, `PlacementResult`, `PlacementJournal` |
+| `topology.rs` | MST + loop topology + stair reservations | `TopologyResult`, `build_topology()` |
+| `routing.rs` | A* corridor routing | `RouteSegment`, `RouteResult`, `route_sockets()` |
+| `reservation.rs` | transactional ownership system | `Transaction`, `TransactionMark`, `OwnerKind` |
+| `transition.rs` | stair reservation | `reserve_transitions()` |
+| `theme.rs` | theme package and palette assignment | `ThemePackage`, `PaletteDefinition`, `RoomRole`, `AssignmentStrategy`, `ThemeAssignment` |
+| `features.rs` | corridor/ceiling/pillar variance | `CorridorWidthSelection`, `FeatureResult`, `apply_features()` |
+| `emission.rs` | map text emission | `emit_map()` |
+| `metadata.rs` | metadata re-export | (re-exports `EnhancedMetadata`) |
+| `pipeline.rs` | top-level entry point | `generate_enhanced()`, `EnhancedMetadata` |
+
+### 14.3 RNG Domains
+
+Enhanced v2 uses domain separator `"dungeon-gen/v2"` — **completely independent**
+from Legacy v1's `"dungeon-gen/v1"`. Same seed values produce different output.
+
+| tag | stage | stream consumed by |
+|-----|-------|-------------------|
+| `layer-placement` | room placement on two layers | `place_rooms()` |
+| `vertical-topology` | topology edge and transition selection | `build_topology()` |
+| `vertical-routing` | reserved | (future use) |
+| `theme-assignment` | palette assignment | `assign_uniform()` / `assign_by_zone()` |
+| `feature-placement` | pillar positions, ceiling selection | `apply_features()` |
+| `corridor-variance` | per-route corridor width selection | `apply_features()` |
+
+### 14.4 Geometry Contracts
+
+**Room placement:**
+- Rooms placed across two layers with balanced membership (max diff = 1)
+- All rooms on both layers projected onto a shared XY occupancy grid — no XY overlap
+- Room spans: 112–256 Quake units per axis (7–16 quanta)
+- Socket portals: 64 units wide, 32-unit corner margins, derived from committed rooms only
+- Transactional journal: full checkpoint/rollback on failed placement attempts
+
+**Topology:**
+- Per-layer MST via Kruskal's algorithm (candidate pairs sorted by center distance)
+- Loop edges added from non-MST pairs, canonical backtracking on failed routes
+- Stair transitions: one stair per `vertical_edges`, connecting a lower-room socket to an upper-room socket
+- Each transition reserves: 12 treads × 16-unit riser × 64-unit width, landings at both ends, headroom envelope
+- Global connectivity validated post-commit (every room reachable from every other)
+
+**Corridor routing:**
+- A* on quantum grid with 64-unit corridor envelope
+- Route envelopes checked against occupancy grid (allow room endpoints, reject intervening rooms)
+- Socket approach reservations: one exterior cell + 64-unit tangent strip
+
+**Theme:**
+- CC0 Dungeon v2 theme: checked-in typed data in `theme.rs`
+- Palettes: base palette (all roles) + optional zone palettes + connector palette (no accent)
+- Room role derivation: Entry (lowest RoomId), Hub (max graph degree), DeadEnd (degree=1), Side (remaining)
+- Strategies: `Uniform` (all rooms get base palette) or `ByZone` (zones get distinct palettes)
+
+**Feature variance:**
+- Corridor widths: 64, 80, or 96 Quake units per route (RNG-selected, must fit reserved envelopes)
+- Ceiling heights: 128, 144, or 176 Quake units per room (RNG-selected, min 80 headroom preserved)
+- Pillars: freestanding 32×32×80 axis-aligned boxes, accent-textured, connectivity oracle validates accessibility
+
+**Emission:**
+- Room shells: floor slab + ceiling slab + 4 wall masks with aperture cutouts
+- Corridor union: open cells for 64×64 turns and intersections
+- Stairwells: sealed shells enclosing treads and landings
+- Canonical `.map` serialization: worldspawn first, alphabetical keys, canonical face order
+
+### 14.5 Key Differences from Legacy v1
+
+| aspect | Legacy v1 | Enhanced v2 |
+|--------|-----------|-------------|
+| domain | `"dungeon-gen/v1"` | `"dungeon-gen/v2"` |
+| map classes | M1 + M2 | M2 only |
+| layers | 1 (flat, all rooms at Z=0) | 2 (lower Z=0, upper Z=192) |
+| vertical connections | none | 12-tread stairs (sealed shells) |
+| config validation | `DungeonConfig::validate()` | validates at construction |
+| RNG isolation | 4 stage tags | 6 stage tags (enhanced-only) |
+| theme | CC0 Stone Beta | CC0 Dungeon v2 (separate WAD) |
+| room roles | none | Entry / Hub / DeadEnd / Side |
+| placement | same-layer, flat | two-layer, balanced membership, projected XY |
+| topology | Kruskal MST + loops (flat) | per-layer MST + loops + stair reservations |
+| corridor width | fixed 64 | 64/80/96 per route |
+| ceiling height | fixed (config.z_span) | 128/144/176 per room |
+| pillars | none | up to 8 per room, connectivity-verified |
+
+## 15. See Also
 
 - [BSP Generator Usage Guide](../guide/19-bsp-generator.md) — how to generate and compile
 - [BSP Generator API Reference](../api/19-bsp-generator.md) — public type and function docs
