@@ -610,13 +610,21 @@ fn compile_bsp_cmd(args: &[String]) -> CliResult<String> {
 /// Default compiler profile bundled with engine_pack.
 const DEFAULT_BSP2_PROFILE: &str = include_str!("../../bsp_authoring/ericw-q1-bsp2-generated-profile.toml");
 
-/// Resolve the CC0 Stone Beta theme directory relative to the bsp_generator crate.
-fn cc0_stone_beta_dir() -> PathBuf {
-    // bsp_generator's Cargo.toml is at src/bsp_generator/
-    // The theme dir is at src/bsp_generator/themes/cc0_stone_beta/
-    // From engine_pack (tools/engine_pack/), that's ../../src/bsp_generator/themes/cc0_stone_beta/
+/// Resolve the Enhanced v2 CC0 Dungeon theme directory.
+fn cc0_dungeon_v2_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../src/bsp_generator/themes/cc0_stone_beta")
+        .join("../../src/bsp_generator/themes/cc0_dungeon_v2")
+}
+
+/// Locate the project-documented user installation when the caller did not
+/// supply `--tool-path`. Explicit paths remain authoritative.
+fn default_ericw_tools_dir() -> Option<PathBuf> {
+    let candidate = PathBuf::from(env::var_os("HOME")?)
+        .join(".local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin");
+    ["qbsp", "vis", "light"]
+        .iter()
+        .all(|executable| candidate.join(executable).is_file())
+        .then_some(candidate)
 }
 
 fn enhanced_dungeon_cmd(args: &[String]) -> CliResult<String> {
@@ -629,7 +637,10 @@ fn enhanced_dungeon_cmd(args: &[String]) -> CliResult<String> {
     })?;
 
     let out_dir = PathBuf::from(require_option("--out", &parsed)?);
-    let tool_path = parsed.singleton_value("--tool-path").map(PathBuf::from);
+    let tool_path = parsed
+        .singleton_value("--tool-path")
+        .map(PathBuf::from)
+        .or_else(default_ericw_tools_dir);
     let name = parsed
         .singleton_value("--name")
         .map(|s| s.to_string())
@@ -685,9 +696,9 @@ fn enhanced_dungeon_cmd(args: &[String]) -> CliResult<String> {
     })?;
 
     // ── Resolve theme assets ──────────────────────────────────────
-    let theme_dir = cc0_stone_beta_dir();
+    let theme_dir = cc0_dungeon_v2_dir();
     let palette_path = theme_dir.join("palette.lmp");
-    let wad_path = theme_dir.join("cc0_stone_beta.wad");
+    let wad_path = theme_dir.join("cc0_dungeon_v2.wad");
 
     for input in [&palette_path, &wad_path] {
         let path = input.as_path();
@@ -782,7 +793,7 @@ fn enhanced_dungeon_cmd(args: &[String]) -> CliResult<String> {
         let wad_basename = wad_path
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("cc0_stone_beta.wad");
+            .unwrap_or("cc0_dungeon_v2.wad");
         let wad_staged = staging.join(wad_basename);
         std::fs::copy(&wad_path, &wad_staged)
             .map_err(|err| io_error("enhanced-dungeon.copy_wad", &wad_path, err))?;

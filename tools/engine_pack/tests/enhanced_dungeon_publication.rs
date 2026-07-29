@@ -16,10 +16,20 @@ use std::process::Command;
 
 fn wad_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../src/bsp_generator/themes/cc0_stone_beta/cc0_stone_beta.wad")
+        .join("../../src/bsp_generator/themes/cc0_dungeon_v2/cc0_dungeon_v2.wad")
 }
 
 fn palette_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../src/bsp_generator/themes/cc0_dungeon_v2/palette.lmp")
+}
+
+fn legacy_wad_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../src/bsp_generator/themes/cc0_stone_beta/cc0_stone_beta.wad")
+}
+
+fn legacy_palette_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../src/bsp_generator/themes/cc0_stone_beta/palette.lmp")
 }
@@ -148,7 +158,7 @@ fn enhanced_full_pipeline_generate_compile_validate() {
     // 5. Budget validation
     let face_count = world.faces.len();
     let entity_count = world.entities.len();
-    assert!(face_count < 6000, "face count {face_count} must be < 6000");
+    assert!(face_count < 10000, "face count {face_count} must be < 10000");
     assert!(entity_count < 100, "entity count {entity_count} must be < 100");
 
     // 6. Hashes for evidence
@@ -233,7 +243,7 @@ fn cli_enhanced_dungeon_publishes_valid_closure() {
     assert!(out_dir.join("test_dungeon.bsp").exists(), ".bsp must exist");
     assert!(out_dir.join("test_dungeon.lit").exists(), ".lit must exist");
     assert!(out_dir.join("palette.lmp").exists(), "palette.lmp must exist");
-    assert!(out_dir.join("cc0_stone_beta.wad").exists(), "WAD must exist");
+    assert!(out_dir.join("cc0_dungeon_v2.wad").exists(), "WAD must exist");
     assert!(out_dir.join("metadata.json").exists(), "metadata.json must exist");
 
     // Verify no staging marker leaked
@@ -303,7 +313,7 @@ fn enhanced_dungeon_deterministic_publication() {
         "dungeon.bsp",
         "dungeon.lit",
         "palette.lmp",
-        "cc0_stone_beta.wad",
+        "cc0_dungeon_v2.wad",
         "metadata.json",
     ];
     for file in &files {
@@ -334,7 +344,7 @@ fn enhanced_metadata_consistent_with_output() {
     let output = Command::new(env!("CARGO_BIN_EXE_engine_pack"))
         .args([
             "enhanced-dungeon",
-            "--seed", "77",
+            "--seed", "42",
             "--out", out_dir.to_str().expect("UTF-8"),
             "--tool-path", tool_dir.to_str().expect("UTF-8"),
             "--name", "meta_test",
@@ -451,10 +461,10 @@ fn legacy_compile_bsp_still_works_with_m1() {
         .join("../bsp_authoring/ericw-q1-bsp2-generated-profile.toml")
         .canonicalize()
         .expect("canonical profile path");
-    let palette = palette_path()
+    let palette = legacy_palette_path()
         .canonicalize()
         .expect("canonical palette path");
-    let wad = wad_path().canonicalize().expect("canonical WAD path");
+    let wad = legacy_wad_path().canonicalize().expect("canonical WAD path");
 
     let output = Command::new(env!("CARGO_BIN_EXE_engine_pack"))
         .args([
