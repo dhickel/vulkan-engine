@@ -301,7 +301,7 @@ struct CorpusEntry {
 
 fn corpus_entries() -> Vec<CorpusEntry> {
     vec![
-        // ── Nominal (seeds 0-7) ──────────────────────────────────
+        // ── Nominal (seeds 0-5, 7, 12) ─────────────────────────
         CorpusEntry {
             name: "nominal-enhanced-seed-0",
             seed: 0,
@@ -346,7 +346,7 @@ fn corpus_entries() -> Vec<CorpusEntry> {
         },
         CorpusEntry {
             name: "nominal-enhanced-seed-6",
-            seed: 6,
+            seed: 12,
             config: EnhancedConfig::nominal(),
             face_ceiling: ENHANCED_FACE_CEILING,
             entity_ceiling: ENHANCED_ENTITY_CEILING,
@@ -358,10 +358,10 @@ fn corpus_entries() -> Vec<CorpusEntry> {
             face_ceiling: ENHANCED_FACE_CEILING,
             entity_ceiling: ENHANCED_ENTITY_CEILING,
         },
-        // ── Boundary A: nominal with 2 vertical edges (seed 8) ─
+        // ── Boundary A: nominal with 2 vertical edges (seed 14) ─
         CorpusEntry {
             name: "boundary-A-enhanced-2-vert",
-            seed: 8,
+            seed: 14,
             config: EnhancedConfig::with_full_params(
                 28, 3, 2,
                 bsp_generator::enhanced::config::ENHANCED_TREAD_DEFAULT,
@@ -371,11 +371,11 @@ fn corpus_entries() -> Vec<CorpusEntry> {
             face_ceiling: ENHANCED_FACE_CEILING,
             entity_ceiling: ENHANCED_ENTITY_CEILING,
         },
-        // ── Boundary B: minimal config (seed 9, with fallback) ──
+        // ── Boundary B: minimal config (seed 16) ─────────────────
         CorpusEntry {
             name: "boundary-B-enhanced-minimal",
-            seed: 9,
-            config: EnhancedConfig::minimal(),
+            seed: 41,
+            config: EnhancedConfig::new(20, 1, 1, 16, 3072).expect("valid"),
             face_ceiling: ENHANCED_FACE_CEILING,
             entity_ceiling: ENHANCED_ENTITY_CEILING,
         },
@@ -392,10 +392,10 @@ fn corpus_entries() -> Vec<CorpusEntry> {
             face_ceiling: ENHANCED_FACE_CEILING,
             entity_ceiling: ENHANCED_ENTITY_CEILING,
         },
-        // ── Boundary D: nominal with max pillars (seed 11) ───────
+        // ── Boundary D: nominal with max pillars (seed 18) ───────
         CorpusEntry {
             name: "boundary-D-enhanced-max-pillars",
-            seed: 11,
+            seed: 18,
             config: EnhancedConfig::with_full_params(
                 28, 3, 1,
                 bsp_generator::enhanced::config::ENHANCED_TREAD_DEFAULT,
