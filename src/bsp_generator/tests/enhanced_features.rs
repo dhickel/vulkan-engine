@@ -80,13 +80,19 @@ fn width_selection_records_unreserved_wider_preferences() {
     let result = run_features(42);
     for selection in &result.corridor_widths {
         assert_eq!(selection.width, 64);
-        for rejection in &selection.rejections {
-            assert!(matches!(
-                &rejection.reason,
-                CorridorWidthRejectionReason::CapacityUnavailable
-            ));
-            assert!(rejection.width == 80 || rejection.width == 96);
-        }
+        assert_eq!(selection.rejections.len(), 2);
+        assert!(selection.rejections.iter().all(|rejection| matches!(
+            rejection.reason,
+            CorridorWidthRejectionReason::CapacityUnavailable
+        )));
+
+        let mut rejected_widths: Vec<_> = selection
+            .rejections
+            .iter()
+            .map(|rejection| rejection.width)
+            .collect();
+        rejected_widths.sort_unstable();
+        assert_eq!(rejected_widths, vec![80, 96]);
     }
 }
 

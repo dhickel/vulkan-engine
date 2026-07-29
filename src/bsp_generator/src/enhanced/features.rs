@@ -33,7 +33,7 @@ use crate::config::CONSTRUCTION_QUANTUM;
 
 use super::config::EnhancedConfig;
 use super::error::EnhancedError;
-use super::intent::{RoomId, RouteId, RouteIntent};
+use super::intent::{RoomId, RouteId};
 use super::placement::{PlacedRoom, PlacementResult, WallDirection};
 use super::seed::EnhancedStageRng;
 use super::theme::ThemeAssignment;
@@ -67,8 +67,8 @@ pub const PILLAR_DEPTH: i32 = 32;
 /// Default pillar height in Quake units (floor to walkable ceiling).
 pub const PILLAR_HEIGHT: i32 = 80;
 
-/// The preferred corridor width try order: default first, then wider.
-const WIDTH_TRY_ORDER: &[u32] = &[96, 80, 64];
+/// Wider preferences whose unavailable Phase-04 capacity must be recorded.
+const WIDER_WIDTH_PREFERENCES: &[u32] = &[96, 80];
 
 // ── Public result types ────────────────────────────────────────────────────
 
@@ -78,7 +78,7 @@ pub struct CorridorWidthSelection {
     pub route_id: RouteId,
     /// Width in Quake units: 64, 80, or 96.
     pub width: u32,
-    /// Every wider preference rejected before selecting `width`.
+    /// Every approved wider width rejected by the committed route capacity.
     pub rejections: Vec<CorridorWidthRejection>,
 }
 
@@ -255,7 +255,7 @@ pub fn apply_features(
     let rooms = room_map(placement);
 
     // Step 2: Corridor width selection
-    let corridor_widths = select_corridor_widths(topology, &rooms, placement, corridor_seed)?;
+    let corridor_widths = select_corridor_widths(topology, corridor_seed)?;
 
     // Step 3: Ceiling height selection
     let ceiling_heights = select_ceiling_heights(placement, topology, feature_seed.clone())?;
@@ -330,71 +330,34 @@ fn validate_variance_policy(_config: &EnhancedConfig) -> Result<(), EnhancedErro
 /// variance RNG stream. Wider widths must fit within Phase-04 reserved capacity.
 fn select_corridor_widths(
     topology: &TopologyResult,
-    rooms: &BTreeMap<RoomId, &PlacedRoom>,
-    placement: &PlacementResult,
     mut rng: EnhancedStageRng,
 ) -> Result<Vec<CorridorWidthSelection>, EnhancedError> {
     let mut selections = Vec::with_capacity(topology.routes.len());
 
     for route in &topology.routes {
-        let src_room = rooms.get(&route.source_room);
-        let tgt_room = rooms.get(&route.target_room);
-        let preferred = rng.range_u32(WIDTH_TRY_ORDER.len() as u32) as usize;
-        let mut width = None;
-        let mut rejections = Vec::new();
-
-        // Each route consumes only the corridor-variance stream. Start at the
-        // selected preference and then try narrower approved widths; this
-        // preserves the committed 64-wide route when a wider capacity was not
-        // reserved by Phase 04.
-        for &candidate in WIDTH_TRY_ORDER[preferred..]
+        // Phase 04 commits exact 64-wide envelopes. Nearby clearance is not
+        // owned capacity and cannot be consumed here without mutating the
+        // accepted topology, so every wider preference is explicitly rejected.
+        // The isolated stream controls only the deterministic preference order.
+        let preferred = rng.range_u32(WIDER_WIDTH_PREFERENCES.len() as u32) as usize;
+        let rejections = WIDER_WIDTH_PREFERENCES[preferred..]
             .iter()
-            .chain(WIDTH_TRY_ORDER[..preferred].iter())
-        {
-            if width_fits_route(route, candidate, src_room, tgt_room, placement) {
-                width = Some(candidate);
-                break;
-            }
-            rejections.push(CorridorWidthRejection {
-                width: candidate,
+            .chain(WIDER_WIDTH_PREFERENCES[..preferred].iter())
+            .map(|&width| CorridorWidthRejection {
+                width,
                 reason: CorridorWidthRejectionReason::CapacityUnavailable,
-            });
-        }
+            })
+            .collect();
 
-        let width = width.ok_or_else(|| EnhancedError::ContractViolation {
-            detail: format!(
-                "route {:?} has no legal width in the committed Phase-04 capacity",
-                route.id
-            ),
-        })?;
         selections.push(CorridorWidthSelection {
             route_id: route.id,
-            width,
+            width: 64,
             rejections,
         });
     }
 
     selections.sort_by_key(|s| s.route_id);
     Ok(selections)
-}
-
-/// Check if a corridor width fits the route's reserved capacity.
-/// The route's envelopes are based on 64-wide corridors. Expanding the width
-/// adds (width - 64) / 2 units on each side perpendicular to the segment.
-fn width_fits_route(
-    route: &RouteIntent,
-    width: u32,
-    _src_room: Option<&&PlacedRoom>,
-    _tgt_room: Option<&&PlacedRoom>,
-    _placement: &PlacementResult,
-) -> bool {
-    // Phase 04 currently stores an exact 64-wide reservation in every route
-    // envelope, not an expandable 80/96 capacity record. Clearance around a
-    // route is not a reservation: widening into it would mutate the accepted
-    // structural topology. Until Phase 04 supplies explicit wider capacities,
-    // only the recorded 64-unit envelope is legal here.
-    let _ = route;
-    width == 64
 }
 
 // ── Step 3: Ceiling height selection ───────────────────────────────────────
