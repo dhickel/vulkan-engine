@@ -1231,3 +1231,95 @@ fn every_transition_has_explicit_palette_owner() {
         assert!(t.palette(pa.palette_id).is_some());
     }
 }
+
+// ── Checked-in theme closure determinism ──────────────────────────────
+
+/// Prove the checked-in theme directory matches a fresh deterministic build.
+/// Every output — LICENSE, theme.toml, palette, WAD, and all 45 companion
+/// PNGs — must be byte-identical.
+#[test]
+fn checked_in_closure_matches_deterministic_build() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    assert!(run_build(tmp.path()).success());
+
+    // Static files
+    for name in &["LICENSE", "theme.toml", "palette.lmp", "cc0_dungeon_v2.wad"] {
+        let checked_in = theme_dir().join(name);
+        let generated = tmp.path().join(name);
+        assert_file(&checked_in);
+        assert_file(&generated);
+        let ci_bytes = std::fs::read(&checked_in).unwrap();
+        let gen_bytes = std::fs::read(&generated).unwrap();
+        assert_eq!(
+            ci_bytes, gen_bytes,
+            "checked-in {name} differs from deterministic build"
+        );
+    }
+
+    // All 45 PNG companions — 15 identities × 3 variants (basecolor/norm/gloss).
+    // The build.py identities match the ALL_VISIBLE names directly:
+    //   bs_floor, bs_wall, bs_ceil, bs_accent,
+    //   crypt_floor, crypt_wall, crypt_ceil, crypt_accent,
+    //   treas_floor, treas_wall, treas_ceil, treas_accent,
+    //   conn_floor, conn_wall, conn_ceil
+    let visible_identities: &[&str] = &[
+        "bs_floor", "bs_wall", "bs_ceil", "bs_accent",
+        "crypt_floor", "crypt_wall", "crypt_ceil", "crypt_accent",
+        "treas_floor", "treas_wall", "treas_ceil", "treas_accent",
+        "conn_floor", "conn_wall", "conn_ceil",
+    ];
+    assert_eq!(visible_identities.len(), 15, "15 visible identities");
+
+    let variants = ["_basecolor.png", "_norm.png", "_gloss.png"];
+    let expected_pngs = visible_identities
+        .iter()
+        .flat_map(|identity| variants.iter().map(move |suffix| format!("{identity}{suffix}")))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(expected_pngs.len(), 45, "15 identities × 3 PNG variants");
+
+    for directory in [theme_dir().join("textures"), tmp.path().join("textures")] {
+        let actual_pngs = std::fs::read_dir(&directory)
+            .expect("read texture directory")
+            .map(|entry| {
+                let entry = entry.expect("read texture entry");
+                assert!(entry.path().is_file(), "texture entry must be a file");
+                entry.file_name().to_string_lossy().into_owned()
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            actual_pngs,
+            expected_pngs,
+            "{} must contain exactly the 45 declared texture PNGs",
+            directory.display()
+        );
+    }
+
+    let mut total = 0usize;
+    for identity in visible_identities {
+        for suffix in &variants {
+            let fname = format!("{identity}{suffix}");
+            let checked_in = theme_dir().join("textures").join(&fname);
+            let generated = tmp.path().join("textures").join(&fname);
+            assert!(
+                checked_in.is_file(),
+                "checked-in textures/{fname} missing"
+            );
+            assert!(
+                generated.is_file(),
+                "generated textures/{fname} missing"
+            );
+            let ci_bytes = std::fs::read(&checked_in).unwrap();
+            let gen_bytes = std::fs::read(&generated).unwrap();
+            assert_eq!(
+                ci_bytes, gen_bytes,
+                "checked-in textures/{fname} differs from deterministic build"
+            );
+            total += 1;
+        }
+    }
+    assert_eq!(total, 45, "must verify exactly 45 companion PNGs");
+
+    eprintln!(
+        "PASS: checked-in theme closure ({total} files) matches deterministic build"
+    );
+}

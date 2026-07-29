@@ -1,0 +1,24 @@
+[package]
+name = "cc0_dungeon_v2"
+version = "1.0.0"
+wad = "cc0_dungeon_v2.wad"
+
+[palettes]
+base = "base_stone"
+connector = "connector"
+
+[palettes.entries]
+base_stone = ["bs_floor", "bs_wall", "bs_ceil", "bs_accent"]
+crypt = ["crypt_floor", "crypt_wall", "crypt_ceil", "crypt_accent"]
+treasury = ["treas_floor", "treas_wall", "treas_ceil", "treas_accent"]
+connector = ["conn_floor", "conn_wall", "conn_ceil"]
+
+[roles]
+floor = 0
+wall = 1
+ceiling = 2
+accent = 3
+
+[compiler]
+skip = "skip"
+skip_size = 64

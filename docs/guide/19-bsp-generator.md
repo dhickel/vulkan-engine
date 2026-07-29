@@ -224,9 +224,37 @@ per-room corridor/ceiling/pillar variance.
 ### CLI Usage
 
 ```bash
-# Generate an enhanced dungeon through engine_pack
-engine_pack enhanced-dungeon --seed 42 --config nominal \
-    --output my_enhanced_dungeon.map
+# Generate, compile, and publish an enhanced dungeon through engine_pack.
+# The published closure includes the BSP, .lit, palette, WAD, metadata, and
+# referenced normal/gloss companion files under textures/. Albedo remains
+# WAD-backed per the frozen contract.
+engine_pack enhanced-dungeon --seed 42 --out ./dungeon_package \
+    --tool-path ~/.local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin
+```
+
+**Published package layout:**
+
+```text
+dungeon_package/
+├── enhanced_dungeon.map      ← generated .map source
+├── enhanced_dungeon.bsp      ← compiled BSP2
+├── enhanced_dungeon.lit      ← colored light data
+├── palette.lmp               ← CC0 Dungeon v2 palette
+├── cc0_dungeon_v2.wad        ← theme WAD (albedo source)
+├── metadata.json             ← generation evidence
+└── textures/                 ← PBR companions
+    ├── bs_floor_norm.png
+    ├── bs_floor_gloss.png
+    ├── bs_wall_norm.png
+    ├── bs_wall_gloss.png
+    ├── bs_ceil_norm.png
+    ├── bs_ceil_gloss.png
+    ├── conn_floor_norm.png
+    ├── conn_floor_gloss.png
+    ├── conn_wall_norm.png
+    ├── conn_wall_gloss.png
+    ├── conn_ceil_norm.png
+    └── conn_ceil_gloss.png
 ```
 
 ### Quick Start
@@ -272,11 +300,20 @@ let (map_text, meta) = generate_enhanced(200, cfg)?;
 
 The CC0 Dungeon v2 theme at `src/bsp_generator/themes/cc0_dungeon_v2/` provides
 a separate set of CC0 textures from Legacy v1's CC0 Stone Beta. Both themes are
-project-authored and deterministically built.
+project-authored and deterministically built. Enhanced publication requires and
+publishes both normal and gloss companions for every referenced eligible identity;
+a missing, malformed, or dimension-mismatched companion rejects the package before
+atomic publication. Albedo remains WAD-backed per the frozen PBR companion naming
+contract (§9 of the dungeon generation specification). This Enhanced-only closure
+rule does not change generic `engine_pack compile-bsp` optional-companion behavior.
 
 ## Limitations (Beta) and Known Issues
 
-### Generator Design Limitations
+### Legacy v1 Design Limitations
+
+These limitations apply to the Legacy v1 generator (`bsp_generator::generate`)
+only. The Enhanced v2 profile supports two-layer dungeons with stairs, multiple
+room palettes, and corridor/ceiling/pillar variance.
 
 - Single-layer Cartesian only (no ramps, stairs, multi-floor)
 - Axis-aligned rectangular rooms only

@@ -269,7 +269,61 @@ fn cli_enhanced_dungeon_publishes_valid_closure() {
     assert_eq!(metadata["config"]["rooms"], 28);
     assert_eq!(metadata["generator"], "bsp_generator::enhanced");
 
-    eprintln!("PASS: CLI enhanced-dungeon published valid closure to {}", out_dir.display());
+    // ── PBR companion closure ────────────────────────────────────
+    let textures_dir = out_dir.join("textures");
+    assert!(textures_dir.is_dir(), "textures/ must exist in published closure");
+
+    // Collect all files in textures/
+    let mut companion_files: Vec<String> = std::fs::read_dir(&textures_dir)
+        .expect("read textures")
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path();
+            if path.is_file() { Some(name) } else { None }
+        })
+        .collect();
+    companion_files.sort();
+
+    // Seed-42 nominal generates base_stone + connector textures (6 identities).
+    // Expected: 6 × 2 = 12 companion files (normal + gloss for each identity).
+    let expected_companions = vec![
+        "bs_ceil_gloss.png", "bs_ceil_norm.png",
+        "bs_floor_gloss.png", "bs_floor_norm.png",
+        "bs_wall_gloss.png", "bs_wall_norm.png",
+        "conn_ceil_gloss.png", "conn_ceil_norm.png",
+        "conn_floor_gloss.png", "conn_floor_norm.png",
+        "conn_wall_gloss.png", "conn_wall_norm.png",
+    ];
+    assert_eq!(
+        companion_files, expected_companions,
+        "published textures/ must contain exactly the 12 normal+gloss companions for the \
+         6 referenced identities"
+    );
+
+    // Verify no basecolor copies leaked into published textures/
+    for fname in &companion_files {
+        assert!(
+            !fname.contains("_basecolor"),
+            "published textures/ must not contain basecolor source PNGs: found {fname}"
+        );
+    }
+
+    // Verify each companion is a valid 1024×1024 PNG
+    for fname in &companion_files {
+        let path = textures_dir.join(fname);
+        let data = std::fs::read(&path).expect("read companion");
+        assert!(data.len() >= 24, "companion {fname} lacks a complete IHDR");
+        assert_eq!(&data[0..8], b"\x89PNG\r\n\x1a\n", "companion {fname} not valid PNG");
+        assert_eq!(&data[12..16], b"IHDR", "companion {fname} lacks an IHDR chunk");
+        // Dimensions are in the mandatory first IHDR chunk at bytes 16..24.
+        let w = u32::from_be_bytes(data[16..20].try_into().unwrap());
+        let h = u32::from_be_bytes(data[20..24].try_into().unwrap());
+        assert_eq!((w, h), (1024, 1024), "companion {fname} must be 1024×1024");
+    }
+
+    eprintln!("PASS: CLI enhanced-dungeon published valid closure with {} PBR companions to {}",
+              companion_files.len(), out_dir.display());
 
     let _ = std::fs::remove_dir_all(&staging);
 }
@@ -307,8 +361,8 @@ fn enhanced_dungeon_deterministic_publication() {
         assert!(output.status.success(), "run failed for {}", staging.display());
     }
 
-    // Compare all files
-    let files = [
+    // Compare all root-level files
+    let root_files = [
         "dungeon.map",
         "dungeon.bsp",
         "dungeon.lit",
@@ -316,13 +370,46 @@ fn enhanced_dungeon_deterministic_publication() {
         "cc0_dungeon_v2.wad",
         "metadata.json",
     ];
-    for file in &files {
+    for file in &root_files {
         let data1 = std::fs::read(out1.join(file)).expect(&format!("read {file} from run 1"));
         let data2 = std::fs::read(out2.join(file)).expect(&format!("read {file} from run 2"));
         assert_eq!(data1, data2, "file {file} must be identical across runs");
     }
 
-    eprintln!("PASS: deterministic publication verified ({} files identical)", files.len());
+    // Compare textures/ companion files
+    let textures1 = out1.join("textures");
+    let textures2 = out2.join("textures");
+    let mut companion_names: Vec<String> = std::fs::read_dir(&textures1)
+        .expect("read textures1")
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            entry.path().is_file().then_some(name)
+        })
+        .collect();
+    companion_names.sort();
+    assert!(!companion_names.is_empty(), "must have companion files");
+    let mut companion_names2: Vec<String> = std::fs::read_dir(&textures2)
+        .expect("read textures2")
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            entry.path().is_file().then_some(name)
+        })
+        .collect();
+    companion_names2.sort();
+    assert_eq!(
+        companion_names, companion_names2,
+        "deterministic publication must have an identical companion file set"
+    );
+    for fname in &companion_names {
+        let data1 = std::fs::read(textures1.join(fname)).expect("read companion from run 1");
+        let data2 = std::fs::read(textures2.join(fname)).expect("read companion from run 2");
+        assert_eq!(data1, data2, "companion {fname} must be identical across runs");
+    }
+
+    eprintln!("PASS: deterministic publication verified ({} root + {} companion files identical)",
+              root_files.len(), companion_names.len());
 
     let _ = std::fs::remove_dir_all(&staging1);
     let _ = std::fs::remove_dir_all(&staging2);

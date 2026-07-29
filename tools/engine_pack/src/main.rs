@@ -610,10 +610,18 @@ fn compile_bsp_cmd(args: &[String]) -> CliResult<String> {
 /// Default compiler profile bundled with engine_pack.
 const DEFAULT_BSP2_PROFILE: &str = include_str!("../../bsp_authoring/ericw-q1-bsp2-generated-profile.toml");
 
-/// Resolve the Enhanced v2 CC0 Dungeon theme directory.
-fn cc0_dungeon_v2_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../src/bsp_generator/themes/cc0_dungeon_v2")
+/// Resolve the Enhanced v2 CC0 Dungeon theme directory without parent traversal.
+fn cc0_dungeon_v2_dir() -> CliResult<PathBuf> {
+    let engine_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| {
+            CliError::Validation(internal_error(
+                "enhanced-dungeon.theme",
+                "engine_pack manifest directory is not under the workspace tools directory".into(),
+            ))
+        })?;
+    Ok(engine_root.join("src/bsp_generator/themes/cc0_dungeon_v2"))
 }
 
 /// Locate the project-documented user installation when the caller did not
@@ -696,7 +704,7 @@ fn enhanced_dungeon_cmd(args: &[String]) -> CliResult<String> {
     })?;
 
     // ── Resolve theme assets ──────────────────────────────────────
-    let theme_dir = cc0_dungeon_v2_dir();
+    let theme_dir = cc0_dungeon_v2_dir()?;
     let palette_path = theme_dir.join("palette.lmp");
     let wad_path = theme_dir.join("cc0_dungeon_v2.wad");
 
@@ -798,7 +806,30 @@ fn enhanced_dungeon_cmd(args: &[String]) -> CliResult<String> {
         std::fs::copy(&wad_path, &wad_staged)
             .map_err(|err| io_error("enhanced-dungeon.copy_wad", &wad_path, err))?;
 
-        // 8. Write metadata.json
+        // 8. Stage PBR companion textures from the theme's textures/ directory
+        let staged_pbr = stage_pbr_companions(
+            &staging,
+            &name,
+            &compile_result,
+            &[wad_path.clone()],
+            &palette_bytes,
+        )?;
+        require_complete_enhanced_pbr_closure(&staged_pbr)?;
+        let selected_wad_basenames: Vec<String> = staged_pbr
+            .required_wad_basenames
+            .iter()
+            .cloned()
+            .collect();
+
+        // 9. Validate the complete staged closure through isolated strict authorization
+        validate_staged_authorized_import(
+            &staging,
+            &name,
+            compile_result.lit_data.is_some(),
+            &selected_wad_basenames,
+        )?;
+
+        // 10. Write metadata.json
         let metadata = serde_json::json!({
             "format_version": 1,
             "generator": "bsp_generator::enhanced",
@@ -833,7 +864,7 @@ fn enhanced_dungeon_cmd(args: &[String]) -> CliResult<String> {
         )
         .map_err(|err| io_error("enhanced-dungeon.write_metadata", &metadata_path, err))?;
 
-        // 9. Publish atomically
+        // 11. Publish atomically
         publish_staging(&staging, &out_dir).map_err(CliError::FsTx)?;
 
         Ok(format!(
@@ -1177,6 +1208,40 @@ fn png_crc32(bytes: &[u8]) -> u32 {
 
 struct StagedPbrClosure {
     required_wad_basenames: std::collections::BTreeSet<String>,
+    eligible_identities: std::collections::BTreeSet<String>,
+    staged_companions: std::collections::BTreeSet<String>,
+}
+
+/// Enhanced packages are a complete PBR closure: unlike generic `compile-bsp`,
+/// every eligible BSP identity must stage both canonical companion maps.
+fn require_complete_enhanced_pbr_closure(staged: &StagedPbrClosure) -> CliResult<()> {
+    let expected = staged
+        .eligible_identities
+        .iter()
+        .flat_map(|identity| [
+            format!("{identity}_norm.png"),
+            format!("{identity}_gloss.png"),
+        ])
+        .collect::<std::collections::BTreeSet<_>>();
+    if staged.staged_companions == expected {
+        return Ok(());
+    }
+
+    let missing = expected
+        .difference(&staged.staged_companions)
+        .cloned()
+        .collect::<Vec<_>>();
+    let unexpected = staged
+        .staged_companions
+        .difference(&expected)
+        .cloned()
+        .collect::<Vec<_>>();
+    Err(CliError::Validation(internal_error(
+        "enhanced-dungeon.pbr-closure",
+        format!(
+            "incomplete Enhanced PBR companion closure; missing: {missing:?}; unexpected: {unexpected:?}"
+        ),
+    )))
 }
 
 /// Determine the WAD archives actually needed by face texture resolution.
@@ -1303,11 +1368,12 @@ fn stage_pbr_companions(
         })
         .collect::<CliResult<std::collections::BTreeMap<_, _>>>()?;
 
-    // Resolve companions from ordered WAD texture roots
-    // Normalize each WAD parent to its confined textures/ child
+    // Resolve companions from ordered WAD texture roots.
+    // Normalize each WAD parent to its confined textures/ child.
     let textures_dir = staging.join("textures");
     std::fs::create_dir_all(&textures_dir)
         .map_err(|err| io_error("compile-bsp.textures", &textures_dir, err))?;
+    let mut staged_companions = BTreeSet::new();
 
     for identity in &eligible {
         for suffix in &["_norm.png", "_gloss.png"] {
@@ -1405,14 +1471,12 @@ fn stage_pbr_companions(
                 })?;
                 validate_selected_pbr_companion(&src, identity, expected_dimensions)?;
 
-                // Copy companion into staging textures/
-                let fname = src
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(&expected);
-                let dest = textures_dir.join(fname);
+                // Publish the canonical identity-derived name even when generic
+                // discovery selected its permitted case-insensitive source fallback.
+                let dest = textures_dir.join(&expected);
                 std::fs::copy(&src, &dest)
                     .map_err(|err| io_error("compile-bsp.copy_companion", &src, err))?;
+                staged_companions.insert(expected);
             }
             // Absence is not an error — legacy fallback
         }
@@ -1420,7 +1484,25 @@ fn stage_pbr_companions(
 
     Ok(StagedPbrClosure {
         required_wad_basenames,
+        eligible_identities: eligible,
+        staged_companions,
     })
+}
+
+#[cfg(test)]
+mod pbr_closure_tests {
+    use super::*;
+
+    #[test]
+    fn enhanced_pbr_closure_rejects_a_missing_required_companion() {
+        let staged = StagedPbrClosure {
+            required_wad_basenames: std::collections::BTreeSet::new(),
+            eligible_identities: std::collections::BTreeSet::from(["bs_floor".to_string()]),
+            staged_companions: std::collections::BTreeSet::from(["bs_floor_norm.png".to_string()]),
+        };
+
+        assert!(require_complete_enhanced_pbr_closure(&staged).is_err());
+    }
 }
 
 /// Build a canonical package manifest capturing the full closure.

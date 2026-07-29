@@ -442,6 +442,23 @@ from Legacy v1's `"dungeon-gen/v1"`. Same seed values produce different output.
 - Corridor union: open cells for 64×64 turns and intersections
 - Stairwells: sealed shells enclosing treads and landings
 - Canonical `.map` serialization: worldspawn first, alphabetical keys, canonical face order
+- Enhanced-only `_minlight 16` in worldspawn ensures fully occluded connector and stair
+  faces receive baked lightmap data from the pinned ericw `light` stage
+
+**Publication:**
+- `engine_pack enhanced-dungeon` publishes the compiled BSP, .lit, palette, WAD,
+  metadata, and exactly the normal/gloss companions for eligible referenced identities
+  under a `textures/` subdirectory; it never publishes source basecolor PNGs
+- Albedo remains WAD-backed; companion discovery uses the frozen `<miptex>_norm.png` /
+  `<miptex>_gloss.png` naming convention
+- Enhanced publication verifies that every eligible referenced identity staged both
+  canonical companions. Companion PNGs must be regular, complete PNGs with valid CRCs
+  and IHDRs whose dimensions exact-match the WAD miptex mip-0 resolution (1024×1024)
+- This required-closure rule is Enhanced-only: generic `compile-bsp` retains optional
+  companion semantics and its deterministic legacy fallback
+- A strict isolated authorization validates the complete staged closure before atomic
+  publication; malformed, dimension-mismatched, or missing required assets fail before
+  the package becomes visible
 
 ### 14.5 Key Differences from Legacy v1
 

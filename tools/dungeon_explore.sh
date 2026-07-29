@@ -18,20 +18,25 @@ cd "$repo_root"
 
 cache_root=".internal-dev/captures/bsp-dungeon-generator"
 
-# Theme paths differ by class
-if [[ "$CLASS" == "m2" ]]; then
-  DEFAULT_WAD_PATH="src/bsp_generator/themes/cc0_dungeon_v2/cc0_dungeon_v2.wad"
-  DEFAULT_PALETTE_PATH="src/bsp_generator/themes/cc0_dungeon_v2/palette.lmp"
-  DEFAULT_TEXTURES_DIR="src/bsp_generator/themes/cc0_dungeon_v2/textures"
-else
-  DEFAULT_WAD_PATH="src/bsp_generator/themes/cc0_stone_beta/cc0_stone_beta.wad"
-  DEFAULT_PALETTE_PATH="src/bsp_generator/themes/cc0_stone_beta/palette.lmp"
-  DEFAULT_TEXTURES_DIR="src/bsp_generator/themes/cc0_stone_beta/textures"
-fi
+configure_theme_paths() {
+  # Recompute defaults whenever the class changes so CLI and interactive M2
+  # runs cannot accidentally retain the Legacy v1 resource roots.
+  if [[ "$CLASS" == "m2" ]]; then
+    DEFAULT_WAD_PATH="src/bsp_generator/themes/cc0_dungeon_v2/cc0_dungeon_v2.wad"
+    DEFAULT_PALETTE_PATH="src/bsp_generator/themes/cc0_dungeon_v2/palette.lmp"
+    DEFAULT_TEXTURES_DIR="src/bsp_generator/themes/cc0_dungeon_v2/textures"
+  else
+    DEFAULT_WAD_PATH="src/bsp_generator/themes/cc0_stone_beta/cc0_stone_beta.wad"
+    DEFAULT_PALETTE_PATH="src/bsp_generator/themes/cc0_stone_beta/palette.lmp"
+    DEFAULT_TEXTURES_DIR="src/bsp_generator/themes/cc0_stone_beta/textures"
+  fi
 
-WAD_PATH="${DUNGEON_WAD_PATH:-$DEFAULT_WAD_PATH}"
-PALETTE_PATH="${DUNGEON_PALETTE_PATH:-$DEFAULT_PALETTE_PATH}"
-TEXTURES_DIR="${DUNGEON_TEXTURES_DIR:-$DEFAULT_TEXTURES_DIR}"
+  WAD_PATH="${DUNGEON_WAD_PATH:-$DEFAULT_WAD_PATH}"
+  PALETTE_PATH="${DUNGEON_PALETTE_PATH:-$DEFAULT_PALETTE_PATH}"
+  TEXTURES_DIR="${DUNGEON_TEXTURES_DIR:-$DEFAULT_TEXTURES_DIR}"
+}
+
+configure_theme_paths
 PROFILE_PATH="${DUNGEON_PROFILE_PATH:-tools/bsp_authoring/ericw-q1-bsp2-generated-profile.toml}"
 DEFAULT_TOOL_PATH="${DUNGEON_TOOL_PATH:-$HOME/.local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin}"
 
@@ -53,6 +58,21 @@ cache_paths() {
 }
 
 calc_sha256() { sha256sum "$1" | awk '{print $1}'; }
+
+# Hash a non-empty texture tree by stable relative name and file bytes. The
+# per-file digest framing prevents ambiguity between adjacent file contents.
+texture_tree_sha256() {
+  local dir="$1"
+  [[ -d "$dir" ]] || return 1
+  [[ -n "$(find "$dir" -type f -print -quit)" ]] || return 1
+  {
+    local relative digest
+    while IFS= read -r -d '' relative; do
+      digest="$(calc_sha256 "$dir/$relative")" || return 1
+      printf '%s\0%s\0' "$relative" "$digest"
+    done < <(find "$dir" -type f -printf '%P\0' | LC_ALL=C sort -z)
+  } | sha256sum | awk '{print $1}'
+}
 
 verify_cache() {
   local bsp="$1" lit="$2" manifest="$3"
@@ -77,7 +97,17 @@ verify_cache() {
   [[ "$stored_wad" == "$(calc_sha256 "$WAD_PATH")" ]] || return 1
 
   local stored_gen; stored_gen="$(grep '^generator[[:space:]]*=' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
-  [[ "$stored_gen" == "dungeon_gen" ]] || return 1
+  if [[ "$CLASS" == "m2" ]]; then
+    # M2 Enhanced v2 provenance and the configured texture closure are both
+    # mandatory cache inputs. A missing directory or hash is never a cache hit.
+    [[ "$stored_gen" == "engine_pack:enhanced-dungeon" ]] || return 1
+    local stored_tx; stored_tx="$(grep '^textures_tree\.sha256' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
+    [[ -n "$stored_tx" ]] || return 1
+    local current_tx; current_tx="$(texture_tree_sha256 "$TEXTURES_DIR")" || return 1
+    [[ "$stored_tx" == "$current_tx" ]] || return 1
+  else
+    [[ "$stored_gen" == "dungeon_gen" ]] || return 1
+  fi
 
   return 0
 }
@@ -86,6 +116,7 @@ generator_version() {
   # Fingerprint every generator source plus all compiler inputs. A curated
   # source list previously omitted serialize.rs, so texture-scale changes kept
   # reusing a scale-1 BSP even after the generator had moved to scale 0.25.
+  # For M2 (Enhanced v2), also fingerprint the theme textures/ closure.
   local files=(
     "$repo_root/Cargo.lock"
     "$repo_root/tools/dungeon_explore.sh"
@@ -104,6 +135,13 @@ generator_version() {
       "$repo_root/tools/engine_pack" \
       -type f \( -name '*.rs' -o -name 'Cargo.toml' \) -print0
   )
+  # For M2, fingerprint the effective texture closure with stable relative
+  # names and bytes. This catches addition, removal, rename, and replacement.
+  if [[ "$CLASS" == "m2" ]]; then
+    local texture_tree
+    texture_tree="$(texture_tree_sha256 "$TEXTURES_DIR")" || return 1
+    files+=("$TEXTURES_DIR")
+  fi
   local tool tool_path
   for tool in qbsp vis light; do
     tool_path="$DEFAULT_TOOL_PATH/$tool"
@@ -117,6 +155,9 @@ generator_version() {
   while IFS= read -r -d '' f; do
     [[ -f "$f" ]] && hash_input+="$(sha256sum "$f" | awk '{print $1}')"
   done < <(printf '%s\0' "${files[@]}" | sort -zu)
+  if [[ "$CLASS" == "m2" ]]; then
+    hash_input+="textures_tree:$texture_tree"
+  fi
   echo "$hash_input" | sha256sum | awk '{print $1}' | head -c 16
 }
 
@@ -206,10 +247,22 @@ build_cache() {
   local wad_sha256; wad_sha256="$(calc_sha256 "$WAD_PATH")"
   local bsp_sha256; bsp_sha256="$(calc_sha256 "$bsp")"
   local lit_sha256; lit_sha256="$(calc_sha256 "$lit")"
+
+  local gen_id; gen_id="dungeon_gen"
+  local textures_tree_line=""
+  if [[ "$class" == "m2" ]]; then
+    gen_id="engine_pack:enhanced-dungeon"
+    local tx_tree; tx_tree="$(texture_tree_sha256 "$TEXTURES_DIR")" || {
+      echo "  $(red "✗") Enhanced v2 requires a non-empty texture directory: $TEXTURES_DIR" >&2
+      return 1
+    }
+    textures_tree_line="textures_tree.sha256 = \"$tx_tree\""
+  fi
+
   cat > "$manifest" <<MANIFEST
 # Auto-generated dungeon manifest — do not edit manually
 [generator]
-generator = "dungeon_gen"
+generator = "$gen_id"
 seed = $seed
 class = "$class"
 generator_version = "$(generator_version)"
@@ -221,7 +274,7 @@ profile = "ericw-q1-bsp2-generated"
 palette.sha256 = "$palette_sha256"
 wad.path = "$WAD_PATH"
 wad.sha256 = "$wad_sha256"
-
+$textures_tree_line
 [compiled]
 bsp.sha256 = "$bsp_sha256"
 lit.sha256 = "$lit_sha256"
@@ -262,6 +315,7 @@ draw_menu() {
 }
 
 cache_status_line() {
+  configure_theme_paths
   cache_paths "$SEED" "$CLASS"
   if verify_cache "$CACHE_BSP" "$CACHE_LIT" "$CACHE_MANIFEST"; then
     local sz; sz="$(du -h "$CACHE_BSP" | awk '{print $1}')"
@@ -274,6 +328,7 @@ cache_status_line() {
 }
 
 run_explorer() {
+  configure_theme_paths
   cache_paths "$SEED" "$CLASS"
   local bsp="$CACHE_BSP" lit="$CACHE_LIT" manifest="$CACHE_MANIFEST"
 
