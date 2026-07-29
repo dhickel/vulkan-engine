@@ -37,6 +37,7 @@ pub struct RouteSegment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteResult {
     pub segments: Vec<RouteSegment>,
+    /// Actual A* node expansions, including failed detours.
     pub expansions: u32,
 }
 
@@ -89,9 +90,15 @@ pub fn route_sockets(
     // Try the primary start cell; if blocked, try neighbors
     let start_candidates = [
         start_cell,
-        (start_cell.0.saturating_add(1).min(cells_x - 1), start_cell.1),
+        (
+            start_cell.0.saturating_add(1).min(cells_x - 1),
+            start_cell.1,
+        ),
         (start_cell.0.saturating_sub(1), start_cell.1),
-        (start_cell.0, start_cell.1.saturating_add(1).min(cells_y - 1)),
+        (
+            start_cell.0,
+            start_cell.1.saturating_add(1).min(cells_y - 1),
+        ),
         (start_cell.0, start_cell.1.saturating_sub(1)),
     ];
 
@@ -108,11 +115,19 @@ pub fn route_sockets(
             target_room,
         );
         match path {
-            Ok(p) => {
+            Ok((p, expansions)) => {
                 let segments = simplify_path(&p, from_anchor, to_anchor, grid)?;
+                // A* probes each step's complete 64-unit envelope. Recheck
+                // the final merged segments so no simplification can weaken
+                // that guarantee.
+                for segment in &segments {
+                    if !envelope_is_clear(segment.envelope, grid, source_room, target_room)? {
+                        return Err(EnhancedError::RouteExhausted { expansions });
+                    }
+                }
                 return Ok(RouteResult {
                     segments,
-                    expansions: p.len() as u32,
+                    expansions,
                 });
             }
             Err(e) => {
@@ -150,7 +165,7 @@ fn a_star_search(
     max_expansions: u32,
     source_room: RoomId,
     target_room: RoomId,
-) -> Result<Vec<(u32, u32)>, EnhancedError> {
+) -> Result<(Vec<(u32, u32)>, u32), EnhancedError> {
     use std::collections::BinaryHeap;
 
     // For deterministic tie-breaking, we use a custom ordering.
@@ -220,7 +235,7 @@ fn a_star_search(
                 cur = p;
             }
             path.reverse();
-            return Ok(path);
+            return Ok((path, expansions));
         }
 
         expansions += 1;
@@ -244,7 +259,17 @@ fn a_star_search(
             let n_idx = (cells_x as usize) * (ny as usize) + (nx as usize);
 
             // Check corridor envelope for this step
-            if !corridor_step_clear(cx, cy, nx, ny, grid, cells_x, cells_y, source_room, target_room)? {
+            if !corridor_step_clear(
+                cx,
+                cy,
+                nx,
+                ny,
+                grid,
+                cells_x,
+                cells_y,
+                source_room,
+                target_room,
+            )? {
                 continue;
             }
 
@@ -263,9 +288,7 @@ fn a_star_search(
         }
     }
 
-    Err(EnhancedError::RouteExhausted {
-        expansions,
-    })
+    Err(EnhancedError::RouteExhausted { expansions })
 }
 
 // ── Corridor clearance check ───────────────────────────────────────────────
@@ -274,8 +297,9 @@ fn a_star_search(
 /// (nx,ny) does not overlap any occupied cells, except cells owned by
 /// `source_room` or `target_room` (for portal clearance).
 ///
-/// Uses the minimal 1-cell check during A* for pathfinding speed;
-/// the full 64-unit envelope is validated after path simplification.
+/// The full 64-unit envelope is checked for every expansion. This is
+/// deliberately conservative: a centreline path is not a materializable
+/// route unless its entire corridor footprint is clear.
 fn corridor_step_clear(
     _cx: u32,
     _cy: u32,
@@ -287,38 +311,42 @@ fn corridor_step_clear(
     _source_room: RoomId,
     _target_room: RoomId,
 ) -> Result<bool, EnhancedError> {
-    // Single-cell clearance during A*. Allow passage through any room cell.
-    let qx = (nx * Q_U) as i32;
-    let qy = (ny * Q_U) as i32;
-    cell_is_clear(qx, qy, grid, _source_room, _target_room)
+    let center = ((nx * Q_U) as i32, (ny * Q_U) as i32);
+    let envelope = compute_envelope(center.0, center.1, center.0, center.1);
+    envelope_is_clear(envelope, grid, _source_room, _target_room)
 }
 
-/// Check if a single cell is clear (empty or owned by any room).
-/// Routes can pass through room cells since the BSP compiler merges
-/// overlapping empty volumes.
-fn cell_is_clear(
-    qx: i32,
-    qy: i32,
+fn envelope_is_clear(
+    (x0, y0, x1, y1): (i32, i32, i32, i32),
     grid: &OccupancyGrid,
-    _source_room: RoomId,
-    _target_room: RoomId,
+    source_room: RoomId,
+    target_room: RoomId,
 ) -> Result<bool, EnhancedError> {
-    // Allow empty cells and any room-owned cells.
-    // Route/Transition cells are NOT allowed (prevents route overlap).
     use super::occupancy::Owner;
-    let cx = (qx as u32) / Q_U;
-    let cy = (qy as u32) / Q_U;
-    if cx >= grid.cells_x() || cy >= grid.cells_y() {
+    if x0 < 0 || y0 < 0 || x1 <= x0 || y1 <= y0 {
         return Ok(false);
     }
-    let idx = (grid.cells_x() as usize) * (cy as usize) + (cx as usize);
-    match grid.cells()[idx] {
-        Owner::Empty => Ok(true),
-        Owner::Room(_) => Ok(true),
-        Owner::Route(_) => Ok(true),  // routes can share cells (junctions)
-        Owner::Transition(_) => Ok(true),  // transitions can share with corridors
-        Owner::Reservation(_) => Ok(true),
+    let qx0 = x0 as u32 / Q_U;
+    let qy0 = y0 as u32 / Q_U;
+    let qx1 = x1 as u32 / Q_U;
+    let qy1 = y1 as u32 / Q_U;
+    if qx1 > grid.cells_x() || qy1 > grid.cells_y() {
+        return Ok(false);
     }
+    for cy in qy0..qy1 {
+        for cx in qx0..qx1 {
+            let idx = grid.cells_x() as usize * cy as usize + cx as usize;
+            match grid.cells()[idx] {
+                Owner::Empty => {}
+                Owner::Room(room) if room == source_room || room == target_room => {}
+                // Existing horizontal reservations form explicit junctions;
+                // transition footprints are still exclusive blockers.
+                Owner::Route(_) => {}
+                _ => return Ok(false),
+            }
+        }
+    }
+    Ok(true)
 }
 
 // ── Manhattan distance heuristic ───────────────────────────────────────────
@@ -352,12 +380,6 @@ fn simplify_path(
     if path.len() == 1 {
         // Direct connection — single segment between anchors
         let envelope = compute_envelope(from_anchor.0, from_anchor.1, to_anchor.0, to_anchor.1);
-        // Validate envelope
-        if !_grid.is_rect_empty(envelope.0, envelope.1, envelope.2 - envelope.0, envelope.3 - envelope.1)? {
-            return Err(EnhancedError::ContractViolation {
-                detail: "corridor envelope overlaps occupied cells".into(),
-            });
-        }
         return Ok(vec![RouteSegment {
             start: (from_anchor.0, from_anchor.1),
             end: (to_anchor.0, to_anchor.1),
@@ -483,7 +505,16 @@ mod tests {
     #[test]
     fn straight_horizontal_route() {
         let grid = make_grid();
-        let result = route_sockets((16, 48), (208, 48), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
+        let result = route_sockets(
+            (16, 48),
+            (208, 48),
+            &grid,
+            1024,
+            10000,
+            RoomId(0),
+            RoomId(0),
+        )
+        .unwrap();
         assert!(!result.segments.is_empty());
         // Should be a straight horizontal corridor
         for seg in &result.segments {
@@ -495,7 +526,16 @@ mod tests {
     #[test]
     fn straight_vertical_route() {
         let grid = make_grid();
-        let result = route_sockets((48, 16), (48, 208), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
+        let result = route_sockets(
+            (48, 16),
+            (48, 208),
+            &grid,
+            1024,
+            10000,
+            RoomId(0),
+            RoomId(0),
+        )
+        .unwrap();
         assert!(!result.segments.is_empty());
         for seg in &result.segments {
             assert_eq!(seg.start.0, seg.end.0); // same x
@@ -506,7 +546,16 @@ mod tests {
     #[test]
     fn l_shaped_route() {
         let grid = make_grid();
-        let result = route_sockets((16, 48), (208, 160), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
+        let result = route_sockets(
+            (16, 48),
+            (208, 160),
+            &grid,
+            1024,
+            10000,
+            RoomId(0),
+            RoomId(0),
+        )
+        .unwrap();
         assert!(!result.segments.is_empty());
         // Should have at least 2 segments (L-shape)
         for seg in &result.segments {
@@ -530,11 +579,16 @@ mod tests {
         // Place a blocking room between start and end
         grid.reserve_rect(80, 16, 64, 64, RoomId(0)).unwrap();
 
-        let result = route_sockets((16, 48), (208, 48), &grid, 1024, 10000, RoomId(0), RoomId(0));
-        assert!(
-            result.is_ok(),
-            "should find path around obstacle"
+        let result = route_sockets(
+            (16, 48),
+            (208, 48),
+            &grid,
+            1024,
+            10000,
+            RoomId(0),
+            RoomId(0),
         );
+        assert!(result.is_ok(), "should find path around obstacle");
     }
 
     #[test]
@@ -555,7 +609,16 @@ mod tests {
         grid.reserve_rect(16, 80, 64, 64, RoomId(0)).unwrap();
 
         // Route should go around, not through
-        let result = route_sockets((48, 16), (48, 208), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
+        let result = route_sockets(
+            (48, 16),
+            (48, 208),
+            &grid,
+            1024,
+            10000,
+            RoomId(0),
+            RoomId(0),
+        )
+        .unwrap();
         for seg in &result.segments {
             let (ex0, ey0, ex1, ey1) = seg.envelope;
             for rx in [ex0, ex1 - 16] {
@@ -566,7 +629,8 @@ mod tests {
                     let room_y0 = 80;
                     let room_x1 = 80;
                     let room_y1 = 144;
-                    let overlaps = rx < room_x1 && rx + 16 > room_x0 && ry < room_y1 && ry + 16 > room_y0;
+                    let overlaps =
+                        rx < room_x1 && rx + 16 > room_x0 && ry < room_y1 && ry + 16 > room_y0;
                     assert!(
                         !overlaps,
                         "segment envelope {:?} overlaps room at ({},{},{},{})",
@@ -580,15 +644,42 @@ mod tests {
     #[test]
     fn deterministic_same_input_same_path() {
         let grid = make_grid();
-        let r1 = route_sockets((16, 48), (208, 160), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
-        let r2 = route_sockets((16, 48), (208, 160), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
+        let r1 = route_sockets(
+            (16, 48),
+            (208, 160),
+            &grid,
+            1024,
+            10000,
+            RoomId(0),
+            RoomId(0),
+        )
+        .unwrap();
+        let r2 = route_sockets(
+            (16, 48),
+            (208, 160),
+            &grid,
+            1024,
+            10000,
+            RoomId(0),
+            RoomId(0),
+        )
+        .unwrap();
         assert_eq!(r1.segments, r2.segments);
     }
 
     #[test]
     fn corridor_width_enforced() {
         let grid = make_grid();
-        let result = route_sockets((16, 48), (208, 48), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
+        let result = route_sockets(
+            (16, 48),
+            (208, 48),
+            &grid,
+            1024,
+            10000,
+            RoomId(0),
+            RoomId(0),
+        )
+        .unwrap();
         for seg in &result.segments {
             let (ex0, ey0, ex1, ey1) = seg.envelope;
             let ew = ex1 - ex0;

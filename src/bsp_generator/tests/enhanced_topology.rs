@@ -30,10 +30,7 @@ fn topo_rng(seed_val: u64) -> EnhancedStageRng {
 fn try_build(
     cfg: &EnhancedConfig,
     seed: u64,
-) -> Result<
-    bsp_generator::enhanced::topology::TopologyResult,
-    EnhancedError,
-> {
+) -> Result<bsp_generator::enhanced::topology::TopologyResult, EnhancedError> {
     let placement = place_rooms(cfg, seed_rng(seed)).unwrap();
     let mut rng = topo_rng(seed);
     build_topology(cfg, &placement, &mut rng)
@@ -202,8 +199,7 @@ fn rollback_restores_full_state() {
     tx.consume_loop_budget();
     tx.claim_socket(SocketId(0), OwnerKind::Route(RouteId(0)))
         .unwrap();
-    tx.reserve_route_rect(0, 0, 64, 64, RouteId(0))
-        .unwrap();
+    tx.reserve_route_rect(0, 0, 64, 64, RouteId(0)).unwrap();
 
     assert_eq!(tx.loop_budget_remaining(), 3);
     assert!(tx.socket_is_claimed(SocketId(0)));

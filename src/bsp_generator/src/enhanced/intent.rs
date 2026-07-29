@@ -141,6 +141,16 @@ pub struct RouteIntent {
     pub id: RouteId,
     pub source_socket: SocketId,
     pub target_socket: SocketId,
+    /// Room endpoints, retained so validation never infers graph ownership
+    /// from allocation order.
+    pub source_room: RoomId,
+    pub target_room: RoomId,
+    /// Canonically ordered, orthogonal centreline segments.
+    pub path: Vec<((i32, i32), (i32, i32))>,
+    /// Complete 64-unit projected reservations for `path`.
+    pub envelopes: Vec<(i32, i32, i32, i32)>,
+    /// Clear vertical extent for every corridor envelope.
+    pub headroom: (i32, i32),
 }
 
 /// A vertical transition (stair) between rooms on different layers.
@@ -151,6 +161,22 @@ pub struct TransitionIntent {
     pub upper_room: RoomId,
     pub lower_socket: SocketId,
     pub upper_socket: SocketId,
+    /// Protected projected footprint `(x0, y0, x1, y1)`.
+    pub footprint: (i32, i32, i32, i32),
+    /// Protected 3-D volume `(x0, y0, z0, x1, y1, z1)`.
+    pub protected_volume: (i32, i32, i32, i32, i32, i32),
+    /// Direct room approaches and landings, each as an XY rectangle.
+    pub lower_approach: (i32, i32, i32, i32),
+    pub upper_approach: (i32, i32, i32, i32),
+    pub lower_landing: (i32, i32, i32, i32),
+    pub upper_landing: (i32, i32, i32, i32),
+    /// `(x, y, z)` lower corners of the ordered 16-unit-riser treads.
+    pub treads: Vec<(i32, i32, i32)>,
+    /// Required clear volume above the stairs.
+    pub headroom: (i32, i32, i32, i32, i32, i32),
+    pub riser: i32,
+    pub tread_depth: i32,
+    pub sealed_shell: bool,
 }
 
 /// A zone of rooms sharing a theme palette.

@@ -25,10 +25,22 @@ fn grid_2048() -> OccupancyGrid {
 #[test]
 fn straight_horizontal_route() {
     let grid = grid_1024();
-    let result = route_sockets((16, 48), (208, 48), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
+    let result = route_sockets(
+        (16, 48),
+        (208, 48),
+        &grid,
+        1024,
+        10000,
+        RoomId(0),
+        RoomId(0),
+    )
+    .unwrap();
     assert!(!result.segments.is_empty());
     for seg in &result.segments {
-        assert_eq!(seg.start.1, seg.end.1, "horizontal segment must have same Y");
+        assert_eq!(
+            seg.start.1, seg.end.1,
+            "horizontal segment must have same Y"
+        );
         let (_, ey0, _, ey1) = seg.envelope;
         assert_eq!(ey1 - ey0, CORRIDOR_WIDTH, "envelope must be corridor width");
     }
@@ -37,7 +49,16 @@ fn straight_horizontal_route() {
 #[test]
 fn straight_vertical_route() {
     let grid = grid_1024();
-    let result = route_sockets((48, 16), (48, 208), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
+    let result = route_sockets(
+        (48, 16),
+        (48, 208),
+        &grid,
+        1024,
+        10000,
+        RoomId(0),
+        RoomId(0),
+    )
+    .unwrap();
     assert!(!result.segments.is_empty());
     for seg in &result.segments {
         assert_eq!(seg.start.0, seg.end.0, "vertical segment must have same X");
@@ -51,14 +72,35 @@ fn straight_vertical_route() {
 #[test]
 fn l_shaped_route_has_at_least_two_segments() {
     let grid = grid_1024();
-    let result = route_sockets((16, 48), (208, 160), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
-    assert!(result.segments.len() >= 2, "L-shaped route needs ≥2 segments");
+    let result = route_sockets(
+        (16, 48),
+        (208, 160),
+        &grid,
+        1024,
+        10000,
+        RoomId(0),
+        RoomId(0),
+    )
+    .unwrap();
+    assert!(
+        result.segments.len() >= 2,
+        "L-shaped route needs ≥2 segments"
+    );
 }
 
 #[test]
 fn l_shaped_segments_are_connected() {
     let grid = grid_1024();
-    let result = route_sockets((16, 48), (208, 160), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
+    let result = route_sockets(
+        (16, 48),
+        (208, 160),
+        &grid,
+        1024,
+        10000,
+        RoomId(0),
+        RoomId(0),
+    )
+    .unwrap();
 
     for i in 1..result.segments.len() {
         assert_eq!(
@@ -74,7 +116,16 @@ fn l_shaped_segments_are_connected() {
 #[test]
 fn all_segments_are_axis_aligned() {
     let grid = grid_1024();
-    let result = route_sockets((16, 48), (208, 160), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
+    let result = route_sockets(
+        (16, 48),
+        (208, 160),
+        &grid,
+        1024,
+        10000,
+        RoomId(0),
+        RoomId(0),
+    )
+    .unwrap();
 
     for seg in &result.segments {
         let dx = (seg.end.0 - seg.start.0).abs();
@@ -97,7 +148,15 @@ fn route_avoids_blocking_room() {
     // conflict with the portal-allowed rooms RoomId(0))
     grid.reserve_rect(80, 16, 64, 64, RoomId(99)).unwrap();
 
-    let result = route_sockets((16, 48), (208, 48), &grid, 1024, 10000, RoomId(0), RoomId(1));
+    let result = route_sockets(
+        (16, 48),
+        (208, 48),
+        &grid,
+        1024,
+        10000,
+        RoomId(0),
+        RoomId(1),
+    );
     // The route may or may not succeed depending on whether the
     // centerline can avoid the room. Either outcome is valid.
     if let Ok(route) = result {
@@ -115,7 +174,15 @@ fn route_avoids_multiple_rooms() {
     grid.reserve_rect(64, 96, 64, 80, RoomId(99)).unwrap();
 
     // Route must go through the gap
-    let result = route_sockets((16, 48), (208, 48), &grid, 1024, 10000, RoomId(0), RoomId(1));
+    let result = route_sockets(
+        (16, 48),
+        (208, 48),
+        &grid,
+        1024,
+        10000,
+        RoomId(0),
+        RoomId(1),
+    );
     assert!(result.is_ok(), "should find path through the gap");
 }
 
@@ -124,7 +191,16 @@ fn route_avoids_multiple_rooms() {
 #[test]
 fn corridor_width_in_envelope() {
     let grid = grid_1024();
-    let result = route_sockets((16, 48), (208, 160), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
+    let result = route_sockets(
+        (16, 48),
+        (208, 160),
+        &grid,
+        1024,
+        10000,
+        RoomId(0),
+        RoomId(0),
+    )
+    .unwrap();
 
     for seg in &result.segments {
         let (ex0, ey0, ex1, ey1) = seg.envelope;
@@ -145,7 +221,16 @@ fn corridor_width_in_envelope() {
 #[test]
 fn envelope_is_quantum_aligned() {
     let grid = grid_1024();
-    let result = route_sockets((16, 48), (208, 160), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
+    let result = route_sockets(
+        (16, 48),
+        (208, 160),
+        &grid,
+        1024,
+        10000,
+        RoomId(0),
+        RoomId(0),
+    )
+    .unwrap();
 
     for seg in &result.segments {
         let (ex0, ey0, ex1, ey1) = seg.envelope;
@@ -159,7 +244,16 @@ fn envelope_is_quantum_aligned() {
 #[test]
 fn route_endpoints_are_quantum_aligned() {
     let grid = grid_1024();
-    let result = route_sockets((16, 48), (208, 160), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
+    let result = route_sockets(
+        (16, 48),
+        (208, 160),
+        &grid,
+        1024,
+        10000,
+        RoomId(0),
+        RoomId(0),
+    )
+    .unwrap();
 
     for seg in &result.segments {
         assert_eq!(seg.start.0 % Q, 0, "start.x not quantum-aligned");
@@ -174,8 +268,26 @@ fn route_endpoints_are_quantum_aligned() {
 #[test]
 fn same_input_same_route() {
     let grid = grid_1024();
-    let r1 = route_sockets((16, 48), (208, 160), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
-    let r2 = route_sockets((16, 48), (208, 160), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
+    let r1 = route_sockets(
+        (16, 48),
+        (208, 160),
+        &grid,
+        1024,
+        10000,
+        RoomId(0),
+        RoomId(0),
+    )
+    .unwrap();
+    let r2 = route_sockets(
+        (16, 48),
+        (208, 160),
+        &grid,
+        1024,
+        10000,
+        RoomId(0),
+        RoomId(0),
+    )
+    .unwrap();
     assert_eq!(r1.segments, r2.segments, "routing must be deterministic");
 }
 
@@ -184,8 +296,26 @@ fn deterministic_with_obstacles() {
     let mut grid = grid_1024();
     grid.reserve_rect(96, 16, 48, 80, RoomId(99)).unwrap();
 
-    let r1 = route_sockets((16, 48), (208, 96), &grid, 1024, 10000, RoomId(0), RoomId(1)).unwrap();
-    let r2 = route_sockets((16, 48), (208, 96), &grid, 1024, 10000, RoomId(0), RoomId(1)).unwrap();
+    let r1 = route_sockets(
+        (16, 48),
+        (208, 96),
+        &grid,
+        1024,
+        10000,
+        RoomId(0),
+        RoomId(1),
+    )
+    .unwrap();
+    let r2 = route_sockets(
+        (16, 48),
+        (208, 96),
+        &grid,
+        1024,
+        10000,
+        RoomId(0),
+        RoomId(1),
+    )
+    .unwrap();
     assert_eq!(r1.segments, r2.segments);
 }
 
@@ -210,20 +340,22 @@ fn exhaustion_with_blocked_path() {
     // Block the entire middle of the grid with rooms not in the portal clearance list
     grid.reserve_rect(0, 80, 1024, 32, RoomId(99)).unwrap();
 
-    // With lenient routing (v2 allows corridors through rooms),
-    // a path should be found through the room cells.
     let result = route_sockets((16, 48), (16, 160), &grid, 1024, 500, RoomId(0), RoomId(1));
-    // Route should succeed since rooms don't block corridors
-    assert!(result.is_ok());
+    // A full-width envelope may not tunnel through an unrelated room.
+    assert!(matches!(result, Err(EnhancedError::RouteExhausted { .. })));
 }
 
 #[test]
 fn exhaustion_error_contains_expansions() {
     let grid = grid_1024();
-    let err = route_sockets((16, 48), (900, 900), &grid, 1024, 3, RoomId(0), RoomId(0)).unwrap_err();
+    let err =
+        route_sockets((16, 48), (900, 900), &grid, 1024, 3, RoomId(0), RoomId(0)).unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("A*"), "error message should mention A*");
-    assert!(msg.contains("expansion"), "error message should mention expansions");
+    assert!(
+        msg.contains("expansion"),
+        "error message should mention expansions"
+    );
 }
 
 // ── Large grid ────────────────────────────────────────────────────────────
@@ -231,7 +363,16 @@ fn exhaustion_error_contains_expansions() {
 #[test]
 fn large_grid_routing() {
     let grid = grid_2048();
-    let result = route_sockets((16, 48), (1800, 1600), &grid, 2048, 50000, RoomId(0), RoomId(0)).unwrap();
+    let result = route_sockets(
+        (16, 48),
+        (1800, 1600),
+        &grid,
+        2048,
+        50000,
+        RoomId(0),
+        RoomId(0),
+    )
+    .unwrap();
     assert!(!result.segments.is_empty());
 
     for seg in &result.segments {
@@ -246,21 +387,31 @@ fn large_grid_routing() {
 #[test]
 fn route_same_cell_is_single_segment() {
     let grid = grid_1024();
-    let result = route_sockets((48, 48), (48, 48), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
+    let result =
+        route_sockets((48, 48), (48, 48), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
     assert!(!result.segments.is_empty());
 }
 
 #[test]
 fn route_one_cell_apart() {
     let grid = grid_1024();
-    let result = route_sockets((16, 48), (32, 48), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
+    let result =
+        route_sockets((16, 48), (32, 48), &grid, 1024, 10000, RoomId(0), RoomId(0)).unwrap();
     assert!(!result.segments.is_empty());
 }
 
 #[test]
 fn route_out_of_bounds_errors() {
     let grid = grid_1024();
-    let result = route_sockets((-16, 48), (208, 48), &grid, 1024, 10000, RoomId(0), RoomId(0));
+    let result = route_sockets(
+        (-16, 48),
+        (208, 48),
+        &grid,
+        1024,
+        10000,
+        RoomId(0),
+        RoomId(0),
+    );
     // Anchors outside grid should produce an error (or be clamped)
     // The function snaps to grid, so -16 would become cell 0
     // But negative coords might cause issues
@@ -285,8 +436,22 @@ fn route_between_placed_rooms() {
     let sockets_b: Vec<_> = placement.sockets.iter().filter(|s| s.room == b).collect();
 
     eprintln!("Routing room {:?} -> {:?}", a, b);
-    eprintln!("  sockets from {:?}: {:?}", a, sockets_a.iter().map(|s| (s.id, s.wall, s.anchor)).collect::<Vec<_>>());
-    eprintln!("  sockets from {:?}: {:?}", b, sockets_b.iter().map(|s| (s.id, s.wall, s.anchor)).collect::<Vec<_>>());
+    eprintln!(
+        "  sockets from {:?}: {:?}",
+        a,
+        sockets_a
+            .iter()
+            .map(|s| (s.id, s.wall, s.anchor))
+            .collect::<Vec<_>>()
+    );
+    eprintln!(
+        "  sockets from {:?}: {:?}",
+        b,
+        sockets_b
+            .iter()
+            .map(|s| (s.id, s.wall, s.anchor))
+            .collect::<Vec<_>>()
+    );
 
     let mut any_ok = false;
     for sa in &sockets_a {
@@ -297,11 +462,17 @@ fn route_between_placed_rooms() {
                 &placement.grid,
                 cfg.xy_extent(),
                 500_000,
-                a, b,
+                a,
+                b,
             );
             match &result {
                 Ok(r) => {
-                    eprintln!("  OK: socket {:?}->{:?}: {} segments", sa.id, sb.id, r.segments.len());
+                    eprintln!(
+                        "  OK: socket {:?}->{:?}: {} segments",
+                        sa.id,
+                        sb.id,
+                        r.segments.len()
+                    );
                     any_ok = true;
                 }
                 Err(e) => {
@@ -310,13 +481,26 @@ fn route_between_placed_rooms() {
             }
         }
     }
-    assert!(any_ok, "no socket pair could be routed between {:?} and {:?}", a, b);
+    assert!(
+        any_ok,
+        "no socket pair could be routed between {:?} and {:?}",
+        a, b
+    );
 }
 
 #[test]
 fn route_straight_line_long_distance() {
     let grid = grid_2048();
-    let result = route_sockets((16, 48), (2000, 48), &grid, 2048, 20000, RoomId(0), RoomId(0)).unwrap();
+    let result = route_sockets(
+        (16, 48),
+        (2000, 48),
+        &grid,
+        2048,
+        20000,
+        RoomId(0),
+        RoomId(0),
+    )
+    .unwrap();
     assert!(!result.segments.is_empty());
     // Should be a single horizontal segment
     assert_eq!(result.segments.len(), 1);

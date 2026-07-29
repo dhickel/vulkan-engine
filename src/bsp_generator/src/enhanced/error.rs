@@ -39,21 +39,13 @@ pub enum EnhancedError {
         xy_extent: u32,
     },
     /// Topology construction exhausted all backtracking alternatives.
-    TopologyExhausted {
-        detail: String,
-    },
+    TopologyExhausted { detail: String },
     /// A* routing exhausted its expansion budget.
-    RouteExhausted {
-        expansions: u32,
-    },
+    RouteExhausted { expansions: u32 },
     /// A stair transition reservation failed (no compatible socket pair).
-    TransitionReservationFailed {
-        detail: String,
-    },
+    TransitionReservationFailed { detail: String },
     /// Post-commit topology validation failed.
-    TopologyValidationFailed {
-        detail: String,
-    },
+    TopologyValidationFailed { detail: String },
 }
 
 impl fmt::Display for EnhancedError {

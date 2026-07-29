@@ -16,6 +16,8 @@ use super::error::EnhancedError;
 use super::intent::{IdAllocator, RouteId, RouteIntent, SocketId, TransitionId, TransitionIntent};
 use super::occupancy::{OccupancyGrid, Owner};
 
+const Q_U: u32 = crate::config::CONSTRUCTION_QUANTUM;
+
 // ── Ownership kinds ────────────────────────────────────────────────────────
 
 /// Which kind of entity owns a socket claim.
@@ -155,10 +157,8 @@ impl Transaction {
                 ),
             });
         }
-        self.socket_claims
-            .insert(source, OwnerKind::Route(route));
-        self.socket_claims
-            .insert(target, OwnerKind::Route(route));
+        self.socket_claims.insert(source, OwnerKind::Route(route));
+        self.socket_claims.insert(target, OwnerKind::Route(route));
         Ok(())
     }
 
@@ -207,8 +207,10 @@ impl Transaction {
             .reserve_rect_owner(x0, y0, w, h, Owner::Route(route))
     }
 
-    /// Reserve a rectangular region for a route, allowing overlap with
-    /// cells already owned by the same route or `allowed_rooms`.
+    /// Reserve a rectangular region for a route, allowing overlap only with
+    /// its two endpoint rooms or an explicit horizontal junction. A corridor
+    /// may meet another route only as a shared junction; transitions and
+    /// unrelated rooms always remain exclusive.
     pub fn reserve_route_rect_allow_rooms(
         &mut self,
         x0: i32,
@@ -262,18 +264,35 @@ impl Transaction {
                 let idx = (cells_x as usize) * (py as usize) + (px as usize);
                 match self.grid.cells()[idx] {
                     Owner::Empty => {}
-                    Owner::Room(_) => {} // allow all rooms (corridor shares space)
-                    Owner::Route(_) => {} // allow route junctions
-                    Owner::Transition(_) => {} // allow stair overlaps
-                    Owner::Reservation(_) => {}
+                    // Explicit junction sharing remains a route-owned
+                    // reservation for both records; transitions never share.
+                    Owner::Route(_) => {}
+                    Owner::Room(room) if _allowed_rooms.contains(&room) => {}
+                    owner => {
+                        return Err(EnhancedError::ContractViolation {
+                            detail: format!(
+                                "route {:?} conflicts with {:?} at ({}, {})",
+                                route,
+                                owner,
+                                px * Q_U,
+                                py * Q_U
+                            ),
+                        })
+                    }
                 }
             }
         }
 
-        // Second pass: write
+        // Keep endpoint room cells owned by their room. Socket claims and the
+        // route record own the aperture/throat; replacing the room ownership
+        // would make a later legal socket on that same room appear blocked.
         for py in qy0..qy1 {
             for px in qx0..qx1 {
                 let idx = (cells_x as usize) * (py as usize) + (px as usize);
+                if matches!(self.grid.cells()[idx], Owner::Room(room) if _allowed_rooms.contains(&room))
+                {
+                    continue;
+                }
                 self.grid.cells_mut()[idx] = Owner::Route(route);
             }
         }
@@ -281,7 +300,8 @@ impl Transaction {
         Ok(())
     }
 
-    /// Reserve a rectangular region for a transition.
+    /// Reserve a rectangular region for a transition. This strict variant
+    /// accepts only empty cells (or cells already owned by that transition).
     pub fn reserve_transition_rect(
         &mut self,
         x0: i32,
@@ -290,8 +310,75 @@ impl Transaction {
         h: i32,
         transition: TransitionId,
     ) -> Result<(), EnhancedError> {
-        self.grid
-            .reserve_rect_owner(x0, y0, w, h, Owner::Transition(transition))
+        self.reserve_transition_rect_allow_rooms(x0, y0, w, h, transition, &[])
+    }
+
+    /// Reserve a transition footprint while permitting only its direct host
+    /// rooms at its apertures. All unrelated projected ownership conflicts.
+    pub fn reserve_transition_rect_allow_rooms(
+        &mut self,
+        x0: i32,
+        y0: i32,
+        w: i32,
+        h: i32,
+        transition: TransitionId,
+        allowed_rooms: &[super::intent::RoomId],
+    ) -> Result<(), EnhancedError> {
+        let q = crate::config::CONSTRUCTION_QUANTUM as i32;
+        if x0 < 0
+            || y0 < 0
+            || w <= 0
+            || h <= 0
+            || x0 % q != 0
+            || y0 % q != 0
+            || w % q != 0
+            || h % q != 0
+        {
+            return Err(EnhancedError::ContractViolation {
+                detail: "invalid transition reservation rectangle".into(),
+            });
+        }
+        let qx0 = x0 as u32 / Q_U;
+        let qy0 = y0 as u32 / Q_U;
+        let qx1 = qx0 + w as u32 / Q_U;
+        let qy1 = qy0 + h as u32 / Q_U;
+        if qx1 > self.grid.cells_x() || qy1 > self.grid.cells_y() {
+            return Err(EnhancedError::ContractViolation {
+                detail: "transition footprint exceeds grid bounds".into(),
+            });
+        }
+        for py in qy0..qy1 {
+            for px in qx0..qx1 {
+                let idx = self.grid.cells_x() as usize * py as usize + px as usize;
+                match self.grid.cells()[idx] {
+                    Owner::Empty => {}
+                    Owner::Transition(existing) if existing == transition => {}
+                    Owner::Room(room) if allowed_rooms.contains(&room) => {}
+                    owner => {
+                        return Err(EnhancedError::ContractViolation {
+                            detail: format!(
+                                "transition {:?} conflicts with {:?} at ({}, {})",
+                                transition,
+                                owner,
+                                px * Q_U,
+                                py * Q_U
+                            ),
+                        })
+                    }
+                }
+            }
+        }
+        for py in qy0..qy1 {
+            for px in qx0..qx1 {
+                let idx = self.grid.cells_x() as usize * py as usize + px as usize;
+                if matches!(self.grid.cells()[idx], Owner::Room(room) if allowed_rooms.contains(&room))
+                {
+                    continue;
+                }
+                self.grid.cells_mut()[idx] = Owner::Transition(transition);
+            }
+        }
+        Ok(())
     }
 
     /// Check if a rect is empty (no rooms, routes, or transitions).
@@ -336,6 +423,11 @@ impl Transaction {
     pub fn transitions(&self) -> &[TransitionIntent] {
         &self.transitions
     }
+
+    /// Canonical socket-ownership snapshot used by post-commit validation.
+    pub fn socket_claims(&self) -> &BTreeMap<SocketId, OwnerKind> {
+        &self.socket_claims
+    }
 }
 
 // ── Committed state ────────────────────────────────────────────────────────
@@ -367,8 +459,7 @@ mod tests {
         let mut tx = Transaction::new(grid, alloc, 3);
 
         let mark = tx.mark();
-        tx.reserve_route_rect(0, 0, 64, 64, RouteId(0))
-            .unwrap();
+        tx.reserve_route_rect(0, 0, 64, 64, RouteId(0)).unwrap();
         tx.rollback(mark);
 
         assert!(tx.is_rect_empty(0, 0, 64, 64).unwrap());
@@ -414,6 +505,11 @@ mod tests {
             id: alloc.next_route().unwrap(),
             source_socket: SocketId(0),
             target_socket: SocketId(1),
+            source_room: RoomId(0),
+            target_room: RoomId(1),
+            path: Vec::new(),
+            envelopes: Vec::new(),
+            headroom: (16, 96),
         };
         tx.add_route(route.clone());
 
@@ -465,6 +561,11 @@ mod tests {
             id: alloc.next_route().unwrap(),
             source_socket: SocketId(0),
             target_socket: SocketId(1),
+            source_room: RoomId(0),
+            target_room: RoomId(1),
+            path: Vec::new(),
+            envelopes: Vec::new(),
+            headroom: (16, 96),
         };
         tx.add_route(route.clone());
         tx.claim_socket(SocketId(0), OwnerKind::Route(route.id))
@@ -480,7 +581,7 @@ mod tests {
     #[test]
     fn mark_rollback_restores_id_allocator() {
         let grid = make_grid();
-        let mut alloc = IdAllocator::new();
+        let alloc = IdAllocator::new();
         let mut tx = Transaction::new(grid, alloc.clone(), 3);
 
         let mark = tx.mark();

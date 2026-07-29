@@ -5,11 +5,9 @@ use bsp_generator::enhanced::config::{
     EnhancedConfig, ENHANCED_LOWER_FLOOR_Z, ENHANCED_UPPER_FLOOR_Z,
 };
 use bsp_generator::enhanced::error::EnhancedError;
-use bsp_generator::enhanced::intent::{IdAllocator, LayerId, RoomId, RouteId, SocketId};
+use bsp_generator::enhanced::intent::{IdAllocator, LayerId, RoomId, SocketId};
 use bsp_generator::enhanced::occupancy::OccupancyGrid;
-use bsp_generator::enhanced::placement::{
-    place_rooms, CandidateSocket, PlacedRoom, WallDirection,
-};
+use bsp_generator::enhanced::placement::{place_rooms, CandidateSocket, PlacedRoom, WallDirection};
 use bsp_generator::enhanced::reservation::{OwnerKind, Transaction};
 use bsp_generator::enhanced::seed::{tags, EnhancedSeed, EnhancedStageRng};
 use bsp_generator::enhanced::topology::build_topology;
@@ -21,22 +19,13 @@ fn topo_rng(seed_val: u64) -> EnhancedStageRng {
         .rng()
 }
 
-fn make_placed_room(
-    id: u32,
-    layer: u32,
-    floor_z: i32,
-    shell: (i32, i32, i32, i32),
-) -> PlacedRoom {
+fn make_placed_room(id: u32, layer: u32, floor_z: i32, shell: (i32, i32, i32, i32)) -> PlacedRoom {
     PlacedRoom {
         id: RoomId(id),
         layer: LayerId(layer),
         floor_z,
         shell,
-        dims: (
-            (shell.2 - shell.0) as u32,
-            (shell.3 - shell.1) as u32,
-            176,
-        ),
+        dims: ((shell.2 - shell.0) as u32, (shell.3 - shell.1) as u32, 176),
     }
 }
 
@@ -61,7 +50,10 @@ fn make_socket(
 #[test]
 fn stair_footprint_is_quantum_aligned() {
     let fp = transition::compute_stair_footprint(
-        112, 48, 112, 240,
+        112,
+        48,
+        112,
+        240,
         WallDirection::East,
         WallDirection::West,
     );
@@ -75,7 +67,10 @@ fn stair_footprint_is_quantum_aligned() {
 #[test]
 fn stair_footprint_covers_both_anchors() {
     let fp = transition::compute_stair_footprint(
-        64, 64, 256, 192,
+        64,
+        64,
+        256,
+        192,
         WallDirection::North,
         WallDirection::South,
     );
@@ -114,7 +109,10 @@ fn transition_rollback_restores_grid() {
 
     let mark = tx.mark();
     tx.reserve_transition_rect(
-        0, 0, 128, 128,
+        0,
+        0,
+        128,
+        128,
         bsp_generator::enhanced::intent::TransitionId(0),
     )
     .unwrap();
@@ -126,19 +124,21 @@ fn transition_rollback_restores_grid() {
 // ── Cross-layer conflict ───────────────────────────────────────────────────
 
 #[test]
-fn transition_footprint_can_overlap_rooms() {
-    // In enhanced v2, transitions can share cells with rooms
+fn transition_footprint_rejects_unrelated_room_overlap() {
     let mut grid = OccupancyGrid::new(1024, 1024).unwrap();
     grid.reserve_rect(128, 128, 128, 128, RoomId(99)).unwrap();
-
-    let alloc = IdAllocator::new();
-    let mut tx = Transaction::new(grid, alloc, 3);
-
+    let mut tx = Transaction::new(grid, IdAllocator::new(), 3);
     let result = tx.reserve_transition_rect(
-        128, 128, 128, 128,
+        128,
+        128,
+        128,
+        128,
         bsp_generator::enhanced::intent::TransitionId(0),
     );
-    assert!(result.is_ok(), "v2 allows transition-room overlap");
+    assert!(
+        result.is_err(),
+        "unrelated room ownership must remain exclusive"
+    );
 }
 
 // ── Single stair reservation ───────────────────────────────────────────────
@@ -154,7 +154,8 @@ fn reserve_one_stair_succeeds() {
     let alloc = IdAllocator::new();
     let mut tx = Transaction::new(grid, alloc, 3);
 
-    let intent = transition::reserve_one_stair(ls.clone(), us.clone(), &[lroom, uroom], &mut tx).unwrap();
+    let intent =
+        transition::reserve_one_stair(ls.clone(), us.clone(), &[lroom, uroom], &mut tx).unwrap();
 
     assert_eq!(intent.lower_room, RoomId(0));
     assert_eq!(intent.upper_room, RoomId(1));

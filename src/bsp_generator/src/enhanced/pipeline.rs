@@ -29,9 +29,7 @@ pub fn generate_enhanced(
     let placement = place_rooms(&config, placement_rng)?;
 
     // Phase 04 — Topology
-    let mut topo_rng = eseed
-        .stage_seed(super::seed::tags::VERTICAL_TOPOLOGY)
-        .rng();
+    let mut topo_rng = eseed.stage_seed(super::seed::tags::VERTICAL_TOPOLOGY).rng();
     let topology = build_topology(&config, &placement, &mut topo_rng)?;
 
     // Phase 07 — Emission
