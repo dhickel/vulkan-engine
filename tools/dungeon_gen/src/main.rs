@@ -38,15 +38,47 @@ fn run() -> Result<(), String> {
     }
 
     let seed = seed.unwrap_or(0);
-    let config = match class.as_deref().unwrap_or("m1") {
-        "m1" => bsp_generator::DungeonConfig::nominal_m1(),
-        "m2" => bsp_generator::DungeonConfig::nominal_m2(),
+    match class.as_deref().unwrap_or("m1") {
+        "m1" => {
+            let config = bsp_generator::DungeonConfig::nominal_m1();
+            let (map_text, meta) = bsp_generator::generate(seed, config)
+                .map_err(|err| format!("generation failed: {err:?}"))?;
+            write_output(
+                map_text,
+                meta.room_count,
+                meta.corridor_count,
+                meta.face_count_estimate,
+                seed,
+                out,
+            )?;
+        }
+        "m2" => {
+            let config = bsp_generator::enhanced::config::EnhancedConfig::nominal();
+            let (map_text, meta) = bsp_generator::generate_enhanced(seed, config)
+                .map_err(|err| format!("enhanced generation failed: {err}"))?;
+            write_output(
+                map_text,
+                meta.room_count,
+                meta.route_count,
+                (meta.room_count + meta.route_count + meta.transition_count) * 6,
+                seed,
+                out,
+            )?;
+        }
         other => return Err(format!("--class must be m1 or m2, got {other}")),
-    };
+    }
 
-    let (map_text, meta) = bsp_generator::generate(seed, config)
-        .map_err(|err| format!("generation failed: {err:?}"))?;
+    Ok(())
+}
 
+fn write_output(
+    map_text: String,
+    rooms: u32,
+    corridors: u32,
+    estimated_faces: u32,
+    seed: u64,
+    out: Option<PathBuf>,
+) -> Result<(), String> {
     if let Some(path) = out {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -55,19 +87,17 @@ fn run() -> Result<(), String> {
         std::fs::write(&path, map_text)
             .map_err(|err| format!("write {}: {err}", path.display()))?;
         eprintln!(
-            "generated {}: seed={seed} rooms={} corridors={} estimated_faces={}",
+            "generated {}: seed={seed} rooms={rooms} corridors={corridors} estimated_faces={estimated_faces}",
             path.display(),
-            meta.room_count,
-            meta.corridor_count,
-            meta.face_count_estimate
         );
     } else {
         print!("{map_text}");
     }
-
     Ok(())
 }
 
 fn print_usage() {
     eprintln!("Usage: dungeon_gen [--seed <u64>] [--class m1|m2] [--out <path>]");
+    eprintln!("  m1: Legacy v1 single-layer dungeon");
+    eprintln!("  m2: Enhanced v2 two-layer dungeon with stairs");
 }

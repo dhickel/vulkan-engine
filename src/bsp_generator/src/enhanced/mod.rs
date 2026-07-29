@@ -11,6 +11,7 @@ pub mod emission;
 pub mod error;
 pub mod features;
 pub mod intent;
+pub mod metadata;
 pub mod occupancy;
 pub mod pipeline;
 pub mod placement;

@@ -72,6 +72,10 @@ pub use seed::{Seed, StageRng, StageSeed};
 pub use serialize::serialize;
 pub use topology::build_topology;
 
+// ── Enhanced v2 public API ────────────────────────────────────────────────
+
+pub use enhanced::pipeline::{generate_enhanced, EnhancedMetadata};
+
 // ── Generation metadata ───────────────────────────────────────────────────
 
 /// Descriptive metadata for a completed generation run.
