@@ -13,7 +13,7 @@
 //!   [`NormalClass::Diagonal45`], or rejected.
 //! - Ordered collections with explicit lexicographic tie-breakers.
 //! - AABB used only for broad-phase rejection — never proves validity.
-//! - Never depends on `f64`, production code, BSP, renderer, or runtime.
+//! - Never depends on floating-point arithmetic, production code, BSP, renderer, or runtime.
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -289,11 +289,6 @@ impl Rational {
     /// Whether this is an integer.
     pub fn is_integer(&self) -> bool {
         self.den == 1
-    }
-
-    /// Convert to `f64` for debug display only — never use in logic.
-    pub fn to_f64(self) -> f64 {
-        self.num as f64 / self.den as f64
     }
 
     /// Absolute value.
