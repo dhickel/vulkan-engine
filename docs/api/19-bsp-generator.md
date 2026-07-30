@@ -545,7 +545,10 @@ pub enum StairType {
 `WallEdgeNarrow` uses a 192×64-unit strip along a room wall. Both types emit
 exactly twelve 16-unit treads and risers. Each transition carries exact tread
 boxes, lower and upper approach segments, and lower-wall, ceiling, and
-upper-wall aperture descriptors.
+upper-wall aperture descriptors. Enhanced emission centers `info_player_start`
+on the canonical 64×64 lower stair landing, reserves 16 units for the Quake
+player hull plus a 16-unit safety margin on every landing side, and emits a
+cardinal `angle` facing the stair opening.
 
 ### `GenerationProfile`
 

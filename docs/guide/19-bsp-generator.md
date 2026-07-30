@@ -217,6 +217,7 @@ per-room corridor/ceiling/pillar variance.
 - **Corridor variance**: per-route widths of 64, 80, or 96 Quake units
 - **Ceiling variance**: per-room ceiling heights of 128, 144, or 176 Quake units
 - **Pillars**: up to 8 freestanding axis-aligned pillars per room
+- **Safe stair-facing spawn**: the player starts at the center of a 64×64 lower stair landing, with a 16-unit hull radius plus 16-unit safety margin from the landing sides and stair solids
 - **Theme roles**: rooms get typed roles (Entry, Hub, DeadEnd, Side) with
   palette assignment via Uniform or ByZone strategies
 - **CC0 Dungeon v2 theme**: separate theme WAD from Legacy v1
@@ -296,6 +297,7 @@ let (map_text, meta) = generate_enhanced(200, cfg)?;
 - Wall-edge narrow stairs use a 192×64-unit strip hugging a room wall
 - 12 treads × 16-unit riser = 192-unit climb (exactly the inter-layer offset)
 - Lower routes join the stair entrance through a split wall aperture; the upper path uses a split ceiling exit and upper-room wall aperture
+- `info_player_start` is centered on the canonical lower landing and emits a cardinal `angle` facing the stair opening
 - Socket portals are 64 units wide with 32-unit corner margins
 - All rooms have 176-unit height (≥ 80-unit required headroom for portals)
 

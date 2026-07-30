@@ -8,7 +8,7 @@ use bsp_generator::enhanced::features::{
     MIN_HEADROOM,
 };
 use bsp_generator::enhanced::intent::{LayerId, RoomId};
-use bsp_generator::enhanced::placement::{place_rooms, PlacedRoom};
+use bsp_generator::enhanced::placement::{place_rooms, PlacedRoom, WallDirection};
 use bsp_generator::enhanced::seed::{tags, EnhancedSeed};
 use bsp_generator::enhanced::theme::{assign_uniform, cc0_dungeon_v2_theme};
 use bsp_generator::enhanced::topology::build_topology;
@@ -276,19 +276,63 @@ fn spawn_origin_on_entry_layer() {
 }
 
 #[test]
-fn spawn_origin_within_room() {
+fn spawn_origin_is_centered_on_clear_lower_stair_landing() {
     let result = run_features(42);
-    let (_, placement, _, _) = build_test_input(42);
-
+    let (_, placement, topology, _) = build_test_input(42);
+    let transition = topology
+        .transitions
+        .iter()
+        .min_by_key(|transition| transition.id)
+        .unwrap();
     let spawn_room = placement
         .rooms
         .iter()
-        .find(|r| r.id == result.spawn_point.room_id)
+        .find(|room| room.id == result.spawn_point.room_id)
         .unwrap();
+    let landing = transition.lower_landing;
     let (sx, sy, sz) = result.spawn_point.origin;
-    assert!(sx >= spawn_room.shell.0 && sx <= spawn_room.shell.2);
-    assert!(sy >= spawn_room.shell.1 && sy <= spawn_room.shell.3);
-    assert!(sz >= spawn_room.floor_z + 16);
+
+    assert_eq!(spawn_room.id, transition.lower_room);
+    assert_eq!(
+        (sx, sy),
+        ((landing.0 + landing.2) / 2, (landing.1 + landing.3) / 2)
+    );
+    assert_eq!(sz, spawn_room.floor_z + 16 + 24);
+
+    // Quake's 16-unit hull radius plus a 16-unit safety margin fits between
+    // the spawn origin and both landing side walls.
+    let clearance = 32;
+    assert!(sx - landing.0 >= clearance && landing.2 - sx >= clearance);
+    assert!(sy - landing.1 >= clearance && landing.3 - sy >= clearance);
+    let spawn_clearance = (
+        sx - clearance,
+        sy - clearance,
+        sx + clearance,
+        sy + clearance,
+    );
+    for tread in &transition.tread_boxes {
+        assert!(
+            spawn_clearance.0 >= tread.bounds.3
+                || spawn_clearance.2 <= tread.bounds.0
+                || spawn_clearance.1 >= tread.bounds.4
+                || spawn_clearance.3 <= tread.bounds.1,
+            "spawn clearance envelope intersects tread {:?}",
+            tread.bounds
+        );
+    }
+
+    let lower_socket = placement
+        .sockets
+        .iter()
+        .find(|socket| socket.id == transition.lower_socket)
+        .unwrap();
+    let expected_yaw = match lower_socket.wall {
+        WallDirection::North => 270,
+        WallDirection::South => 90,
+        WallDirection::East => 180,
+        WallDirection::West => 0,
+    };
+    assert_eq!(result.spawn_point.yaw, expected_yaw);
 }
 
 // ── Light origins ──────────────────────────────────────────────────────────

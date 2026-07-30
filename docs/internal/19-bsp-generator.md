@@ -439,13 +439,14 @@ from Legacy v1's `"dungeon-gen/v1"`. Same seed values produce different output.
 - Corridor widths: 64, 80, or 96 Quake units per route (RNG-selected, must fit reserved envelopes)
 - Ceiling heights: 128, 144, or 176 Quake units per room (RNG-selected, min 80 headroom preserved)
 - Pillars: freestanding 32×32×80 axis-aligned boxes, accent-textured, connectivity oracle validates accessibility
+- Spawn: center of the canonical 64×64 lower stair landing at floor-top + 24, leaving the 16-unit Quake hull radius plus a 16-unit safety margin from both landing sides and every tread; cardinal yaw faces the stair opening
 
 **Emission:**
 - Room shells: floor slab + ceiling slab + 4 wall masks with aperture cutouts
 - Corridor union: open cells for 64×64 turns and intersections
 - Stairwells: host floor cells are replaced by exact tread columns; ceiling cells are omitted where high-tread headroom crosses the slab
 - Transition shells union lower-route approaches and upper connectors, split both room-wall apertures, and seal the 176→192 ceiling bridge without capping it
-- Canonical `.map` serialization: worldspawn first, alphabetical keys, canonical face order
+- Canonical `.map` serialization: worldspawn first, alphabetical keys (including spawn `angle`), canonical face order
 - Enhanced-only `_minlight 16` in worldspawn ensures fully occluded connector and stair
   faces receive baked lightmap data from the pinned ericw `light` stage
 

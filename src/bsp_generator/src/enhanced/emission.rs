@@ -153,8 +153,8 @@ pub fn emit_map(
     // info_player_start
     let spawn = &features.spawn_point;
     out.push_str(&format!(
-        "{{\n\"classname\" \"info_player_start\"\n\"origin\" \"{} {} {}\"\n}}\n",
-        spawn.origin.0, spawn.origin.1, spawn.origin.2
+        "{{\n\"angle\" \"{}\"\n\"classname\" \"info_player_start\"\n\"origin\" \"{} {} {}\"\n}}\n",
+        spawn.yaw, spawn.origin.0, spawn.origin.1, spawn.origin.2
     ));
 
     // light entities
@@ -1079,6 +1079,10 @@ mod tests {
         assert!(
             map.contains(&spawn_str),
             "spawn origin not found: {spawn_str}"
+        );
+        assert!(
+            map.contains(&format!("\"angle\" \"{}\"", features.spawn_point.yaw)),
+            "spawn yaw must face the stair opening"
         );
     }
 

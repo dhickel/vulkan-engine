@@ -112,7 +112,7 @@ themes/cc0_dungeon_v2/
 6. **Frozen values**: Constants from the specification are declared as `const` items. Changing a `const` is a contract violation.
 7. **No inline texture generation**: The CC0 Stone Beta theme assets are pre-built by `build.py`. The generator references WAD texture names — it does not produce textures.
 8. **Hybrid shell construction**: Quake brushes are additive. Emit each room's floor, ceiling, and four walls explicitly; split wall masks around omitted routed apertures. Use a corridor-only open-cell union for floors, ceilings, boundary walls, and 64×64 endpoint chambers so turns remain clear without creating scene-spanning room slabs.
-9. **Point entities occupy clear volume**: Spawn Z includes floor-slab thickness plus the 24-unit eye offset; lights use the midpoint between floor-slab top and ceiling-slab bottom.
+9. **Point entities occupy clear volume**: Legacy spawn Z includes floor-slab thickness plus the 24-unit eye offset. Enhanced spawn is centered on a 64×64 lower stair landing, leaving the 16-unit Quake hull radius plus a 16-unit safety margin and facing the opening. Lights use the midpoint between floor-slab top and ceiling-slab bottom.
 
 ## Testing
 

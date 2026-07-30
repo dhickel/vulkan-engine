@@ -70,6 +70,14 @@ pub const PILLAR_HEIGHT: i32 = 80;
 /// Wider preferences whose unavailable Phase-04 capacity must be recorded.
 const WIDER_WIDTH_PREFERENCES: &[u32] = &[96, 80];
 
+/// Quake's standing player hull extends 16 units from the origin in XY.
+const PLAYER_HULL_RADIUS: i32 = 16;
+/// Keep one additional construction quantum between the hull and landing walls
+/// or stair solids so compiler plane tolerances cannot start the player stuck.
+const SPAWN_SAFETY_MARGIN: i32 = Q;
+/// The standing hull bottom is 24 units below the authored entity origin.
+const PLAYER_HULL_FLOOR_OFFSET: i32 = 24;
+
 // ── Public result types ────────────────────────────────────────────────────
 
 /// Selected corridor width for a single route.
@@ -187,6 +195,8 @@ pub struct RequestedCountUnmet {
 pub struct SpawnPoint {
     /// Origin in Quake units: (x, y, z).
     pub origin: (i32, i32, i32),
+    /// Cardinal Quake yaw facing the stair opening (0=east, 90=north).
+    pub yaw: i32,
     pub room_id: RoomId,
     /// Layer index (0 = lower/entry).
     pub layer: u8,
@@ -264,8 +274,13 @@ pub fn apply_features(
     // optional pillars. Their protected volumes ensure later feature placement
     // cannot invalidate a required entity origin.
     let mut exclusions = derive_exclusion_regions(placement, topology, &rooms)?;
-    let (spawn_point, light_origins) =
-        select_clear_origins(placement, &rooms, &exclusions, feature_seed.clone())?;
+    let (spawn_point, light_origins) = select_clear_origins(
+        placement,
+        topology,
+        &rooms,
+        &exclusions,
+        feature_seed.clone(),
+    )?;
     protect_required_origins(&mut exclusions, &spawn_point, &light_origins);
 
     // Step 5-6: Pillar placement
@@ -1013,36 +1028,74 @@ fn mark_pillar_cells(
 /// are subsequently protected as pillar exclusions.
 fn select_clear_origins(
     placement: &PlacementResult,
+    topology: &TopologyResult,
     rooms: &BTreeMap<RoomId, &PlacedRoom>,
     exclusions: &BTreeMap<RoomId, Vec<ExclusionVolume>>,
     mut rng: EnhancedStageRng,
 ) -> Result<(SpawnPoint, Vec<LightOrigin>), EnhancedError> {
-    let entry_id =
-        placement
-            .lower_rooms
-            .iter()
-            .copied()
-            .min()
-            .ok_or(EnhancedError::ContractViolation {
-                detail: "no entry-layer room for spawn".into(),
-            })?;
+    let transition = topology
+        .transitions
+        .iter()
+        .min_by_key(|transition| transition.id)
+        .ok_or(EnhancedError::ContractViolation {
+            detail: "no lower stair landing for spawn".into(),
+        })?;
+    let entry_id = transition.lower_room;
     let entry_room = rooms
         .get(&entry_id)
         .ok_or(EnhancedError::ContractViolation {
-            detail: "entry room not found".into(),
+            detail: "stair landing host room not found".into(),
         })?;
-    let spawn_origin = find_clear_origin(
-        entry_room,
-        exclusions.get(&entry_id).map(Vec::as_slice).unwrap_or(&[]),
-        entry_room.floor_z + Q + 24,
-        None,
-        &mut rng,
-    )
-    .ok_or_else(|| EnhancedError::ContractViolation {
-        detail: format!("entry room {:?} has no clear spawn origin", entry_id),
-    })?;
+    let lower_socket = placement
+        .sockets
+        .iter()
+        .find(|socket| socket.id == transition.lower_socket)
+        .ok_or(EnhancedError::ContractViolation {
+            detail: "stair landing socket not found".into(),
+        })?;
+    let landing = transition.lower_landing;
+    let clearance = PLAYER_HULL_RADIUS + SPAWN_SAFETY_MARGIN;
+    let spawn_xy = ((landing.0 + landing.2) / 2, (landing.1 + landing.3) / 2);
+    if spawn_xy.0 - landing.0 < clearance
+        || landing.2 - spawn_xy.0 < clearance
+        || spawn_xy.1 - landing.1 < clearance
+        || landing.3 - spawn_xy.1 < clearance
+    {
+        return Err(EnhancedError::ContractViolation {
+            detail: format!(
+                "stair landing {:?} cannot provide {clearance}-unit spawn clearance",
+                landing
+            ),
+        });
+    }
+    let spawn_clearance = (
+        spawn_xy.0 - clearance,
+        spawn_xy.1 - clearance,
+        spawn_xy.0 + clearance,
+        spawn_xy.1 + clearance,
+    );
+    if transition.tread_boxes.iter().any(|tread| {
+        spawn_clearance.0 < tread.bounds.3
+            && spawn_clearance.2 > tread.bounds.0
+            && spawn_clearance.1 < tread.bounds.4
+            && spawn_clearance.3 > tread.bounds.1
+    }) {
+        return Err(EnhancedError::ContractViolation {
+            detail: "stair landing spawn clearance overlaps a tread solid".into(),
+        });
+    }
     let spawn = SpawnPoint {
-        origin: spawn_origin,
+        origin: (
+            spawn_xy.0,
+            spawn_xy.1,
+            entry_room.floor_z + Q + PLAYER_HULL_FLOOR_OFFSET,
+        ),
+        yaw: match lower_socket.wall {
+            WallDirection::North => 270,
+            WallDirection::South => 90,
+            WallDirection::East => 180,
+            WallDirection::West => 0,
+        },
         room_id: entry_id,
         layer: 0,
     };
@@ -1647,11 +1700,22 @@ mod tests {
         assert!(placement.lower_rooms.contains(&spawn_room.id));
         assert_eq!(result.spawn_point.layer, 0);
 
-        // Spawn must be inside room shell
+        let transition = topology
+            .transitions
+            .iter()
+            .min_by_key(|transition| transition.id)
+            .unwrap();
+        assert_eq!(spawn_room.id, transition.lower_room);
+        let landing = transition.lower_landing;
         let (sx, sy, sz) = result.spawn_point.origin;
-        assert!(sx >= spawn_room.shell.0 && sx <= spawn_room.shell.2);
-        assert!(sy >= spawn_room.shell.1 && sy <= spawn_room.shell.3);
-        assert!(sz >= spawn_room.floor_z + Q);
+        assert_eq!(
+            (sx, sy),
+            ((landing.0 + landing.2) / 2, (landing.1 + landing.3) / 2)
+        );
+        assert_eq!(sz, spawn_room.floor_z + Q + PLAYER_HULL_FLOOR_OFFSET);
+        let clearance = PLAYER_HULL_RADIUS + SPAWN_SAFETY_MARGIN;
+        assert!(sx - landing.0 >= clearance && landing.2 - sx >= clearance);
+        assert!(sy - landing.1 >= clearance && landing.3 - sy >= clearance);
     }
 
     #[test]
