@@ -172,7 +172,10 @@ build_cache() {
   local seed="$1" class="$2"
   cache_paths "$seed" "$class"
   local bsp="$CACHE_BSP" lit="$CACHE_LIT" manifest="$CACHE_MANIFEST"
+  local candidate_bsp candidate_lit
 
+  # Build and validate the candidate entirely outside the cache. The existing
+  # cache remains usable if a configured resource tree fails validation.
   local tmp_dir; tmp_dir="$(mktemp -d -t dungeon-explore-${class}-${seed}-XXXXXX)"
   trap 'rm -rf "$tmp_dir"' RETURN
 
@@ -200,10 +203,8 @@ build_cache() {
       echo "  $(red "✗") compiler did not produce the required BSP/LIT pair" >&2
       return 1
     }
-    rm -f "$bsp" "$lit" "$manifest"
-    cp "$compiled_bsp" "$bsp"
-    cp "$compiled_lit" "$lit"
-    rm -rf "$tmp_dir"
+    candidate_bsp="$compiled_bsp"
+    candidate_lit="$compiled_lit"
   else
     # Legacy v1: use dungeon_gen + engine_pack compile-bsp
     local map_path="$tmp_dir/${class}-seed-${seed}.map"
@@ -236,17 +237,14 @@ build_cache() {
       echo "  $(red "✗") compiler did not produce the required BSP/LIT pair" >&2
       return 1
     }
-    rm -f "$bsp" "$lit" "$manifest"
-    cp "$compiled_bsp" "$bsp"
-    cp "$compiled_lit" "$lit"
-    rm -rf "$tmp_dir"
+    candidate_bsp="$compiled_bsp"
+    candidate_lit="$compiled_lit"
   fi
-  trap - RETURN
 
   local palette_sha256; palette_sha256="$(calc_sha256 "$PALETTE_PATH")"
   local wad_sha256; wad_sha256="$(calc_sha256 "$WAD_PATH")"
-  local bsp_sha256; bsp_sha256="$(calc_sha256 "$bsp")"
-  local lit_sha256; lit_sha256="$(calc_sha256 "$lit")"
+  local bsp_sha256; bsp_sha256="$(calc_sha256 "$candidate_bsp")"
+  local lit_sha256; lit_sha256="$(calc_sha256 "$candidate_lit")"
 
   local gen_id; gen_id="dungeon_gen"
   local textures_tree_line=""
@@ -259,7 +257,8 @@ build_cache() {
     textures_tree_line="textures_tree.sha256 = \"$tx_tree\""
   fi
 
-  cat > "$manifest" <<MANIFEST
+  local candidate_manifest="$tmp_dir/cache.manifest.toml"
+  cat > "$candidate_manifest" <<MANIFEST
 # Auto-generated dungeon manifest — do not edit manually
 [generator]
 generator = "$gen_id"
@@ -279,6 +278,19 @@ $textures_tree_line
 bsp.sha256 = "$bsp_sha256"
 lit.sha256 = "$lit_sha256"
 MANIFEST
+
+  # The manifest is the cache validity gate, so publish it last. A failed
+  # candidate build or input validation above cannot remove a valid cache.
+  local cache_stage; cache_stage="$(mktemp -d "$cache_root/.${class}-seed-${seed}.XXXXXX")"
+  cp "$candidate_bsp" "$cache_stage/bsp"
+  cp "$candidate_lit" "$cache_stage/lit"
+  cp "$candidate_manifest" "$cache_stage/manifest.toml"
+  mv -f "$cache_stage/bsp" "$bsp"
+  mv -f "$cache_stage/lit" "$lit"
+  mv -f "$cache_stage/manifest.toml" "$manifest"
+  rmdir "$cache_stage"
+  rm -rf "$tmp_dir"
+  trap - RETURN
 
   echo "  $(green "✓") cached $(bold "$(basename "$bsp")") ($(du -h "$bsp" | awk '{print $1}'))"
 }
