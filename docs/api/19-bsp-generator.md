@@ -484,7 +484,7 @@ no separate `validate()` step.
 | `room_count()` | `u32` | total rooms (17–40) |
 | `loop_count()` | `u32` | extra loop edges (1–6) |
 | `vertical_edges()` | `u32` | stair connections (1–3) |
-| `tread_depth()` | `i32` | stair tread depth (16 or 32) |
+| `tread_depth()` | `i32` | fixed stair tread depth (always 16) |
 | `xy_extent()` | `u32` | XY bounds per axis |
 | `placement_candidates()` | `u32` | candidates per room attempt |
 | `max_placement_attempts()` | `u32` | max attempts per room |
@@ -532,6 +532,21 @@ pub enum EnhancedError {
 }
 ```
 
+### `StairType`
+
+```rust
+pub enum StairType {
+    RoomScaleGrand,
+    WallEdgeNarrow,
+}
+```
+
+`RoomScaleGrand` uses a 192-unit run across the host room's full usable width.
+`WallEdgeNarrow` uses a 192×64-unit strip along a room wall. Both types emit
+exactly twelve 16-unit treads and risers. Each transition carries exact tread
+boxes, lower and upper approach segments, and lower-wall, ceiling, and
+upper-wall aperture descriptors.
+
 ### `GenerationProfile`
 
 ```rust
@@ -569,8 +584,8 @@ pub const ENHANCED_LOWER_FLOOR_Z: i32 = 0;
 pub const ENHANCED_UPPER_FLOOR_Z: i32 = 192;
 pub const ENHANCED_ROOM_HEIGHT: i32 = 176;
 pub const ENHANCED_RISER: i32 = 16;
-pub const ENHANCED_TREAD_DEFAULT: i32 = 16;
-pub const ENHANCED_TREAD_ALTERNATIVE: i32 = 32;
+pub const ENHANCED_TREAD: i32 = 16;
+pub const ENHANCED_TREAD_DEFAULT: i32 = ENHANCED_TREAD; // compatibility alias
 pub const ENHANCED_LAYER_COUNT: u32 = 2;
 pub const ENHANCED_MIN_ROOM_SPAN: i32 = 112;
 pub const ENHANCED_MAX_ROOM_SPAN: i32 = 256;

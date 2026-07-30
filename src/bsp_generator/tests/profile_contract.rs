@@ -34,11 +34,14 @@ fn enhanced_config_rejects_m1_room_count() {
 }
 
 #[test]
-fn enhanced_config_rejects_invalid_tread() {
-    assert!(EnhancedConfig::new(28, 3, 1, 8, 2048).is_err());
-    assert!(EnhancedConfig::new(28, 3, 1, 24, 2048).is_err());
-    assert!(EnhancedConfig::new(28, 3, 1, 16, 2048).is_ok());
-    assert!(EnhancedConfig::new(28, 3, 1, 32, 2048).is_ok());
+fn enhanced_config_tread_always_sixteen() {
+    assert!(EnhancedConfig::new(28, 3, 1, 32, 2048).is_err());
+    let cfg = EnhancedConfig::nominal();
+    assert_eq!(cfg.tread_depth(), 16);
+    let cfg2 = EnhancedConfig::minimal();
+    assert_eq!(cfg2.tread_depth(), 16);
+    let cfg3 = EnhancedConfig::maximal();
+    assert_eq!(cfg3.tread_depth(), 16);
 }
 
 #[test]

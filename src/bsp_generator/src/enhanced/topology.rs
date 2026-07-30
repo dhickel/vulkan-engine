@@ -37,6 +37,8 @@ struct SocketRouteApproach {
     envelope: (i32, i32, i32, i32),
 }
 
+const MAX_TRANSITION_BACKTRACK: usize = 32;
+
 pub fn build_topology(
     config: &EnhancedConfig,
     placement: &PlacementResult,
@@ -50,89 +52,116 @@ pub fn build_topology(
         config.loop_count(),
     );
     let root = tx.mark();
-    let result = (|| {
-        // Establish each horizontal spanning tree before reserving vertical
-        // footprints. This prevents a transition's dual room ownership from
-        // obscuring the host-room cells that A* must inspect at a portal.
-        connect_layer(
-            &placement.lower_rooms,
-            &room_map,
-            &placement.sockets,
-            config.xy_extent(),
-            &mut tx,
-        )?;
-        connect_layer(
-            &placement.upper_rooms,
-            &room_map,
-            &placement.sockets,
-            config.xy_extent(),
-            &mut tx,
-        )?;
-        let transitions = transition::reserve_transitions(
-            config.vertical_edges(),
-            &placement.lower_rooms,
-            &placement.upper_rooms,
-            &placement.rooms,
-            &placement.sockets,
-            &mut tx,
-            config,
-        )
+    let mut last_error = None;
+    for first_candidate_skip in 0..MAX_TRANSITION_BACKTRACK {
+        if first_candidate_skip > 0 {
+            tx.rollback(root.clone());
+        }
+        match build_topology_attempt(config, placement, &room_map, &mut tx, first_candidate_skip) {
+            Ok(()) => {
+                let committed = tx.commit();
+                let mut routes = committed.routes;
+                let mut transitions = committed.transitions;
+                routes.sort_by_key(|route| route.id);
+                transitions.sort_by_key(|transition| transition.id);
+                return Ok(TopologyResult {
+                    routes,
+                    transitions,
+                    loop_edges: config.loop_count(),
+                });
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    tx.rollback(root);
+    Err(EnhancedError::TopologyExhausted {
+        detail: format!(
+            "all {MAX_TRANSITION_BACKTRACK} canonical transition alternatives exhausted; last error: {}",
+            last_error
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "no transition attempt executed".into())
+        ),
+    })
+}
+
+fn build_topology_attempt(
+    config: &EnhancedConfig,
+    placement: &PlacementResult,
+    room_map: &BTreeMap<RoomId, &PlacedRoom>,
+    tx: &mut Transaction,
+    first_candidate_skip: usize,
+) -> Result<(), EnhancedError> {
+    // Reserve exact vertical geometry before horizontal routing. If its
+    // canonical choice prevents a complete horizontal topology, the caller
+    // rolls the whole transaction back and advances to the next viable stair.
+    let transitions = transition::reserve_transitions_skipping(
+        config.vertical_edges(),
+        &placement.lower_rooms,
+        &placement.upper_rooms,
+        &placement.rooms,
+        &placement.sockets,
+        tx,
+        config,
+        first_candidate_skip,
+    )
+    .map_err(|error| EnhancedError::TopologyExhausted {
+        detail: error.to_string(),
+    })?;
+    for _ in 1..transitions.len() {
+        if !tx.consume_loop_budget() {
+            return Err(EnhancedError::TopologyExhausted {
+                detail: "extra vertical transition exceeds loop budget".into(),
+            });
+        }
+    }
+    connect_layer(
+        &placement.lower_rooms,
+        room_map,
+        &placement.sockets,
+        config.xy_extent(),
+        tx,
+    )?;
+    connect_layer(
+        &placement.upper_rooms,
+        room_map,
+        &placement.sockets,
+        config.xy_extent(),
+        tx,
+    )?;
+    add_required_loops(
+        &placement.lower_rooms,
+        room_map,
+        &placement.sockets,
+        config.xy_extent(),
+        tx,
+    )?;
+    add_required_loops(
+        &placement.upper_rooms,
+        room_map,
+        &placement.sockets,
+        config.xy_extent(),
+        tx,
+    )?;
+    if tx.loop_budget_remaining() != 0 {
+        return Err(EnhancedError::TopologyExhausted {
+            detail: format!(
+                "only consumed {} of {} requested loop edges",
+                config.loop_count() - tx.loop_budget_remaining(),
+                config.loop_count()
+            ),
+        });
+    }
+    transition::connect_lower_approaches(&placement.rooms, &placement.sockets, tx, config)
         .map_err(|error| EnhancedError::TopologyExhausted {
             detail: error.to_string(),
         })?;
-        for _ in 1..transitions.len() {
-            if !tx.consume_loop_budget() {
-                return Err(EnhancedError::TopologyExhausted {
-                    detail: "extra vertical transition exceeds loop budget".into(),
-                });
-            }
-        }
-        add_required_loops(
-            &placement.lower_rooms,
-            &room_map,
-            &placement.sockets,
-            config.xy_extent(),
-            &mut tx,
-        )?;
-        add_required_loops(
-            &placement.upper_rooms,
-            &room_map,
-            &placement.sockets,
-            config.xy_extent(),
-            &mut tx,
-        )?;
-        if tx.loop_budget_remaining() != 0 {
-            return Err(EnhancedError::TopologyExhausted {
-                detail: format!(
-                    "only consumed {} of {} requested loop edges",
-                    config.loop_count() - tx.loop_budget_remaining(),
-                    config.loop_count()
-                ),
-            });
-        }
-        validate_topology(
-            tx.routes(),
-            tx.transitions(),
-            tx.socket_claims(),
-            placement,
-            config.loop_count(),
-        )?;
-        Ok(())
-    })();
-    if let Err(error) = result {
-        tx.rollback(root);
-        return Err(error);
-    }
-    let committed = tx.commit();
-    let mut routes = committed.routes;
-    let mut transitions = committed.transitions;
-    routes.sort_by_key(|route| route.id);
-    transitions.sort_by_key(|transition| transition.id);
-    Ok(TopologyResult {
-        routes,
-        transitions,
-        loop_edges: config.loop_count(),
-    })
+    validate_topology(
+        tx.routes(),
+        tx.transitions(),
+        tx.socket_claims(),
+        placement,
+        config.loop_count(),
+    )
 }
 
 fn connect_layer(
@@ -259,10 +288,12 @@ fn try_route_pair(
         let mark = tx.mark();
         let source_approach = socket_route_approach(source);
         let target_approach = socket_route_approach(target);
+        let floor = rooms[&pair.a].floor_z;
+        let routing_grid = horizontal_routing_grid(tx, floor);
         let result = routing::route_sockets(
             source_approach.exterior,
             target_approach.exterior,
-            &tx.grid,
+            &routing_grid,
             extent,
             524_288,
             pair.a,
@@ -286,7 +317,15 @@ fn try_route_pair(
             .chain(std::iter::once(target_approach.envelope))
         {
             if tx
-                .reserve_route_rect_allow_rooms(x0, y0, x1 - x0, y1 - y0, id, &[pair.a, pair.b])
+                .reserve_route_rect_allow_rooms(
+                    x0,
+                    y0,
+                    x1 - x0,
+                    y1 - y0,
+                    id,
+                    floor,
+                    &[pair.a, pair.b],
+                )
                 .is_err()
             {
                 reserved = false;
@@ -297,7 +336,6 @@ fn try_route_pair(
             tx.rollback(mark);
             continue;
         }
-        let floor = rooms[&pair.a].floor_z;
         tx.add_route(RouteIntent {
             id,
             source_socket: source.id,
@@ -327,6 +365,37 @@ fn try_route_pair(
     Err(EnhancedError::RouteExhausted {
         expansions: 524_288,
     })
+}
+
+fn horizontal_routing_grid(tx: &Transaction, floor_z: i32) -> super::occupancy::OccupancyGrid {
+    use super::occupancy::Owner;
+
+    let mut grid = tx.grid.clone();
+    let q = crate::config::CONSTRUCTION_QUANTUM as i32;
+    for transition in tx.transitions() {
+        let lower_floor = transition.tread_boxes.first().map(|tread| tread.bounds.2);
+        let rects: Vec<_> = if lower_floor == Some(floor_z) {
+            vec![transition.lower_landing]
+        } else {
+            transition
+                .upper_approach_segments
+                .iter()
+                .filter(|segment| segment.z.0 - q == floor_z)
+                .map(|segment| segment.envelope)
+                .collect()
+        };
+        for rect in rects {
+            for y in rect.1.div_euclid(q)..rect.3.div_euclid(q) {
+                for x in rect.0.div_euclid(q)..rect.2.div_euclid(q) {
+                    let index = grid.cells_x() as usize * y as usize + x as usize;
+                    if grid.cells()[index] == Owner::Transition(transition.id) {
+                        grid.cells_mut()[index] = Owner::Empty;
+                    }
+                }
+            }
+        }
+    }
+    grid
 }
 
 fn validate_topology(
@@ -413,6 +482,11 @@ fn validate_topology(
             || stair.riser != 16
             || stair.tread_depth != 16
             || stair.treads.len() != 12
+            || stair.tread_boxes.len() != 12
+            || stair.lower_approach_segments.is_empty()
+            || stair.upper_approach_segments.is_empty()
+            || stair.reserved_projection.is_empty()
+            || stair.headroom_volumes.is_empty()
             || stair.headroom.5 - stair.headroom.2 < 80
         {
             return Err(EnhancedError::TopologyValidationFailed {
@@ -420,6 +494,22 @@ fn validate_topology(
                     "transition {:?} is not a complete direct stair reservation",
                     stair.id
                 ),
+            });
+        }
+        if stair.lower_wall_opening.tangent_min >= stair.lower_wall_opening.tangent_max
+            || stair.upper_wall_opening.tangent_min >= stair.upper_wall_opening.tangent_max
+            || stair.upper_ceiling_opening.rect.0 >= stair.upper_ceiling_opening.rect.2
+            || stair.upper_ceiling_opening.rect.1 >= stair.upper_ceiling_opening.rect.3
+            || stair.upper_ceiling_opening.z
+                != placement
+                    .rooms
+                    .iter()
+                    .find(|room| room.id == stair.lower_room)
+                    .map(|room| room.floor_z + room.dims.2 as i32)
+                    .unwrap_or_default()
+        {
+            return Err(EnhancedError::TopologyValidationFailed {
+                detail: format!("transition {:?} has incomplete aperture geometry", stair.id),
             });
         }
     }

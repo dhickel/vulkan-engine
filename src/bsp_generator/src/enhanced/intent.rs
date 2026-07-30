@@ -6,6 +6,7 @@
 //! selection and serialization order.
 
 use super::error::EnhancedError;
+use super::profile::StairType;
 
 // ── Typed newtype IDs ──────────────────────────────────────────────────────
 
@@ -153,10 +154,30 @@ pub struct RouteIntent {
     pub headroom: (i32, i32),
 }
 
+/// One materializable solid stair step. Bounds are half-open and include the
+/// riser volume below the walkable tread surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct StairTread {
+    pub bounds: (i32, i32, i32, i32, i32, i32),
+}
+
+/// One materialized-width upper-level approach segment. It is intentionally
+/// separate from a horizontal `RouteIntent`: it belongs exclusively to its
+/// transition and exists at the upper-floor clearance elevation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TransitionApproachSegment {
+    pub start: (i32, i32),
+    pub end: (i32, i32),
+    pub envelope: (i32, i32, i32, i32),
+    pub z: (i32, i32),
+}
+
 /// A vertical transition (stair) between rooms on different layers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TransitionIntent {
     pub id: TransitionId,
+    /// The concrete stair type selected for this transition.
+    pub stair_type: StairType,
     pub lower_room: RoomId,
     pub upper_room: RoomId,
     pub lower_socket: SocketId,
@@ -170,13 +191,66 @@ pub struct TransitionIntent {
     pub upper_approach: (i32, i32, i32, i32),
     pub lower_landing: (i32, i32, i32, i32),
     pub upper_landing: (i32, i32, i32, i32),
-    /// `(x, y, z)` lower corners of the ordered 16-unit-riser treads.
+    /// Compatibility lower corners for the current emitter. `tread_boxes` is
+    /// the authoritative materializable geometry.
     pub treads: Vec<(i32, i32, i32)>,
-    /// Required clear volume above the stairs.
+    /// Exact positive-volume tread/riser solids in ascent order.
+    pub tread_boxes: Vec<StairTread>,
+    /// Exact lower-level approach from the stair entrance to a committed
+    /// lower-route junction. This keeps the lower aperture out of exterior
+    /// void and makes it part of the connected lower clear-space union.
+    pub lower_approach_segments: Vec<TransitionApproachSegment>,
+    /// Exact upper-level approach, from the ceiling exit to the selected upper
+    /// room's wall opening. This prevents graph-only endpoint connections.
+    pub upper_approach_segments: Vec<TransitionApproachSegment>,
+    /// Every exact projected reservation owned by this transition. The union,
+    /// not the bounding footprint, is the collision contract.
+    pub reserved_projection: Vec<(i32, i32, i32, i32)>,
+    /// Exact clear volumes above each tread and approach segment.
+    pub headroom_volumes: Vec<(i32, i32, i32, i32, i32, i32)>,
+    /// Compatibility bounding volume for consumers that need a conservative
+    /// broad-phase query.
     pub headroom: (i32, i32, i32, i32, i32, i32),
     pub riser: i32,
     pub tread_depth: i32,
     pub sealed_shell: bool,
+    /// Lower wall aperture through the lower host room.
+    pub lower_wall_opening: WallOpening,
+    /// Ceiling slab omission above the high treads; it is the actual vertical
+    /// exit, not a strip derived from the upper room's wall.
+    pub upper_ceiling_opening: CeilingOpening,
+    /// Upper room wall aperture reached by `upper_approach_segments`.
+    pub upper_wall_opening: WallOpening,
+}
+
+/// Describes an opening through a room wall for a stair entrance/exit.
+///
+/// Phase 2 emission uses this to split or omit wall brush solids at the
+/// exact aperture location.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WallOpening {
+    /// Which wall face the opening is on.
+    pub wall: super::placement::WallDirection,
+    /// Minimum coordinate along the wall's tangent axis.
+    pub tangent_min: i32,
+    /// Maximum coordinate along the wall's tangent axis.
+    pub tangent_max: i32,
+    /// Bottom Z of the opening (floor-relative).
+    pub bottom_z: i32,
+    /// Top Z of the opening.
+    pub top_z: i32,
+}
+
+/// Describes an opening through a ceiling for the upper stair exit.
+///
+/// Phase 2 emission uses this to omit ceiling slab solids where the stair
+/// opens into the upper layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CeilingOpening {
+    /// The XY rectangle of the ceiling opening `(x0, y0, x1, y1)`.
+    pub rect: (i32, i32, i32, i32),
+    /// The Z level at which the ceiling opening exists.
+    pub z: i32,
 }
 
 /// A zone of rooms sharing a theme palette.

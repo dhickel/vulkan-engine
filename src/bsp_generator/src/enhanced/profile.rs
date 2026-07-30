@@ -1,10 +1,62 @@
-//! Enhanced v2 profile identity and strict profile selection.
+//! Enhanced v2 profile identity, strict profile selection, and stair type
+//! contracts.
 //!
 //! `GenerationProfile` is the single discriminator for every public request.
 //! Legacy and Enhanced variants carry disjoint configuration records;
 //! cross-profile field mixing is a typed error.
 
 use crate::DungeonConfig;
+
+// ── Stair type contract ────────────────────────────────────────────────────
+
+/// Fixed tread depth for both Type A and Type B stairs (frozen).
+pub const STAIR_TREAD: i32 = 16;
+
+/// Fixed riser height for all enhanced stairs (frozen).
+pub const STAIR_RISER: i32 = 16;
+
+/// Fixed number of steps to climb the 192-unit inter-layer offset.
+pub const STAIR_STEPS: u32 = 12;
+
+/// Required run depth for a 12-step stair (12 × 16 = 192).
+pub const STAIR_RUN: i32 = 192;
+
+/// Minimum run depth for a Type A host room (must fit the full stair run).
+pub const TYPE_A_MIN_RUN_DEPTH: i32 = STAIR_RUN;
+
+/// Type B stair width bounds (wall-edge narrow staircase).
+pub const TYPE_B_MIN_WIDTH: i32 = 64;
+pub const TYPE_B_MAX_WIDTH: i32 = 80;
+
+/// Default Type B stair width when RNG is not available for width selection.
+pub const TYPE_B_DEFAULT_WIDTH: i32 = 64;
+
+/// The two real stair types replacing the buggy Enhanced v2 transition model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum StairType {
+    /// Type A: Room-Scale Grand Staircase.
+    ///
+    /// Occupies a selected transition room volume, full available room width,
+    /// 16-deep treads, 16-high risers, exactly 12 steps for floor_z 0 to
+    /// upper floor_z 192. Requires at least 192 run depth in the host room.
+    RoomScaleGrand,
+    /// Type B: Wall-Edge Narrow Staircase.
+    ///
+    /// Exactly 12 16×16 steps, width 64–80, aligned along/hugging a room or
+    /// corridor wall, using a 192-unit run.
+    WallEdgeNarrow,
+}
+
+impl StairType {
+    /// Human-readable tag for the stair type.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::RoomScaleGrand => "room-scale-grand",
+            Self::WallEdgeNarrow => "wall-edge-narrow",
+        }
+    }
+}
 
 // ── Profile ────────────────────────────────────────────────────────────────
 

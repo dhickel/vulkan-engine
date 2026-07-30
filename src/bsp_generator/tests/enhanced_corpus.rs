@@ -43,8 +43,9 @@ fn palette_path() -> PathBuf {
 }
 
 fn evidence_output_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.internal-dev/debug_reports/bsp-dungeon-generator/phase-09-enhanced-corpus.json")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        "../../.internal-dev/debug_reports/bsp-dungeon-generator/phase-09-enhanced-corpus.json",
+    )
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -65,8 +66,10 @@ fn unique_tmp(label: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir =
-        std::env::temp_dir().join(format!("enhanced-corpus-{label}-{}-{nanos}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "enhanced-corpus-{label}-{}-{nanos}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -139,8 +142,7 @@ fn compile_enhanced_map(
     }
 
     let work_palette = work_dir.join("palette.lmp");
-    std::fs::copy(palette_path(), &work_palette)
-        .map_err(|e| format!("copy palette: {e}"))?;
+    std::fs::copy(palette_path(), &work_palette).map_err(|e| format!("copy palette: {e}"))?;
 
     let work_wad = work_dir.join("cc0_dungeon_v2.wad");
     std::fs::copy(wad_path(), &work_wad).map_err(|e| format!("copy WAD: {e}"))?;
@@ -237,11 +239,7 @@ fn assert_non_solid(world: &bsp::BspWorld, label: &str, quake_point: (i32, i32, 
 fn assert_navigation_witnesses(world: &bsp::BspWorld, meta: &EnhancedMetadata) {
     // Spawn point at player height
     let spawn = meta.spawn_origin;
-    assert_non_solid(
-        world,
-        "spawn point",
-        (spawn.0, spawn.1, spawn.2 + 40),
-    );
+    assert_non_solid(world, "spawn point", (spawn.0, spawn.1, spawn.2 + 40));
 
     // Check a grid of points at player height on the lower floor
     let lower_z = meta.lower_floor_z;
@@ -259,12 +257,9 @@ fn assert_navigation_witnesses(world: &bsp::BspWorld, meta: &EnhancedMetadata) {
                 test_point.1 as f32,
                 test_point.2 as f32,
             );
-            let contents =
-                point_contents(engine_point, &world.nodes, &world.leaves, &world.planes);
+            let contents = point_contents(engine_point, &world.nodes, &world.leaves, &world.planes);
             if contents == PointContents::Solid {
-                eprintln!(
-                    "  [nav] solid at offset ({dx},{dy}) from spawn: {test_point:?}"
-                );
+                eprintln!("  [nav] solid at offset ({dx},{dy}) from spawn: {test_point:?}");
             }
         }
     }
@@ -362,16 +357,12 @@ fn corpus_entries() -> Vec<CorpusEntry> {
         CorpusEntry {
             name: "boundary-A-enhanced-2-vert",
             seed: 14,
-            config: EnhancedConfig::with_full_params(
-                28, 3, 2,
-                bsp_generator::enhanced::config::ENHANCED_TREAD_DEFAULT,
-                2048, 32, 96, 2,
-            )
-            .expect("valid boundary-A config"),
+            config: EnhancedConfig::with_full_params(28, 3, 2, 16, 2048, 32, 96, 2)
+                .expect("valid boundary-A config"),
             face_ceiling: ENHANCED_FACE_CEILING,
             entity_ceiling: ENHANCED_ENTITY_CEILING,
         },
-        // ── Boundary B: minimal config (seed 16) ─────────────────
+        // ── Boundary B: reduced-loop config (seed 41) ───────────
         CorpusEntry {
             name: "boundary-B-enhanced-minimal",
             seed: 41,
@@ -383,12 +374,8 @@ fn corpus_entries() -> Vec<CorpusEntry> {
         CorpusEntry {
             name: "boundary-C-enhanced-6-loops",
             seed: 10,
-            config: EnhancedConfig::with_full_params(
-                28, 6, 1,
-                bsp_generator::enhanced::config::ENHANCED_TREAD_DEFAULT,
-                2048, 32, 96, 2,
-            )
-            .expect("valid boundary-C config"),
+            config: EnhancedConfig::with_full_params(28, 6, 1, 16, 2048, 32, 96, 2)
+                .expect("valid boundary-C config"),
             face_ceiling: ENHANCED_FACE_CEILING,
             entity_ceiling: ENHANCED_ENTITY_CEILING,
         },
@@ -396,12 +383,8 @@ fn corpus_entries() -> Vec<CorpusEntry> {
         CorpusEntry {
             name: "boundary-D-enhanced-max-pillars",
             seed: 18,
-            config: EnhancedConfig::with_full_params(
-                28, 3, 1,
-                bsp_generator::enhanced::config::ENHANCED_TREAD_DEFAULT,
-                2048, 32, 96, 4,
-            )
-            .expect("valid boundary-D config"),
+            config: EnhancedConfig::with_full_params(28, 3, 1, 16, 2048, 32, 96, 4)
+                .expect("valid boundary-D config"),
             face_ceiling: ENHANCED_FACE_CEILING,
             entity_ceiling: ENHANCED_ENTITY_CEILING,
         },
@@ -469,7 +452,10 @@ fn enhanced_corpus_all_12_configurations() {
     let mut results: Vec<CorpusResult> = Vec::with_capacity(12);
 
     for entry in &entries {
-        eprintln!("─── Enhanced Corpus: {} (primary seed {}) ───", entry.name, entry.seed);
+        eprintln!(
+            "─── Enhanced Corpus: {} (primary seed {}) ───",
+            entry.name, entry.seed
+        );
 
         let gen_start = std::time::Instant::now();
 
@@ -554,46 +540,46 @@ fn enhanced_corpus_all_12_configurations() {
 
         let comp_start = std::time::Instant::now();
 
-        let (bsp_data, lit_data) =
-            match compile_enhanced_map(&map_path, &staging, &tool_dir, true) {
-                Ok(result) => result,
-                Err(e) => {
-                    let result = CorpusResult {
-                        name: entry.name.to_string(),
-                        seed: entry.seed,
-                        room_count: meta.room_count,
-                        route_count: meta.route_count,
-                        transition_count: meta.transition_count,
-                        lower_floor_z: meta.lower_floor_z,
-                        upper_floor_z: meta.upper_floor_z,
-                        spawn_origin: meta.spawn_origin,
-                        light_count: meta.light_count,
-                        pillar_count: meta.pillar_count,
-                        map_bytes: map_text.len(),
-                        map_hash,
-                        compiled_faces: 0,
-                        compiled_entities: 0,
-                        compiled_vertices: 0,
-                        compiled_nodes: 0,
-                        compiled_leaves: 0,
-                        bsp_size: 0,
-                        bsp_hash: String::new(),
-                        lit_present: false,
-                        lit_size: 0,
-                        lit_hash: String::new(),
-                        sealed: false,
-                        strict_diagnostics: 0,
-                        status: "COMPILATION_FAILED".to_string(),
-                        error: Some(e),
-                        generation_duration_ms: gen_duration,
-                        compilation_duration_ms: comp_start.elapsed().as_millis() as u64,
-                    };
-                    results.push(result);
-                    eprintln!("  FAIL: compilation error");
-                    let _ = std::fs::remove_dir_all(&staging);
-                    continue;
-                }
-            };
+        let (bsp_data, lit_data) = match compile_enhanced_map(&map_path, &staging, &tool_dir, true)
+        {
+            Ok(result) => result,
+            Err(e) => {
+                let result = CorpusResult {
+                    name: entry.name.to_string(),
+                    seed: entry.seed,
+                    room_count: meta.room_count,
+                    route_count: meta.route_count,
+                    transition_count: meta.transition_count,
+                    lower_floor_z: meta.lower_floor_z,
+                    upper_floor_z: meta.upper_floor_z,
+                    spawn_origin: meta.spawn_origin,
+                    light_count: meta.light_count,
+                    pillar_count: meta.pillar_count,
+                    map_bytes: map_text.len(),
+                    map_hash,
+                    compiled_faces: 0,
+                    compiled_entities: 0,
+                    compiled_vertices: 0,
+                    compiled_nodes: 0,
+                    compiled_leaves: 0,
+                    bsp_size: 0,
+                    bsp_hash: String::new(),
+                    lit_present: false,
+                    lit_size: 0,
+                    lit_hash: String::new(),
+                    sealed: false,
+                    strict_diagnostics: 0,
+                    status: "COMPILATION_FAILED".to_string(),
+                    error: Some(e),
+                    generation_duration_ms: gen_duration,
+                    compilation_duration_ms: comp_start.elapsed().as_millis() as u64,
+                };
+                results.push(result);
+                eprintln!("  FAIL: compilation error");
+                let _ = std::fs::remove_dir_all(&staging);
+                continue;
+            }
+        };
 
         let comp_duration = comp_start.elapsed().as_millis() as u64;
 

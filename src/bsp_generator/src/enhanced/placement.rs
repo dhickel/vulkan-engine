@@ -69,6 +69,90 @@ pub struct PlacementResult {
     pub upper_rooms: Vec<RoomId>,
 }
 
+// ── Stair-host eligibility ────────────────────────────────────────────────
+
+/// Stair-host eligibility for a room or socket, derived from placed geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StairEligibility {
+    /// Room can host a Type A Room-Scale Grand Staircase.
+    TypeACapable,
+    /// Wall/socket can host a Type B Wall-Edge Narrow Staircase.
+    TypeBCapable,
+    /// Neither type fits.
+    NotEligible,
+}
+
+impl PlacementResult {
+    /// Determine whether a placed room has 192 units of wall-free interior
+    /// run for a Type A stair. Shell span is deliberately insufficient: both
+    /// 16-unit room walls are solid and cannot be consumed by treads.
+    pub fn is_type_a_eligible(&self, room_id: RoomId) -> bool {
+        let Some(room) = self.rooms.iter().find(|r| r.id == room_id) else {
+            return false;
+        };
+        let clear_w = room.shell.2 - room.shell.0 - 2 * Q;
+        let clear_d = room.shell.3 - room.shell.1 - 2 * Q;
+        clear_w >= super::profile::TYPE_A_MIN_RUN_DEPTH
+            || clear_d >= super::profile::TYPE_A_MIN_RUN_DEPTH
+    }
+
+    /// Determine whether a socket's wall supports a Type B (Wall-Edge Narrow)
+    /// staircase. Requires the host room wall to have ≥192 units of
+    /// unobstructed run parallel to the socket wall.
+    pub fn is_type_b_eligible(&self, socket_id: SocketId) -> bool {
+        let Some(socket) = self.sockets.iter().find(|s| s.id == socket_id) else {
+            return false;
+        };
+        let Some(room) = self.rooms.iter().find(|r| r.id == socket.room) else {
+            return false;
+        };
+        let (rx0, ry0, rx1, ry1) = room.shell;
+        let clear_x0 = rx0 + Q;
+        let clear_y0 = ry0 + Q;
+        let clear_x1 = rx1 - Q;
+        let clear_y1 = ry1 - Q;
+        let (run_min, run_max, anchor, inward_clear) = match socket.wall {
+            WallDirection::North | WallDirection::South => {
+                (clear_x0, clear_x1, socket.anchor.0, clear_y1 - clear_y0)
+            }
+            WallDirection::East | WallDirection::West => {
+                (clear_y0, clear_y1, socket.anchor.1, clear_x1 - clear_x0)
+            }
+        };
+        let half = socket.width as i32 / 2;
+        inward_clear >= super::profile::TYPE_B_MIN_WIDTH
+            && ((anchor - half >= run_min && anchor - half + super::profile::STAIR_RUN <= run_max)
+                || (anchor + half - super::profile::STAIR_RUN >= run_min
+                    && anchor + half <= run_max))
+    }
+
+    /// Classify the stair eligibility for a given socket candidate.
+    pub fn stair_eligibility(&self, socket_id: SocketId) -> StairEligibility {
+        let Some(socket) = self.sockets.iter().find(|s| s.id == socket_id) else {
+            return StairEligibility::NotEligible;
+        };
+        if !socket.transition_capable {
+            return StairEligibility::NotEligible;
+        }
+        let Some(room) = self.rooms.iter().find(|r| r.id == socket.room) else {
+            return StairEligibility::NotEligible;
+        };
+        let clear_w = room.shell.2 - room.shell.0 - 2 * Q;
+        let clear_d = room.shell.3 - room.shell.1 - 2 * Q;
+        let type_a_run = match socket.wall {
+            WallDirection::North | WallDirection::South => clear_d,
+            WallDirection::East | WallDirection::West => clear_w,
+        };
+        if type_a_run >= super::profile::TYPE_A_MIN_RUN_DEPTH {
+            return StairEligibility::TypeACapable;
+        }
+        if self.is_type_b_eligible(socket.id) {
+            return StairEligibility::TypeBCapable;
+        }
+        StairEligibility::NotEligible
+    }
+}
+
 // ── Placement journal ─────────────────────────────────────────────────────
 
 /// A full snapshot of placement state for transactional rollback.

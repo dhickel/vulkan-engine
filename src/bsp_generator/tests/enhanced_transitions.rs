@@ -145,10 +145,10 @@ fn transition_footprint_rejects_unrelated_room_overlap() {
 
 #[test]
 fn reserve_one_stair_succeeds() {
-    let lroom = make_placed_room(0, 0, ENHANCED_LOWER_FLOOR_Z, (0, 0, 128, 128));
-    let uroom = make_placed_room(1, 1, ENHANCED_UPPER_FLOOR_Z, (256, 0, 384, 128));
-    let ls = make_socket(0, 0, WallDirection::East, (128, 64, 56));
-    let us = make_socket(1, 1, WallDirection::West, (256, 64, 248));
+    let lroom = make_placed_room(0, 0, ENHANCED_LOWER_FLOOR_Z, (0, 0, 256, 256));
+    let uroom = make_placed_room(1, 1, ENHANCED_UPPER_FLOOR_Z, (368, 64, 496, 320));
+    let ls = make_socket(0, 0, WallDirection::East, (256, 128, 56));
+    let us = make_socket(1, 1, WallDirection::West, (368, 192, 248));
 
     let grid = OccupancyGrid::new(1024, 1024).unwrap();
     let alloc = IdAllocator::new();
@@ -187,6 +187,114 @@ fn topology_produces_valid_transitions_or_exhausts() {
         }
         Err(EnhancedError::TopologyExhausted { .. }) => {}
         Err(e) => panic!("unexpected error: {:?}", e),
+    }
+}
+
+#[test]
+fn type_a_and_type_b_are_distinct_constructible_geometries() {
+    let upper = make_placed_room(1, 1, ENHANCED_UPPER_FLOOR_Z, (432, 192, 560, 448));
+    let upper_socket = make_socket(1, 1, WallDirection::West, (432, 320, 248));
+
+    let grand_room = make_placed_room(0, 0, ENHANCED_LOWER_FLOOR_Z, (128, 128, 384, 384));
+    let grand_socket = make_socket(0, 0, WallDirection::South, (256, 128, 56));
+    let mut grand_tx = Transaction::new(
+        OccupancyGrid::new(1024, 1024).unwrap(),
+        IdAllocator::new(),
+        3,
+    );
+    let grand = transition::reserve_one_stair(
+        grand_socket,
+        upper_socket.clone(),
+        &[grand_room.clone(), upper.clone()],
+        &mut grand_tx,
+    )
+    .unwrap();
+    assert_eq!(
+        grand.stair_type,
+        bsp_generator::enhanced::profile::StairType::RoomScaleGrand
+    );
+    assert_eq!(grand.tread_boxes.len(), 12);
+    assert_eq!(grand.footprint, (144, 144, 368, 336));
+
+    // Type B has no 192-unit perpendicular interior, but has a 192-unit run
+    // parallel to its south wall and a 64-unit inward strip.
+    let narrow_room = make_placed_room(0, 0, ENHANCED_LOWER_FLOOR_Z, (128, 128, 384, 256));
+    let narrow_socket = make_socket(0, 0, WallDirection::South, (192, 128, 56));
+    let mut narrow_tx = Transaction::new(
+        OccupancyGrid::new(1024, 1024).unwrap(),
+        IdAllocator::new(),
+        3,
+    );
+    let narrow = transition::reserve_one_stair(
+        narrow_socket,
+        upper_socket,
+        &[narrow_room.clone(), upper],
+        &mut narrow_tx,
+    )
+    .unwrap();
+    assert_eq!(
+        narrow.stair_type,
+        bsp_generator::enhanced::profile::StairType::WallEdgeNarrow
+    );
+    assert_eq!(narrow.footprint.3 - narrow.footprint.1, 64);
+    assert_eq!(narrow.footprint.2 - narrow.footprint.0, 192);
+    for pair in narrow.tread_boxes.windows(2) {
+        assert_eq!(pair[1].bounds.0 - pair[0].bounds.0, 16);
+        assert_eq!(pair[1].bounds.1, pair[0].bounds.1);
+        assert_eq!(pair[1].bounds.4 - pair[1].bounds.1, 64);
+    }
+
+    for stair in [&grand, &narrow] {
+        assert_eq!(stair.riser, 16);
+        assert_eq!(stair.tread_depth, 16);
+        assert_eq!(stair.tread_boxes.len(), 12);
+        for (index, tread) in stair.tread_boxes.iter().enumerate() {
+            let (x0, y0, z0, x1, y1, z1) = tread.bounds;
+            assert!(x0 < x1 && y0 < y1 && z0 < z1);
+            assert_eq!(x0 % 16, 0);
+            assert_eq!(y0 % 16, 0);
+            assert_eq!(z0 % 16, 0);
+            assert_eq!(z1, (index as i32 + 1) * 16);
+            assert!(x0 >= stair.footprint.0 && x1 <= stair.footprint.2);
+            assert!(y0 >= stair.footprint.1 && y1 <= stair.footprint.3);
+        }
+        assert_eq!(stair.upper_ceiling_opening.z, 176);
+        let ceiling_slab_bottom = 160;
+        assert_eq!(stair.tread_boxes[4].bounds.5 + 80, ceiling_slab_bottom);
+        assert_eq!(stair.tread_boxes[5].bounds.5 + 80, 176);
+        let high_treads = &stair.tread_boxes[5..];
+        let expected_opening = (
+            high_treads
+                .iter()
+                .map(|tread| tread.bounds.0)
+                .min()
+                .unwrap(),
+            high_treads
+                .iter()
+                .map(|tread| tread.bounds.1)
+                .min()
+                .unwrap(),
+            high_treads
+                .iter()
+                .map(|tread| tread.bounds.3)
+                .max()
+                .unwrap(),
+            high_treads
+                .iter()
+                .map(|tread| tread.bounds.4)
+                .max()
+                .unwrap(),
+        );
+        assert_eq!(stair.upper_ceiling_opening.rect, expected_opening);
+        assert!(high_treads
+            .iter()
+            .all(|tread| tread.bounds.5 + 80 <= stair.headroom.5));
+        assert!(!stair.upper_approach_segments.is_empty());
+        assert_eq!(
+            stair.upper_approach_segments.last().unwrap().end,
+            (432, 320)
+        );
+        assert_eq!(stair.upper_wall_opening.wall, WallDirection::West);
     }
 }
 
