@@ -86,7 +86,7 @@ src/enhanced/
   routing.rs      — route_sockets() — width-aware A* corridor routing
   reservation.rs  — Transaction with mark/rollback/commit, socket claims,
                      loop budget tracking
-  transition.rs   — reserve_transitions() — 12-tread direct stair reservations
+  transition.rs   — reserve_transitions() — typed grand/wall-edge stair reservations
   theme.rs        — ThemePackage (frozen CC0 Dungeon v2), PaletteDefinition,
                      RoomRole derivation, AssignmentStrategy, zone partitioning
   features.rs     — apply_features() — corridor width (64/80/96),
@@ -177,7 +177,7 @@ let cfg = EnhancedConfig::with_full_params(
     28,   // room_count   (17–40, M2 only)
     3,    // loop_count   (1–6)
     1,    // vertical_edges (1–3)
-    16,   // tread_depth  (16 or 32)
+    16,   // tread_depth  (fixed; other values are rejected)
     2048, // xy_extent    (≤ 3072, multiple of 16)
     32,   // placement_candidates
     96,   // max_placement_attempts
@@ -198,8 +198,7 @@ let cfg = EnhancedConfig::with_full_params(
 | upper floor Z | 192 |
 | room height (both layers) | 176 |
 | riser | 16 |
-| tread (default) | 16 |
-| tread (alternative) | 32 |
+| tread (both stair types) | 16 |
 | total Z span | 368 (≤ 384 M2 max) |
 | layer count | 2 (frozen) |
 
@@ -230,7 +229,7 @@ CC0-licensed, and deterministically built via `build.py`.
 | domain | `"dungeon-gen/v1"` | `"dungeon-gen/v2"` |
 | map classes | M1 + M2 | M2 only |
 | layers | 1 (flat) | 2 (lower + upper) |
-| vertical connections | none | stairs (12-tread sealed shells) |
+| vertical connections | none | room-scale grand or wall-edge narrow stairs (12-tread sealed shells) |
 | config type | `DungeonConfig` + `validate()` | `EnhancedConfig` (validates at construction) |
 | entry point | `generate(seed, config)` | `generate_enhanced(seed, config)` |
 | room placement | same-layer, no membership balancing | two-layer, balanced membership |
