@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::contract::{self, ApprovedCapability, ContractError, Preset, ProofConfig};
 use super::ir::{
     CommittedRoom, CommittedTopology, FeatureId, FeatureInstance, FeatureIntent, InstanceId,
-    PlanOutcome, QuantumVolume, SupportRelation, V3IdAllocator,
+    PlanOutcome, QuantumVolume, SupportRelation, SupportSurfaceKind, V3IdAllocator,
 };
 use super::seed::{CandidateSelector, V3Seed};
 
@@ -234,6 +234,8 @@ pub fn plan_composition(
     config: &ProofConfig,
     topology: &CommittedTopology,
 ) -> Result<PlanOutcome, ContractError> {
+    topology.validate()?;
+
     let mut alloc = V3IdAllocator::new();
     let composition_id = alloc
         .next_composition()
@@ -253,10 +255,11 @@ pub fn plan_composition(
         }
     }
 
-    // Build a candidate selector for composition planning
-    let planner_seed = seed.stage_seed(super::seed::tags::COMPOSITION_PLANNING);
-    let planner_u64s = planner_seed.u64s();
-    let selector_seed = V3Seed::new(planner_u64s[0]);
+    // Candidate decisions derive directly from the master seed.  The stage
+    // tag and stable candidate key provide the complete framing boundary;
+    // deriving a second seed here would make identity depend on an unrelated
+    // intermediate draw.
+    let selector_seed = seed;
 
     // Step 1: Evaluate eligibility per room
     let eligibility = evaluate_eligibility(topology, selector_seed);
@@ -267,11 +270,8 @@ pub fn plan_composition(
     // Step 3: Construct semantic intents for each selected family
     // Step 3: Assign each room a grammar family and construct semantic intents
     let mut intents: Vec<FeatureIntent> = Vec::new();
-    let assigned: BTreeSet<super::ir::RoomId> = assign_rooms_to_families(
-        &selected_families,
-        &eligibility,
-        selector_seed,
-    );
+    let assigned: BTreeSet<super::ir::RoomId> =
+        assign_rooms_to_families(&selected_families, &eligibility, selector_seed);
 
     for el in &eligibility {
         if !assigned.contains(&el.room_id) {
@@ -287,7 +287,7 @@ pub fn plan_composition(
                     detail: format!("unknown grammar family: {family}"),
                 })?;
             let room_intents =
-                construct_intents_for_room(desc, &el.room, &mut alloc, selector_seed)?;
+                construct_intents_for_room(desc, &el.room, topology, &mut alloc, selector_seed)?;
             intents.extend(room_intents);
             break; // One family per room
         }
@@ -298,19 +298,49 @@ pub fn plan_composition(
     let _reservations = validate_reservations(&intents, topology)?;
 
     // Step 5: Build and validate support graph
-    let (instances, support_edges) = build_support_graph(&intents, &mut alloc)?;
+    let (instances, support_edges) = build_support_graph(&intents, topology)?;
     validate_support_acyclicity(&support_edges)?;
 
-    // Step 6: Deterministic simplification in fixed (priority, stable_key) order
-    let (accepted, simplified) = deterministic_simplification(&instances, config, selector_seed);
+    // Step 6: Deterministic simplification in fixed (priority, stable_key) order.
+    // Removing a support parent expands to its complete transitive dependent
+    // closure so the accepted graph cannot retain a dangling edge.
+    let (accepted, simplified) = deterministic_simplification(&instances, config)?;
+    validate_instance_supports(&accepted, topology)?;
+    let support_edges: Vec<(InstanceId, SupportRelation)> = accepted
+        .iter()
+        .filter_map(|instance| {
+            instance
+                .support
+                .clone()
+                .map(|support| (instance.id, support))
+        })
+        .collect();
+    validate_support_acyclicity(&support_edges)?;
 
-    // Step 7: Minimum-identity check
-    let identity_satisfied = check_minimum_identity(config, &accepted, &selected_families);
+    // Step 7: Minimum identity is a hard requirement, not an advisory field.
+    // A budget-constrained plan that cannot retain it must not return a
+    // successful outcome.
+    if !check_minimum_identity(config, &accepted, &selected_families) {
+        return Err(ContractError::MinimumIdentityFailure {
+            preset: config.preset.tag().to_string(),
+            required: config.preset.minimum_features(),
+            actual: accepted.len() as u32,
+        });
+    }
 
-    // Step 8: Build outcome
+    // Step 8: Build outcome.
     let grammar_families: BTreeSet<String> = selected_families.iter().cloned().collect();
-    let estimated_total_faces: u32 = accepted.iter().map(|fi| fi.estimated_faces).sum();
-    let estimated_total_entities: u32 = topology.rooms.len() as u32; // 1 entity per room
+    let estimated_total_faces = accepted.iter().try_fold(0u32, |total, instance| {
+        total
+            .checked_add(instance.estimated_faces)
+            .ok_or(ContractError::ArithmeticOverflow {
+                operation: "plan estimated face total",
+            })
+    })?;
+    let estimated_total_entities =
+        u32::try_from(topology.rooms.len()).map_err(|_| ContractError::ArithmeticOverflow {
+            operation: "plan estimated entity total",
+        })?; // one semantic point-entity allowance per room
 
     // Build rejected map
     let mut rejected = BTreeMap::new();
@@ -329,7 +359,7 @@ pub fn plan_composition(
         simplified,
         rejected,
         support_edges,
-        identity_satisfied,
+        identity_satisfied: true,
         estimated_total_faces,
         estimated_total_entities,
     })
@@ -380,7 +410,7 @@ fn select_families(
     eligibility: &[RoomEligibility],
     seed: V3Seed,
 ) -> Result<Vec<String>, ContractError> {
-    let mut selector = CandidateSelector::new(seed, super::seed::tags::COMPOSITION_PLANNING, true);
+    let mut selector = CandidateSelector::new(seed, super::seed::tags::COMPOSITION, true);
     let min_families = config.preset.minimum_families();
 
     // Collect all eligible families across all rooms
@@ -424,7 +454,14 @@ fn select_families(
         }
 
         if let Some(desc) = grammar_by_family(family) {
-            // Check that at least one room is eligible
+            // Planning-only descriptors are intentionally represented in the
+            // table, but are not permitted to produce integrated intents.
+            if !desc.is_integrated || !desc.capability.is_approved() {
+                selector.reject(family, "capability is planning-only".into());
+                continue;
+            }
+
+            // Check that at least one room is eligible.
             if !eligibility
                 .iter()
                 .any(|el| el.eligible_families.contains(family))
@@ -433,7 +470,7 @@ fn select_families(
                 continue;
             }
 
-            // Apply motif exclusions
+            // Apply motif exclusions.
             for excl in desc.excluded_motifs {
                 excluded.insert(excl.to_string());
             }
@@ -455,39 +492,143 @@ fn select_families(
     Ok(selected)
 }
 
-/// Build a support graph and create feature instances.
-fn build_support_graph(
-    intents: &[FeatureIntent],
-    alloc: &mut V3IdAllocator,
-) -> Result<(Vec<FeatureInstance>, Vec<(InstanceId, SupportRelation)>), ContractError> {
-    let mut instances: Vec<FeatureInstance> = Vec::new();
-    let mut support_edges: Vec<(InstanceId, SupportRelation)> = Vec::new();
+fn invariant(detail: impl Into<String>) -> ContractError {
+    ContractError::InvariantViolation {
+        detail: detail.into(),
+    }
+}
 
-    for intent in intents {
-        let instance_id = alloc
-            .next_instance()
-            .map_err(|e| ContractError::InvariantViolation { detail: e })?;
-
-        let instance = FeatureInstance {
-            id: instance_id,
-            feature_id: intent.id,
-            room_id: intent.room_id,
-            volume: intent.volume,
-            support: intent.support.clone(),
-            tags: intent.tags.clone(),
-            estimated_faces: intent.estimated_faces,
-        };
-
-        if let Some(ref support) = intent.support {
-            support_edges.push((instance_id, support.clone()));
+fn validate_support_relation(
+    owner: &str,
+    room_id: super::ir::RoomId,
+    support: &SupportRelation,
+    instance_ids: &BTreeSet<InstanceId>,
+    topology: &CommittedTopology,
+) -> Result<(), ContractError> {
+    if let Some((surface_id, expected_kind)) = support.support_surface() {
+        let surface = topology.surface(surface_id).ok_or_else(|| {
+            invariant(format!(
+                "{owner} references deleted support surface {}",
+                surface_id.stable_key()
+            ))
+        })?;
+        if surface.room_id != room_id || surface.kind != expected_kind {
+            return Err(invariant(format!(
+                "{owner} support surface {} has incompatible owner or kind",
+                surface_id.stable_key()
+            )));
         }
-
-        instances.push(instance);
     }
 
-    // Sort instances by ID for determinism
-    instances.sort_by_key(|fi| fi.id);
+    if let Some(parent) = support.supported_by() {
+        if !instance_ids.contains(&parent) {
+            return Err(invariant(format!(
+                "{owner} references missing support parent {}",
+                parent.stable_key()
+            )));
+        }
+    }
 
+    Ok(())
+}
+
+/// Validate every semantic intent support before materialization.
+pub fn validate_intent_supports(
+    intents: &[FeatureIntent],
+    topology: &CommittedTopology,
+) -> Result<(), ContractError> {
+    let mut instance_ids = BTreeSet::new();
+    for intent in intents {
+        let instance_id = intent.instance_id.ok_or_else(|| {
+            invariant(format!(
+                "{} has no stable materialized instance ID",
+                intent.id.stable_key()
+            ))
+        })?;
+        if !instance_ids.insert(instance_id) {
+            return Err(invariant(format!(
+                "duplicate support instance ID {}",
+                instance_id.stable_key()
+            )));
+        }
+    }
+
+    for intent in intents {
+        if let Some(support) = &intent.support {
+            validate_support_relation(
+                &intent.id.stable_key(),
+                intent.room_id,
+                support,
+                &instance_ids,
+                topology,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Validate accepted instances after simplification so no removed surface or
+/// support parent remains referenced.
+pub fn validate_instance_supports(
+    instances: &[FeatureInstance],
+    topology: &CommittedTopology,
+) -> Result<(), ContractError> {
+    let instance_ids: BTreeSet<InstanceId> = instances.iter().map(|instance| instance.id).collect();
+    if instance_ids.len() != instances.len() {
+        return Err(invariant("duplicate accepted support instance ID"));
+    }
+
+    for instance in instances {
+        if let Some(support) = &instance.support {
+            validate_support_relation(
+                &instance.id.stable_key(),
+                instance.room_id,
+                support,
+                &instance_ids,
+                topology,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Build a validated support graph and materialize feature instances.
+fn build_support_graph(
+    intents: &[FeatureIntent],
+    topology: &CommittedTopology,
+) -> Result<(Vec<FeatureInstance>, Vec<(InstanceId, SupportRelation)>), ContractError> {
+    validate_intent_supports(intents, topology)?;
+
+    let mut instances: Vec<FeatureInstance> = intents
+        .iter()
+        .map(|intent| {
+            Ok(FeatureInstance {
+                id: intent.instance_id.ok_or_else(|| {
+                    invariant(format!(
+                        "{} lost its validated instance ID",
+                        intent.id.stable_key()
+                    ))
+                })?,
+                feature_id: intent.id,
+                room_id: intent.room_id,
+                volume: intent.volume,
+                support: intent.support.clone(),
+                tags: intent.tags.clone(),
+                estimated_faces: intent.estimated_faces,
+            })
+        })
+        .collect::<Result<_, ContractError>>()?;
+    instances.sort_by_key(|instance| instance.id);
+
+    let support_edges = instances
+        .iter()
+        .filter_map(|instance| {
+            instance
+                .support
+                .clone()
+                .map(|support| (instance.id, support))
+        })
+        .collect();
     Ok((instances, support_edges))
 }
 
@@ -576,77 +717,156 @@ pub fn validate_support_acyclicity(
 /// derived from the family's minimum_instances constraint. Features
 /// belonging to families with `minimum_instances > 0` are simplified
 /// last.
+fn is_minimum_identity_instance(instance: &FeatureInstance) -> bool {
+    instance
+        .tags
+        .iter()
+        .find_map(|tag| tag.strip_prefix("family:"))
+        .and_then(grammar_by_family)
+        .is_some_and(|grammar| grammar.minimum_instances > 0)
+}
+
+fn support_dependents(
+    instances: &[FeatureInstance],
+) -> Result<BTreeMap<InstanceId, Vec<InstanceId>>, ContractError> {
+    let instance_ids: BTreeSet<InstanceId> = instances.iter().map(|instance| instance.id).collect();
+    if instance_ids.len() != instances.len() {
+        return Err(invariant("duplicate instance ID during simplification"));
+    }
+
+    let mut dependents: BTreeMap<InstanceId, Vec<InstanceId>> = BTreeMap::new();
+    for instance in instances {
+        if let Some(SupportRelation::SupportedBy(parent)) = instance.support {
+            if !instance_ids.contains(&parent) {
+                return Err(invariant(format!(
+                    "{} references removed support parent {}",
+                    instance.id.stable_key(),
+                    parent.stable_key()
+                )));
+            }
+            dependents.entry(parent).or_default().push(instance.id);
+        }
+    }
+    for children in dependents.values_mut() {
+        children.sort();
+    }
+    Ok(dependents)
+}
+
+fn dependent_removal_closure(
+    root: InstanceId,
+    dependents: &BTreeMap<InstanceId, Vec<InstanceId>>,
+) -> BTreeSet<InstanceId> {
+    let mut closure = BTreeSet::from([root]);
+    let mut pending = BTreeSet::from([root]);
+    while let Some(next) = pending.iter().next().copied() {
+        pending.remove(&next);
+        if let Some(children) = dependents.get(&next) {
+            for child in children {
+                if closure.insert(*child) {
+                    pending.insert(*child);
+                }
+            }
+        }
+    }
+    closure
+}
+
 fn deterministic_simplification(
     instances: &[FeatureInstance],
     config: &ProofConfig,
-    seed: V3Seed,
-) -> (Vec<FeatureInstance>, Vec<FeatureId>) {
+) -> Result<(Vec<FeatureInstance>, Vec<FeatureId>), ContractError> {
     let budget = config.preset.face_budget();
-    let total: u32 = instances.iter().map(|fi| fi.estimated_faces).sum();
+    let total = instances.iter().try_fold(0u32, |total, instance| {
+        total
+            .checked_add(instance.estimated_faces)
+            .ok_or(ContractError::ArithmeticOverflow {
+                operation: "simplification estimated face total",
+            })
+    })?;
+    let dependents = support_dependents(instances)?;
 
     if total <= budget {
-        return (instances.to_vec(), Vec::new());
+        return Ok((instances.to_vec(), Vec::new()));
     }
 
-    // Build simplification priority: (is_critical, family_priority, stable_key)
-    let simplification_seed = seed.stage_seed(super::seed::tags::SIMPLIFICATION);
-    let simpl_selector = CandidateSelector::new(
-        V3Seed::new(simplification_seed.u64_at(0)),
-        super::seed::tags::SIMPLIFICATION,
-        false, // descending: higher rank = kept
-    );
-
-    let mut ranked: Vec<(bool, u64, InstanceId, &FeatureInstance)> = instances
+    // Lower-priority details are considered in the declared fixed
+    // `(priority, stable_key)` order. Removing a parent expands to the complete
+    // transitive dependent closure and commits that closure as one operation.
+    let mut removal_order: Vec<(u32, String, &FeatureInstance)> = instances
         .iter()
-        .map(|fi| {
-            let family_critical = grammar_by_family(
-                // We need to know the family — use tags as proxy
-                fi.tags
-                    .iter()
-                    .find_map(|t| {
-                        if t.starts_with("family:") {
-                            Some(&t[7..])
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or("unknown"),
+        .map(|instance| {
+            (
+                u32::from(is_minimum_identity_instance(instance)),
+                instance.id.stable_key(),
+                instance,
             )
-            .map(|d| d.minimum_instances > 0)
-            .unwrap_or(false);
-
-            let rank = simpl_selector.rank_for(fi.id.stable_key().as_bytes());
-            // Critical features get high priority (sorted to front)
-            (!family_critical, rank, fi.id, fi)
         })
         .collect();
+    removal_order.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
 
-    // Sort: critical features first, then by rank (descending = higher rank kept)
-    ranked.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| b.1.cmp(&a.1))
-            .then_with(|| a.2.cmp(&b.2))
-    });
+    let by_id: BTreeMap<InstanceId, &FeatureInstance> = instances
+        .iter()
+        .map(|instance| (instance.id, instance))
+        .collect();
+    let mut kept_ids: BTreeSet<InstanceId> = by_id.keys().copied().collect();
+    let mut removed = Vec::new();
+    let mut running_cost = total;
 
-    let mut kept: Vec<FeatureInstance> = Vec::new();
-    let mut removed: Vec<FeatureId> = Vec::new();
-    let mut running_cost: u32 = 0;
+    for (_, _, instance) in removal_order {
+        if running_cost <= budget {
+            break;
+        }
+        if !kept_ids.contains(&instance.id) {
+            continue;
+        }
 
-    for (_is_critical, _rank, _instance_id, fi) in &ranked {
-        let new_cost = running_cost.saturating_add(fi.estimated_faces);
-        if new_cost <= budget {
-            kept.push((*fi).clone());
-            running_cost = new_cost;
-        } else {
-            removed.push(fi.feature_id);
+        let closure: BTreeSet<InstanceId> = dependent_removal_closure(instance.id, &dependents)
+            .intersection(&kept_ids)
+            .copied()
+            .collect();
+        if closure
+            .iter()
+            .any(|id| is_minimum_identity_instance(by_id[id]))
+        {
+            continue;
+        }
+
+        let closure_cost = closure.iter().try_fold(0u32, |cost, id| {
+            cost.checked_add(by_id[id].estimated_faces)
+                .ok_or(ContractError::ArithmeticOverflow {
+                    operation: "dependent simplification closure",
+                })
+        })?;
+        running_cost =
+            running_cost
+                .checked_sub(closure_cost)
+                .ok_or(ContractError::ArithmeticOverflow {
+                    operation: "simplification removal",
+                })?;
+        for id in closure {
+            kept_ids.remove(&id);
+            removed.push(by_id[&id].feature_id);
         }
     }
 
-    // Sort kept by ID for determinism
-    kept.sort_by_key(|fi| fi.id);
+    let mut kept: Vec<FeatureInstance> = instances
+        .iter()
+        .filter(|instance| kept_ids.contains(&instance.id))
+        .cloned()
+        .collect();
+    kept.sort_by_key(|instance| instance.id);
     removed.sort();
 
-    (kept, removed)
+    if running_cost > budget {
+        return Err(ContractError::MinimumIdentityFailure {
+            preset: config.preset.tag().to_string(),
+            required: config.preset.minimum_features(),
+            actual: kept.len() as u32,
+        });
+    }
+
+    Ok((kept, removed))
 }
 
 /// Check that minimum-identity constraints are satisfied.
@@ -666,9 +886,9 @@ fn check_minimum_identity(
         .filter(|fi| {
             matches!(
                 fi.support,
-                Some(SupportRelation::Floor)
-                    | Some(SupportRelation::Wall)
-                    | Some(SupportRelation::Ceiling)
+                Some(SupportRelation::Floor(_))
+                    | Some(SupportRelation::Wall(_))
+                    | Some(SupportRelation::Ceiling(_))
             )
         })
         .count() as u32;
@@ -690,7 +910,7 @@ fn assign_rooms_to_families(
     eligibility: &[RoomEligibility],
     seed: V3Seed,
 ) -> BTreeSet<super::ir::RoomId> {
-    let selector = CandidateSelector::new(seed, super::seed::tags::FEATURE_PLACEMENT, true);
+    let selector = CandidateSelector::new(seed, super::seed::tags::PLACEMENT, true);
     let mut assigned: BTreeSet<super::ir::RoomId> = BTreeSet::new();
 
     for el in eligibility {
@@ -728,6 +948,7 @@ fn assign_rooms_to_families(
 fn construct_intents_for_room(
     desc: &GrammarDescriptor,
     room: &CommittedRoom,
+    topology: &CommittedTopology,
     alloc: &mut V3IdAllocator,
     _seed: V3Seed,
 ) -> Result<Vec<FeatureIntent>, ContractError> {
@@ -757,6 +978,9 @@ fn construct_intents_for_room(
         let feature_id = alloc
             .next_feature()
             .map_err(|e| ContractError::InvariantViolation { detail: e })?;
+        let instance_id = alloc
+            .next_instance()
+            .map_err(|e| ContractError::InvariantViolation { detail: e })?;
 
         let mut tags = BTreeSet::new();
         tags.insert(format!("family:{}", desc.family));
@@ -765,7 +989,15 @@ fn construct_intents_for_room(
         // Add grounded assembly tag if applicable
         let support = if desc.produces_grounded_assembly {
             tags.insert("grounded-assembly".into());
-            Some(SupportRelation::Floor)
+            let surface = topology
+                .room_support_surface(room.id, SupportSurfaceKind::Floor)
+                .ok_or_else(|| {
+                    invariant(format!(
+                        "{} has no committed floor support surface",
+                        room.id.stable_key()
+                    ))
+                })?;
+            Some(SupportRelation::Floor(surface.id))
         } else {
             None
         };
@@ -776,7 +1008,7 @@ fn construct_intents_for_room(
             room_id: room.id,
             volume,
             support,
-            instance_id: None,
+            instance_id: Some(instance_id),
             tags,
             estimated_faces: desc.estimated_cost,
         };
@@ -859,6 +1091,21 @@ mod tests {
     use super::super::ir::*;
     use super::*;
 
+    fn floor_surface(id: u32, room_id: RoomId) -> CommittedSurface {
+        CommittedSurface {
+            id: SurfaceId(id),
+            room_id,
+            kind: SupportSurfaceKind::Floor,
+            owner: SurfaceOwner {
+                parent_kind: "room",
+                parent_id: room_id.raw(),
+                face: "floor",
+                direction: "up",
+                qualifier: "primary",
+            },
+        }
+    }
+
     fn test_topology() -> CommittedTopology {
         let q = contract::CONSTRUCTION_QUANTUM;
         CommittedTopology {
@@ -884,6 +1131,11 @@ mod tests {
                     floor_z: contract::UPPER_FLOOR_Z,
                     dims: (8 * q as u32, 10 * q as u32, 176),
                 },
+            ],
+            surfaces: vec![
+                floor_surface(0, RoomId(0)),
+                floor_surface(1, RoomId(1)),
+                floor_surface(2, RoomId(2)),
             ],
             portals: vec![CommittedPortal {
                 id: PortalId(0),
@@ -982,6 +1234,7 @@ mod tests {
         // Empty topology — no rooms, so no families can be selected
         let empty = CommittedTopology {
             rooms: vec![],
+            surfaces: vec![],
             portals: vec![],
             routes: vec![],
             transitions: vec![],
@@ -1026,7 +1279,7 @@ mod tests {
         let edges = vec![
             (a, SupportRelation::SupportedBy(b)),
             (b, SupportRelation::SupportedBy(c)),
-            (c, SupportRelation::Floor),
+            (c, SupportRelation::Floor(SurfaceId(0))),
         ];
 
         assert!(validate_support_acyclicity(&edges).is_ok());
@@ -1040,6 +1293,88 @@ mod tests {
     }
 
     #[test]
+    fn intent_referencing_deleted_surface_is_rejected() {
+        let topology = test_topology();
+        let intent = FeatureIntent {
+            id: FeatureId(0),
+            family: "portal_chamber",
+            room_id: RoomId(0),
+            volume: QuantumVolume::new(32, 32, 16, 64, 64, 96).unwrap(),
+            support: Some(SupportRelation::Floor(SurfaceId(99))),
+            instance_id: Some(InstanceId(0)),
+            tags: BTreeSet::new(),
+            estimated_faces: 100,
+        };
+
+        let error = validate_intent_supports(&[intent], &topology).unwrap_err();
+        assert!(matches!(error, ContractError::InvariantViolation { .. }));
+        assert!(error.to_string().contains("deleted support surface"));
+    }
+
+    #[test]
+    fn intent_referencing_missing_support_parent_is_rejected() {
+        let topology = test_topology();
+        let intent = FeatureIntent {
+            id: FeatureId(0),
+            family: "portal_chamber",
+            room_id: RoomId(0),
+            volume: QuantumVolume::new(32, 32, 16, 64, 64, 96).unwrap(),
+            support: Some(SupportRelation::SupportedBy(InstanceId(99))),
+            instance_id: Some(InstanceId(0)),
+            tags: BTreeSet::new(),
+            estimated_faces: 100,
+        };
+
+        let error = validate_intent_supports(&[intent], &topology).unwrap_err();
+        assert!(matches!(error, ContractError::InvariantViolation { .. }));
+        assert!(error.to_string().contains("missing support parent"));
+    }
+
+    #[test]
+    fn simplification_removes_support_dependents_atomically() {
+        let q = contract::CONSTRUCTION_QUANTUM;
+        let instances = vec![
+            FeatureInstance {
+                id: InstanceId(0),
+                feature_id: FeatureId(0),
+                room_id: RoomId(0),
+                volume: QuantumVolume::new(0, 0, 0, q, q, q).unwrap(),
+                support: Some(SupportRelation::Floor(SurfaceId(0))),
+                tags: BTreeSet::new(),
+                estimated_faces: 1600,
+            },
+            FeatureInstance {
+                id: InstanceId(1),
+                feature_id: FeatureId(1),
+                room_id: RoomId(0),
+                volume: QuantumVolume::new(q, 0, 0, 2 * q, q, q).unwrap(),
+                support: Some(SupportRelation::SupportedBy(InstanceId(0))),
+                tags: BTreeSet::new(),
+                estimated_faces: 1600,
+            },
+            FeatureInstance {
+                id: InstanceId(2),
+                feature_id: FeatureId(2),
+                room_id: RoomId(0),
+                volume: QuantumVolume::new(2 * q, 0, 0, 3 * q, q, q).unwrap(),
+                support: None,
+                tags: BTreeSet::new(),
+                estimated_faces: 2500,
+            },
+        ];
+        let config = ProofConfig::new(Preset::Sparse, 2048).unwrap();
+
+        let (kept, removed) = deterministic_simplification(&instances, &config).unwrap();
+
+        assert_eq!(
+            kept.iter().map(|instance| instance.id).collect::<Vec<_>>(),
+            vec![InstanceId(2)]
+        );
+        assert_eq!(removed, vec![FeatureId(0), FeatureId(1)]);
+        assert!(support_dependents(&kept).is_ok());
+    }
+
+    #[test]
     fn deterministic_simplification_removes_lower_priority() {
         let q = contract::CONSTRUCTION_QUANTUM;
         let instances = vec![
@@ -1048,7 +1383,7 @@ mod tests {
                 feature_id: FeatureId(0),
                 room_id: RoomId(0),
                 volume: QuantumVolume::new(0, 0, 0, q, q, q).unwrap(),
-                support: Some(SupportRelation::Floor),
+                support: Some(SupportRelation::Floor(SurfaceId(0))),
                 tags: {
                     let mut t = BTreeSet::new();
                     t.insert("family:portal_chamber".into());
@@ -1068,8 +1403,7 @@ mod tests {
         ];
 
         let config = ProofConfig::new(Preset::Sparse, 2048).unwrap();
-        let seed = V3Seed::new(0);
-        let (kept, removed) = deterministic_simplification(&instances, &config, seed);
+        let (kept, removed) = deterministic_simplification(&instances, &config).unwrap();
 
         // Sparse budget is 3000; total is 6000, so one must be removed
         let total_kept: u32 = kept.iter().map(|fi| fi.estimated_faces).sum();
@@ -1094,8 +1428,7 @@ mod tests {
         }
 
         let config = ProofConfig::new(Preset::Rich, 3072).unwrap();
-        let seed = V3Seed::new(42);
-        let (kept, removed) = deterministic_simplification(&instances, &config, seed);
+        let (kept, removed) = deterministic_simplification(&instances, &config).unwrap();
 
         // May keep many, may remove many — but must not panic
         let total: u32 = kept.iter().map(|fi| fi.estimated_faces).sum();
@@ -1136,15 +1469,13 @@ mod tests {
         let config_rich = ProofConfig::new(Preset::Rich, 2048).unwrap();
 
         let sparse = plan_composition(V3Seed::new(7), &config_sparse, &topo).unwrap();
-        let rich = plan_composition(V3Seed::new(7), &config_rich, &topo).unwrap();
+        let rich = plan_composition(V3Seed::new(7), &config_rich, &topo);
 
-        // Different presets should apply different family selection
-        // (at minimum, Rich requires more families)
-        assert!(
-            rich.grammar_families.len() >= sparse.grammar_families.len()
-                || sparse.grammar_families != rich.grammar_families,
-            "different presets should differ in family selection or count"
-        );
+        assert!(!sparse.grammar_families.is_empty());
+        assert!(matches!(
+            rich,
+            Err(ContractError::MinimumIdentityFailure { .. })
+        ));
     }
 
     #[test]
@@ -1216,6 +1547,7 @@ mod tests {
 
         let topo = CommittedTopology {
             rooms: vec![],
+            surfaces: vec![],
             portals: vec![],
             routes: vec![],
             transitions: vec![],

@@ -12,8 +12,9 @@ mod enhanced_v3_proof;
 
 use enhanced_v3_proof::contract::{ContractError, Preset, ProofConfig};
 use enhanced_v3_proof::ir::{
-    CommittedPortal, CommittedRoom, CommittedRoute, CommittedTopology, CommittedTransition,
-    InstanceId, PortalId, RoomId, SupportRelation,
+    CommittedPortal, CommittedRoom, CommittedRoute, CommittedSurface, CommittedTopology,
+    CommittedTransition, InstanceId, PortalId, RoomId, SupportRelation, SupportSurfaceKind,
+    SurfaceId, SurfaceOwner,
 };
 use enhanced_v3_proof::planner::{all_grammars, grammar_by_family, plan_composition};
 use enhanced_v3_proof::seed::{self, CandidateSelector, V3Seed};
@@ -21,6 +22,21 @@ use enhanced_v3_proof::seed::{self, CandidateSelector, V3Seed};
 // ── Test topology builder ──────────────────────────────────────────────────
 
 /// Build a standard test topology with 3 rooms, 1 portal, 1 route, 1 transition.
+fn floor_surface(id: u32, room_id: RoomId) -> CommittedSurface {
+    CommittedSurface {
+        id: SurfaceId(id),
+        room_id,
+        kind: SupportSurfaceKind::Floor,
+        owner: SurfaceOwner {
+            parent_kind: "room",
+            parent_id: room_id.raw(),
+            face: "floor",
+            direction: "up",
+            qualifier: "primary",
+        },
+    }
+}
+
 fn test_topology() -> CommittedTopology {
     let q = enhanced_v3_proof::contract::CONSTRUCTION_QUANTUM;
     CommittedTopology {
@@ -46,6 +62,11 @@ fn test_topology() -> CommittedTopology {
                 floor_z: enhanced_v3_proof::contract::UPPER_FLOOR_Z,
                 dims: (8 * q as u32, 10 * q as u32, 176),
             },
+        ],
+        surfaces: vec![
+            floor_surface(0, RoomId(0)),
+            floor_surface(1, RoomId(1)),
+            floor_surface(2, RoomId(2)),
         ],
         portals: vec![CommittedPortal {
             id: PortalId(0),
@@ -168,12 +189,13 @@ fn preset_sparse_plan_succeeds() {
 }
 
 #[test]
-fn preset_moderate_plan_succeeds() {
+fn preset_moderate_rejects_unmet_minimum_identity() {
     let topo = test_topology();
     let config = ProofConfig::new(Preset::Moderate, 2048).unwrap();
-    let outcome = plan_composition(V3Seed::new(0), &config, &topo).unwrap();
-    assert!(outcome.grammar_families.len() >= 2 || !outcome.identity_satisfied);
-    assert_eq!(outcome.preset, "moderate");
+    assert!(matches!(
+        plan_composition(V3Seed::new(0), &config, &topo),
+        Err(ContractError::MinimumIdentityFailure { .. })
+    ));
 }
 
 #[test]
@@ -206,6 +228,7 @@ fn small_room_not_eligible_for_large_grammars() {
             floor_z: 0,
             dims: (6 * q as u32, 6 * q as u32, 80),
         }],
+        surfaces: vec![],
         portals: vec![],
         routes: vec![],
         transitions: vec![],
@@ -300,7 +323,7 @@ fn support_graph_acyclic_accepted() {
 
     let edges = vec![
         (a, SupportRelation::SupportedBy(b)),
-        (b, SupportRelation::Floor),
+        (b, SupportRelation::Floor(SurfaceId(0))),
     ];
 
     assert!(enhanced_v3_proof::planner::validate_support_acyclicity(&edges).is_ok());
@@ -331,6 +354,7 @@ fn cost_overflow_handled_gracefully() {
             floor_z: 0,
             dims: (20 * q as u32, 20 * q as u32, 176),
         }],
+        surfaces: vec![floor_surface(0, RoomId(0))],
         portals: vec![],
         routes: vec![],
         transitions: vec![],
@@ -352,6 +376,7 @@ fn cost_overflow_handled_gracefully() {
 fn empty_topology_fails_minimum_identity() {
     let empty = CommittedTopology {
         rooms: vec![],
+        surfaces: vec![],
         portals: vec![],
         routes: vec![],
         transitions: vec![],
@@ -368,29 +393,13 @@ fn empty_topology_fails_minimum_identity() {
 }
 
 #[test]
-fn minimum_identity_reflected_in_outcome() {
+fn minimum_identity_is_not_returned_as_an_unsatisfied_success() {
     let topo = test_topology();
     let config = ProofConfig::new(Preset::Moderate, 2048).unwrap();
-    let outcome = plan_composition(V3Seed::new(0), &config, &topo).unwrap();
-
-    // identity_satisfied field reflects whether minimums are met
-    if outcome.identity_satisfied {
-        assert!(outcome.grammar_families.len() >= config.preset.minimum_families() as usize);
-        assert!(
-            outcome
-                .instances
-                .iter()
-                .filter(|fi| matches!(
-                    fi.support,
-                    Some(SupportRelation::Floor)
-                        | Some(SupportRelation::Wall)
-                        | Some(SupportRelation::Ceiling)
-                ))
-                .count() as u32
-                >= config.preset.minimum_assemblies()
-        );
-        assert!(outcome.instances.len() as u32 >= config.preset.minimum_features());
-    }
+    assert!(matches!(
+        plan_composition(V3Seed::new(0), &config, &topo),
+        Err(ContractError::MinimumIdentityFailure { .. })
+    ));
 }
 
 // ── Tests: 3-key perturbation ──────────────────────────────────────────────
@@ -398,13 +407,13 @@ fn minimum_identity_reflected_in_outcome() {
 #[test]
 fn three_key_perturbation_middle_reject_first_third_unchanged() {
     let seed = V3Seed::new(42);
-    let sel = CandidateSelector::new(seed, seed::tags::COMPOSITION_PLANNING, true);
+    let sel = CandidateSelector::new(seed, seed::tags::COMPOSITION, true);
 
     let r_first = sel.rank_for(b"first");
     let r_third = sel.rank_for(b"third");
 
     // Rejection of "middle" in a separate selector does not perturb
-    let mut sel2 = CandidateSelector::new(seed, seed::tags::COMPOSITION_PLANNING, true);
+    let mut sel2 = CandidateSelector::new(seed, seed::tags::COMPOSITION, true);
     sel2.reject("middle", "test rejection".into());
     let r_first_after = sel2.rank_for(b"first");
     let r_third_after = sel2.rank_for(b"third");

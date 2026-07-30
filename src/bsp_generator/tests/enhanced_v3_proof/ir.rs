@@ -146,18 +146,37 @@ impl V3IdAllocator {
 
 // ── Support relations ──────────────────────────────────────────────────────
 
+/// Kind of committed architectural surface that can act as world support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SupportSurfaceKind {
+    Floor,
+    Wall,
+    Ceiling,
+}
+
+impl SupportSurfaceKind {
+    pub fn face(self) -> &'static str {
+        match self {
+            Self::Floor => "floor",
+            Self::Wall => "wall",
+            Self::Ceiling => "ceiling",
+        }
+    }
+}
+
 /// Support relation between features.
 ///
-/// A feature may be supported by `Floor`, `Wall`, `Ceiling`, or another
-/// feature instance via `SupportedBy(instance)`.
+/// Architectural roots carry the exact committed semantic surface ID. A
+/// surface removed from the committed topology therefore cannot remain as an
+/// implicit `Floor`, `Wall`, or `Ceiling` support.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SupportRelation {
-    /// Supported directly by the architectural floor slab.
-    Floor,
-    /// Supported directly by a wall.
-    Wall,
-    /// Supported directly by the ceiling slab.
-    Ceiling,
+    /// Supported directly by a committed architectural floor surface.
+    Floor(SurfaceId),
+    /// Supported directly by a committed wall surface.
+    Wall(SurfaceId),
+    /// Supported directly by a committed ceiling surface.
+    Ceiling(SurfaceId),
     /// Supported by another feature instance (transitive).
     SupportedBy(InstanceId),
 }
@@ -173,6 +192,16 @@ impl SupportRelation {
         match self {
             SupportRelation::SupportedBy(id) => Some(*id),
             _ => None,
+        }
+    }
+
+    /// The exact architectural support surface, if this is a world root.
+    pub fn support_surface(&self) -> Option<(SurfaceId, SupportSurfaceKind)> {
+        match self {
+            Self::Floor(id) => Some((*id, SupportSurfaceKind::Floor)),
+            Self::Wall(id) => Some((*id, SupportSurfaceKind::Wall)),
+            Self::Ceiling(id) => Some((*id, SupportSurfaceKind::Ceiling)),
+            Self::SupportedBy(_) => None,
         }
     }
 }
@@ -204,6 +233,15 @@ impl SurfaceOwner {
             self.parent_kind, self.parent_id, self.face, self.direction, self.qualifier
         )
     }
+}
+
+/// A committed semantic support surface derived from frozen topology.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedSurface {
+    pub id: SurfaceId,
+    pub room_id: RoomId,
+    pub kind: SupportSurfaceKind,
+    pub owner: SurfaceOwner,
 }
 
 // ── Quantum-aligned volume ─────────────────────────────────────────────────
@@ -371,15 +409,214 @@ pub struct CommittedTransition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommittedTopology {
     pub rooms: Vec<CommittedRoom>,
+    pub surfaces: Vec<CommittedSurface>,
     pub portals: Vec<CommittedPortal>,
     pub routes: Vec<CommittedRoute>,
     pub transitions: Vec<CommittedTransition>,
 }
 
 impl CommittedTopology {
+    /// Validate the committed structural snapshot before composition begins.
+    /// The planner consumes this immutable, canonical input and never creates
+    /// rooms, routes, portals, or transitions itself.
+    pub fn validate(&self) -> Result<(), super::contract::ContractError> {
+        use super::contract::{
+            ContractError, CONSTRUCTION_QUANTUM, LAYER_COUNT, LOWER_FLOOR_Z, UPPER_FLOOR_Z, XY_MAX,
+        };
+
+        fn invariant(detail: impl Into<String>) -> ContractError {
+            ContractError::InvariantViolation {
+                detail: detail.into(),
+            }
+        }
+        fn aligned(value: i32) -> bool {
+            value % CONSTRUCTION_QUANTUM == 0
+        }
+
+        if !self.rooms.windows(2).all(|pair| pair[0].id < pair[1].id) {
+            return Err(invariant("rooms must be unique and sorted by stable ID"));
+        }
+        if !self.surfaces.windows(2).all(|pair| pair[0].id < pair[1].id) {
+            return Err(invariant("surfaces must be unique and sorted by stable ID"));
+        }
+        if !self.portals.windows(2).all(|pair| pair[0].id < pair[1].id) {
+            return Err(invariant("portals must be unique and sorted by stable ID"));
+        }
+        if !self.routes.windows(2).all(|pair| pair[0].id < pair[1].id) {
+            return Err(invariant("routes must be unique and sorted by stable ID"));
+        }
+        if !self
+            .transitions
+            .windows(2)
+            .all(|pair| pair[0].id < pair[1].id)
+        {
+            return Err(invariant(
+                "transitions must be unique and sorted by stable ID",
+            ));
+        }
+
+        let rooms: BTreeSet<RoomId> = self.rooms.iter().map(|room| room.id).collect();
+        for room in &self.rooms {
+            let (x0, y0, x1, y1) = room.shell;
+            if room.layer >= LAYER_COUNT as u8 {
+                return Err(invariant(format!("{} has an invalid layer", room.id)));
+            }
+            let expected_floor = if room.layer == 0 {
+                LOWER_FLOOR_Z
+            } else {
+                UPPER_FLOOR_Z
+            };
+            if room.floor_z != expected_floor {
+                return Err(invariant(format!("{} has an invalid floor Z", room.id)));
+            }
+            if [x0, y0, x1, y1, room.floor_z]
+                .into_iter()
+                .any(|value| !aligned(value))
+                || x0 < 0
+                || y0 < 0
+                || x0 >= x1
+                || y0 >= y1
+                || x1 > XY_MAX as i32
+                || y1 > XY_MAX as i32
+                || room.dims != ((x1 - x0) as u32, (y1 - y0) as u32, room.dims.2)
+                || room.dims.2 == 0
+                || room.dims.2 % CONSTRUCTION_QUANTUM as u32 != 0
+            {
+                return Err(invariant(format!(
+                    "{} has invalid aligned shell dimensions",
+                    room.id
+                )));
+            }
+        }
+
+        let mut surface_owners = BTreeSet::new();
+        for surface in &self.surfaces {
+            if !rooms.contains(&surface.room_id)
+                || surface.owner.parent_kind != "room"
+                || surface.owner.parent_id != surface.room_id.raw()
+                || surface.owner.face != surface.kind.face()
+                || surface.owner.direction.is_empty()
+                || surface.owner.qualifier.is_empty()
+            {
+                return Err(invariant(format!(
+                    "{} has dangling or inconsistent semantic ownership",
+                    surface.id
+                )));
+            }
+            if !surface_owners.insert(surface.owner.stable_key()) {
+                return Err(invariant(format!(
+                    "{} duplicates semantic surface ownership",
+                    surface.id
+                )));
+            }
+        }
+
+        for portal in &self.portals {
+            if !rooms.contains(&portal.source_room)
+                || portal
+                    .target_room
+                    .is_some_and(|room| !rooms.contains(&room))
+                || portal.target_room == Some(portal.source_room)
+                || !["north", "south", "east", "west"].contains(&portal.wall)
+                || portal.width == 0
+                || portal.height == 0
+                || portal.width % CONSTRUCTION_QUANTUM as u32 != 0
+            {
+                return Err(invariant(format!(
+                    "{} has invalid semantic ownership",
+                    portal.id
+                )));
+            }
+        }
+
+        for route in &self.routes {
+            if !rooms.contains(&route.source_room)
+                || !rooms.contains(&route.target_room)
+                || route.source_room == route.target_room
+            {
+                return Err(invariant(format!(
+                    "route/{:04} has dangling room ownership",
+                    route.id
+                )));
+            }
+            for &(x0, y0, x1, y1) in &route.envelopes {
+                if [x0, y0, x1, y1].into_iter().any(|value| !aligned(value)) || x0 >= x1 || y0 >= y1
+                {
+                    return Err(invariant(format!(
+                        "route/{:04} has invalid envelope",
+                        route.id
+                    )));
+                }
+            }
+        }
+
+        for transition in &self.transitions {
+            let Some(lower) = self.room(transition.lower_room) else {
+                return Err(invariant(format!(
+                    "transition/{:04} has dangling lower room",
+                    transition.id
+                )));
+            };
+            let Some(upper) = self.room(transition.upper_room) else {
+                return Err(invariant(format!(
+                    "transition/{:04} has dangling upper room",
+                    transition.id
+                )));
+            };
+            if lower.layer != 0 || upper.layer != 1 {
+                return Err(invariant(format!(
+                    "transition/{:04} violates layer ownership",
+                    transition.id
+                )));
+            }
+            let (x0, y0, z0, x1, y1, z1) = transition.protected_volume;
+            if QuantumVolume::new(x0, y0, z0, x1, y1, z1).is_none() {
+                return Err(invariant(format!(
+                    "transition/{:04} has invalid protected volume",
+                    transition.id
+                )));
+            }
+            for &(x0, y0, x1, y1) in &[transition.lower_landing, transition.upper_landing] {
+                if [x0, y0, x1, y1].into_iter().any(|value| !aligned(value)) || x0 >= x1 || y0 >= y1
+                {
+                    return Err(invariant(format!(
+                        "transition/{:04} has invalid landing",
+                        transition.id
+                    )));
+                }
+            }
+            for &(x0, y0, z0, x1, y1, z1) in &transition.headroom_volumes {
+                if QuantumVolume::new(x0, y0, z0, x1, y1, z1).is_none() {
+                    return Err(invariant(format!(
+                        "transition/{:04} has invalid headroom",
+                        transition.id
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Look up a room by ID.
     pub fn room(&self, id: RoomId) -> Option<&CommittedRoom> {
         self.rooms.iter().find(|r| r.id == id)
+    }
+
+    /// Look up a committed semantic surface by ID.
+    pub fn surface(&self, id: SurfaceId) -> Option<&CommittedSurface> {
+        self.surfaces.iter().find(|surface| surface.id == id)
+    }
+
+    /// Find a room's committed support surface of the requested kind.
+    pub fn room_support_surface(
+        &self,
+        room_id: RoomId,
+        kind: SupportSurfaceKind,
+    ) -> Option<&CommittedSurface> {
+        self.surfaces
+            .iter()
+            .find(|surface| surface.room_id == room_id && surface.kind == kind)
     }
 
     /// Portals for a given room.
@@ -504,11 +741,15 @@ mod tests {
 
     #[test]
     fn support_relation_transitive_detection() {
-        let floor = SupportRelation::Floor;
-        let wall = SupportRelation::Wall;
+        let floor = SupportRelation::Floor(SurfaceId(0));
+        let wall = SupportRelation::Wall(SurfaceId(1));
         let supported = SupportRelation::SupportedBy(InstanceId(5));
         assert!(!floor.is_transitive());
         assert!(!wall.is_transitive());
+        assert_eq!(
+            floor.support_surface(),
+            Some((SurfaceId(0), SupportSurfaceKind::Floor))
+        );
         assert!(supported.is_transitive());
         assert_eq!(supported.supported_by(), Some(InstanceId(5)));
     }
@@ -523,10 +764,23 @@ mod tests {
                 floor_z: 0,
                 dims: (256, 256, 176),
             }],
+            surfaces: vec![CommittedSurface {
+                id: SurfaceId(0),
+                room_id: RoomId(0),
+                kind: SupportSurfaceKind::Floor,
+                owner: SurfaceOwner {
+                    parent_kind: "room",
+                    parent_id: 0,
+                    face: "floor",
+                    direction: "up",
+                    qualifier: "primary",
+                },
+            }],
             portals: vec![],
             routes: vec![],
             transitions: vec![],
         };
+        assert!(topo.validate().is_ok());
         assert!(topo.room(RoomId(0)).is_some());
         assert!(topo.room(RoomId(1)).is_none());
     }

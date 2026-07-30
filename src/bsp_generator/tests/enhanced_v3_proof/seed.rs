@@ -12,29 +12,51 @@ use sha2::{Digest, Sha256};
 /// v2 (`"dungeon-gen/v2"`).
 pub const V3_DOMAIN: &[u8] = b"dungeon-gen/v3";
 
-/// Frozen Enhanced v3 stage tags.
+/// Frozen proof-only Enhanced v3 stage tags authorized by Phase 01.
 ///
 /// Each tag produces an independent deterministic stream from the same
-/// master seed. Tags are frozen — renaming or reframing a tag is an
-/// output-version change.
+/// master seed. These tags do not authorize a production v3 profile. Renaming,
+/// reordering, or reframing a tag is a proof output-version change.
 pub mod tags {
-    /// Composition planning: grammar eligibility, feature selection order.
-    pub const COMPOSITION_PLANNING: &str = "composition-planning";
-    /// Feature placement: geometric arrangement within rooms.
-    pub const FEATURE_PLACEMENT: &str = "feature-placement";
-    /// Detail planning: grounded assembly selection and support graph.
-    pub const DETAIL_PLANNING: &str = "detail-planning";
-    /// Simplification: deterministic priority-based simplification.
-    pub const SIMPLIFICATION: &str = "simplification";
+    /// Placement-time footprint and feature-site decisions.
+    pub const PLACEMENT: &str = "placement";
+    /// Committed topology and transition decisions.
+    pub const TOPOLOGY: &str = "topology";
+    /// Composition eligibility and feature selection decisions.
+    pub const COMPOSITION: &str = "composition";
+    /// Canonical emission decisions.
+    pub const EMISSION: &str = "emission";
 
-    /// All Enhanced v3 tags in canonical order.
-    pub const ALL: &[&str] = &[
-        COMPOSITION_PLANNING,
-        FEATURE_PLACEMENT,
-        DETAIL_PLANNING,
-        SIMPLIFICATION,
-    ];
+    /// All proof-only Enhanced v3 tags in frozen canonical order.
+    pub const ALL: &[&str] = &[PLACEMENT, TOPOLOGY, COMPOSITION, EMISSION];
 }
+
+/// Domain marker used only to extend an exhausted candidate rejection stream.
+const REJECTION_STREAM_MARKER: &[u8] = b"rejection-stream/v1";
+/// Hard bound for deterministic rejection sampling (1,024 `u64` draws).
+const MAX_REJECTION_BLOCKS: u64 = 256;
+
+/// Typed failures from proof-only bounded selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedError {
+    /// A bounded choice requires a non-zero exclusive upper bound.
+    ZeroBound,
+    /// Every draw in the frozen rejection-stream budget was rejected.
+    RejectionStreamExhausted,
+}
+
+impl std::fmt::Display for SeedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroBound => write!(f, "bounded v3 choice requires a non-zero bound"),
+            Self::RejectionStreamExhausted => {
+                write!(f, "v3 deterministic rejection stream exhausted")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SeedError {}
 
 // ── V3 seed ────────────────────────────────────────────────────────────────
 
@@ -58,23 +80,14 @@ impl V3Seed {
 
     /// Derive a deterministic per-stage sub-seed for the given tag.
     ///
+    /// A stage seed is the candidate framing with an empty key, including the
+    /// required zero `len(key)` field:
+    ///
     /// ```text
-    /// SHA-256(len(domain) || domain || seed_le || len(stage) || stage)
+    /// SHA-256(len(domain) || domain || seed_le || len(stage) || stage || 0_u32_le)
     /// ```
     pub fn stage_seed(&self, tag: &str) -> V3StageSeed {
-        let seed_bytes = self.0.to_le_bytes();
-        let mut hasher = Sha256::new();
-        // Length-prefixed domain
-        hasher.update((V3_DOMAIN.len() as u32).to_le_bytes());
-        hasher.update(V3_DOMAIN);
-        // Seed in little-endian
-        hasher.update(seed_bytes);
-        // Length-prefixed stage tag
-        let tag_bytes = tag.as_bytes();
-        hasher.update((tag_bytes.len() as u32).to_le_bytes());
-        hasher.update(tag_bytes);
-        let digest: [u8; 32] = hasher.finalize().into();
-        V3StageSeed { digest }
+        self.candidate_seed(tag, b"")
     }
 
     /// Derive a candidate-keyed sub-seed.
@@ -99,6 +112,66 @@ impl V3Seed {
         hasher.update(key);
         let digest: [u8; 32] = hasher.finalize().into();
         V3StageSeed { digest }
+    }
+
+    /// Derive one deterministic rejection-stream block.
+    ///
+    /// Block zero is the candidate root digest. Later blocks preserve the
+    /// root framing and replace the key field with the Phase 01-authorized
+    /// extension `len(marker) || marker || len(key) || key || block_le`.
+    pub fn rejection_stream_block(&self, stage: &str, key: &[u8], block: u64) -> V3StageSeed {
+        if block == 0 {
+            return self.candidate_seed(stage, key);
+        }
+
+        let mut extension_key = Vec::with_capacity(
+            4 + REJECTION_STREAM_MARKER.len() + 4 + key.len() + std::mem::size_of::<u64>(),
+        );
+        extension_key.extend_from_slice(&(REJECTION_STREAM_MARKER.len() as u32).to_le_bytes());
+        extension_key.extend_from_slice(REJECTION_STREAM_MARKER);
+        extension_key.extend_from_slice(&(key.len() as u32).to_le_bytes());
+        extension_key.extend_from_slice(key);
+        extension_key.extend_from_slice(&block.to_le_bytes());
+        self.candidate_seed(stage, &extension_key)
+    }
+
+    /// Select uniformly from `0..upper_exclusive` without modulo bias.
+    ///
+    /// Rejected draws consume only this candidate's deterministic extension
+    /// blocks. A hard bound prevents an unbounded retry loop.
+    pub fn bounded_u64(
+        &self,
+        stage: &str,
+        key: &[u8],
+        upper_exclusive: u64,
+    ) -> Result<u64, SeedError> {
+        self.bounded_u64_with_blocks(stage, key, upper_exclusive, MAX_REJECTION_BLOCKS)
+    }
+
+    fn bounded_u64_with_blocks(
+        &self,
+        stage: &str,
+        key: &[u8],
+        upper_exclusive: u64,
+        max_blocks: u64,
+    ) -> Result<u64, SeedError> {
+        if upper_exclusive == 0 {
+            return Err(SeedError::ZeroBound);
+        }
+
+        // `threshold` is 2^64 mod the bound. Accepting draws at or above it
+        // leaves an exactly divisible source range before modulo reduction.
+        let threshold = upper_exclusive.wrapping_neg() % upper_exclusive;
+        for block in 0..max_blocks {
+            let block_seed = self.rejection_stream_block(stage, key, block);
+            for draw in block_seed.u64s() {
+                if draw >= threshold {
+                    return Ok(draw % upper_exclusive);
+                }
+            }
+        }
+
+        Err(SeedError::RejectionStreamExhausted)
     }
 }
 
@@ -288,47 +361,59 @@ mod tests {
     #[test]
     fn stage_seed_determinism() {
         let seed = V3Seed::new(42);
-        let a = seed.stage_seed(tags::COMPOSITION_PLANNING);
-        let b = seed.stage_seed(tags::COMPOSITION_PLANNING);
+        let a = seed.stage_seed(tags::COMPOSITION);
+        let b = seed.stage_seed(tags::COMPOSITION);
         assert_eq!(a.digest, b.digest);
     }
 
     #[test]
     fn different_tags_produce_different_digests() {
         let seed = V3Seed::new(0);
-        let a = seed.stage_seed(tags::COMPOSITION_PLANNING);
-        let b = seed.stage_seed(tags::FEATURE_PLACEMENT);
+        let a = seed.stage_seed(tags::COMPOSITION);
+        let b = seed.stage_seed(tags::PLACEMENT);
         assert_ne!(a.digest, b.digest);
     }
 
     #[test]
     fn different_seeds_produce_different_digests() {
-        let a = V3Seed::new(0).stage_seed(tags::COMPOSITION_PLANNING);
-        let b = V3Seed::new(1).stage_seed(tags::COMPOSITION_PLANNING);
+        let a = V3Seed::new(0).stage_seed(tags::COMPOSITION);
+        let b = V3Seed::new(1).stage_seed(tags::COMPOSITION);
         assert_ne!(a.digest, b.digest);
     }
 
     #[test]
     fn candidate_keyed_determinism() {
         let seed = V3Seed::new(42);
-        let a = seed.candidate_seed(tags::COMPOSITION_PLANNING, b"room/0001");
-        let b = seed.candidate_seed(tags::COMPOSITION_PLANNING, b"room/0001");
+        let a = seed.candidate_seed(tags::COMPOSITION, b"room/0001");
+        let b = seed.candidate_seed(tags::COMPOSITION, b"room/0001");
         assert_eq!(a.digest, b.digest);
+    }
+
+    #[test]
+    fn candidate_keyed_framing_matches_frozen_vector() {
+        let digest = V3Seed::new(42)
+            .candidate_seed(tags::COMPOSITION, b"room/0001")
+            .digest;
+        let actual: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(
+            actual,
+            "80c6d3f14b7271ca4d381a03664483471cea06e9d7f9da45a0abc7268e364f26"
+        );
     }
 
     #[test]
     fn candidate_keyed_isolation() {
         let seed = V3Seed::new(0);
-        let a = seed.candidate_seed(tags::COMPOSITION_PLANNING, b"room/0001");
-        let b = seed.candidate_seed(tags::COMPOSITION_PLANNING, b"room/0002");
+        let a = seed.candidate_seed(tags::COMPOSITION, b"room/0001");
+        let b = seed.candidate_seed(tags::COMPOSITION, b"room/0002");
         assert_ne!(a.digest, b.digest);
     }
 
     #[test]
     fn candidate_keyed_vs_stage_isolation() {
         let seed = V3Seed::new(0);
-        let stage = seed.stage_seed(tags::COMPOSITION_PLANNING);
-        let candidate = seed.candidate_seed(tags::COMPOSITION_PLANNING, b"room/0001");
+        let stage = seed.stage_seed(tags::COMPOSITION);
+        let candidate = seed.candidate_seed(tags::COMPOSITION, b"room/0001");
         assert_ne!(stage.digest, candidate.digest);
     }
 
@@ -364,8 +449,8 @@ mod tests {
     #[test]
     fn candidate_selector_determinism() {
         let seed = V3Seed::new(42);
-        let sel1 = CandidateSelector::new(seed, tags::COMPOSITION_PLANNING, true);
-        let sel2 = CandidateSelector::new(seed, tags::COMPOSITION_PLANNING, true);
+        let sel1 = CandidateSelector::new(seed, tags::COMPOSITION, true);
+        let sel2 = CandidateSelector::new(seed, tags::COMPOSITION, true);
 
         let candidates = ["room/0001", "room/0002", "room/0003"];
         let r1 = candidates
@@ -382,7 +467,7 @@ mod tests {
     #[test]
     fn candidate_selector_select_min() {
         let seed = V3Seed::new(0);
-        let mut sel = CandidateSelector::new(seed, tags::COMPOSITION_PLANNING, true);
+        let mut sel = CandidateSelector::new(seed, tags::COMPOSITION, true);
         let result = sel.select_best(&["room/0001", "room/0002", "room/0003"]);
         assert!(result.is_some());
     }
@@ -390,7 +475,7 @@ mod tests {
     #[test]
     fn candidate_selector_empty() {
         let seed = V3Seed::new(0);
-        let mut sel = CandidateSelector::new(seed, tags::COMPOSITION_PLANNING, true);
+        let mut sel = CandidateSelector::new(seed, tags::COMPOSITION, true);
         let result = sel.select_best(&[]);
         assert!(result.is_none());
     }
@@ -398,7 +483,7 @@ mod tests {
     #[test]
     fn candidate_selector_bounded_rejection() {
         let seed = V3Seed::new(0);
-        let mut sel = CandidateSelector::new(seed, tags::COMPOSITION_PLANNING, true);
+        let mut sel = CandidateSelector::new(seed, tags::COMPOSITION, true);
 
         // Reject all candidates
         let result = sel.bounded_select(&["room/0001", "room/0002"], |key| {
@@ -411,7 +496,7 @@ mod tests {
     #[test]
     fn candidate_selector_bounded_first_accepts() {
         let seed = V3Seed::new(0);
-        let mut sel = CandidateSelector::new(seed, tags::COMPOSITION_PLANNING, true);
+        let mut sel = CandidateSelector::new(seed, tags::COMPOSITION, true);
 
         // First candidate (by rank) always accepted
         let mut accepted = Vec::new();
@@ -432,12 +517,12 @@ mod tests {
         // When the middle candidate is rejected, the first and third retain
         // their original ranks — rejection does not perturb others.
         let seed = V3Seed::new(42);
-        let sel1 = CandidateSelector::new(seed, tags::COMPOSITION_PLANNING, true);
+        let sel1 = CandidateSelector::new(seed, tags::COMPOSITION, true);
 
         let r_first = sel1.rank_for(b"first");
         let r_third = sel1.rank_for(b"third");
 
-        let sel2 = CandidateSelector::new(seed, tags::COMPOSITION_PLANNING, true);
+        let sel2 = CandidateSelector::new(seed, tags::COMPOSITION, true);
         let r_first2 = sel2.rank_for(b"first");
         let r_third2 = sel2.rank_for(b"third");
         let r_middle = sel2.rank_for(b"middle");
@@ -450,17 +535,52 @@ mod tests {
         assert_ne!(r_middle, 0); // unlikely to be zero, but well-defined
 
         // Rejection of middle does not perturb first or third
-        let sel3 = CandidateSelector::new(seed, tags::COMPOSITION_PLANNING, true);
+        let sel3 = CandidateSelector::new(seed, tags::COMPOSITION, true);
         assert_eq!(sel3.rank_for(b"first"), r_first);
         assert_eq!(sel3.rank_for(b"third"), r_third);
     }
 
     #[test]
+    fn rejection_stream_is_deterministic_and_candidate_keyed() {
+        let seed = V3Seed::new(42);
+        let first = seed.rejection_stream_block(tags::COMPOSITION, b"room/0001", 1);
+        let repeated = seed.rejection_stream_block(tags::COMPOSITION, b"room/0001", 1);
+        let next = seed.rejection_stream_block(tags::COMPOSITION, b"room/0001", 2);
+        let other = seed.rejection_stream_block(tags::COMPOSITION, b"room/0002", 1);
+
+        assert_eq!(first, repeated);
+        assert_ne!(first, next);
+        assert_ne!(first, other);
+    }
+
+    #[test]
+    fn bounded_u64_honors_bounds_and_typed_failures() {
+        let seed = V3Seed::new(42);
+        for bound in [1, 2, 3, 7, 1024, u64::MAX] {
+            let value = seed
+                .bounded_u64(tags::COMPOSITION, b"room/0001", bound)
+                .unwrap();
+            assert!(value < bound);
+        }
+        assert_eq!(
+            seed.bounded_u64(tags::COMPOSITION, b"room/0001", 0),
+            Err(SeedError::ZeroBound)
+        );
+        assert_eq!(
+            seed.bounded_u64_with_blocks(tags::COMPOSITION, b"room/0001", 7, 0),
+            Err(SeedError::RejectionStreamExhausted)
+        );
+    }
+
+    #[test]
     fn stage_keys_are_frozen() {
-        assert_eq!(tags::COMPOSITION_PLANNING, "composition-planning");
-        assert_eq!(tags::FEATURE_PLACEMENT, "feature-placement");
-        assert_eq!(tags::DETAIL_PLANNING, "detail-planning");
-        assert_eq!(tags::SIMPLIFICATION, "simplification");
-        assert_eq!(tags::ALL.len(), 4);
+        assert_eq!(tags::PLACEMENT, "placement");
+        assert_eq!(tags::TOPOLOGY, "topology");
+        assert_eq!(tags::COMPOSITION, "composition");
+        assert_eq!(tags::EMISSION, "emission");
+        assert_eq!(
+            tags::ALL,
+            &["placement", "topology", "composition", "emission"]
+        );
     }
 }
