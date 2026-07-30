@@ -139,7 +139,8 @@ fn canonical_enhanced_meta_bytes(meta: &EnhancedMetadata) -> Vec<u8> {
 /// Contains: ordered corpus entries, map/metadata hashes, public profile
 /// observations, RNG domains/tags, theme/asset/producer closure,
 /// compiled-artifact dispositions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BaselineProjection {
     schema_version: u32,
     profile_observations: ProfileObservations,
@@ -149,26 +150,30 @@ struct BaselineProjection {
     compiled_artifact_dispositions: BTreeMap<String, ArtifactDisposition>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProfileObservations {
     accepted_profiles: Vec<String>,
     unrecognized_tags: Vec<String>,
     enhanced_v3_not_recognized: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RngDomainRecords {
     legacy_domain: RngDomainInfo,
     enhanced_domain: RngDomainInfo,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RngDomainInfo {
     domain: String,
     tags: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ThemeClosure {
     legacy_theme: ThemeAssetInfo,
     enhanced_theme: ThemeAssetInfo,
@@ -177,7 +182,8 @@ struct ThemeClosure {
     compiler_version: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ThemeAssetInfo {
     name: String,
     wad_path: String,
@@ -185,7 +191,8 @@ struct ThemeAssetInfo {
     texture_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CorpusEntryProjection {
     id: String,
     profile: String,
@@ -207,7 +214,8 @@ enum ArtifactDisposition {
 
 // ── Manifest / Report schemas ─────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ManifestV1 {
     schema: String,
     baseline_id: String,
@@ -506,84 +514,17 @@ fn build_projection(
     }
 }
 
-/// Compute baseline_id as SHA-256 of a canonical projection.
+/// Serialize the entire compared-data projection in declaration order.
+///
+/// Every member uses an ordered vector or `BTreeMap`, so these bytes are the
+/// stable comparison input. Volatile run diagnostics never enter this value.
+fn compared_projection_bytes(projection: &BaselineProjection) -> Vec<u8> {
+    serde_json::to_vec(projection).expect("serialize compared-data projection")
+}
+
+/// Compute baseline_id as SHA-256 of the complete compared-data projection.
 fn compute_baseline_id(projection: &BaselineProjection) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("schema_version:{}\n", projection.schema_version));
-
-    // Profile observations (ordered)
-    out.push_str("profile_observations:\n");
-    out.push_str(&format!(
-        "accepted:{}\n",
-        projection.profile_observations.accepted_profiles.join(",")
-    ));
-    out.push_str(&format!(
-        "unrecognized:{}\n",
-        projection.profile_observations.unrecognized_tags.join(",")
-    ));
-    out.push_str(&format!(
-        "enhanced_v3_not_recognized:{}\n",
-        projection.profile_observations.enhanced_v3_not_recognized
-    ));
-
-    // RNG domains
-    out.push_str("rng_domains:\n");
-    out.push_str(&format!(
-        "legacy:{}:{}\n",
-        projection.rng_domains.legacy_domain.domain,
-        projection.rng_domains.legacy_domain.tags.join("|")
-    ));
-    out.push_str(&format!(
-        "enhanced:{}:{}\n",
-        projection.rng_domains.enhanced_domain.domain,
-        projection.rng_domains.enhanced_domain.tags.join("|")
-    ));
-
-    // Theme closure
-    out.push_str("theme_closure:\n");
-    out.push_str(&format!(
-        "legacy_theme:{}\n",
-        projection.theme_closure.legacy_theme.name
-    ));
-    out.push_str(&format!(
-        "enhanced_theme:{}\n",
-        projection.theme_closure.enhanced_theme.name
-    ));
-    out.push_str(&format!(
-        "profile:{}\n",
-        projection.theme_closure.publication_profile
-    ));
-    out.push_str(&format!(
-        "compiler:{}\n",
-        projection.theme_closure.compiler_version
-    ));
-
-    // Corpus entries (ordered)
-    out.push_str("corpus_entries:\n");
-    for entry in &projection.corpus_entries {
-        out.push_str(&format!(
-            "{}:{}:{}:{}:{}:{}\n",
-            entry.id,
-            entry.seed,
-            entry.map_length,
-            entry.map_sha256,
-            entry.metadata_canonical_sha256,
-            entry.map_baseline_sha256
-        ));
-    }
-
-    // Compiled artifact dispositions (BTreeMap = ordered)
-    out.push_str("dispositions:\n");
-    for (key, disp) in &projection.compiled_artifact_dispositions {
-        let d = match disp {
-            ArtifactDisposition::Required => "required",
-            ArtifactDisposition::NotRequired => "not_required",
-            ArtifactDisposition::NotReproducible => "not_reproducible",
-        };
-        out.push_str(&format!("{key}:{d}\n"));
-    }
-
-    sha256_hex(out.as_bytes())
+    sha256_hex(&compared_projection_bytes(projection))
 }
 
 // ── Capture mode ──────────────────────────────────────────────────────────
@@ -593,24 +534,8 @@ fn capture_mode_dir() -> Option<PathBuf> {
 }
 
 fn validate_capture_dir(dir: &Path) -> Result<(), String> {
-    if !dir.exists() {
-        return Err(format!(
-            "capture directory does not exist: {}",
-            dir.display()
-        ));
-    }
-    if !dir.is_dir() {
-        return Err(format!(
-            "capture path is not a directory: {}",
-            dir.display()
-        ));
-    }
-    // Must be empty
-    let mut entries = std::fs::read_dir(dir).map_err(|e| format!("cannot read dir: {e}"))?;
-    if entries.next().is_some() {
-        return Err(format!("capture directory is not empty: {}", dir.display()));
-    }
-    // Must not be the fixture dir or report dir
+    // Reject protected destinations before checking their contents. This makes
+    // the protection explicit even when a fixture/report directory is empty.
     let fixture_dir = manifest_path().parent().unwrap().to_path_buf();
     let report_dir = report_path().parent().unwrap().to_path_buf();
     let canonical_dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
@@ -625,6 +550,22 @@ fn validate_capture_dir(dir: &Path) -> Result<(), String> {
     }
     if canonical_dir == canonical_report {
         return Err("capture dir must not be the report directory".to_string());
+    }
+    if !dir.exists() {
+        return Err(format!(
+            "capture directory does not exist: {}",
+            dir.display()
+        ));
+    }
+    if !dir.is_dir() {
+        return Err(format!(
+            "capture path is not a directory: {}",
+            dir.display()
+        ));
+    }
+    let mut entries = std::fs::read_dir(dir).map_err(|e| format!("cannot read dir: {e}"))?;
+    if entries.next().is_some() {
+        return Err(format!("capture directory is not empty: {}", dir.display()));
     }
     Ok(())
 }
@@ -1016,14 +957,26 @@ fn canonical_serializer_deterministic() {
 // ── Test: Guarded capture mode rejects invalid destinations ────────────────
 
 #[test]
-fn capture_mode_rejects_fixture_dir() {
-    // In this test we're in normal mode, so capture_mode_dir() returns None.
-    // The guard is tested indirectly: the constructor checks against known
-    // paths. Let's verify the env is not set in test context.
-    assert!(
-        env::var(CAPTURE_ENV).is_err(),
-        "CAPTURE_ENV must not be set during normal test runs"
+fn capture_mode_rejects_fixture_report_and_existing_destinations() {
+    let fixture_dir = manifest_path().parent().unwrap().to_path_buf();
+    assert_eq!(
+        validate_capture_dir(&fixture_dir),
+        Err("capture dir must not be the fixture directory".to_string())
     );
+
+    let report_dir = report_path().parent().unwrap().to_path_buf();
+    assert_eq!(
+        validate_capture_dir(&report_dir),
+        Err("capture dir must not be the report directory".to_string())
+    );
+
+    let candidate = tempfile::tempdir().expect("create candidate directory");
+    validate_capture_dir(candidate.path()).expect("fresh external candidate is accepted");
+    std::fs::write(candidate.path().join("existing-candidate"), b"blocked")
+        .expect("write existing candidate marker");
+    assert!(validate_capture_dir(candidate.path())
+        .expect_err("existing candidate artifacts must be rejected")
+        .contains("not empty"));
 }
 
 // ── Test: Normal verification — load manifest, compare all entries ────────
@@ -1039,19 +992,18 @@ fn baseline_verification_all_24_entries() {
         eprintln!("CAPTURE MODE: writing candidates to {}", dir.display());
     }
 
-    // In normal mode, the manifest must exist.
-    // In capture mode, we generate unconditionally (no manifest required).
+    // Normal verification is fail-closed; only explicit capture can proceed
+    // without an existing baseline candidate.
     let manifest: Option<ManifestV1> = if manifest_path.exists() {
         let manifest_json = std::fs::read_to_string(&manifest_path).expect("read manifest");
         Some(serde_json::from_str(&manifest_json).expect("parse manifest"))
     } else if is_capture {
         None
     } else {
-        eprintln!(
-            "SKIP: manifest not found at {} — run capture mode first",
+        panic!(
+            "baseline manifest missing at {}; normal verification never captures or skips",
             manifest_path.display()
         );
-        return;
     };
 
     // Generate all entries
@@ -1070,6 +1022,40 @@ fn baseline_verification_all_24_entries() {
     let mut failed = 0;
 
     if let Some(ref manifest) = manifest {
+        assert_eq!(manifest.schema, "enhanced-v3-baseline-manifest/v1");
+        assert_eq!(manifest.projection.schema_version, 1);
+        assert_eq!(manifest.projection.corpus_entries.len(), 24);
+        assert_eq!(
+            manifest.compiled_artifact_dispositions,
+            manifest.projection.compiled_artifact_dispositions,
+            "top-level and compared compiled dispositions must agree"
+        );
+        assert_eq!(
+            manifest.baseline_id,
+            compute_baseline_id(&manifest.projection),
+            "manifest baseline_id must identify its complete compared projection"
+        );
+        if manifest.projection != current_projection {
+            failed += 1;
+            eprintln!("MISMATCH: compared-data projection drifted");
+        }
+        if manifest.baseline_id != current_baseline_id {
+            failed += 1;
+            eprintln!("MISMATCH: baseline ID drifted");
+        }
+
+        let expected_ids: Vec<_> = manifest
+            .projection
+            .corpus_entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect();
+        let actual_ids: Vec<_> = current_projection
+            .corpus_entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect();
+        assert_eq!(expected_ids, actual_ids, "corpus coverage/order drifted");
         for entry in &manifest.projection.corpus_entries {
             // Find matching current entry
             let current = current_projection
@@ -1170,14 +1156,16 @@ fn baseline_verification_all_24_entries() {
     // Profile observations
     let profile_ok = observe_profiles().enhanced_v3_not_recognized;
 
-    // RNG domains
-    let rng_ok = true; // verified by unit tests above
+    // The full projection equality above verifies ordered domain/tag records.
+    let rng_ok = observe_rng_domains() == current_projection.rng_domains;
 
-    // Theme closure — verify paths exist
+    // Theme closure — verify every declared root asset exists.
     let theme_ok = theme_dir_v1().exists()
         && theme_dir_v2().exists()
         && theme_dir_v1().join("cc0_stone_beta.wad").exists()
-        && theme_dir_v2().join("cc0_dungeon_v2.wad").exists();
+        && theme_dir_v1().join("palette.lmp").exists()
+        && theme_dir_v2().join("cc0_dungeon_v2.wad").exists()
+        && theme_dir_v2().join("palette.lmp").exists();
 
     // If in capture mode, write manifest to capture dir
     if is_capture {
@@ -1255,6 +1243,11 @@ fn baseline_verification_all_24_entries() {
 
 #[test]
 fn baseline_determinism_regenerate_twice() {
+    // Use independent clean staging roots and compare only the canonical
+    // compared-data projection, never timestamps, paths, or report output.
+    let staging_a = tempfile::tempdir().expect("create first clean staging root");
+    let staging_b = tempfile::tempdir().expect("create second clean staging root");
+
     // Generate all entries twice, assert identical map bytes and metadata
     let run1_legacy = generate_all_legacy();
     let run2_legacy = generate_all_legacy();
@@ -1279,6 +1272,28 @@ fn baseline_determinism_regenerate_twice() {
         assert_eq!(seed1, seed2);
         assert_eq!(map1, map2, "enhanced map {id1} differs across runs");
     }
+
+    let projection_a = build_projection(&run1_legacy, &run1_enhanced);
+    let projection_b = build_projection(&run2_legacy, &run2_enhanced);
+    let bytes_a = compared_projection_bytes(&projection_a);
+    let bytes_b = compared_projection_bytes(&projection_b);
+    std::fs::write(
+        staging_a.path().join("compared-data-projection.json"),
+        &bytes_a,
+    )
+    .expect("write first compared projection");
+    std::fs::write(
+        staging_b.path().join("compared-data-projection.json"),
+        &bytes_b,
+    )
+    .expect("write second compared projection");
+    assert_eq!(
+        std::fs::read(staging_a.path().join("compared-data-projection.json"))
+            .expect("read first compared projection"),
+        std::fs::read(staging_b.path().join("compared-data-projection.json"))
+            .expect("read second compared projection"),
+        "compared-data projection differs across clean staging roots"
+    );
 }
 
 // ── Test: Compiled artifact verification (requires ericw-tools) ────────────
@@ -1286,10 +1301,11 @@ fn baseline_determinism_regenerate_twice() {
 #[test]
 fn compiled_artifact_byte_identical_determinism() {
     let tool_dir = ericw_tools_dir();
-    if !tools_available(&tool_dir) {
-        eprintln!("SKIP: ericw-tools not found at {}", tool_dir.display());
-        return;
-    }
+    assert!(
+        tools_available(&tool_dir),
+        "required ericw-tools 2.0.0-alpha3 executables unavailable at {}",
+        tool_dir.display()
+    );
 
     // Pick one legacy entry and one enhanced entry to verify
     let seed: u64 = 0;

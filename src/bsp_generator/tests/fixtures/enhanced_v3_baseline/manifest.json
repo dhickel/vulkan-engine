@@ -1,6 +1,6 @@
 {
   "schema": "enhanced-v3-baseline-manifest/v1",
-  "baseline_id": "07b3357659d6752fbaeffeed6c25fb3db8769f05c84f6c4782f7d8ea81cf43f5",
+  "baseline_id": "3fd0f9d0afe144780964d2b786b37f07d752eb80333f7a9744972f3f5e825d81",
   "baseline_description": "Capture-mode baseline generated from current production code.",
   "frozen_at": "2026-07-30T22:24:55Z",
   "projection": {
