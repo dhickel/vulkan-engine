@@ -1263,17 +1263,32 @@ fn checked_in_closure_matches_deterministic_build() {
     //   treas_floor, treas_wall, treas_ceil, treas_accent,
     //   conn_floor, conn_wall, conn_ceil
     let visible_identities: &[&str] = &[
-        "bs_floor", "bs_wall", "bs_ceil", "bs_accent",
-        "crypt_floor", "crypt_wall", "crypt_ceil", "crypt_accent",
-        "treas_floor", "treas_wall", "treas_ceil", "treas_accent",
-        "conn_floor", "conn_wall", "conn_ceil",
+        "bs_floor",
+        "bs_wall",
+        "bs_ceil",
+        "bs_accent",
+        "crypt_floor",
+        "crypt_wall",
+        "crypt_ceil",
+        "crypt_accent",
+        "treas_floor",
+        "treas_wall",
+        "treas_ceil",
+        "treas_accent",
+        "conn_floor",
+        "conn_wall",
+        "conn_ceil",
     ];
     assert_eq!(visible_identities.len(), 15, "15 visible identities");
 
     let variants = ["_basecolor.png", "_norm.png", "_gloss.png"];
     let expected_pngs = visible_identities
         .iter()
-        .flat_map(|identity| variants.iter().map(move |suffix| format!("{identity}{suffix}")))
+        .flat_map(|identity| {
+            variants
+                .iter()
+                .map(move |suffix| format!("{identity}{suffix}"))
+        })
         .collect::<BTreeSet<_>>();
     assert_eq!(expected_pngs.len(), 45, "15 identities × 3 PNG variants");
 
@@ -1300,14 +1315,8 @@ fn checked_in_closure_matches_deterministic_build() {
             let fname = format!("{identity}{suffix}");
             let checked_in = theme_dir().join("textures").join(&fname);
             let generated = tmp.path().join("textures").join(&fname);
-            assert!(
-                checked_in.is_file(),
-                "checked-in textures/{fname} missing"
-            );
-            assert!(
-                generated.is_file(),
-                "generated textures/{fname} missing"
-            );
+            assert!(checked_in.is_file(), "checked-in textures/{fname} missing");
+            assert!(generated.is_file(), "generated textures/{fname} missing");
             let ci_bytes = std::fs::read(&checked_in).unwrap();
             let gen_bytes = std::fs::read(&generated).unwrap();
             assert_eq!(
@@ -1319,7 +1328,5 @@ fn checked_in_closure_matches_deterministic_build() {
     }
     assert_eq!(total, 45, "must verify exactly 45 companion PNGs");
 
-    eprintln!(
-        "PASS: checked-in theme closure ({total} files) matches deterministic build"
-    );
+    eprintln!("PASS: checked-in theme closure ({total} files) matches deterministic build");
 }

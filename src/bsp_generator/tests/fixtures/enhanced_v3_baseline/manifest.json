@@ -1,0 +1,355 @@
+{
+  "schema": "enhanced-v3-baseline-manifest/v1",
+  "baseline_id": "07b3357659d6752fbaeffeed6c25fb3db8769f05c84f6c4782f7d8ea81cf43f5",
+  "baseline_description": "Capture-mode baseline generated from current production code.",
+  "frozen_at": "2026-07-30T22:24:55Z",
+  "projection": {
+    "schema_version": 1,
+    "profile_observations": {
+      "accepted_profiles": [
+        "legacy-v1",
+        "enhanced-v2"
+      ],
+      "unrecognized_tags": [
+        "enhanced-v3",
+        "v3"
+      ],
+      "enhanced_v3_not_recognized": true
+    },
+    "rng_domains": {
+      "legacy_domain": {
+        "domain": "dungeon-gen/v1",
+        "tags": [
+          "room-placement",
+          "corridor-routing",
+          "entity-placement",
+          "light-placement"
+        ]
+      },
+      "enhanced_domain": {
+        "domain": "dungeon-gen/v2",
+        "tags": [
+          "layer-placement",
+          "vertical-topology",
+          "vertical-routing",
+          "theme-assignment",
+          "feature-placement",
+          "corridor-variance"
+        ]
+      }
+    },
+    "theme_closure": {
+      "legacy_theme": {
+        "name": "cc0_stone_beta",
+        "wad_path": "themes/cc0_stone_beta/cc0_stone_beta.wad",
+        "palette_path": "themes/cc0_stone_beta/palette.lmp",
+        "texture_count": 12
+      },
+      "enhanced_theme": {
+        "name": "cc0_dungeon_v2",
+        "wad_path": "themes/cc0_dungeon_v2/cc0_dungeon_v2.wad",
+        "palette_path": "themes/cc0_dungeon_v2/palette.lmp",
+        "texture_count": 45
+      },
+      "publication_profile": "ericw-q1-bsp2-generated-profile.toml",
+      "compiler_path": "/home/dhickel/.local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin",
+      "compiler_version": "2.0.0-alpha3"
+    },
+    "corpus_entries": [
+      {
+        "id": "legacy-m1-nominal-seed-0",
+        "profile": "legacy-v1",
+        "seed": 0,
+        "config_label": "legacy-m1-nominal-seed-0",
+        "map_length": 96013,
+        "map_sha256": "eac591c46b7815802c2a65add4b6507f288c575235b93c310fd9290e07bb7c5d",
+        "metadata_canonical_sha256": "6bf884ad0a0afd8ad39a293bddb76de20e257ba0018b7982b848e3f41fe7d5cc",
+        "map_baseline_sha256": "7d065d3c6268da598eb0405f86adf6716c6d1dd258973902bf8931c41cb3bbfe"
+      },
+      {
+        "id": "legacy-m1-nominal-seed-1",
+        "profile": "legacy-v1",
+        "seed": 1,
+        "config_label": "legacy-m1-nominal-seed-1",
+        "map_length": 98890,
+        "map_sha256": "948e7ab48d1e16c2174e2c618f160780d4b33e51465768fbcfcfe61b3a287e7e",
+        "metadata_canonical_sha256": "1a830dee35e27899fdcb1f3c934af25f4853bf9333a4284708e43ed00f5a7122",
+        "map_baseline_sha256": "199c80c026c7ceff9385a420d4902dba2881013aab2217655db228971bc6137a"
+      },
+      {
+        "id": "legacy-m1-nominal-seed-2",
+        "profile": "legacy-v1",
+        "seed": 2,
+        "config_label": "legacy-m1-nominal-seed-2",
+        "map_length": 97252,
+        "map_sha256": "8bca0ed36628d6ed8c134b8bca5be57760ffb1ada42720471bf424fb34d69a88",
+        "metadata_canonical_sha256": "d670c7d3ae57f3afdcd516dc1ff700544b835049c95c8ebb8bf8bd6d552652cd",
+        "map_baseline_sha256": "7d240038cac9b73ed238e6b3d20edd1d81b06f4434b9fa7cdcfb1314d5af8977"
+      },
+      {
+        "id": "legacy-m1-nominal-seed-3",
+        "profile": "legacy-v1",
+        "seed": 3,
+        "config_label": "legacy-m1-nominal-seed-3",
+        "map_length": 106034,
+        "map_sha256": "cb311e3393a8f9cf64d2849d462a660019441c931f556c61a0120efadd018bae",
+        "metadata_canonical_sha256": "f41c274daa030fb3cd258163152bc0c5fea6be4360478076dd941da5f499386b",
+        "map_baseline_sha256": "de2af52c9550d727851ed2d9f9de27d35fd1068affd0014aff1fad81769ec698"
+      },
+      {
+        "id": "legacy-m2-nominal-seed-17",
+        "profile": "legacy-v1",
+        "seed": 17,
+        "config_label": "legacy-m2-nominal-seed-17",
+        "map_length": 241325,
+        "map_sha256": "18e197388320f2ef8f78b7af4441f09b6faeb2a3057c2c4ed06bef5228e08c2c",
+        "metadata_canonical_sha256": "08dbd53dfee6d196ca56c74235785be9f7992ec1e57f24094a28abab6c8c8a82",
+        "map_baseline_sha256": "57e559d782b451beac85cd04a00fac72d9ac351a3d41e93585e9fb6245253f31"
+      },
+      {
+        "id": "legacy-m2-nominal-seed-255",
+        "profile": "legacy-v1",
+        "seed": 255,
+        "config_label": "legacy-m2-nominal-seed-255",
+        "map_length": 245285,
+        "map_sha256": "c1d1d89cf527e9b82af015a5a7285d517a20c40ec260253fbc9961776b2947a2",
+        "metadata_canonical_sha256": "5e6ef29fe5899772ca1a47e0fac616dc0c10e1b2716a8dbf71f7172705b55bbf",
+        "map_baseline_sha256": "694ccaeca6728294e7680b163750e9a021391fd1652ac7a98723675931a17d0d"
+      },
+      {
+        "id": "legacy-m2-nominal-seed-alt1",
+        "profile": "legacy-v1",
+        "seed": 6148914691236517205,
+        "config_label": "legacy-m2-nominal-seed-alt1",
+        "map_length": 239273,
+        "map_sha256": "57d58c12d7715ad0ddcbae138c0cb10eb6af0077419edcb8bd04923a9bb558ab",
+        "metadata_canonical_sha256": "1b81bbff387107ae67bbfc2ee126cf9562fd19625df78815f926cafd7d6c88cf",
+        "map_baseline_sha256": "11fb3c28945b96547efd69289ac95b6f7158a82227882f62571aaf66b9f94371"
+      },
+      {
+        "id": "legacy-m2-nominal-seed-max",
+        "profile": "legacy-v1",
+        "seed": 18446744073709551615,
+        "config_label": "legacy-m2-nominal-seed-max",
+        "map_length": 247117,
+        "map_sha256": "7fc8c6c66c2f8b0c40349d5c4a05396a6af119cfefdd4903aa8bcbb0bf224894",
+        "metadata_canonical_sha256": "9ea12ea61efc953cbea71b212cb5950a8ffb4c9c456cbc5eb74298cee8bc6725",
+        "map_baseline_sha256": "20552d08f3766dbb71e54699a92fef67a15f06dc3bb1d6240cbf2ea1b6621e9e"
+      },
+      {
+        "id": "legacy-m1-boundary-A-min",
+        "profile": "legacy-v1",
+        "seed": 42,
+        "config_label": "legacy-m1-boundary-A-min",
+        "map_length": 66710,
+        "map_sha256": "15c0a1516732bfd36ad30b3dfbf2c13a900ad72840d884dc5d0ed07e13c1a85d",
+        "metadata_canonical_sha256": "0f3343f71fede05f1504de1bb08986bd0916f22953d5bce5a578460916d0c8c0",
+        "map_baseline_sha256": "be28919de47257b735d0ee33e131c9ed71a0d49a7ae16aeb8f2f894b989dc6b2"
+      },
+      {
+        "id": "legacy-m1-boundary-B-max",
+        "profile": "legacy-v1",
+        "seed": 43,
+        "config_label": "legacy-m1-boundary-B-max",
+        "map_length": 127485,
+        "map_sha256": "a08af59885615f0d5b795fb3d771f667ea85eb1518c6d071053754122863d2ef",
+        "metadata_canonical_sha256": "445406a4574adde66fd13bbd3edbb0e0e67e6d86b818497c452c9105d92bc091",
+        "map_baseline_sha256": "a0aa54e4d63c5435966a43bc90184cfd31964673221ef3b00eb84f7a752de672"
+      },
+      {
+        "id": "legacy-m2-boundary-C-min",
+        "profile": "legacy-v1",
+        "seed": 44,
+        "config_label": "legacy-m2-boundary-C-min",
+        "map_length": 141664,
+        "map_sha256": "7564bd9459fdee142ba74ec4f9d2f6180b36ff3b5c0bdbb30ce98aa22c1b6415",
+        "metadata_canonical_sha256": "e4c949bfd302fddb707dc245caf48e28ca5dcef8567aaa12498003f5c8fb18ea",
+        "map_baseline_sha256": "cb0f207ac24469556ce2928aac20d14149a4af2ad063b82b68b32f970a1bc193"
+      },
+      {
+        "id": "legacy-m2-boundary-D-max",
+        "profile": "legacy-v1",
+        "seed": 45,
+        "config_label": "legacy-m2-boundary-D-max",
+        "map_length": 364648,
+        "map_sha256": "de8c04ab0a1b4b99d0a85c95b39303475d16a20464c760230cd3e83012f56b89",
+        "metadata_canonical_sha256": "515b964645efa573efa34813a21d55ad969d4240fe7eb14583cb154496c8c5ae",
+        "map_baseline_sha256": "5b373bc6f4dda9e8921ed52d3990ff921467aea084a6e6805cd80b858dad3f5e"
+      },
+      {
+        "id": "enhanced-nominal-seed-0",
+        "profile": "enhanced-v2",
+        "seed": 0,
+        "config_label": "enhanced-nominal-seed-0",
+        "map_length": 484400,
+        "map_sha256": "430e0340b3535278cc9a6394650c42007e9982c895f5b0c63897cb887cca5592",
+        "metadata_canonical_sha256": "a0d9172f5baabdb8e7be10fdc7067f5c5650bedeba2fcaff5e2d02f52ff35fd8",
+        "map_baseline_sha256": "db393af3060f148e0a3cc256389a3e7070fde867154701420c975fee9fe4b893"
+      },
+      {
+        "id": "enhanced-nominal-seed-1",
+        "profile": "enhanced-v2",
+        "seed": 1,
+        "config_label": "enhanced-nominal-seed-1",
+        "map_length": 474859,
+        "map_sha256": "445e810b0ba4eb4dd8c3f0b48c81ec11de6e8fa02e1a7314373bd91164b5ba47",
+        "metadata_canonical_sha256": "eb9319aa7b143643d8c10493e3029b97a9de517d537818f52f3c6e1824786628",
+        "map_baseline_sha256": "db2b93d3beb9e1667b059712ec22dcd394a0d3e69539221c47d0ab5c6b4bc7f3"
+      },
+      {
+        "id": "enhanced-nominal-seed-2",
+        "profile": "enhanced-v2",
+        "seed": 2,
+        "config_label": "enhanced-nominal-seed-2",
+        "map_length": 444908,
+        "map_sha256": "d9a519805b7d60bd0897c520470790f3dfdca6a4a1a41ec1d3f8e38bd819490f",
+        "metadata_canonical_sha256": "cd182659f6f4aa501931cdfb39692bcf64dc11d0a61a70c341d36f23e7b7b14d",
+        "map_baseline_sha256": "3e9f2c1c29e439576d31f0845b6a092c189b0b08f4efeba5fbd01b0320eea93e"
+      },
+      {
+        "id": "enhanced-nominal-seed-3",
+        "profile": "enhanced-v2",
+        "seed": 3,
+        "config_label": "enhanced-nominal-seed-3",
+        "map_length": 537512,
+        "map_sha256": "d0134e07f9c5f12ee914538960e15bd3ecc97c9a8931ccfc8cb75932a5c41b94",
+        "metadata_canonical_sha256": "6fa302954db6b7bf2df4120f67eda5e189675143be51d9b37398621bc3ba5466",
+        "map_baseline_sha256": "ab21c8940a9c77ed22caa416165611f3f33e56e746387dbe7e8142e2434af1e0"
+      },
+      {
+        "id": "enhanced-nominal-seed-4",
+        "profile": "enhanced-v2",
+        "seed": 4,
+        "config_label": "enhanced-nominal-seed-4",
+        "map_length": 439201,
+        "map_sha256": "9a41e76fc0e70a265caf7f5a623f9881b46334cbecbd395f18b0885444d7188f",
+        "metadata_canonical_sha256": "cee0df750833e4c7d8bc7d7573e8e4e65ad1301c0f77f8abd279bed7a8ce25dd",
+        "map_baseline_sha256": "45fa9f5e8c30cab86a8f43963822721c8e2da97ae1d8cb682ff5f00aa69e9ffd"
+      },
+      {
+        "id": "enhanced-nominal-seed-5",
+        "profile": "enhanced-v2",
+        "seed": 5,
+        "config_label": "enhanced-nominal-seed-5",
+        "map_length": 469893,
+        "map_sha256": "fcaae7b6dc53abf07b85e021b47eeccc58ca8af274d9a77234a412f7c14adfce",
+        "metadata_canonical_sha256": "670d8f83d8dd3d37680da357d3e976cda84ab1f0e0a26ff3e50dc6e4bb8fc07f",
+        "map_baseline_sha256": "4bf57e9cc8da7d4e574fada0cb21ab0851ecec8de3c299ad665ea8b0f7d70ea6"
+      },
+      {
+        "id": "enhanced-nominal-seed-6",
+        "profile": "enhanced-v2",
+        "seed": 12,
+        "config_label": "enhanced-nominal-seed-6",
+        "map_length": 436623,
+        "map_sha256": "0d390b105b73f7c3a552848a9b3562d3cc62bf522d969aa89430b689744c5d83",
+        "metadata_canonical_sha256": "7d69f9894c78914be11c76da608d716b3c657fb380078166a8258eb1ca38389c",
+        "map_baseline_sha256": "885e86cd9f85cea6d8d4c17837a52aade3bdc7193b257c216b4dc5c813c436ca"
+      },
+      {
+        "id": "enhanced-nominal-seed-7",
+        "profile": "enhanced-v2",
+        "seed": 7,
+        "config_label": "enhanced-nominal-seed-7",
+        "map_length": 475558,
+        "map_sha256": "5fe1f192ae8f3ea14076f9360e90cadcc688d040d4d0418a48cf3fb96f407746",
+        "metadata_canonical_sha256": "51935cacc3a5b667aa9fcee634e84352ba73201a1d1821041b569bcc7ffa0b3c",
+        "map_baseline_sha256": "04a645a3a0c1499edeec00e00d1455cb1ffad8347b652c8358e2800688a2e530"
+      },
+      {
+        "id": "enhanced-boundary-A-2-vert",
+        "profile": "enhanced-v2",
+        "seed": 14,
+        "config_label": "enhanced-boundary-A-2-vert",
+        "map_length": 480864,
+        "map_sha256": "4117e40eb4c3d60f5c891f1c38382bedb6a772672552e03e8045b7e4728d3540",
+        "metadata_canonical_sha256": "131577806b7696de0de88fc713a9b769405b35342e6fee23c187537a9a0af610",
+        "map_baseline_sha256": "d1f35c5d42a5cc5ca4a57aedd31e1ae47a526a804ffdaf5795bf28090790ebe9"
+      },
+      {
+        "id": "enhanced-boundary-B-minimal",
+        "profile": "enhanced-v2",
+        "seed": 41,
+        "config_label": "enhanced-boundary-B-minimal",
+        "map_length": 373452,
+        "map_sha256": "2df6fc5687e88258a847ef9c2fb62e272eeee33e14c0937233655c246ca85e4f",
+        "metadata_canonical_sha256": "f42567765b448e17b85ef256d37e049ba561aef412c1fa91c3d4261af7b6a0ff",
+        "map_baseline_sha256": "c90c202fdc6420b84931ec5b07a4274b5286c14ddcd0804f01153dd2959ead34"
+      },
+      {
+        "id": "enhanced-boundary-C-6-loops",
+        "profile": "enhanced-v2",
+        "seed": 10,
+        "config_label": "enhanced-boundary-C-6-loops",
+        "map_length": 539204,
+        "map_sha256": "bdce498ab117055d13d0774a509640807a07ae35b142b8ab812771c899e63113",
+        "metadata_canonical_sha256": "c1d2cc771d3aa6c5148a63a91881dea97c101c4d7d2f9568eb6cdd69e865b55a",
+        "map_baseline_sha256": "8ad7710d5f727731fe768f4ce6996fa114cfe1e300a6f40753efef3f99715c8d"
+      },
+      {
+        "id": "enhanced-boundary-D-max-pillars",
+        "profile": "enhanced-v2",
+        "seed": 18,
+        "config_label": "enhanced-boundary-D-max-pillars",
+        "map_length": 478073,
+        "map_sha256": "7eef440f6e6f8f747e2bca067498e8e8ad88166e89e762ad58086a7dbb3e571e",
+        "metadata_canonical_sha256": "184fa989105b46acf4890f070b8c9dd3d779b8ca04f09bd0b06f51a9ad1860c9",
+        "map_baseline_sha256": "498a34ac72eda716c98365c8598a88e665037be86bc8cee06aa5f46f9da25bb9"
+      }
+    ],
+    "compiled_artifact_dispositions": {
+      "enhanced-compiled-enhanced-boundary-A-2-vert": "required",
+      "enhanced-compiled-enhanced-boundary-B-minimal": "required",
+      "enhanced-compiled-enhanced-boundary-C-6-loops": "required",
+      "enhanced-compiled-enhanced-boundary-D-max-pillars": "required",
+      "enhanced-compiled-enhanced-nominal-seed-0": "required",
+      "enhanced-compiled-enhanced-nominal-seed-1": "required",
+      "enhanced-compiled-enhanced-nominal-seed-2": "required",
+      "enhanced-compiled-enhanced-nominal-seed-3": "required",
+      "enhanced-compiled-enhanced-nominal-seed-4": "required",
+      "enhanced-compiled-enhanced-nominal-seed-5": "required",
+      "enhanced-compiled-enhanced-nominal-seed-6": "required",
+      "enhanced-compiled-enhanced-nominal-seed-7": "required",
+      "enhanced-v3-compiled": "not_reproducible",
+      "legacy-compiled-legacy-m1-boundary-A-min": "required",
+      "legacy-compiled-legacy-m1-boundary-B-max": "required",
+      "legacy-compiled-legacy-m1-nominal-seed-0": "required",
+      "legacy-compiled-legacy-m1-nominal-seed-1": "required",
+      "legacy-compiled-legacy-m1-nominal-seed-2": "required",
+      "legacy-compiled-legacy-m1-nominal-seed-3": "required",
+      "legacy-compiled-legacy-m2-boundary-C-min": "required",
+      "legacy-compiled-legacy-m2-boundary-D-max": "required",
+      "legacy-compiled-legacy-m2-nominal-seed-17": "required",
+      "legacy-compiled-legacy-m2-nominal-seed-255": "required",
+      "legacy-compiled-legacy-m2-nominal-seed-alt1": "required",
+      "legacy-compiled-legacy-m2-nominal-seed-max": "required"
+    }
+  },
+  "compiled_artifact_dispositions": {
+    "enhanced-compiled-enhanced-boundary-A-2-vert": "required",
+    "enhanced-compiled-enhanced-boundary-B-minimal": "required",
+    "enhanced-compiled-enhanced-boundary-C-6-loops": "required",
+    "enhanced-compiled-enhanced-boundary-D-max-pillars": "required",
+    "enhanced-compiled-enhanced-nominal-seed-0": "required",
+    "enhanced-compiled-enhanced-nominal-seed-1": "required",
+    "enhanced-compiled-enhanced-nominal-seed-2": "required",
+    "enhanced-compiled-enhanced-nominal-seed-3": "required",
+    "enhanced-compiled-enhanced-nominal-seed-4": "required",
+    "enhanced-compiled-enhanced-nominal-seed-5": "required",
+    "enhanced-compiled-enhanced-nominal-seed-6": "required",
+    "enhanced-compiled-enhanced-nominal-seed-7": "required",
+    "enhanced-v3-compiled": "not_reproducible",
+    "legacy-compiled-legacy-m1-boundary-A-min": "required",
+    "legacy-compiled-legacy-m1-boundary-B-max": "required",
+    "legacy-compiled-legacy-m1-nominal-seed-0": "required",
+    "legacy-compiled-legacy-m1-nominal-seed-1": "required",
+    "legacy-compiled-legacy-m1-nominal-seed-2": "required",
+    "legacy-compiled-legacy-m1-nominal-seed-3": "required",
+    "legacy-compiled-legacy-m2-boundary-C-min": "required",
+    "legacy-compiled-legacy-m2-boundary-D-max": "required",
+    "legacy-compiled-legacy-m2-nominal-seed-17": "required",
+    "legacy-compiled-legacy-m2-nominal-seed-255": "required",
+    "legacy-compiled-legacy-m2-nominal-seed-alt1": "required",
+    "legacy-compiled-legacy-m2-nominal-seed-max": "required"
+  }
+}
