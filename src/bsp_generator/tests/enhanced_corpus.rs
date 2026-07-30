@@ -9,7 +9,9 @@
 //!   ~/.local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin/
 //! Tests skip gracefully when tools are absent.
 
-use bsp::{point_contents, BspLoader, LoadOptions, PointContents, QuakeToEngine};
+use bsp::{
+    point_contents, trace_line, BspLoader, LoadOptions, PointContents, QuakeToEngine, StoredHull,
+};
 use bsp_generator::enhanced::config::EnhancedConfig;
 use bsp_generator::enhanced::pipeline::{generate_enhanced, EnhancedMetadata};
 use sha2::{Digest, Sha256};
@@ -235,11 +237,27 @@ fn assert_non_solid(world: &bsp::BspWorld, label: &str, quake_point: (i32, i32, 
     );
 }
 
-/// Assert navigation witnesses: spawn point and entity origins must be non-solid.
+/// Assert navigation witnesses: the authored spawn origin and player hull must
+/// be non-solid. `spawn_origin` already includes the floor and eye offsets.
 fn assert_navigation_witnesses(world: &bsp::BspWorld, meta: &EnhancedMetadata) {
-    // Spawn point at player height
     let spawn = meta.spawn_origin;
-    assert_non_solid(world, "spawn point", (spawn.0, spawn.1, spawn.2 + 40));
+    assert_non_solid(world, "spawn point", spawn);
+
+    let transform = QuakeToEngine::default();
+    let engine_spawn = transform.position(spawn.0 as f32, spawn.1 as f32, spawn.2 as f32);
+    let trace = trace_line(
+        engine_spawn,
+        engine_spawn,
+        StoredHull::Player,
+        &world.clipnodes,
+        &world.planes,
+        &world.models,
+        &transform,
+    );
+    assert!(
+        !trace.starts_solid && !trace.all_solid,
+        "player hull starts solid at authored spawn {spawn:?}"
+    );
 
     // Check a grid of points at player height on the lower floor
     let lower_z = meta.lower_floor_z;
