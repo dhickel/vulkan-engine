@@ -51,23 +51,10 @@ pub fn build_topology(
     );
     let root = tx.mark();
     let result = (|| {
-        // Establish each horizontal spanning tree before reserving vertical
-        // footprints. This prevents a transition's dual room ownership from
-        // obscuring the host-room cells that A* must inspect at a portal.
-        connect_layer(
-            &placement.lower_rooms,
-            &room_map,
-            &placement.sockets,
-            config.xy_extent(),
-            &mut tx,
-        )?;
-        connect_layer(
-            &placement.upper_rooms,
-            &room_map,
-            &placement.sockets,
-            config.xy_extent(),
-            &mut tx,
-        )?;
+        // Reserve exact vertical geometry before horizontal routing so its
+        // lower entry and upper approach cannot be claimed or blocked by a
+        // graph-only route. Subsequent route construction still requires each
+        // remaining room connection to materialize through a separate socket.
         let transitions = transition::reserve_transitions(
             config.vertical_edges(),
             &placement.lower_rooms,
@@ -87,6 +74,20 @@ pub fn build_topology(
                 });
             }
         }
+        connect_layer(
+            &placement.lower_rooms,
+            &room_map,
+            &placement.sockets,
+            config.xy_extent(),
+            &mut tx,
+        )?;
+        connect_layer(
+            &placement.upper_rooms,
+            &room_map,
+            &placement.sockets,
+            config.xy_extent(),
+            &mut tx,
+        )?;
         add_required_loops(
             &placement.lower_rooms,
             &room_map,
@@ -413,6 +414,10 @@ fn validate_topology(
             || stair.riser != 16
             || stair.tread_depth != 16
             || stair.treads.len() != 12
+            || stair.tread_boxes.len() != 12
+            || stair.upper_approach_segments.is_empty()
+            || stair.reserved_projection.is_empty()
+            || stair.headroom_volumes.is_empty()
             || stair.headroom.5 - stair.headroom.2 < 80
         {
             return Err(EnhancedError::TopologyValidationFailed {
@@ -420,6 +425,22 @@ fn validate_topology(
                     "transition {:?} is not a complete direct stair reservation",
                     stair.id
                 ),
+            });
+        }
+        if stair.lower_wall_opening.tangent_min >= stair.lower_wall_opening.tangent_max
+            || stair.upper_wall_opening.tangent_min >= stair.upper_wall_opening.tangent_max
+            || stair.upper_ceiling_opening.rect.0 >= stair.upper_ceiling_opening.rect.2
+            || stair.upper_ceiling_opening.rect.1 >= stair.upper_ceiling_opening.rect.3
+            || stair.upper_ceiling_opening.z
+                != placement
+                    .rooms
+                    .iter()
+                    .find(|room| room.id == stair.lower_room)
+                    .map(|room| room.floor_z + room.dims.2 as i32)
+                    .unwrap_or_default()
+        {
+            return Err(EnhancedError::TopologyValidationFailed {
+                detail: format!("transition {:?} has incomplete aperture geometry", stair.id),
             });
         }
     }

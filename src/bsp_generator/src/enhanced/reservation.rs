@@ -381,6 +381,85 @@ impl Transaction {
         Ok(())
     }
 
+    /// Reserve a transition rectangle with explicit, per-room projection
+    /// exceptions. A room cell is legal only when it belongs to the named room
+    /// and lies inside that exact exception rectangle; all other projected
+    /// ownership stays exclusive across layers.
+    pub fn reserve_transition_rect_with_exceptions(
+        &mut self,
+        x0: i32,
+        y0: i32,
+        w: i32,
+        h: i32,
+        transition: TransitionId,
+        exceptions: &[(super::intent::RoomId, (i32, i32, i32, i32))],
+    ) -> Result<(), EnhancedError> {
+        let q = crate::config::CONSTRUCTION_QUANTUM as i32;
+        if x0 < 0
+            || y0 < 0
+            || w <= 0
+            || h <= 0
+            || x0 % q != 0
+            || y0 % q != 0
+            || w % q != 0
+            || h % q != 0
+        {
+            return Err(EnhancedError::ContractViolation {
+                detail: "invalid transition reservation rectangle".into(),
+            });
+        }
+        let qx0 = x0 as u32 / Q_U;
+        let qy0 = y0 as u32 / Q_U;
+        let qx1 = qx0 + w as u32 / Q_U;
+        let qy1 = qy0 + h as u32 / Q_U;
+        if qx1 > self.grid.cells_x() || qy1 > self.grid.cells_y() {
+            return Err(EnhancedError::ContractViolation {
+                detail: "transition footprint exceeds grid bounds".into(),
+            });
+        }
+        let exception_covers = |room, px: i32, py: i32| {
+            exceptions.iter().any(|(allowed, rect)| {
+                *allowed == room
+                    && px >= rect.0
+                    && px + q <= rect.2
+                    && py >= rect.1
+                    && py + q <= rect.3
+            })
+        };
+        for py in qy0..qy1 {
+            for px in qx0..qx1 {
+                let idx = self.grid.cells_x() as usize * py as usize + px as usize;
+                match self.grid.cells()[idx] {
+                    Owner::Empty => {}
+                    Owner::Transition(existing) if existing == transition => {}
+                    Owner::Room(room)
+                        if exception_covers(room, (px * Q_U) as i32, (py * Q_U) as i32) => {}
+                    owner => {
+                        return Err(EnhancedError::ContractViolation {
+                            detail: format!(
+                                "transition {:?} conflicts with {:?} at ({}, {})",
+                                transition,
+                                owner,
+                                px * Q_U,
+                                py * Q_U
+                            ),
+                        })
+                    }
+                }
+            }
+        }
+        for py in qy0..qy1 {
+            for px in qx0..qx1 {
+                let idx = self.grid.cells_x() as usize * py as usize + px as usize;
+                // The explicitly approved host projection changes ownership to
+                // the transition. Keeping it as Room would let a later route
+                // silently overlap stair tread or headroom geometry.
+                self.grid.cells_mut()[idx] = Owner::Transition(transition);
+            }
+        }
+        Ok(())
+    }
+
     /// Check if a rect is empty (no rooms, routes, or transitions).
     pub fn is_rect_empty(&self, x0: i32, y0: i32, w: i32, h: i32) -> Result<bool, EnhancedError> {
         self.grid.is_rect_empty(x0, y0, w, h)

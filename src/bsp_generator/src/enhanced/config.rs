@@ -7,6 +7,7 @@ use crate::config::{
 use crate::MapClass;
 
 use super::error::EnhancedError;
+use super::profile::{STAIR_RISER, STAIR_TREAD};
 
 // ── Selected vertical contract (Phase 01 evidence) ─────────────────────────
 
@@ -20,13 +21,11 @@ pub const ENHANCED_UPPER_FLOOR_Z: i32 = 192;
 pub const ENHANCED_ROOM_HEIGHT: i32 = 176;
 
 /// Stair riser height. Evidence-selected constant.
-pub const ENHANCED_RISER: i32 = 16;
+pub const ENHANCED_RISER: i32 = STAIR_RISER;
 
-/// Default stair tread depth. Evidence-selected constant.
-pub const ENHANCED_TREAD_DEFAULT: i32 = 16;
-
-/// Alternative stair tread depth (also passes feasibility evidence).
-pub const ENHANCED_TREAD_ALTERNATIVE: i32 = 32;
+/// Stair tread depth — fixed at 16 for the Enhanced v2 stair repair.
+/// Both Type A and Type B exclusively use this value.
+pub const ENHANCED_TREAD: i32 = STAIR_TREAD;
 
 /// Exact Enhanced layer count (frozen).
 pub const ENHANCED_LAYER_COUNT: u32 = 2;
@@ -53,6 +52,9 @@ pub const MIN_WALL_FOR_SOCKET: i32 = SOCKET_APERTURE + 2 * SOCKET_CORNER_MARGIN;
 /// Construction via `EnhancedConfig::new()` validates all fields against
 /// the frozen M2 bounds and the Phase 01 selected vertical contract.
 /// An `EnhancedConfig` is immutable after construction.
+///
+/// Tread depth is fixed at 16 after the Enhanced v2 stair repair; the
+/// constructor validates this and rejects any other value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnhancedConfig {
     /// Number of rooms (M2 range: 17..=40).
@@ -61,7 +63,7 @@ pub struct EnhancedConfig {
     loop_count: u32,
     /// Number of vertical edges between layers (1..=3).
     vertical_edges: u32,
-    /// Stair tread depth (16 or 32).
+    /// Stair tread depth; public input retained for contract validation.
     tread_depth: i32,
     /// XY extent per axis in Quake units (≤ M2_XY_MAX).
     xy_extent: u32,
@@ -75,6 +77,9 @@ pub struct EnhancedConfig {
 
 impl EnhancedConfig {
     /// Create and validate an Enhanced v2 configuration.
+    ///
+    /// Tread depth remains an explicit public argument so incompatible caller
+    /// input is rejected rather than silently changed; only 16 is accepted.
     pub fn new(
         room_count: u32,
         loop_count: u32,
@@ -152,12 +157,12 @@ impl EnhancedConfig {
                 max: 3,
             });
         }
-        if tread_depth != ENHANCED_TREAD_DEFAULT && tread_depth != ENHANCED_TREAD_ALTERNATIVE {
+        if tread_depth != ENHANCED_TREAD {
             return Err(EnhancedError::ConfigOutOfRange {
                 field: "tread_depth",
                 value: tread_depth as u64,
-                min: ENHANCED_TREAD_DEFAULT as u64,
-                max: ENHANCED_TREAD_ALTERNATIVE as u64,
+                min: ENHANCED_TREAD as u64,
+                max: ENHANCED_TREAD as u64,
             });
         }
         if xy_extent == 0 || xy_extent > M2_XY_MAX || xy_extent % CONSTRUCTION_QUANTUM != 0 {
@@ -234,20 +239,17 @@ impl EnhancedConfig {
 
     /// Nominal M2 Enhanced configuration.
     pub fn nominal() -> Self {
-        Self::with_full_params(28, 3, 1, ENHANCED_TREAD_DEFAULT, 2048, 32, 96, 2)
-            .expect("nominal config")
+        Self::with_full_params(28, 3, 1, ENHANCED_TREAD, 2048, 32, 96, 2).expect("nominal config")
     }
 
     /// Minimal M2 Enhanced configuration (17 rooms, 1 loop, 1024 extent).
     pub fn minimal() -> Self {
-        Self::with_full_params(17, 1, 1, ENHANCED_TREAD_DEFAULT, 1024, 32, 96, 1)
-            .expect("minimal config")
+        Self::with_full_params(17, 1, 1, ENHANCED_TREAD, 1024, 32, 96, 1).expect("minimal config")
     }
 
     /// Maximal M2 Enhanced configuration (40 rooms, 6 loops, 3072 extent).
     pub fn maximal() -> Self {
-        Self::with_full_params(40, 6, 3, ENHANCED_TREAD_DEFAULT, 3072, 32, 96, 4)
-            .expect("maximal config")
+        Self::with_full_params(40, 6, 3, ENHANCED_TREAD, 3072, 32, 96, 4).expect("maximal config")
     }
 
     // Accessors
@@ -260,6 +262,7 @@ impl EnhancedConfig {
     pub fn vertical_edges(&self) -> u32 {
         self.vertical_edges
     }
+    /// Stair tread depth — always 16 after the Enhanced v2 stair repair.
     pub fn tread_depth(&self) -> i32 {
         self.tread_depth
     }
@@ -317,15 +320,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_tread() {
-        assert!(EnhancedConfig::new(28, 3, 1, 8, 2048).is_err());
-        assert!(EnhancedConfig::new(28, 3, 1, 24, 2048).is_err());
-    }
-
-    #[test]
-    fn accepts_both_tread_depths() {
-        assert!(EnhancedConfig::new(28, 3, 1, 16, 2048).is_ok());
-        assert!(EnhancedConfig::new(28, 3, 1, 32, 2048).is_ok());
+    fn tread_always_sixteen() {
+        let cfg = EnhancedConfig::nominal();
+        assert_eq!(cfg.tread_depth(), 16);
+        let cfg2 = EnhancedConfig::minimal();
+        assert_eq!(cfg2.tread_depth(), 16);
+        let cfg3 = EnhancedConfig::maximal();
+        assert_eq!(cfg3.tread_depth(), 16);
     }
 
     #[test]

@@ -597,43 +597,23 @@ fn derive_exclusion_regions(
             }
         }
 
-        // 4. Transition volumes
+        // 4. Transition solids. Entity origins and pillars use the exact
+        // materializable tread boxes, not a transition bounding volume or an
+        // all-or-nothing transition exception. Clear approaches remain clear.
         for t in &topology.transitions {
-            if t.lower_room != room.id && t.upper_room != room.id {
-                continue;
-            }
-            let (fx0, fy0, fx1, fy1) = t.footprint;
-            if fx0 < x1 && fx1 > x0 && fy0 < y1 && fy1 > y0 {
-                let cx0 = fx0.max(x0);
-                let cy0 = fy0.max(y0);
-                let cx1 = fx1.min(x1);
-                let cy1 = fy1.min(y1);
-                if cx0 < cx1 && cy0 < cy1 {
+            for tread in &t.tread_boxes {
+                let (tx0, ty0, tz0, tx1, ty1, tz1) = tread.bounds;
+                let cx0 = tx0.max(x0);
+                let cy0 = ty0.max(y0);
+                let cz0 = tz0.max(z0);
+                let cx1 = tx1.min(x1);
+                let cy1 = ty1.min(y1);
+                let cz1 = tz1.min(z1);
+                if cx0 < cx1 && cy0 < cy1 && cz0 < cz1 {
                     vols.push(ExclusionVolume {
-                        bounds: (cx0, cy0, z0, cx1, cy1, z1),
-                        reason: format!("transition {:?}", t.id),
+                        bounds: (cx0, cy0, cz0, cx1, cy1, cz1),
+                        reason: format!("transition {:?} tread", t.id),
                     });
-                }
-            }
-            // Transition approaches and landings
-            for &landing in &[
-                t.lower_approach,
-                t.upper_approach,
-                t.lower_landing,
-                t.upper_landing,
-            ] {
-                let (lx0, ly0, lx1, ly1) = landing;
-                if lx0 < x1 && lx1 > x0 && ly0 < y1 && ly1 > y0 {
-                    let cx0 = lx0.max(x0);
-                    let cy0 = ly0.max(y0);
-                    let cx1 = lx1.min(x1);
-                    let cy1 = ly1.min(y1);
-                    if cx0 < cx1 && cy0 < cy1 {
-                        vols.push(ExclusionVolume {
-                            bounds: (cx0, cy0, z0, cx1, cy1, z1),
-                            reason: format!("transition {:?} landing", t.id),
-                        });
-                    }
                 }
             }
         }
@@ -1122,11 +1102,11 @@ fn find_clear_origin(
             continue;
         }
         let volume = (x, y, z, x + Q, y + Q, z + Q);
+        // Corridors and wall apertures are intentional clear space, but every
+        // transition volume is materialized stair geometry or required
+        // clearance. Test that transition geometry in 3-D; never grant a
+        // blanket transition-volume exception to an entity origin.
         if !exclusions.iter().any(|exclusion| {
-            // Corridors and apertures are deliberately clear-volume access
-            // regions. They exclude pillars but remain valid entity origins;
-            // stair/landing volumes are the only feature exclusions that
-            // consume room clear volume for a point entity.
             exclusion.reason.starts_with("transition") && boxes_intersect(volume, exclusion.bounds)
         }) {
             return Some(origin);
