@@ -362,7 +362,7 @@ fn corpus_entries() -> Vec<CorpusEntry> {
             face_ceiling: ENHANCED_FACE_CEILING,
             entity_ceiling: ENHANCED_ENTITY_CEILING,
         },
-        // ── Boundary B: minimal config (seed 16) ─────────────────
+        // ── Boundary B: reduced-loop config (seed 41) ───────────
         CorpusEntry {
             name: "boundary-B-enhanced-minimal",
             seed: 41,
