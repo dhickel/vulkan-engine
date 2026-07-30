@@ -1101,13 +1101,34 @@ fn find_clear_origin(
         if avoid == Some(origin) {
             continue;
         }
-        let volume = (x, y, z, x + Q, y + Q, z + Q);
         // Corridors and wall apertures are intentional clear space, but every
         // transition volume is materialized stair geometry or required
         // clearance. Test that transition geometry in 3-D; never grant a
         // blanket transition-volume exception to an entity origin.
         if !exclusions.iter().any(|exclusion| {
-            exclusion.reason.starts_with("transition") && boxes_intersect(volume, exclusion.bounds)
+            if !exclusion.reason.starts_with("transition") {
+                return false;
+            }
+            // A point entity exactly on a tread top is classified as solid by
+            // the pinned light compiler even though half-open brush volumes do
+            // not positively overlap. Reserve one unit above each tread so
+            // origins are selected in strict clear space rather than on a
+            // compiler boundary plane.
+            let bounds = exclusion.bounds;
+            let compiler_solid = (
+                bounds.0.saturating_sub(1),
+                bounds.1.saturating_sub(1),
+                bounds.2.saturating_sub(1),
+                bounds.3.saturating_add(1),
+                bounds.4.saturating_add(1),
+                bounds.5.saturating_add(1),
+            );
+            origin.0 >= compiler_solid.0
+                && origin.0 < compiler_solid.3
+                && origin.1 >= compiler_solid.1
+                && origin.1 < compiler_solid.4
+                && origin.2 >= compiler_solid.2
+                && origin.2 < compiler_solid.5
         }) {
             return Some(origin);
         }

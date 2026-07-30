@@ -196,6 +196,10 @@ pub struct TransitionIntent {
     pub treads: Vec<(i32, i32, i32)>,
     /// Exact positive-volume tread/riser solids in ascent order.
     pub tread_boxes: Vec<StairTread>,
+    /// Exact lower-level approach from the stair entrance to a committed
+    /// lower-route junction. This keeps the lower aperture out of exterior
+    /// void and makes it part of the connected lower clear-space union.
+    pub lower_approach_segments: Vec<TransitionApproachSegment>,
     /// Exact upper-level approach, from the ceiling exit to the selected upper
     /// room's wall opening. This prevents graph-only endpoint connections.
     pub upper_approach_segments: Vec<TransitionApproachSegment>,

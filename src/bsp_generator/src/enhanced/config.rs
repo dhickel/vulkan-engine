@@ -27,6 +27,9 @@ pub const ENHANCED_RISER: i32 = STAIR_RISER;
 /// Both Type A and Type B exclusively use this value.
 pub const ENHANCED_TREAD: i32 = STAIR_TREAD;
 
+/// Backward-compatible name for the fixed Enhanced v2 tread contract.
+pub const ENHANCED_TREAD_DEFAULT: i32 = ENHANCED_TREAD;
+
 /// Exact Enhanced layer count (frozen).
 pub const ENHANCED_LAYER_COUNT: u32 = 2;
 

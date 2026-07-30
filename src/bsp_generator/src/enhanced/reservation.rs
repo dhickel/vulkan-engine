@@ -218,6 +218,7 @@ impl Transaction {
         w: i32,
         h: i32,
         route: RouteId,
+        floor_z: i32,
         _allowed_rooms: &[super::intent::RoomId],
     ) -> Result<(), EnhancedError> {
         // Use a two-phase approach: first check, then reserve.
@@ -268,6 +269,13 @@ impl Transaction {
                     // reservation for both records; transitions never share.
                     Owner::Route(_) => {}
                     Owner::Room(room) if _allowed_rooms.contains(&room) => {}
+                    Owner::Transition(transition)
+                        if self.transition_approach_covers(
+                            transition,
+                            (px * Q_U) as i32,
+                            (py * Q_U) as i32,
+                            floor_z,
+                        ) => {}
                     owner => {
                         return Err(EnhancedError::ContractViolation {
                             detail: format!(
@@ -289,15 +297,48 @@ impl Transaction {
         for py in qy0..qy1 {
             for px in qx0..qx1 {
                 let idx = (cells_x as usize) * (py as usize) + (px as usize);
-                if matches!(self.grid.cells()[idx], Owner::Room(room) if _allowed_rooms.contains(&room))
-                {
-                    continue;
+                match self.grid.cells()[idx] {
+                    Owner::Room(room) if _allowed_rooms.contains(&room) => continue,
+                    Owner::Transition(transition)
+                        if self.transition_approach_covers(
+                            transition,
+                            (px * Q_U) as i32,
+                            (py * Q_U) as i32,
+                            floor_z,
+                        ) =>
+                    {
+                        continue
+                    }
+                    _ => self.grid.cells_mut()[idx] = Owner::Route(route),
                 }
-                self.grid.cells_mut()[idx] = Owner::Route(route);
             }
         }
 
         Ok(())
+    }
+
+    fn transition_approach_covers(
+        &self,
+        transition: TransitionId,
+        x: i32,
+        y: i32,
+        floor_z: i32,
+    ) -> bool {
+        let q = crate::config::CONSTRUCTION_QUANTUM as i32;
+        let covers = |rect: (i32, i32, i32, i32)| {
+            x >= rect.0 && x + q <= rect.2 && y >= rect.1 && y + q <= rect.3
+        };
+        self.transitions
+            .iter()
+            .find(|intent| intent.id == transition)
+            .is_some_and(|intent| {
+                let lower_floor = intent.tread_boxes.first().map(|tread| tread.bounds.2);
+                (lower_floor == Some(floor_z) && covers(intent.lower_landing))
+                    || intent
+                        .upper_approach_segments
+                        .iter()
+                        .any(|segment| segment.z.0 - q == floor_z && covers(segment.envelope))
+            })
     }
 
     /// Reserve a rectangular region for a transition. This strict variant
@@ -460,6 +501,71 @@ impl Transaction {
         Ok(())
     }
 
+    /// Reserve a late transition approach after horizontal routing. Route
+    /// cells are intentional clear-space junctions and retain their route
+    /// ownership; rooms and other transitions remain exclusive blockers.
+    pub fn reserve_transition_rect_allow_routes(
+        &mut self,
+        x0: i32,
+        y0: i32,
+        w: i32,
+        h: i32,
+        transition: TransitionId,
+    ) -> Result<(), EnhancedError> {
+        let q = crate::config::CONSTRUCTION_QUANTUM as i32;
+        if x0 < 0
+            || y0 < 0
+            || w <= 0
+            || h <= 0
+            || x0 % q != 0
+            || y0 % q != 0
+            || w % q != 0
+            || h % q != 0
+        {
+            return Err(EnhancedError::ContractViolation {
+                detail: "invalid shared transition reservation rectangle".into(),
+            });
+        }
+        let qx0 = x0 as u32 / Q_U;
+        let qy0 = y0 as u32 / Q_U;
+        let qx1 = qx0 + w as u32 / Q_U;
+        let qy1 = qy0 + h as u32 / Q_U;
+        if qx1 > self.grid.cells_x() || qy1 > self.grid.cells_y() {
+            return Err(EnhancedError::ContractViolation {
+                detail: "shared transition approach exceeds grid bounds".into(),
+            });
+        }
+        for py in qy0..qy1 {
+            for px in qx0..qx1 {
+                let idx = self.grid.cells_x() as usize * py as usize + px as usize;
+                match self.grid.cells()[idx] {
+                    Owner::Empty | Owner::Route(_) => {}
+                    Owner::Transition(existing) if existing == transition => {}
+                    owner => {
+                        return Err(EnhancedError::ContractViolation {
+                            detail: format!(
+                                "transition {:?} approach conflicts with {:?} at ({}, {})",
+                                transition,
+                                owner,
+                                px * Q_U,
+                                py * Q_U
+                            ),
+                        })
+                    }
+                }
+            }
+        }
+        for py in qy0..qy1 {
+            for px in qx0..qx1 {
+                let idx = self.grid.cells_x() as usize * py as usize + px as usize;
+                if matches!(self.grid.cells()[idx], Owner::Empty) {
+                    self.grid.cells_mut()[idx] = Owner::Transition(transition);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Check if a rect is empty (no rooms, routes, or transitions).
     pub fn is_rect_empty(&self, x0: i32, y0: i32, w: i32, h: i32) -> Result<bool, EnhancedError> {
         self.grid.is_rect_empty(x0, y0, w, h)
@@ -475,6 +581,24 @@ impl Transaction {
     /// Add a committed transition intent.
     pub fn add_transition(&mut self, transition: TransitionIntent) {
         self.transitions.push(transition);
+    }
+
+    /// Replace one transition after its late lower-route approach is sealed.
+    pub fn replace_transition(
+        &mut self,
+        transition: TransitionIntent,
+    ) -> Result<(), EnhancedError> {
+        let Some(existing) = self
+            .transitions
+            .iter_mut()
+            .find(|existing| existing.id == transition.id)
+        else {
+            return Err(EnhancedError::ContractViolation {
+                detail: format!("transition {:?} is not reserved", transition.id),
+            });
+        };
+        *existing = transition;
+        Ok(())
     }
 
     // ── Loop budget ─────────────────────────────────────────────────────

@@ -117,13 +117,31 @@ fn assert_topology_valid(
         }
     }
 
-    // Transitions only connect lower↔upper
+    // Transitions only connect lower↔upper, and every lower aperture reaches
+    // the committed lower route union rather than an isolated exterior shell.
     for t in &topo.transitions {
         let lower_is_lower = placement.lower_rooms.contains(&t.lower_room);
         let upper_is_upper = placement.upper_rooms.contains(&t.upper_room);
         assert!(
             lower_is_lower && upper_is_upper,
             "transition {:?} must connect lower→upper",
+            t.id
+        );
+        let junction = t
+            .lower_approach_segments
+            .last()
+            .expect("transition must have a typed lower approach")
+            .end;
+        assert!(
+            topo.routes.iter().any(|route| {
+                route.envelopes.iter().any(|rect| {
+                    junction.0 >= rect.0
+                        && junction.0 <= rect.2
+                        && junction.1 >= rect.1
+                        && junction.1 <= rect.3
+                })
+            }),
+            "transition {:?} lower approach does not meet a route",
             t.id
         );
     }
