@@ -259,37 +259,28 @@ fn type_a_and_type_b_are_distinct_constructible_geometries() {
             assert!(y0 >= stair.footprint.1 && y1 <= stair.footprint.3);
         }
         assert_eq!(stair.upper_ceiling_opening.z, 176);
-        let ceiling_slab_bottom = 160;
-        assert_eq!(stair.tread_boxes[4].bounds.5 + 80, ceiling_slab_bottom);
-        assert_eq!(stair.tread_boxes[5].bounds.5 + 80, 176);
-        let high_treads = &stair.tread_boxes[5..];
-        let expected_opening = (
-            high_treads
-                .iter()
-                .map(|tread| tread.bounds.0)
-                .min()
-                .unwrap(),
-            high_treads
-                .iter()
-                .map(|tread| tread.bounds.1)
-                .min()
-                .unwrap(),
-            high_treads
-                .iter()
-                .map(|tread| tread.bounds.3)
-                .max()
-                .unwrap(),
-            high_treads
-                .iter()
-                .map(|tread| tread.bounds.4)
-                .max()
-                .unwrap(),
+        assert_eq!(
+            stair.upper_ceiling_opening.rect, stair.footprint,
+            "the slab aperture must cover the complete 192-unit stair run"
         );
-        assert_eq!(stair.upper_ceiling_opening.rect, expected_opening);
-        assert!(high_treads
+        assert!(stair
+            .tread_boxes
             .iter()
             .all(|tread| tread.bounds.5 + 80 <= stair.headroom.5));
         assert!(!stair.upper_approach_segments.is_empty());
+        let opening = stair.upper_ceiling_opening.rect;
+        let crest = stair.upper_approach_segments[0].envelope;
+        let shared_span = if opening.0 == crest.2 || opening.2 == crest.0 {
+            (opening.3.min(crest.3) - opening.1.max(crest.1)).max(0)
+        } else if opening.1 == crest.3 || opening.3 == crest.1 {
+            (opening.2.min(crest.2) - opening.0.max(crest.0)).max(0)
+        } else {
+            0
+        };
+        assert_eq!(
+            shared_span, 64,
+            "upper landing must retain a full 64-unit crest throat"
+        );
         assert_eq!(
             stair.upper_approach_segments.last().unwrap().end,
             (432, 320)

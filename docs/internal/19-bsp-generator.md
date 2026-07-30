@@ -444,8 +444,8 @@ from Legacy v1's `"dungeon-gen/v1"`. Same seed values produce different output.
 **Emission:**
 - Room shells: floor slab + ceiling slab + 4 wall masks with aperture cutouts
 - Corridor union: open cells for 64×64 turns and intersections
-- Stairwells: host floor cells are replaced by exact tread columns; ceiling cells are omitted where high-tread headroom crosses the slab
-- Transition shells union lower-route approaches and upper connectors, split both room-wall apertures, and seal the 176→192 ceiling bridge without capping it
+- Stairwells: host floor cells are replaced by exact tread columns; the inter-layer slab aperture omits the complete 192-unit run so no ceiling edge or shaft return crosses the flight
+- Transition shells union lower-route approaches and upper connectors, split both room-wall apertures, retain 80-unit standing headroom over the supported upper landing, preserve a full 64-unit crest throat, and seal the 176→192 ceiling bridge without capping it
 - Canonical `.map` serialization: worldspawn first, alphabetical keys (including spawn `angle`), canonical face order
 - Enhanced-only `_minlight 16` in worldspawn ensures fully occluded connector and stair
   faces receive baked lightmap data from the pinned ericw `light` stage

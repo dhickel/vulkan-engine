@@ -625,18 +625,13 @@ fn geometry_from_steps(
     tread_boxes: Vec<StairTread>,
 ) -> Result<Geometry, EnhancedError> {
     let lower_wall_opening = wall_opening(socket, room)?;
-    // Tread 5 surface is at Z=96 and requires headroom to Z=176, so the
-    // ceiling must be open above it.  skip(6) was one tread too short and
-    // left tread 5 with its 80-unit headroom partially occluded by a
-    // phantom ceiling remnant.
-    let high = bounds_of_rects(
-        tread_boxes
-            .iter()
-            .skip(5)
-            .map(|step| (step.bounds.0, step.bounds.1, step.bounds.3, step.bounds.4)),
-    )?;
+    // The inter-layer slab aperture owns the complete 192-unit run. Cutting
+    // only the mathematically high treads leaves a slab edge and shaft returns
+    // across the middle of the visible flight. The full tread footprint keeps
+    // every 56-unit player stance clear at every step depth while retaining a
+    // supported upper landing immediately beyond the final tread.
     let upper_ceiling_opening = CeilingOpening {
-        rect: high,
+        rect: footprint,
         z: room.floor_z + room.dims.2 as i32,
     };
     let headroom_volumes = tread_boxes
@@ -722,6 +717,14 @@ fn upper_departure_segments(
     };
     let previous = previous.bounds;
     let final_tread = final_tread.bounds;
+    let footprint = bounds_of_rects(treads.iter().map(|tread| {
+        (
+            tread.bounds.0,
+            tread.bounds.1,
+            tread.bounds.3,
+            tread.bounds.4,
+        )
+    }))?;
     let ascent = (
         (final_tread.0 - previous.0).signum(),
         (final_tread.1 - previous.1).signum(),
@@ -739,12 +742,8 @@ fn upper_departure_segments(
     let mut segments = Vec::with_capacity(3);
     for (dx, dy) in directions {
         let (start, end, envelope) = if dx != 0 {
-            let tangent = canonical_approach_center(
-                final_tread.1,
-                final_tread.4,
-                room.shell.1 + Q,
-                room.shell.3 - Q,
-            )?;
+            let tangent =
+                canonical_approach_center(final_tread.1, final_tread.4, footprint.1, footprint.3)?;
             let edge = if dx > 0 { final_tread.3 } else { final_tread.0 };
             let exterior = if dx > 0 {
                 room.shell.2 + Q
@@ -762,12 +761,8 @@ fn upper_departure_segments(
                 ),
             )
         } else {
-            let tangent = canonical_approach_center(
-                final_tread.0,
-                final_tread.3,
-                room.shell.0 + Q,
-                room.shell.2 - Q,
-            )?;
+            let tangent =
+                canonical_approach_center(final_tread.0, final_tread.3, footprint.0, footprint.2)?;
             let edge = if dy > 0 { final_tread.4 } else { final_tread.1 };
             let exterior = if dy > 0 {
                 room.shell.3 + Q
@@ -1007,11 +1002,15 @@ fn validate_intent_geometry(
             tread.bounds.4,
         )
     });
-    if !overlaps(intent.upper_ceiling_opening.rect, intent.footprint)
+    if intent.upper_ceiling_opening.rect != intent.footprint
         || intent.upper_ceiling_opening.z != lower.floor_z + lower.dims.2 as i32
         || intent.upper_approach_segments.is_empty()
         || final_tread
             .is_some_and(|tread| overlaps(tread, intent.upper_approach_segments[0].envelope))
+        || shared_boundary_span(
+            intent.upper_ceiling_opening.rect,
+            intent.upper_approach_segments[0].envelope,
+        ) < APPROACH_WIDTH
         || intent.upper_wall_opening.bottom_z != upper.floor_z + Q
     {
         return Err(failed(
@@ -1235,6 +1234,15 @@ fn bounds_of_boxes(boxes: impl Iterator<Item = Box3>) -> Result<Box3, EnhancedEr
 }
 fn overlaps(a: Rect, b: Rect) -> bool {
     a.0 < b.2 && a.2 > b.0 && a.1 < b.3 && a.3 > b.1
+}
+fn shared_boundary_span(a: Rect, b: Rect) -> i32 {
+    if a.0 == b.2 || a.2 == b.0 {
+        (a.3.min(b.3) - a.1.max(b.1)).max(0)
+    } else if a.1 == b.3 || a.3 == b.1 {
+        (a.2.min(b.2) - a.0.max(b.0)).max(0)
+    } else {
+        0
+    }
 }
 fn penetrates_room_interior(rect: Rect, room: &PlacedRoom) -> bool {
     overlaps(rect, room_interior(room))

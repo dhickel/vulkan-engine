@@ -193,8 +193,9 @@ fn emit_room_brushes(
     let ceiling_tex = texture_for(palette_name, TextureRole::Ceiling);
 
     // A stair owned by this lower host replaces, rather than overlays, its
-    // floor columns.  Its high treads likewise own the exact lower-ceiling
-    // exit cells.  All masks are quantum-aligned canonical intent geometry.
+    // floor columns. Its complete 192-unit run likewise owns the lower-ceiling
+    // aperture, preventing a slab edge across the visible flight. All masks
+    // are quantum-aligned canonical intent geometry.
     let floor_omissions: Vec<_> = topology
         .transitions
         .iter()
@@ -764,8 +765,8 @@ fn emit_stair_transitions(
             emit_solid_brush(out, x0, y0, z0, x1, y1, z1, "conn_floor");
         }
 
-        // Surround the open high-tread cells between the lower ceiling and
-        // upper-floor bridge.  Room-wall continuations begin at the former
+        // Surround the complete open stair run between the lower ceiling and
+        // upper-floor bridge. Room-wall continuations begin at the former
         // ceiling plane; ceiling-adjacent cells begin above the preserved
         // slab, so no shaft wall overlaps a room ceiling.
         emit_stair_exit_walls(
@@ -1563,16 +1564,29 @@ mod tests {
                 ),
             }
             let ceiling = transition.upper_ceiling_opening.rect;
-            assert!(
-                brushes.iter().all(|brush| {
-                    brush.6 != "bs_ceil"
-                        || !boxes_overlap(
-                            (brush.0, brush.1, brush.2, brush.3, brush.4, brush.5),
-                            (ceiling.0, ceiling.1, 160, ceiling.2, ceiling.3, 176),
-                        )
-                }),
-                "{kind:?} lower ceiling caps its vertical exit"
+            assert_eq!(
+                ceiling, transition.footprint,
+                "{kind:?} aperture must cover the complete stair run"
             );
+            for (index, tread) in transition.tread_boxes.iter().enumerate() {
+                assert!(
+                    brushes.iter().all(|brush| {
+                        brush.6 != "bs_ceil"
+                            || !boxes_overlap(
+                                (brush.0, brush.1, brush.2, brush.3, brush.4, brush.5),
+                                (
+                                    tread.bounds.0,
+                                    tread.bounds.1,
+                                    160,
+                                    tread.bounds.3,
+                                    tread.bounds.4,
+                                    176,
+                                ),
+                            )
+                    }),
+                    "{kind:?} lower ceiling overhangs tread {index}"
+                );
+            }
         }
     }
 
@@ -1893,6 +1907,14 @@ mod tests {
                     &format!("tread {index} headroom"),
                     (center.0, center.1, bounds.5 + 8),
                 );
+                assert_clear(
+                    &format!("tread {index} standing-height clearance"),
+                    (center.0, center.1, bounds.5 + 55),
+                );
+                assert_clear(
+                    &format!("tread {index} frozen headroom clearance"),
+                    (center.0, center.1, bounds.5 + 79),
+                );
             }
             let bridge = stair.upper_approach_segments[0].envelope;
             let bridge_center = ((bridge.0 + bridge.2) / 2, (bridge.1 + bridge.3) / 2);
@@ -1903,6 +1925,10 @@ mod tests {
             assert_clear(
                 "upper bridge headroom",
                 (bridge_center.0, bridge_center.1, 216),
+            );
+            assert_clear(
+                "upper landing standing-height clearance",
+                (bridge_center.0, bridge_center.1, 263),
             );
             let upper_opening = stair.upper_wall_opening;
             assert_clear(

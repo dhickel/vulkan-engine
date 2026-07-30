@@ -297,6 +297,7 @@ let (map_text, meta) = generate_enhanced(200, cfg)?;
 - Wall-edge narrow stairs use a 192×64-unit strip hugging a room wall
 - 12 treads × 16-unit riser = 192-unit climb (exactly the inter-layer offset)
 - Lower routes join the stair entrance through a split wall aperture; the upper path uses a split ceiling exit and upper-room wall aperture
+- The inter-layer slab aperture covers the full 192-unit stair run; the supported upper landing retains 80 units of headroom and a full 64-unit crest throat
 - `info_player_start` is centered on the canonical lower landing and emits a cardinal `angle` facing the stair opening
 - Socket portals are 64 units wide with 32-unit corner margins
 - All rooms have 176-unit height (≥ 80-unit required headroom for portals)

@@ -229,7 +229,7 @@ CC0-licensed, and deterministically built via `build.py`.
 | domain | `"dungeon-gen/v1"` | `"dungeon-gen/v2"` |
 | map classes | M1 + M2 | M2 only |
 | layers | 1 (flat) | 2 (lower + upper) |
-| vertical connections | none | room-scale grand or wall-edge narrow stairs (12-tread sealed shells) |
+| vertical connections | none | room-scale grand or wall-edge narrow stairs (12-tread sealed shells; full-run slab apertures and 64-unit crest throats) |
 | config type | `DungeonConfig` + `validate()` | `EnhancedConfig` (validates at construction) |
 | entry point | `generate(seed, config)` | `generate_enhanced(seed, config)` |
 | room placement | same-layer, no membership balancing | two-layer, balanced membership |
@@ -282,6 +282,7 @@ config generation, metadata population, and configuration validation errors.
 - **Junction center obstruction**: L/T/X closure posts belong only in outer quadrants. Test the entire central 64×64 square, not only the exact center point.
 - **Compiler warnings**: Generated output is accepted only when all three compiler stages are warning-free. The theme WAD includes compiler-only `skip`; never reintroduce `generator_brick` or an unbacked miptex.
 - **Canonical face order**: bottom, top, north, south, west, east. This order is frozen. Changing it breaks byte-compatibility.
+- **Stair aperture sizing**: Enhanced inter-layer slab apertures cover the complete 192-unit tread run. Keep the upper landing supported and align its first approach to a full 64-unit crest throat; a high-tread-only hole recreates the mid-flight overhang.
 - **Entity order**: worldspawn first, then creation-index order. Do not sort entities by classname or origin.
 - **Key order**: alphabetical by key string (ASCII byte order). Use `sort_unstable()` before emission.
 - **`HashMap`/`HashSet`**: Never iterate over these in serialization paths. Use `BTreeMap` or pre-sort into `Vec`.
