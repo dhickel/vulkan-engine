@@ -4,8 +4,10 @@
 //! are exported.
 
 pub mod assembly;
+pub mod compiler;
 pub mod contract;
 pub mod emission;
+pub mod fixtures;
 pub mod footprint;
 pub mod geometry;
 pub mod ir;
