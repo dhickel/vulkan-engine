@@ -48,11 +48,8 @@ pub fn run_pipeline(config: &ProofConfig, seed: V3Seed) -> Result<PipelineResult
     // Stage 3: Plan
     let plan_outcome = planner::plan_composition(seed, config, &topology)?;
 
-    // Stage 4: Assemblies (compile from plan + topology)
-    let _assembly = prefab::compile_assembly(&plan_outcome)?;
-
-    // Stage 5: Validate (assembly already validated during construction)
-    // Re-validate after compilation
+    // Stages 4–5: compile and validate the assembly once. `Assembly::new`
+    // establishes the validation boundary; later stages receive it read-only.
     let assembly = prefab::compile_assembly(&plan_outcome)?;
     if !assembly.validated {
         return Err(ContractError::InvariantViolation {
@@ -73,10 +70,10 @@ pub fn run_pipeline(config: &ProofConfig, seed: V3Seed) -> Result<PipelineResult
         .map(|v| ((v.x0 + v.x1) / 2, (v.y0 + v.y1) / 2, (v.z0 + v.z1) / 2))
         .collect();
 
-    // Stage 6: Serialize
+    // Stage 7: Serialize
     let map_text = emission::emit_map(&assembly, spawn_origin, spawn_yaw, &light_origins)?;
 
-    // Stage 7: Metadata
+    // Stage 8: Metadata
     let metadata = metadata::build_metadata(
         &topology,
         &plan_outcome,
@@ -95,56 +92,23 @@ pub fn run_pipeline(config: &ProofConfig, seed: V3Seed) -> Result<PipelineResult
     })
 }
 
-/// Run the pipeline and produce a canonical simple room map for the fixture.
+/// Run the canonical fixture through the same fallible one-way pipeline.
 ///
-/// This produces a deterministic single-room .map for the integrated proof
-/// fixture. All coordinates are quantum-aligned.
-pub fn run_canonical_pipeline(config: &ProofConfig, seed: V3Seed) -> (String, ProofMetadata) {
-    let mut alloc = V3IdAllocator::new();
-
-    // Build a minimal deterministic topology
-    let (footprints, layouts) =
-        footprint::build_footprints(config, seed, &mut alloc).expect("footprint");
-    let topology = topology::build_topology(config, &footprints, &layouts, seed, &mut alloc)
-        .expect("topology");
-
-    let plan_outcome = planner::plan_composition(seed, config, &topology).expect("plan");
-
-    let assembly = prefab::compile_assembly(&plan_outcome).expect("assembly");
-
-    let (spawn_vol, light_vols) =
-        topology::compute_reservations(&topology, &mut alloc).expect("reservations");
-    let spawn_origin = (
-        (spawn_vol.x0 + spawn_vol.x1) / 2,
-        (spawn_vol.y0 + spawn_vol.y1) / 2,
-        (spawn_vol.z0 + spawn_vol.z1) / 2,
-    );
-    let spawn_yaw = 90;
-    let light_origins: Vec<(i32, i32, i32)> = light_vols
-        .iter()
-        .map(|v| ((v.x0 + v.x1) / 2, (v.y0 + v.y1) / 2, (v.z0 + v.z1) / 2))
-        .collect();
-
-    let map_text =
-        emission::emit_map(&assembly, spawn_origin, spawn_yaw, &light_origins).expect("emission");
-
-    let metadata = metadata::build_metadata(
-        &topology,
-        &plan_outcome,
-        config,
-        spawn_origin,
-        spawn_yaw,
-        &light_origins,
-    );
-
-    (map_text, metadata)
+/// The canonical fixture is not a separate emission path: this preserves the
+/// stage boundary exercised by every integrated proof run.
+pub fn run_canonical_pipeline(
+    config: &ProofConfig,
+    seed: V3Seed,
+) -> Result<(String, ProofMetadata), ContractError> {
+    let result = run_pipeline(config, seed)?;
+    Ok((result.map_text, result.metadata))
 }
 
 /// Make the canonical integrated .map fixture for the sparse preset.
 pub fn make_canonical_fixture() -> (String, ProofMetadata) {
     let config = ProofConfig::new(Preset::Sparse, 2048).expect("valid config");
     let seed = V3Seed::new(0);
-    run_canonical_pipeline(&config, seed)
+    run_canonical_pipeline(&config, seed).expect("canonical proof pipeline")
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────

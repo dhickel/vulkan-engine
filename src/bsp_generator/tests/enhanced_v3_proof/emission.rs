@@ -23,6 +23,11 @@ pub fn emit_map(
             detail: "cannot emit unvalidated assembly".into(),
         });
     }
+    if !matches!(spawn_yaw, 0 | 90 | 180 | 270) {
+        return Err(ContractError::InvariantViolation {
+            detail: format!("spawn angle {spawn_yaw} is not cardinal"),
+        });
+    }
 
     let mut out = String::new();
 

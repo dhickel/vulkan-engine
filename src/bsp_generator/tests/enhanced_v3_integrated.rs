@@ -68,14 +68,14 @@ fn integrated_pipeline_matches_canonical_artifacts() {
         )
     });
 
+    let canonical_metadata_text = std::fs::read_to_string(&meta_path).unwrap_or_else(|e| {
+        panic!(
+            "canonical metadata fixture missing at {}: {e}",
+            meta_path.display()
+        )
+    });
     let canonical_meta: ProofMetadata =
-        serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap_or_else(|e| {
-            panic!(
-                "canonical metadata fixture missing at {}: {e}",
-                meta_path.display()
-            )
-        }))
-        .expect("parse canonical metadata");
+        serde_json::from_str(&canonical_metadata_text).expect("parse canonical metadata");
 
     // Run the pipeline
     let (generated_map, generated_meta) = pipeline::make_canonical_fixture();
@@ -89,6 +89,14 @@ fn integrated_pipeline_matches_canonical_artifacts() {
     assert_eq!(
         generated_meta, canonical_meta,
         "generated metadata does not match canonical fixture"
+    );
+    assert_eq!(
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&generated_meta).expect("serialize generated metadata")
+        ),
+        canonical_metadata_text,
+        "generated metadata bytes do not match canonical fixture"
     );
 }
 
@@ -281,18 +289,27 @@ fn only_validated_assembly_can_be_emitted() {
     assert!(map.contains("worldspawn"));
 }
 
-// ── N.8 Non-positive volume brush rejected ───────────────────────────
+// ── N.8 Arbitrary spawn angle ────────────────────────────────────────
 
 #[test]
-fn non_positive_volume_brush_rejected() {
-    let result = ConvexBrush::make_box((0, 0), (0, 0), (0, 0));
-    // Zero-volume is rejected by make_box validation
-    assert!(
-        result.is_err() || {
-            // Some implementations may accept but validation will fail
-            true
-        }
-    );
+fn arbitrary_spawn_angle_rejected() {
+    let brush = ConvexBrush::make_box((0, 64), (0, 64), (0, 128)).unwrap();
+    let assembly = Assembly::new(
+        vec![AssemblyBrush::new(
+            "test",
+            BrushRole::WallShell,
+            brush,
+            Support::World {
+                surface: FaceRole::Floor,
+            },
+        )],
+        vec![],
+        vec![],
+        vec![],
+    )
+    .unwrap();
+
+    assert!(emission::emit_map(&assembly, (32, 32, 16), 45, &[]).is_err());
 }
 
 // ── N.9 Unapproved normal ────────────────────────────────────────────
@@ -431,11 +448,14 @@ fn generated_map_has_valid_quake_syntax() {
         );
     }
 
-    // Must contain info_player_start
-    assert!(map.contains("info_player_start"));
-
-    // Must contain at least one light
-    assert!(map.contains("\"classname\" \"light\""));
+    // Worldspawn is followed only by one player start and light entities.
+    assert_eq!(map.matches("\"classname\"").count(), 5);
+    assert_eq!(map.matches("\"classname\" \"worldspawn\"").count(), 1);
+    assert_eq!(
+        map.matches("\"classname\" \"info_player_start\"").count(),
+        1
+    );
+    assert_eq!(map.matches("\"classname\" \"light\"").count(), 3);
 
     // No Valve-220 extensions
     assert!(!map.contains("_tb"));
