@@ -34,7 +34,11 @@ fn golden_collect_clip_planes_simple() {
     let qte = QuakeToEngine::default();
     let result = collision::collect_clip_planes(0, &clipnodes, &planes, &qte).unwrap();
     // Should collect from both nodes
-    assert!(result.len() >= 2, "expected at least 2 planes, got {}", result.len());
+    assert!(
+        result.len() >= 2,
+        "expected at least 2 planes, got {}",
+        result.len()
+    );
 }
 
 #[test]
@@ -48,7 +52,10 @@ fn golden_collect_clip_planes_invalid_headnode() {
 
 #[test]
 fn golden_collect_clip_planes_out_of_range() {
-    let clipnodes = vec![lumps::Clipnode { plane: 100, children: [-1, -1] }];
+    let clipnodes = vec![lumps::Clipnode {
+        plane: 100,
+        children: [-1, -1],
+    }];
     let planes = vec![lumps::Plane {
         normal: Vec3::X,
         dist: 0.0,
@@ -63,11 +70,7 @@ fn golden_collect_clip_planes_out_of_range() {
 #[test]
 fn golden_convex_from_unit_cube() {
     // 6 planes defining a unit cube centered at origin
-    let normals = vec![
-        Vec3::X, -Vec3::X,
-        Vec3::Y, -Vec3::Y,
-        Vec3::Z, -Vec3::Z,
-    ];
+    let normals = vec![Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z];
     let dists = vec![0.5, 0.5, 0.5, 0.5, 0.5, 0.5];
 
     let piece = collision::convex_from_planes(&normals, &dists, 1e-4).unwrap();
@@ -97,7 +100,9 @@ fn golden_convex_insufficient_planes() {
 fn golden_convex_open_region() {
     // Only 4 planes all opening inwards (unbounded region)
     let normals = vec![
-        Vec3::X, Vec3::Y, Vec3::Z,
+        Vec3::X,
+        Vec3::Y,
+        Vec3::Z,
         Vec3::new(1.0, 1.0, 1.0).normalize(),
     ];
     let dists = vec![0.0, 0.0, 0.0, 0.0];
@@ -129,11 +134,7 @@ fn golden_convex_complexity_exceeded() {
 #[test]
 fn golden_convex_degenerate_line() {
     // Planes that converge to a line (no volume)
-    let normals = vec![
-        Vec3::X,
-        -Vec3::X,
-        Vec3::Y,
-    ];
+    let normals = vec![Vec3::X, -Vec3::X, Vec3::Y];
     let dists = vec![0.0, 0.0, 0.0];
     let result = collision::convex_from_planes(&normals, &dists, 1e-4);
     assert!(result.is_err());
@@ -179,12 +180,10 @@ fn golden_world_collision_empty_clipnodes() {
 
 #[test]
 fn golden_world_collision_with_planes() {
-    let clipnodes = vec![
-        lumps::Clipnode {
-            plane: 0,
-            children: [-1, -2], // EMPTY, SOLID
-        },
-    ];
+    let clipnodes = vec![lumps::Clipnode {
+        plane: 0,
+        children: [-1, -2], // EMPTY, SOLID
+    }];
     let planes = vec![lumps::Plane {
         normal: Vec3::X,
         dist: 0.0,
@@ -201,27 +200,67 @@ fn golden_world_collision_with_planes() {
 #[test]
 fn golden_collision_recipe_for_brush() {
     let clipnodes = vec![
-        lumps::Clipnode { plane: 0, children: [1, -1] },
-        lumps::Clipnode { plane: 1, children: [2, -1] },
-        lumps::Clipnode { plane: 2, children: [3, -1] },
-        lumps::Clipnode { plane: 3, children: [4, -1] },
-        lumps::Clipnode { plane: 4, children: [5, -1] },
-        lumps::Clipnode { plane: 5, children: [-2, -2] },
+        lumps::Clipnode {
+            plane: 0,
+            children: [1, -1],
+        },
+        lumps::Clipnode {
+            plane: 1,
+            children: [2, -1],
+        },
+        lumps::Clipnode {
+            plane: 2,
+            children: [3, -1],
+        },
+        lumps::Clipnode {
+            plane: 3,
+            children: [4, -1],
+        },
+        lumps::Clipnode {
+            plane: 4,
+            children: [5, -1],
+        },
+        lumps::Clipnode {
+            plane: 5,
+            children: [-2, -2],
+        },
     ];
     // 6 planes forming a box
     let planes = vec![
-        lumps::Plane { normal: Vec3::X, dist: 128.0, plane_type: 0 },
-        lumps::Plane { normal: -Vec3::X, dist: 0.0, plane_type: 0 },
-        lumps::Plane { normal: Vec3::Y, dist: 128.0, plane_type: 0 },
-        lumps::Plane { normal: -Vec3::Y, dist: 0.0, plane_type: 0 },
-        lumps::Plane { normal: Vec3::Z, dist: 128.0, plane_type: 0 },
-        lumps::Plane { normal: -Vec3::Z, dist: 0.0, plane_type: 0 },
+        lumps::Plane {
+            normal: Vec3::X,
+            dist: 128.0,
+            plane_type: 0,
+        },
+        lumps::Plane {
+            normal: -Vec3::X,
+            dist: 0.0,
+            plane_type: 0,
+        },
+        lumps::Plane {
+            normal: Vec3::Y,
+            dist: 128.0,
+            plane_type: 0,
+        },
+        lumps::Plane {
+            normal: -Vec3::Y,
+            dist: 0.0,
+            plane_type: 0,
+        },
+        lumps::Plane {
+            normal: Vec3::Z,
+            dist: 128.0,
+            plane_type: 0,
+        },
+        lumps::Plane {
+            normal: -Vec3::Z,
+            dist: 0.0,
+            plane_type: 0,
+        },
     ];
 
     let qte = QuakeToEngine::default();
-    let recipe = collision::build_collision_recipe(
-        1, 1, 0, false, &clipnodes, &planes, &qte,
-    );
+    let recipe = collision::build_collision_recipe(1, 1, 0, false, &clipnodes, &planes, &qte);
 
     assert!(recipe.is_ok(), "should build recipe: {:?}", recipe.err());
     let recipe = recipe.unwrap();
@@ -233,9 +272,10 @@ fn golden_collision_recipe_for_brush() {
 
 #[test]
 fn golden_collision_recipe_trigger() {
-    let clipnodes = vec![
-        lumps::Clipnode { plane: 0, children: [-2, -2] },
-    ];
+    let clipnodes = vec![lumps::Clipnode {
+        plane: 0,
+        children: [-2, -2],
+    }];
     let planes = vec![lumps::Plane {
         normal: Vec3::X,
         dist: 0.0,
@@ -244,9 +284,7 @@ fn golden_collision_recipe_trigger() {
 
     let qte = QuakeToEngine::default();
     // A single plane with both sides solid will produce a degenerate convex
-    let recipe = collision::build_collision_recipe(
-        2, 1, 0, true, &clipnodes, &planes, &qte,
-    );
+    let recipe = collision::build_collision_recipe(2, 1, 0, true, &clipnodes, &planes, &qte);
 
     assert!(recipe.is_ok(), "trigger recipes should not fail hard");
     let recipe = recipe.unwrap();

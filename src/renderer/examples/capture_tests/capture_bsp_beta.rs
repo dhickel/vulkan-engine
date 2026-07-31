@@ -53,10 +53,7 @@ fn main() {
     let palette_bytes = match std::fs::read(&palette_path) {
         Ok(b) => b,
         Err(e) => {
-            log::error!(
-                "Failed to read palette '{}': {e}",
-                palette_path.display()
-            );
+            log::error!("Failed to read palette '{}': {e}", palette_path.display());
             std::process::exit(1);
         }
     };
@@ -67,13 +64,11 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let lit_bytes = lit_path.as_ref().and_then(|p| {
-        match std::fs::read(p) {
-            Ok(b) => Some(b),
-            Err(e) => {
-                log::error!("Failed to read LIT '{}': {e}", p.display());
-                None
-            }
+    let lit_bytes = lit_path.as_ref().and_then(|p| match std::fs::read(p) {
+        Ok(b) => Some(b),
+        Err(e) => {
+            log::error!("Failed to read LIT '{}': {e}", p.display());
+            None
         }
     });
 
@@ -244,10 +239,7 @@ fn run_strict_capture_test(
     // ── Strict extraction: no ambient fallback ─────────────────────────
     let palette = bsp::companions::validate_palette(palette_bytes, true)
         .map_err(|report| {
-            log::error!(
-                "Strict palette validation failed: {}",
-                report.message
-            );
+            log::error!("Strict palette validation failed: {}", report.message);
             std::process::exit(1);
         })
         .ok()
@@ -326,18 +318,18 @@ fn run_strict_capture_test(
     );
 
     // ── Capture at frozen settings ─────────────────────────────────────
-    let output_dir = args
-        .capture_dir
-        .clone()
-        .unwrap_or_else(|| {
-            PathBuf::from(format!(
-                ".internal-dev/captures/bsp-dungeon-completion/camera-{}",
-                camera_label
-            ))
-        });
+    let output_dir = args.capture_dir.clone().unwrap_or_else(|| {
+        PathBuf::from(format!(
+            ".internal-dev/captures/bsp-dungeon-completion/camera-{}",
+            camera_label
+        ))
+    });
 
     std::fs::create_dir_all(&output_dir).unwrap_or_else(|e| {
-        log::error!("Failed to create capture dir '{}': {e}", output_dir.display());
+        log::error!(
+            "Failed to create capture dir '{}': {e}",
+            output_dir.display()
+        );
     });
 
     let png_path = output_dir.join(format!("capture_{camera_label}_frame_5.png"));
@@ -401,10 +393,7 @@ fn run_strict_capture_test(
     }
 
     if !capture_done {
-        log::error!(
-            "Capture did not complete within {} frames",
-            frame_budget
-        );
+        log::error!("Capture did not complete within {} frames", frame_budget);
         std::process::exit(1);
     }
 
@@ -447,7 +436,8 @@ fn frozen_camera_for_label(
             &extracted.transform,
         )
     };
-    let valid_origin = |point: Vec3| point.is_finite() && contents_at(point) != PointContents::Solid;
+    let valid_origin =
+        |point: Vec3| point.is_finite() && contents_at(point) != PointContents::Solid;
 
     let spawn = extracted
         .entity_descriptors
@@ -502,7 +492,9 @@ fn frozen_camera_for_label(
         .map(|direction| {
             let clear_distance = [0.4064, 0.8128, 1.2192, 1.6256, 2.032]
                 .into_iter()
-                .take_while(|distance| contents_at(eye + direction * *distance) != PointContents::Solid)
+                .take_while(|distance| {
+                    contents_at(eye + direction * *distance) != PointContents::Solid
+                })
                 .last()
                 .unwrap_or(0.4064);
             (direction, clear_distance)

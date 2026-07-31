@@ -9,11 +9,10 @@
 
 use engine_events::{ObjectKind, SceneObjectId};
 use glam::Vec3;
-use renderer::{
-    DirectionalLight, DirectionalShadowConfig, PointLight,
-    Scene, SpotLight, SceneNodeId,
-};
 use renderer::object::ObjectHandle;
+use renderer::{
+    DirectionalLight, DirectionalShadowConfig, PointLight, Scene, SceneNodeId, SpotLight,
+};
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -57,9 +56,7 @@ fn cross_scene_object_id_does_not_validate() {
     let mut scene_a = new_test_scene();
     let scene_b = new_test_scene();
 
-    let node_a = scene_a
-        .create_node_default(None)
-        .expect("create node in A");
+    let node_a = scene_a.create_node_default(None).expect("create node in A");
     let obj_a = scene_a.object_id(node_a).expect("object ID from A");
 
     // Resolving the A object in B must fail (wrong provenance).
@@ -72,12 +69,8 @@ fn same_slot_generation_from_two_worlds_rejects_wrong_scene() {
     let mut scene_a = new_test_scene();
     let mut scene_b = new_test_scene();
 
-    let id_a = scene_a
-        .create_node_default(None)
-        .expect("create node in A");
-    let id_b = scene_b
-        .create_node_default(None)
-        .expect("create node in B");
+    let id_a = scene_a.create_node_default(None).expect("create node in A");
+    let id_b = scene_b.create_node_default(None).expect("create node in B");
 
     // Both are slot 0, generation 0, but different provenance.
     let obj_a = scene_a.object_id(id_a).expect("object ID from A");
@@ -93,9 +86,7 @@ fn same_slot_generation_from_two_worlds_rejects_wrong_scene() {
 #[test]
 fn stale_handle_rejected_by_object_id() {
     let mut scene = new_test_scene();
-    let node = scene
-        .create_node_default(None)
-        .expect("create node");
+    let node = scene.create_node_default(None).expect("create node");
     let obj = scene.object_id(node).expect("valid object ID");
 
     scene.remove_node(node).expect("remove node");
@@ -116,9 +107,7 @@ fn vacant_slot_rejected() {
 #[test]
 fn wrong_kind_access_rejected() {
     let mut scene = new_test_scene();
-    let node = scene
-        .create_node_default(None)
-        .expect("create node");
+    let node = scene.create_node_default(None).expect("create node");
     let obj = scene.object_id(node).expect("object ID");
 
     // The ObjectId has kind Node, not PointLight.
@@ -226,7 +215,9 @@ fn object_id_to_typed_handle_roundtrip_point_light() {
 #[test]
 fn object_id_to_typed_handle_roundtrip_directional_light() {
     let mut scene = new_test_scene();
-    let id = scene.create_directional_light(make_directional_light()).unwrap();
+    let id = scene
+        .create_directional_light(make_directional_light())
+        .unwrap();
     let obj = scene.object_id_for_directional_light(id).unwrap();
 
     let resolved = scene.resolve_object(obj).unwrap();
@@ -275,7 +266,9 @@ fn find_object_by_persistent_id_roundtrip() {
 #[test]
 fn find_object_by_persistent_id_returns_none_for_unknown() {
     let scene = new_test_scene();
-    let unknown = SceneObjectId::new("object.deadbeef0000000000000000000000000000000000000000000000000000000000");
+    let unknown = SceneObjectId::new(
+        "object.deadbeef0000000000000000000000000000000000000000000000000000000000",
+    );
     assert!(scene.find_object_by_persistent_id(&unknown).is_none());
 }
 
@@ -287,7 +280,9 @@ fn persistent_id_uniqueness_across_all_kinds() {
 
     let node = scene.create_node_default(None).unwrap();
     let pl_id = scene.create_point_light(make_point_light(1.0)).unwrap();
-    let dl_id = scene.create_directional_light(make_directional_light()).unwrap();
+    let dl_id = scene
+        .create_directional_light(make_directional_light())
+        .unwrap();
     let sl_id = scene.create_spot_light(make_spot_light()).unwrap();
 
     let obj_node = scene.object_id(node).unwrap();
@@ -359,7 +354,9 @@ fn invariant_audit_after_create_and_remove() {
 #[test]
 fn directional_shadow_config_stored_in_record() {
     let mut scene = new_test_scene();
-    let dl_id = scene.create_directional_light(make_directional_light()).unwrap();
+    let dl_id = scene
+        .create_directional_light(make_directional_light())
+        .unwrap();
 
     let cfg = DirectionalShadowConfig {
         enabled: true,
@@ -367,9 +364,7 @@ fn directional_shadow_config_stored_in_record() {
         cascade_count: 3,
         cascade_split_lambda: 0.75,
     };
-    scene
-        .set_directional_shadow_config(dl_id, cfg)
-        .unwrap();
+    scene.set_directional_shadow_config(dl_id, cfg).unwrap();
 
     let stored = scene
         .world()

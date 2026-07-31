@@ -63,6 +63,8 @@ use crate::data::data_cache::{
     VkPipelineType, VkSamplerCache, VkShaderCache,
 };
 
+#[cfg(feature = "bsp")]
+use crate::api::bsp::{BspEvidenceRequest, BspEvidenceRequestKey, BspEvidenceStatus};
 use crate::api::config::{DueFrameCapture, FrameCaptureStatus, VisualTuning};
 use crate::data::data_util::CountdownLatch;
 use crate::data::gpu_data::{
@@ -80,10 +82,6 @@ use crate::rendergraph::RenderGraph;
 use crate::scene::debug_scenarios;
 use crate::scene::render_submission::RenderSubmission;
 use crate::scene::scene_world::SceneWorld;
-#[cfg(feature = "bsp")]
-use crate::api::bsp::{
-    BspEvidenceRequest, BspEvidenceRequestKey, BspEvidenceStatus,
-};
 use crate::vulkan::vk_debug::{discard_frame_capture, finalize_frame_capture, PendingFrameCapture};
 use crate::vulkan::vk_descriptor::*;
 #[cfg(feature = "csm")]
@@ -186,7 +184,8 @@ pub struct VkRenderCore {
     /// BSP arena retirement queue — holds complete BspRetirementClosure payloads
     /// awaiting GPU fence completion.
     #[cfg(feature = "bsp")]
-    pub(crate) bsp_retirement_queue: GpuRetirementQueue<crate::data::retirement::BspRetirementClosure>,
+    pub(crate) bsp_retirement_queue:
+        GpuRetirementQueue<crate::data::retirement::BspRetirementClosure>,
     /// Phase 07: Pending BSP evidence request (set before submission build, consumed during recording).
     #[cfg(feature = "bsp")]
     pub(crate) bsp_evidence_request: Option<(BspEvidenceRequestKey, BspEvidenceRequest)>,
@@ -1538,7 +1537,7 @@ impl VkRenderCore {
             debug_lines: crate::vulkan::vk_debug_lines::VkDebugLines::new(
                 crate::vulkan::vk_debug_lines::DEFAULT_MAX_DEBUG_LINES,
             ),
-                        sprites: crate::vulkan::vk_sprites::VkSprites::new(
+            sprites: crate::vulkan::vk_sprites::VkSprites::new(
                 crate::vulkan::vk_sprites::DEFAULT_MAX_SPRITES,
             ),
         };
@@ -1760,7 +1759,7 @@ impl VkRenderCore {
             debug_lines: crate::vulkan::vk_debug_lines::VkDebugLines::new(
                 crate::vulkan::vk_debug_lines::DEFAULT_MAX_DEBUG_LINES,
             ),
-                        sprites: crate::vulkan::vk_sprites::VkSprites::new(
+            sprites: crate::vulkan::vk_sprites::VkSprites::new(
                 crate::vulkan::vk_sprites::DEFAULT_MAX_SPRITES,
             ),
         };
@@ -2330,10 +2329,7 @@ impl VkRenderCore {
     ) -> Result<crate::api::bsp::PreparedBspMount, String> {
         use crate::vulkan::vk_types::VkQueueType;
 
-        let transfer_queue = self
-            .vulkan_cache
-            .queues
-            .get_queue(VkQueueType::Transfer);
+        let transfer_queue = self.vulkan_cache.queues.get_queue(VkQueueType::Transfer);
         let transfer_pool = self.transfer.get_local_transfer_pool().pool;
 
         crate::api::bsp::PreparedBspMount::upload_from_extracted(

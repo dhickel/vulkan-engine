@@ -71,7 +71,10 @@ impl PointContents {
 
     /// Whether this contents is a liquid.
     pub fn is_liquid(self) -> bool {
-        matches!(self, PointContents::Water | PointContents::Slime | PointContents::Lava)
+        matches!(
+            self,
+            PointContents::Water | PointContents::Slime | PointContents::Lava
+        )
     }
 
     /// Whether this contents is empty (outside or void).
@@ -186,8 +189,13 @@ pub fn trace_line(
     if headnode == 0 && hull as usize != 0 {
         // Hull not compiled; fall back to point hull.
         return trace_stored_hull(
-            start, end, StoredHull::Point,
-            clipnodes, planes, models[0].headnode[0], qte,
+            start,
+            end,
+            StoredHull::Point,
+            clipnodes,
+            planes,
+            models[0].headnode[0],
+            qte,
         );
     }
     trace_stored_hull(start, end, hull, clipnodes, planes, headnode, qte)
@@ -394,7 +402,12 @@ fn recursive_hull_check(
 
     if node_idx < 0 {
         if node_idx == clip_contents::SOLID {
-            *trace = TraceResult::hit(p1f.clamp(0.0, 1.0), hit_normal, hit_dist, PointContents::Solid);
+            *trace = TraceResult::hit(
+                p1f.clamp(0.0, 1.0),
+                hit_normal,
+                hit_dist,
+                PointContents::Solid,
+            );
         }
         return;
     }
@@ -410,35 +423,114 @@ fn recursive_hull_check(
     let d2 = p2.dot(plane.normal) - plane.dist;
 
     if d1 >= 0.0 && d2 >= 0.0 {
-        recursive_hull_check(p1, p2, p1f, p2f, cn.children[0], clipnodes, planes, qte, epsilon, hit_normal, hit_dist, trace);
+        recursive_hull_check(
+            p1,
+            p2,
+            p1f,
+            p2f,
+            cn.children[0],
+            clipnodes,
+            planes,
+            qte,
+            epsilon,
+            hit_normal,
+            hit_dist,
+            trace,
+        );
     } else if d1 < 0.0 && d2 < 0.0 {
-        recursive_hull_check(p1, p2, p1f, p2f, cn.children[1], clipnodes, planes, qte, epsilon, hit_normal, hit_dist, trace);
+        recursive_hull_check(
+            p1,
+            p2,
+            p1f,
+            p2f,
+            cn.children[1],
+            clipnodes,
+            planes,
+            qte,
+            epsilon,
+            hit_normal,
+            hit_dist,
+            trace,
+        );
     } else {
         let frac = (d1 / (d1 - d2)).clamp(0.0, 1.0);
         let mid = *p1 + frac * (*p2 - *p1);
         let midf = p1f + frac * (p2f - p1f);
 
         let start_front = d1 >= 0.0;
-        let first_child = if start_front { cn.children[0] } else { cn.children[1] };
-        let second_child = if start_front { cn.children[1] } else { cn.children[0] };
+        let first_child = if start_front {
+            cn.children[0]
+        } else {
+            cn.children[1]
+        };
+        let second_child = if start_front {
+            cn.children[1]
+        } else {
+            cn.children[0]
+        };
 
         let (engine_normal, engine_dist) = qte.plane(plane.normal, plane.dist);
-        let crossing_normal = if start_front { engine_normal } else { -engine_normal };
-        let crossing_dist = if start_front { engine_dist } else { -engine_dist };
+        let crossing_normal = if start_front {
+            engine_normal
+        } else {
+            -engine_normal
+        };
+        let crossing_dist = if start_front {
+            engine_dist
+        } else {
+            -engine_dist
+        };
 
-        recursive_hull_check(p1, &mid, p1f, midf, first_child, clipnodes, planes, qte, epsilon, hit_normal, hit_dist, trace);
+        recursive_hull_check(
+            p1,
+            &mid,
+            p1f,
+            midf,
+            first_child,
+            clipnodes,
+            planes,
+            qte,
+            epsilon,
+            hit_normal,
+            hit_dist,
+            trace,
+        );
         if !trace.no_hit {
             return;
         }
 
-        let push = if start_front { -plane.normal } else { plane.normal } * (epsilon / qte.scale.max(1e-10));
+        let push = if start_front {
+            -plane.normal
+        } else {
+            plane.normal
+        } * (epsilon / qte.scale.max(1e-10));
         let just_across = mid + push;
-        if clipnode_point_contents_quake(just_across, clipnodes, planes, second_child) == PointContents::Solid {
-            *trace = TraceResult::hit(midf.clamp(0.0, 1.0), crossing_normal, crossing_dist, PointContents::Solid);
+        if clipnode_point_contents_quake(just_across, clipnodes, planes, second_child)
+            == PointContents::Solid
+        {
+            *trace = TraceResult::hit(
+                midf.clamp(0.0, 1.0),
+                crossing_normal,
+                crossing_dist,
+                PointContents::Solid,
+            );
             return;
         }
 
-        recursive_hull_check(&mid, p2, midf, p2f, second_child, clipnodes, planes, qte, epsilon, crossing_normal, crossing_dist, trace);
+        recursive_hull_check(
+            &mid,
+            p2,
+            midf,
+            p2f,
+            second_child,
+            clipnodes,
+            planes,
+            qte,
+            epsilon,
+            crossing_normal,
+            crossing_dist,
+            trace,
+        );
     }
 }
 

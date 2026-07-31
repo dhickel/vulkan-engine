@@ -794,9 +794,7 @@ pub fn authorize_direct_import(
     // ── 2. Try exact-single-root fast path ────────────────────────────
     match try_fast_path(&plan) {
         Ok(import) => return Ok(import),
-        Err(
-            PackageLoadError::NoCommonAncestor | PackageLoadError::UnconfinedDirectRoot { .. },
-        ) => {
+        Err(PackageLoadError::NoCommonAncestor | PackageLoadError::UnconfinedDirectRoot { .. }) => {
             // Fall through to staging — unrelated roots are expected.
         }
         Err(e) => return Err(e),
@@ -865,9 +863,7 @@ impl DirectImportPlan {
         // Reject symlink components and canonicalize for purity.
         let canonical_bsp = canonicalize_direct_path(bsp_path)?;
         let canonical_palette = canonicalize_direct_path(palette_path)?;
-        let canonical_lit = lit_path
-            .map(canonicalize_direct_path)
-            .transpose()?;
+        let canonical_lit = lit_path.map(canonicalize_direct_path).transpose()?;
         let canonical_wads: Vec<PathBuf> = wad_paths
             .iter()
             .map(|p| canonicalize_direct_path(p))
@@ -884,9 +880,7 @@ impl DirectImportPlan {
             .zip(canonical_wads.iter())
             .enumerate()
             .map(|(ordinal, (original, canonical))| {
-                let basename = sanitize_wad_basename(
-                    &original.to_string_lossy(),
-                )?;
+                let basename = sanitize_wad_basename(&original.to_string_lossy())?;
                 if !seen_basenames.insert(basename.clone()) {
                     return Err(PackageLoadError::InvalidWadBasename {
                         path: original.display().to_string(),
@@ -897,10 +891,7 @@ impl DirectImportPlan {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mut source_roots: Vec<PathBuf> = vec![
-            canonical_bsp.clone(),
-            canonical_palette.clone(),
-        ];
+        let mut source_roots: Vec<PathBuf> = vec![canonical_bsp.clone(), canonical_palette.clone()];
         if let Some(ref lit) = canonical_lit {
             source_roots.push(lit.clone());
         }
@@ -1073,13 +1064,12 @@ fn authorize_single_file(
         reason: format!("cannot create narrow package root: {error}"),
     })?;
 
-    let filename = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| PackageLoadError::CompanionRoot {
+    let filename = path.file_name().and_then(|s| s.to_str()).ok_or_else(|| {
+        PackageLoadError::CompanionRoot {
             path: path.to_path_buf(),
             reason: "resource path has no filename".to_string(),
-        })?;
+        }
+    })?;
 
     // Each narrow authorization uses its own ledger, but we check the
     // aggregate budget afterward.
@@ -1118,9 +1108,7 @@ fn try_fast_path(plan: &DirectImportPlan) -> Result<AuthorizedBspImport, Package
     // Reject the filesystem root or any root broader than the declared
     // resource set.
     if common_root.parent().is_none() {
-        return Err(PackageLoadError::UnconfinedDirectRoot {
-            root: common_root,
-        });
+        return Err(PackageLoadError::UnconfinedDirectRoot { root: common_root });
     }
 
     let package_root =
@@ -1217,10 +1205,8 @@ impl DirectImportStaging {
         let hex = rng.iter().map(|b| format!("{:02x}", b)).collect::<String>();
 
         let root = parent.join(format!("direct-import-staging-{}", hex));
-        std::fs::create_dir_all(&root).map_err(|e| {
-            PackageLoadError::StagingCreateFailed {
-                reason: format!("cannot create staging root '{}': {}", root.display(), e),
-            }
+        std::fs::create_dir_all(&root).map_err(|e| PackageLoadError::StagingCreateFailed {
+            reason: format!("cannot create staging root '{}': {}", root.display(), e),
         })?;
 
         // Set restrictive permissions where supported.
@@ -1279,8 +1265,7 @@ impl DirectImportStaging {
 
         // Sort WADs by ordinal to preserve declaration order.
         staged_wads.sort_by_key(|(ord, _)| *ord);
-        let staged_wad_paths: Vec<PathBuf> =
-            staged_wads.into_iter().map(|(_, p)| p).collect();
+        let staged_wad_paths: Vec<PathBuf> = staged_wads.into_iter().map(|(_, p)| p).collect();
 
         let staged_textures_dir = if let Some(ref tex) = plan.textures_dir {
             // Copy the textures directory contents into staging.
@@ -1301,11 +1286,10 @@ impl DirectImportStaging {
         let staged_bsp = staged_bsp.ok_or_else(|| PackageLoadError::StagingAuthorizeFailed {
             reason: "no BSP staged".to_string(),
         })?;
-        let staged_palette = staged_palette.ok_or_else(|| {
-            PackageLoadError::StagingAuthorizeFailed {
+        let staged_palette =
+            staged_palette.ok_or_else(|| PackageLoadError::StagingAuthorizeFailed {
                 reason: "no palette staged".to_string(),
-            }
-        })?;
+            })?;
 
         Ok(StagedClosure {
             staged_root: self.root.clone(),
@@ -1328,11 +1312,9 @@ impl DirectImportStaging {
             return Ok(());
         }
         self.cleanup_required = false;
-        std::fs::remove_dir_all(&self.root).map_err(|e| {
-            PackageLoadError::StagingCleanupFailed {
-                path: self.root.clone(),
-                reason: format!("{}", e),
-            }
+        std::fs::remove_dir_all(&self.root).map_err(|e| PackageLoadError::StagingCleanupFailed {
+            path: self.root.clone(),
+            reason: format!("{}", e),
         })
     }
 }
@@ -1402,12 +1384,11 @@ impl StagedClosure {
             lit.logical_id = NarrowRole::Lit.semantic_logical_id();
         }
         for (i, wad) in import.wads.iter_mut().enumerate() {
-            wad.resource.logical_id =
-                NarrowRole::Wad {
-                    ordinal: wad.ordinal,
-                    basename: wad.basename.clone(),
-                }
-                .semantic_logical_id();
+            wad.resource.logical_id = NarrowRole::Wad {
+                ordinal: wad.ordinal,
+                basename: wad.basename.clone(),
+            }
+            .semantic_logical_id();
             // Ensure the ordinal matches the plan.
             if let Some((plan_ordinal, _, _)) = plan.wad_entries.get(i) {
                 if wad.ordinal != *plan_ordinal {
@@ -1465,15 +1446,17 @@ fn stage_copy_exclusive(
             reason: format!("cannot create '{}': {}", dest.display(), e),
         })?;
 
-    file.write_all(bytes).map_err(|e| PackageLoadError::StagingCopyFailed {
-        role: format!("{:?}", role),
-        reason: format!("write to '{}' failed: {}", dest.display(), e),
-    })?;
+    file.write_all(bytes)
+        .map_err(|e| PackageLoadError::StagingCopyFailed {
+            role: format!("{:?}", role),
+            reason: format!("write to '{}' failed: {}", dest.display(), e),
+        })?;
 
-    file.flush().map_err(|e| PackageLoadError::StagingCopyFailed {
-        role: format!("{:?}", role),
-        reason: format!("flush to '{}' failed: {}", dest.display(), e),
-    })?;
+    file.flush()
+        .map_err(|e| PackageLoadError::StagingCopyFailed {
+            role: format!("{:?}", role),
+            reason: format!("flush to '{}' failed: {}", dest.display(), e),
+        })?;
 
     // Hash-verify the written bytes.
     let written = std::fs::read(dest).map_err(|e| PackageLoadError::StagingCopyFailed {
@@ -1495,11 +1478,9 @@ fn stage_copy_exclusive(
 /// Copy a directory's regular-file contents recursively into a destination.
 /// Rejects symlinks, devices, FIFOs, sockets, and non-regular files.
 fn copy_dir_contents(src: &Path, dest: &Path) -> Result<(), PackageLoadError> {
-    for entry in std::fs::read_dir(src).map_err(|e| {
-        PackageLoadError::StagingCopyFailed {
-            role: "textures".to_string(),
-            reason: format!("cannot read directory '{}': {}", src.display(), e),
-        }
+    for entry in std::fs::read_dir(src).map_err(|e| PackageLoadError::StagingCopyFailed {
+        role: "textures".to_string(),
+        reason: format!("cannot read directory '{}': {}", src.display(), e),
     })? {
         let entry = entry.map_err(|e| PackageLoadError::StagingCopyFailed {
             role: "textures".to_string(),
@@ -1542,12 +1523,11 @@ fn copy_dir_contents(src: &Path, dest: &Path) -> Result<(), PackageLoadError> {
             })?;
             copy_dir_contents(&path, &sub_dest)?;
         } else if ft.is_file() {
-            let contents = std::fs::read(&path).map_err(|e| {
-                PackageLoadError::StagingCopyFailed {
+            let contents =
+                std::fs::read(&path).map_err(|e| PackageLoadError::StagingCopyFailed {
                     role: "textures".to_string(),
                     reason: format!("cannot read '{}': {}", path.display(), e),
-                }
-            })?;
+                })?;
             let name = entry.file_name();
             let dest_file = dest.join(&name);
             std::fs::write(&dest_file, &contents).map_err(|e| {

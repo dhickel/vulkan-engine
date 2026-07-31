@@ -14,8 +14,8 @@ use std::thread::JoinHandle;
 
 use glam::{Vec3, Vec4};
 use renderer::prelude::{
-    AssetError, MeshHandle, PointLight, ProceduralMeshData,
-    ProceduralVertex, Renderer, Scene, SceneError, SceneNodeId,
+    AssetError, MeshHandle, PointLight, ProceduralMeshData, ProceduralVertex, Renderer, Scene,
+    SceneError, SceneNodeId,
 };
 
 use crate::config::{ResolvedAppConfig, SceneConfigIdentity};
@@ -791,7 +791,8 @@ pub fn stage_initial_scene(
     };
 
     // Create stable point lights
-    let mut light_ids: Vec<renderer::prelude::PointLightId> = Vec::with_capacity(package.lights.len());
+    let mut light_ids: Vec<renderer::prelude::PointLightId> =
+        Vec::with_capacity(package.lights.len());
     for light in &package.lights {
         let id = scene.create_point_light(PointLight {
             position: Vec3::new(light.position[0], light.position[1], light.position[2]),
@@ -804,11 +805,12 @@ pub fn stage_initial_scene(
     log::info!("{} stable point lights created", light_ids.len());
 
     // Load environment
-    let env_path = env_path
-        .cloned()
-        .unwrap_or_else(|| std::path::PathBuf::from("apps/dungeon_dogfood/assets/sky_maps/indoor_4k.exr"));
+    let env_path = env_path.cloned().unwrap_or_else(|| {
+        std::path::PathBuf::from("apps/dungeon_dogfood/assets/sky_maps/indoor_4k.exr")
+    });
     if env_path.exists() {
-        match assets.load_environment(renderer::prelude::EnvironmentSource::Auto(env_path.clone())) {
+        match assets.load_environment(renderer::prelude::EnvironmentSource::Auto(env_path.clone()))
+        {
             Ok(env_handle) => {
                 scene.set_skybox(env_handle);
                 log::info!("IBL environment loaded: {}", env_path.display());
@@ -981,11 +983,17 @@ mod tests {
         while !state.worker_handle.as_ref().unwrap().is_finished() {
             std::thread::yield_now();
         }
-        let result = state.poll_worker().expect("latest panic should be reported");
+        let result = state
+            .poll_worker()
+            .expect("latest panic should be reported");
 
         assert_eq!(result.request_id, 41);
         assert_eq!(result.config.document.generator.seed, 77);
-        assert!(result.error.as_deref().unwrap().contains("attributed panic fixture"));
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("attributed panic fixture"));
     }
 
     // ── Worker builds valid package ────────────────────────────────────
@@ -1021,7 +1029,11 @@ mod tests {
             }
         };
 
-        assert!(result.error.is_none(), "unexpected error: {:?}", result.error);
+        assert!(
+            result.error.is_none(),
+            "unexpected error: {:?}",
+            result.error
+        );
         let pkg = result.package.unwrap();
         assert!(pkg.total_voxels > 0);
         assert_eq!(pkg.lights.len(), 9);

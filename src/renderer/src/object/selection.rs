@@ -306,7 +306,10 @@ impl Selection {
                 }
             }
         }
-        let removed: Vec<ObjectId> = old.into_iter().filter(|id| !self.set.contains(id)).collect();
+        let removed: Vec<ObjectId> = old
+            .into_iter()
+            .filter(|id| !self.set.contains(id))
+            .collect();
         SelectionChange {
             before_primary: before,
             after_primary: self.primary().copied(),
@@ -355,9 +358,7 @@ impl Selection {
     ) -> usize {
         self.entries
             .iter()
-            .filter(|id| {
-                id.provenance() != scene_provenance || !is_live(id)
-            })
+            .filter(|id| id.provenance() != scene_provenance || !is_live(id))
             .count()
     }
 }
@@ -480,7 +481,12 @@ mod tests {
             if id.slot() == 2 {
                 None
             } else {
-                Some(ObjectId::test(2, ObjectKind::Node, id.slot(), id.generation()))
+                Some(ObjectId::test(
+                    2,
+                    ObjectKind::Node,
+                    id.slot(),
+                    id.generation(),
+                ))
             }
         });
         assert_eq!(sel.len(), 2);
@@ -537,9 +543,11 @@ mod tests {
         sel.add(id_a).unwrap();
         sel.add(id_b).unwrap();
         let outcome = ObjectLifecycleOutcome {
-            remaps: vec![
-                ObjectRemap { old: id_a, new: id_c, persistent: engine_events::SceneObjectId::new("deadbeef") },
-            ],
+            remaps: vec![ObjectRemap {
+                old: id_a,
+                new: id_c,
+                persistent: engine_events::SceneObjectId::new("deadbeef"),
+            }],
             snapshots: vec![],
         };
         let ch = sel.apply_remap(&outcome);
@@ -553,7 +561,9 @@ mod tests {
 
     #[test]
     fn from_iter_constructs() {
-        let sel: Selection = vec![test_id(1), test_id(2), test_id(1)].into_iter().collect();
+        let sel: Selection = vec![test_id(1), test_id(2), test_id(1)]
+            .into_iter()
+            .collect();
         assert_eq!(sel.len(), 2);
     }
 }

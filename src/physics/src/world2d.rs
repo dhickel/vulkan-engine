@@ -605,8 +605,7 @@ impl PhysicsWorld2D {
             }
             self.reconfigured_body_states.remove(id);
         } else {
-            self.reconfigured_body_states
-                .insert(id.clone(), previous);
+            self.reconfigured_body_states.insert(id.clone(), previous);
         }
 
         Ok(())
@@ -682,11 +681,7 @@ impl PhysicsWorld2D {
     /// Apply a force at the body's center of mass.
     ///
     /// Static and kinematic bodies are silently ignored.
-    pub fn apply_force(
-        &mut self,
-        id: &PhysicsBodyId,
-        force: [f32; 2],
-    ) -> Result<(), PhysicsError> {
+    pub fn apply_force(&mut self, id: &PhysicsBodyId, force: [f32; 2]) -> Result<(), PhysicsError> {
         validate_vec2("force", force)?;
         let handle = *self
             .body_handles
@@ -1089,9 +1084,7 @@ pub fn validate_collider_shape_2d(
     shape_builder_2d(shape.clone()).map(|_| ())
 }
 
-pub(crate) fn shape_builder_2d(
-    shape: ColliderShape2D,
-) -> Result<ColliderBuilder, PhysicsError> {
+pub(crate) fn shape_builder_2d(shape: ColliderShape2D) -> Result<ColliderBuilder, PhysicsError> {
     match shape {
         ColliderShape2D::Cuboid { half_extents } => {
             validate_vec2("cuboid.half_extents", half_extents)?;
@@ -1124,8 +1117,7 @@ pub(crate) fn shape_builder_2d(
                 .into_iter()
                 .map(|v| na::Point2::new(v[0], v[1]))
                 .collect();
-            ColliderBuilder::convex_hull(&rapier_points)
-                .ok_or(PhysicsError::ConvexHullDegenerate)
+            ColliderBuilder::convex_hull(&rapier_points).ok_or(PhysicsError::ConvexHullDegenerate)
         }
         ColliderShape2D::TriMesh { vertices, indices } => {
             validate_trimesh_2d(&vertices, &indices)?;
@@ -1138,10 +1130,7 @@ pub(crate) fn shape_builder_2d(
     }
 }
 
-fn validate_trimesh_2d(
-    vertices: &[[f32; 2]],
-    indices: &[[u32; 3]],
-) -> Result<(), PhysicsError> {
+fn validate_trimesh_2d(vertices: &[[f32; 2]], indices: &[[u32; 3]]) -> Result<(), PhysicsError> {
     if vertices.is_empty() || indices.is_empty() {
         return Err(PhysicsError::TrimeshEmpty);
     }

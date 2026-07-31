@@ -145,16 +145,19 @@ mod bsp_tests {
         let mut cache = BspSurfaceCacheRepr::new();
         let arena_id = cache.allocate_arena();
         let descriptor = ash::vk::DescriptorSet::from_raw(0xCAFE);
-        let handle = cache.add(arena_id, BspCachedSurfaceRepr {
-            material_descriptor: descriptor,
-            surf_ubo_alloc: Default::default(),
-            pipeline: VkPipelineType::BspOpaque,
-            surface_flags: 0,
-            albedo_tex: TextureHandle::new(10, 1),
-            fullbright_tex: Some(TextureHandle::new(11, 2)),
-            lightmap_tex: TextureHandle::new(20, 3),
+        let handle = cache.add(
             arena_id,
-        });
+            BspCachedSurfaceRepr {
+                material_descriptor: descriptor,
+                surf_ubo_alloc: Default::default(),
+                pipeline: VkPipelineType::BspOpaque,
+                surface_flags: 0,
+                albedo_tex: TextureHandle::new(10, 1),
+                fullbright_tex: Some(TextureHandle::new(11, 2)),
+                lightmap_tex: TextureHandle::new(20, 3),
+                arena_id,
+            },
+        );
 
         let cached = cache
             .get(handle)

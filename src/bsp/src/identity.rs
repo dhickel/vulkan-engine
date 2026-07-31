@@ -72,10 +72,7 @@ pub enum IdentityEvent {
 }
 
 /// Build an entity identity from a parsed entity and its index.
-pub fn build_entity_identity(
-    entity: &Entity,
-    entity_index: u32,
-) -> EntityIdentity {
+pub fn build_entity_identity(entity: &Entity, entity_index: u32) -> EntityIdentity {
     let tb_id = entity
         .key_values
         .iter()
@@ -357,9 +354,15 @@ mod tests {
         ];
 
         let events = reconcile_identities(&old, &new);
-        assert!(events.iter().any(|e| matches!(e, IdentityEvent::Matched { .. })));
-        assert!(events.iter().any(|e| matches!(e, IdentityEvent::Inserted { .. })));
-        assert!(events.iter().any(|e| matches!(e, IdentityEvent::Deleted { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, IdentityEvent::Matched { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, IdentityEvent::Inserted { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, IdentityEvent::Deleted { .. })));
     }
 
     #[test]
@@ -375,9 +378,17 @@ mod tests {
 
         let events = reconcile_identities(&old, &new);
         // First entity should match (same fingerprint)
-        assert!(events.iter().any(|e| matches!(e, IdentityEvent::Matched { entity_index: 0, .. })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            IdentityEvent::Matched {
+                entity_index: 0,
+                ..
+            }
+        )));
         // Second entity has different origin -> inserted
-        assert!(events.iter().any(|e| matches!(e, IdentityEvent::Inserted { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, IdentityEvent::Inserted { .. })));
     }
 
     #[test]

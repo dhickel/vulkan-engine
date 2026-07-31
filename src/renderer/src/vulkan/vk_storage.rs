@@ -242,7 +242,9 @@ impl VkSubAllocator {
             buffer_size,
             transfer_buffer
                 .lock()
-                .map_err(|_| "transfer buffer lock poisoned during allocator construction".to_string())?
+                .map_err(|_| {
+                    "transfer buffer lock poisoned during allocator construction".to_string()
+                })?
                 .buffer
                 .size,
             0,
@@ -276,17 +278,16 @@ impl VkSubAllocator {
         let memory_usage = vk_mem::MemoryUsage::AutoPreferDevice;
 
         let (transfer_queue_index, graphics_queue_index) = {
-            let tb = transfer_buffer
-                .lock()
-                .map_err(|_| "transfer buffer lock poisoned during storage-buffer construction".to_string())?;
+            let tb = transfer_buffer.lock().map_err(|_| {
+                "transfer buffer lock poisoned during storage-buffer construction".to_string()
+            })?;
             (tb.transfer_queue_index, tb.graphics_queue_index)
         };
 
-        let (src_family, dst_family) =
-            crate::vulkan::vk_util::queue_family_indices_for_barrier(
-                transfer_queue_index,
-                graphics_queue_index,
-            );
+        let (src_family, dst_family) = crate::vulkan::vk_util::queue_family_indices_for_barrier(
+            transfer_queue_index,
+            graphics_queue_index,
+        );
         let dst_barrier = vk::BufferMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
             .dst_access_mask(vk::AccessFlags::MEMORY_READ)

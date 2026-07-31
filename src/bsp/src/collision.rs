@@ -128,7 +128,10 @@ fn collect_planes_dfs(
     if plane_idx >= planes.len() {
         return Err(BspReport::fatal(
             DiagnosticCode::StructuralCorruptIndex,
-            format!("clipnode[{}] references plane {} out of range", ni, plane_idx),
+            format!(
+                "clipnode[{}] references plane {} out of range",
+                ni, plane_idx
+            ),
         ));
     }
 
@@ -139,14 +142,7 @@ fn collect_planes_dfs(
     // Recurse into children
     for &child in &cn.children {
         if child >= 0 {
-            collect_planes_dfs(
-                child as u32,
-                clipnodes,
-                planes,
-                qte,
-                plane_set,
-                visited,
-            )?;
+            collect_planes_dfs(child as u32, clipnodes, planes, qte, plane_set, visited)?;
         } else {
             // Record the leaf content plane (closing half-space)
             // Content leaves implicitly close the region
@@ -210,9 +206,12 @@ pub fn convex_from_planes(
         for j in (i + 1)..n {
             for k in (j + 1)..n {
                 if let Some(point) = intersect_three_planes(
-                    plane_normals[i], plane_dists[i],
-                    plane_normals[j], plane_dists[j],
-                    plane_normals[k], plane_dists[k],
+                    plane_normals[i],
+                    plane_dists[i],
+                    plane_normals[j],
+                    plane_dists[j],
+                    plane_normals[k],
+                    plane_dists[k],
                 ) {
                     // Check if this point satisfies all plane constraints
                     let mut valid = true;
@@ -260,11 +259,7 @@ pub fn convex_from_planes(
 /// Compute the intersection point of three planes.
 ///
 /// Solves the linear system: n_i · x = d_i for i in {0, 1, 2}.
-fn intersect_three_planes(
-    n0: Vec3, d0: f32,
-    n1: Vec3, d1: f32,
-    n2: Vec3, d2: f32,
-) -> Option<Vec3> {
+fn intersect_three_planes(n0: Vec3, d0: f32, n1: Vec3, d1: f32, n2: Vec3, d2: f32) -> Option<Vec3> {
     // Solve using Cramer's rule
     let det = n0.dot(n1.cross(n2));
     if det.abs() < 1e-10 {
@@ -320,13 +315,11 @@ fn has_volume(vertices: &[Vec3]) -> bool {
 
     // Find a third vertex not collinear with v0 and v1
     let dir = (v1 - v0).normalize();
-    let v2 = vertices[1..]
-        .iter()
-        .find(|v| {
-            let to = **v - v0;
-            let cross = dir.cross(to);
-            cross.length_squared() > 1e-12
-        });
+    let v2 = vertices[1..].iter().find(|v| {
+        let to = **v - v0;
+        let cross = dir.cross(to);
+        cross.length_squared() > 1e-12
+    });
 
     let v2 = match v2 {
         Some(v) => *v,
@@ -381,12 +374,20 @@ pub fn build_collision_recipe(
                 // For triggers, a degenerate collision is a warning, not an error
                 diagnostics.push(BspReport::fatal(
                     DiagnosticCode::StructuralCorruptFace,
-                    format!("convex reconstruction for trigger entity {}: {}", entity_index, err.message()),
+                    format!(
+                        "convex reconstruction for trigger entity {}: {}",
+                        entity_index,
+                        err.message()
+                    ),
                 ));
             } else {
                 return Err(BspReport::fatal(
                     DiagnosticCode::StructuralCorruptLump,
-                    format!("convex reconstruction failed for entity {}: {}", entity_index, err.message()),
+                    format!(
+                        "convex reconstruction failed for entity {}: {}",
+                        entity_index,
+                        err.message()
+                    ),
                 ));
             }
             Ok(CollisionRecipe {
@@ -480,14 +481,7 @@ mod tests {
     #[test]
     fn convex_from_simple_box() {
         // 6 planes of a unit cube centered at origin
-        let normals = vec![
-            Vec3::X,
-            -Vec3::X,
-            Vec3::Y,
-            -Vec3::Y,
-            Vec3::Z,
-            -Vec3::Z,
-        ];
+        let normals = vec![Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z];
         let dists = vec![0.5, 0.5, 0.5, 0.5, 0.5, 0.5];
 
         let piece = convex_from_planes(&normals, &dists, 1e-4).unwrap();

@@ -6,9 +6,9 @@ use super::context::{AStarWorkspace, AttemptContext, RouteOutcome, RouteSearchKi
 use super::determinism::Pcg32V1;
 use super::error::{ErrorStage, GeneratorError};
 use super::ir::{
-    CandidateEdge, CandidateGraph, EdgeId, GridCoord, IdAllocator, IntendedEdge,
-    IntendedTopology, OccupancyClass, OccupancyGrid, PlacedRegion, PlacedSocket, RegionId,
-    RegionRole, SocketId, SocketRole, TransitionId,
+    CandidateEdge, CandidateGraph, EdgeId, GridCoord, IdAllocator, IntendedEdge, IntendedTopology,
+    OccupancyClass, OccupancyGrid, PlacedRegion, PlacedSocket, RegionId, RegionRole, SocketId,
+    SocketRole, TransitionId,
 };
 
 // ─── Candidate graph construction ───────────────────────────────────────────
@@ -65,10 +65,11 @@ pub(super) fn route_socket_pair(
     )?;
     match result {
         Some((path, envelope)) => {
-            let cost = u64::try_from(path.len()).map_err(|_| GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Topology,
-                operation: "route_socket_pair_cost",
-            })?;
+            let cost =
+                u64::try_from(path.len()).map_err(|_| GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Topology,
+                    operation: "route_socket_pair_cost",
+                })?;
             ctx.route_finished(search_kind, RouteOutcome::Path, path.len());
             Ok(Some((path, envelope, cost)))
         }
@@ -139,45 +140,47 @@ pub(super) fn build_candidate_graph(
     let mut pending = Vec::new();
 
     for (left_index, left) in regions.iter().enumerate() {
-        let start = left_index.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Topology,
-            operation: "candidate_region_pair_start",
-        })?;
+        let start = left_index
+            .checked_add(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Topology,
+                operation: "candidate_region_pair_start",
+            })?;
         for right in regions.iter().skip(start) {
             for left_socket in &left.sockets {
                 for right_socket in &right.sockets {
                     if left.layer != right.layer {
                         if sockets_compatible(left_socket, right_socket) {
                             if let Some(transition) = transition_for_socket_pair(
-                            topology,
-                            left,
-                            left_socket,
-                            right,
-                            right_socket,
-                        )? {
-                            let mut witness: Vec<GridCoord> = transition
-                                .ramp_run_cells
-                                .iter()
-                                .chain(&transition.upper_opening_cells)
-                                .chain(&transition.landing_cells)
-                                .chain(&transition.headroom_cells)
-                                .copied()
-                                .collect();
-                            witness.sort();
-                            witness.dedup();
-                            let cost = u64::try_from(witness.len()).map_err(|_| {
-                                GeneratorError::ArithmeticOverflow {
-                                    stage: ErrorStage::Topology,
-                                    operation: "vertical_edge_cost",
+                                topology,
+                                left,
+                                left_socket,
+                                right,
+                                right_socket,
+                            )? {
+                                let mut witness: Vec<GridCoord> = transition
+                                    .ramp_run_cells
+                                    .iter()
+                                    .chain(&transition.upper_opening_cells)
+                                    .chain(&transition.landing_cells)
+                                    .chain(&transition.headroom_cells)
+                                    .copied()
+                                    .collect();
+                                witness.sort();
+                                witness.dedup();
+                                let cost = u64::try_from(witness.len()).map_err(|_| {
+                                    GeneratorError::ArithmeticOverflow {
+                                        stage: ErrorStage::Topology,
+                                        operation: "vertical_edge_cost",
+                                    }
+                                })?;
+                                if cost == 0 {
+                                    return Err(GeneratorError::TransitionBinding {
+                                        stage: ErrorStage::Topology,
+                                        transition: transition.id.raw(),
+                                        reason: "vertical_witness_empty",
+                                    });
                                 }
-                            })?;
-                            if cost == 0 {
-                                return Err(GeneratorError::TransitionBinding {
-                                    stage: ErrorStage::Topology,
-                                    transition: transition.id.raw(),
-                                    reason: "vertical_witness_empty",
-                                });
-                            }
                                 pending.push(PendingEdge {
                                     source_socket: transition.lower_socket,
                                     target_socket: transition.upper_socket,
@@ -201,7 +204,13 @@ pub(super) fn build_candidate_graph(
                     ctx.candidate_pair_considered();
                     let width = corridor_width_for_sockets(left_socket, right_socket, config)?;
                     if let Some((path, envelope, cost)) = route_socket_pair(
-                        left, left_socket, right, right_socket, grid, config, width,
+                        left,
+                        left_socket,
+                        right,
+                        right_socket,
+                        grid,
+                        config,
+                        width,
                         ctx,
                         RouteSearchKind::CandidateConstruction,
                     )? {
@@ -303,18 +312,22 @@ fn validate_candidate_graph(
             });
         }
         previous_key = Some(key);
-        let source_layer = region_layers.get(&edge.source_region).copied().ok_or(
-            GeneratorError::IrInvariant {
-                stage: ErrorStage::Topology,
-                detail: "candidate_source_region_missing".into(),
-            },
-        )?;
-        let target_layer = region_layers.get(&edge.target_region).copied().ok_or(
-            GeneratorError::IrInvariant {
-                stage: ErrorStage::Topology,
-                detail: "candidate_target_region_missing".into(),
-            },
-        )?;
+        let source_layer =
+            region_layers
+                .get(&edge.source_region)
+                .copied()
+                .ok_or(GeneratorError::IrInvariant {
+                    stage: ErrorStage::Topology,
+                    detail: "candidate_source_region_missing".into(),
+                })?;
+        let target_layer =
+            region_layers
+                .get(&edge.target_region)
+                .copied()
+                .ok_or(GeneratorError::IrInvariant {
+                    stage: ErrorStage::Topology,
+                    detail: "candidate_target_region_missing".into(),
+                })?;
         if source_layer != target_layer && edge.transition.is_none() {
             return Err(GeneratorError::TransitionBinding {
                 stage: ErrorStage::Topology,
@@ -368,10 +381,12 @@ fn validate_candidate_graph(
                 });
             }
             let count = transition_counts.entry(transition_id).or_default();
-            *count = count.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Topology,
-                operation: "candidate_transition_count",
-            })?;
+            *count = count
+                .checked_add(1)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Topology,
+                    operation: "candidate_transition_count",
+                })?;
         } else {
             let source_region = topology
                 .regions
@@ -459,9 +474,7 @@ fn sockets_compatible(left: &PlacedSocket, right: &PlacedSocket) -> bool {
             && left.paired_socket_id == Some(right.id)
             && right.paired_socket_id == Some(left.id);
     }
-    left.direction == right.direction.opposite()
-        && left.width > 0
-        && left.width == right.width
+    left.direction == right.direction.opposite() && left.width > 0 && left.width == right.width
 }
 
 fn corridor_width_for_sockets(
@@ -516,10 +529,7 @@ fn manhattan_distance(left: GridCoord, right: GridCoord) -> Result<u64, Generato
         })
 }
 
-fn astar_direction_bias(
-    source: SocketId,
-    target: SocketId,
-) -> Result<usize, GeneratorError> {
+fn astar_direction_bias(source: SocketId, target: SocketId) -> Result<usize, GeneratorError> {
     let sum = u64::from(source.raw())
         .checked_add(u64::from(target.raw()))
         .ok_or(GeneratorError::ArithmeticOverflow {
@@ -578,26 +588,22 @@ fn socket_aperture_cells(
     for offset in 0..socket.width {
         let (x, y) = match socket.direction {
             super::ir::Direction::North | super::ir::Direction::South => (
-                socket
-                    .global_anchor
-                    .x
-                    .checked_add(offset)
-                    .ok_or(GeneratorError::ArithmeticOverflow {
+                socket.global_anchor.x.checked_add(offset).ok_or(
+                    GeneratorError::ArithmeticOverflow {
                         stage: ErrorStage::Topology,
                         operation: "socket_aperture_x",
-                    })?,
+                    },
+                )?,
                 socket.global_anchor.y,
             ),
             super::ir::Direction::East | super::ir::Direction::West => (
                 socket.global_anchor.x,
-                socket
-                    .global_anchor
-                    .y
-                    .checked_add(offset)
-                    .ok_or(GeneratorError::ArithmeticOverflow {
+                socket.global_anchor.y.checked_add(offset).ok_or(
+                    GeneratorError::ArithmeticOverflow {
                         stage: ErrorStage::Topology,
                         operation: "socket_aperture_y",
-                    })?,
+                    },
+                )?,
             ),
         };
         cells.push(GridCoord::new(
@@ -620,18 +626,18 @@ fn socket_inward_cells(
     socket_aperture_cells(socket, config)?
         .into_iter()
         .map(|aperture| {
-            let x = i32::from(aperture.x)
-                .checked_sub(dx)
-                .ok_or(GeneratorError::ArithmeticOverflow {
+            let x = i32::from(aperture.x).checked_sub(dx).ok_or(
+                GeneratorError::ArithmeticOverflow {
                     stage: ErrorStage::Topology,
                     operation: "socket_inward_x",
-                })?;
-            let y = i32::from(aperture.y)
-                .checked_sub(dy)
-                .ok_or(GeneratorError::ArithmeticOverflow {
+                },
+            )?;
+            let y = i32::from(aperture.y).checked_sub(dy).ok_or(
+                GeneratorError::ArithmeticOverflow {
                     stage: ErrorStage::Topology,
                     operation: "socket_inward_y",
-                })?;
+                },
+            )?;
             let x = u16::try_from(x).map_err(|_| GeneratorError::IrInvariant {
                 stage: ErrorStage::Topology,
                 detail: "socket_inward_x_out_of_bounds".into(),
@@ -656,7 +662,8 @@ fn terminal_cells(
     socket: &PlacedSocket,
     config: &NormalizedGeneratorConfig,
 ) -> Result<BTreeSet<GridCoord>, GeneratorError> {
-    let mut cells: BTreeSet<GridCoord> = socket_aperture_cells(socket, config)?.into_iter().collect();
+    let mut cells: BTreeSet<GridCoord> =
+        socket_aperture_cells(socket, config)?.into_iter().collect();
     cells.extend(socket_inward_cells(socket, config)?);
     Ok(cells)
 }
@@ -702,8 +709,7 @@ fn cell_walkable(
             (owner == source_region.id.raw() && source_terminal.contains(&cell))
                 || (owner == target_region.id.raw() && target_terminal.contains(&cell))
         }
-        Some(OccupancyClass::TransitionHub(owner))
-        | Some(OccupancyClass::Transition(owner)) => {
+        Some(OccupancyClass::TransitionHub(owner)) | Some(OccupancyClass::Transition(owner)) => {
             (source_region
                 .transitions
                 .iter()
@@ -824,14 +830,20 @@ fn find_path_with_envelope(
     // Returns (result, expansions, capped)
     let source_inward = socket_inward_cells(source_socket, config)?;
     let target_inward = socket_inward_cells(target_socket, config)?;
-    let start = source_inward.first().copied().ok_or(GeneratorError::IrInvariant {
-        stage: ErrorStage::Topology,
-        detail: "source_socket_has_no_inward_cell".into(),
-    })?;
-    let goal = target_inward.first().copied().ok_or(GeneratorError::IrInvariant {
-        stage: ErrorStage::Topology,
-        detail: "target_socket_has_no_inward_cell".into(),
-    })?;
+    let start = source_inward
+        .first()
+        .copied()
+        .ok_or(GeneratorError::IrInvariant {
+            stage: ErrorStage::Topology,
+            detail: "source_socket_has_no_inward_cell".into(),
+        })?;
+    let goal = target_inward
+        .first()
+        .copied()
+        .ok_or(GeneratorError::IrInvariant {
+            stage: ErrorStage::Topology,
+            detail: "target_socket_has_no_inward_cell".into(),
+        })?;
     if start.layer != goal.layer {
         return Ok((None, 0, false));
     }
@@ -870,20 +882,23 @@ fn find_path_with_envelope(
     directions.rotate_left(direction_bias);
 
     while let Some(current) = open.pop() {
-        expansions = expansions.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Topology,
-            operation: "astar_expansion_count",
-        })?;
+        expansions = expansions
+            .checked_add(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Topology,
+                operation: "astar_expansion_count",
+            })?;
         if expansions > max_expansions {
             return Ok((None, expansions, true));
         }
         let current_index = astar_cell_index(current.coord, config)?;
-        let best = workspace
-            .distance(current_index)
-            .ok_or_else(|| GeneratorError::IrInvariant {
-                stage: ErrorStage::Topology,
-                detail: "astar_current_workspace_slot_missing".into(),
-            })?;
+        let best =
+            workspace
+                .distance(current_index)
+                .ok_or_else(|| GeneratorError::IrInvariant {
+                    stage: ErrorStage::Topology,
+                    detail: "astar_current_workspace_slot_missing".into(),
+                })?;
         if current.distance != best {
             continue;
         }
@@ -892,39 +907,35 @@ fn find_path_with_envelope(
             let mut cursor = goal;
             while cursor != start {
                 let cursor_index = astar_cell_index(cursor, config)?;
-                cursor = workspace.parent(cursor_index).ok_or_else(|| {
-                    GeneratorError::IrInvariant {
-                        stage: ErrorStage::Topology,
-                        detail: "astar_parent_missing".into(),
-                    }
-                })?;
+                cursor =
+                    workspace
+                        .parent(cursor_index)
+                        .ok_or_else(|| GeneratorError::IrInvariant {
+                            stage: ErrorStage::Topology,
+                            detail: "astar_parent_missing".into(),
+                        })?;
                 path.push(cursor);
             }
             path.reverse();
-            if !route_has_wall_normal_endpoints(
-                &path,
-                source_socket,
-                target_socket,
-                config,
-            )? {
+            if !route_has_wall_normal_endpoints(&path, source_socket, target_socket, config)? {
                 return Ok((None, expansions, false));
             }
             let envelope = compute_cell_envelope(&path, width, config)?;
             return Ok((Some((path, envelope)), expansions, false));
         }
         for movement in directions {
-            let x = i32::from(current.coord.x)
-                .checked_add(movement.0)
-                .ok_or(GeneratorError::ArithmeticOverflow {
+            let x = i32::from(current.coord.x).checked_add(movement.0).ok_or(
+                GeneratorError::ArithmeticOverflow {
                     stage: ErrorStage::Topology,
                     operation: "astar_neighbor_x",
-                })?;
-            let y = i32::from(current.coord.y)
-                .checked_add(movement.1)
-                .ok_or(GeneratorError::ArithmeticOverflow {
+                },
+            )?;
+            let y = i32::from(current.coord.y).checked_add(movement.1).ok_or(
+                GeneratorError::ArithmeticOverflow {
                     stage: ErrorStage::Topology,
                     operation: "astar_neighbor_y",
-                })?;
+                },
+            )?;
             let Ok(x) = u16::try_from(x) else {
                 continue;
             };
@@ -956,19 +967,22 @@ fn find_path_with_envelope(
             )? {
                 continue;
             }
-            let distance = current.distance.checked_add(1).ok_or(
-                GeneratorError::ArithmeticOverflow {
-                    stage: ErrorStage::Topology,
-                    operation: "astar_distance",
-                },
-            )?;
+            let distance =
+                current
+                    .distance
+                    .checked_add(1)
+                    .ok_or(GeneratorError::ArithmeticOverflow {
+                        stage: ErrorStage::Topology,
+                        operation: "astar_distance",
+                    })?;
             let next_index = astar_cell_index(next, config)?;
-            let previous_distance = workspace
-                .distance(next_index)
-                .ok_or_else(|| GeneratorError::IrInvariant {
-                    stage: ErrorStage::Topology,
-                    detail: "astar_neighbor_workspace_slot_missing".into(),
-                })?;
+            let previous_distance =
+                workspace
+                    .distance(next_index)
+                    .ok_or_else(|| GeneratorError::IrInvariant {
+                        stage: ErrorStage::Topology,
+                        detail: "astar_neighbor_workspace_slot_missing".into(),
+                    })?;
             if distance < previous_distance {
                 workspace
                     .set(next_index, distance, Some(current.coord))
@@ -979,12 +993,12 @@ fn find_path_with_envelope(
                 open.push(AStarNode {
                     coord: next,
                     distance,
-                    estimate: distance.checked_add(manhattan_distance(next, goal)?).ok_or(
-                        GeneratorError::ArithmeticOverflow {
+                    estimate: distance
+                        .checked_add(manhattan_distance(next, goal)?)
+                        .ok_or(GeneratorError::ArithmeticOverflow {
                             stage: ErrorStage::Topology,
                             operation: "astar_estimate",
-                        },
-                    )?,
+                        })?,
                     tie: astar_tie_key(next, direction_bias, config)?,
                 });
             }
@@ -1016,7 +1030,9 @@ fn route_has_wall_normal_endpoints(
         socket_aperture_cells(target, config)?.into_iter().collect();
     Ok(path.first() == Some(&source_start)
         && path.last() == Some(&target_end)
-        && path.get(1).is_some_and(|cell| source_apertures.contains(cell))
+        && path
+            .get(1)
+            .is_some_and(|cell| source_apertures.contains(cell))
         && path
             .get(path.len() - 2)
             .is_some_and(|cell| target_apertures.contains(cell)))
@@ -1041,12 +1057,12 @@ fn compute_cell_envelope(
         let Some(right) = pair.get(1).copied() else {
             continue;
         };
-        let dx = i32::from(right.x)
-            .checked_sub(i32::from(left.x))
-            .ok_or(GeneratorError::ArithmeticOverflow {
+        let dx = i32::from(right.x).checked_sub(i32::from(left.x)).ok_or(
+            GeneratorError::ArithmeticOverflow {
                 stage: ErrorStage::Topology,
                 operation: "envelope_direction_x",
-            })?;
+            },
+        )?;
         let perpendicular = if dx == 0 { (1i32, 0i32) } else { (0, 1) };
         for center in [left, right] {
             for offset in first..=last {
@@ -1177,8 +1193,7 @@ fn edges_coexist(
     left: &CandidateEdge,
     right: &CandidateEdge,
 ) -> Result<bool, GeneratorError> {
-    let left_cells: BTreeSet<GridCoord> =
-        left.allowed_envelope_cells.iter().copied().collect();
+    let left_cells: BTreeSet<GridCoord> = left.allowed_envelope_cells.iter().copied().collect();
     let overlap: Vec<GridCoord> = right
         .allowed_envelope_cells
         .iter()
@@ -1329,9 +1344,8 @@ fn reroute_candidate(
         })?;
     let mut overlay = graph.occupancy.clone();
     for existing in selected_edges(graph, selected) {
-        let shared = shared_region(existing, candidate).and_then(|id| {
-            topology.regions.iter().find(|region| region.id == id)
-        });
+        let shared = shared_region(existing, candidate)
+            .and_then(|id| topology.regions.iter().find(|region| region.id == id));
         for cell in &existing.allowed_envelope_cells {
             let inside_shared_region = if let Some(region) = shared {
                 cell_in_region(*cell, region)?
@@ -1363,11 +1377,9 @@ fn reroute_candidate(
         return Ok(None);
     };
     let mut rerouted = candidate.clone();
-    rerouted.cost = u64::try_from(path.len()).map_err(|_| {
-        GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Topology,
-            operation: "rerouted_path_cost",
-        }
+    rerouted.cost = u64::try_from(path.len()).map_err(|_| GeneratorError::ArithmeticOverflow {
+        stage: ErrorStage::Topology,
+        operation: "rerouted_path_cost",
     })?;
     rerouted.path_witness = path;
     rerouted.allowed_envelope_cells = envelope;
@@ -1398,14 +1410,15 @@ fn add_edge_if_legal(
             stage: ErrorStage::Topology,
             detail: "realized_candidate_position_missing".into(),
         })?;
-    let original = graph
-        .edges
-        .get(position)
-        .cloned()
-        .ok_or_else(|| GeneratorError::IrInvariant {
-            stage: ErrorStage::Topology,
-            detail: "realized_candidate_slot_missing".into(),
-        })?;
+    let original =
+        graph
+            .edges
+            .get(position)
+            .cloned()
+            .ok_or_else(|| GeneratorError::IrInvariant {
+                stage: ErrorStage::Topology,
+                detail: "realized_candidate_slot_missing".into(),
+            })?;
     let realized = if candidate_coexists(topology, graph, selected, &original)? {
         original.clone()
     } else {
@@ -1413,13 +1426,9 @@ fn add_edge_if_legal(
         // replacement. Any caller that rejects this branch rolls back to its
         // checkpoint, including nested reroutes in recursive searches.
         search.record_edge(position, original.clone());
-        if let Some(rerouted) = reroute_candidate(
-            topology,
-            graph,
-            selected,
-            &original,
-            search.astar,
-        )? {
+        if let Some(rerouted) =
+            reroute_candidate(topology, graph, selected, &original, search.astar)?
+        {
             rerouted
         } else {
             // A configured crossing is a bounded fallback after deterministic
@@ -1428,12 +1437,13 @@ fn add_edge_if_legal(
             let mut conflicts = 0u32;
             for existing in selected_edges(graph, selected) {
                 if !edges_coexist(topology, existing, &original)? {
-                    conflicts = conflicts.checked_add(1).ok_or(
-                        GeneratorError::ArithmeticOverflow {
-                            stage: ErrorStage::Topology,
-                            operation: "candidate_crossing_count",
-                        },
-                    )?;
+                    conflicts =
+                        conflicts
+                            .checked_add(1)
+                            .ok_or(GeneratorError::ArithmeticOverflow {
+                                stage: ErrorStage::Topology,
+                                operation: "candidate_crossing_count",
+                            })?;
                 }
             }
             let existing_crossings = crossing_count(topology, graph, selected)?;
@@ -1450,10 +1460,13 @@ fn add_edge_if_legal(
             original.clone()
         }
     };
-    let slot = graph.edges.get_mut(position).ok_or(GeneratorError::IrInvariant {
-        stage: ErrorStage::Topology,
-        detail: "realized_candidate_slot_missing".into(),
-    })?;
+    let slot = graph
+        .edges
+        .get_mut(position)
+        .ok_or(GeneratorError::IrInvariant {
+            stage: ErrorStage::Topology,
+            detail: "realized_candidate_slot_missing".into(),
+        })?;
     *slot = realized;
     selected.insert(edge.id);
     if preserve_route_min
@@ -1575,9 +1588,7 @@ fn shortest_path(
     Ok(None)
 }
 
-fn spawn_and_landmark(
-    topology: &IntendedTopology,
-) -> Result<(RegionId, RegionId), GeneratorError> {
+fn spawn_and_landmark(topology: &IntendedTopology) -> Result<(RegionId, RegionId), GeneratorError> {
     let spawn = topology
         .regions
         .iter()
@@ -1617,10 +1628,12 @@ fn bounded_spine(
     seen.insert(Vec::<EdgeId>::new());
     let mut attempts = 0u64;
     while let Some(blocked) = queue.pop_front() {
-        attempts = attempts.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Topology,
-            operation: "spine_search_attempts",
-        })?;
+        attempts = attempts
+            .checked_add(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Topology,
+                operation: "spine_search_attempts",
+            })?;
         if attempts > budget {
             return Err(GeneratorError::SearchExhausted {
                 stage: ErrorStage::Topology,
@@ -1683,14 +1696,7 @@ fn add_path(
     let edge_checkpoint = search.checkpoint();
     for id in path {
         let edge = edge_by_id(graph, *id)?.clone();
-        if !add_edge_if_legal(
-            topology,
-            graph,
-            selected,
-            &edge,
-            preserve_route_min,
-            search,
-        )? {
+        if !add_edge_if_legal(topology, graph, selected, &edge, preserve_route_min, search)? {
             rollback_topology_trial(
                 graph,
                 selected,
@@ -1746,10 +1752,12 @@ fn component_labels(
         {
             continue;
         }
-        component = component.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Topology,
-            operation: "component_label_count",
-        })?;
+        component = component
+            .checked_add(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Topology,
+                operation: "component_label_count",
+            })?;
         let mut stack = vec![region.id];
         labels.insert(region.id, component);
         while let Some(current) = stack.pop() {
@@ -1921,10 +1929,12 @@ fn layer_core_search(
     let mut sizes: BTreeMap<u32, usize> = BTreeMap::new();
     for label in labels.values() {
         let entry = sizes.entry(*label).or_default();
-        *entry = entry.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Topology,
-            operation: "layer_core_component_size",
-        })?;
+        *entry = entry
+            .checked_add(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Topology,
+                operation: "layer_core_component_size",
+            })?;
     }
     let target_component = sizes
         .iter()
@@ -1942,12 +1952,12 @@ fn layer_core_search(
         &sizes,
         target_component,
     ) {
-        *search_steps = search_steps.checked_add(1).ok_or(
-            GeneratorError::ArithmeticOverflow {
+        *search_steps = search_steps
+            .checked_add(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
                 stage: ErrorStage::Topology,
                 operation: "layer_core_search_steps",
-            },
-        )?;
+            })?;
         if *search_steps > max_search_steps {
             return Err(GeneratorError::SearchExhausted {
                 stage: ErrorStage::Topology,
@@ -2022,10 +2032,12 @@ fn connect_global_core(
         let mut sizes: BTreeMap<u32, usize> = BTreeMap::new();
         for label in labels.values() {
             let size = sizes.entry(*label).or_default();
-            *size = size.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Topology,
-                operation: "connectivity_component_size",
-            })?;
+            *size = size
+                .checked_add(1)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Topology,
+                    operation: "connectivity_component_size",
+                })?;
         }
         let target_component = sizes
             .iter()
@@ -2052,22 +2064,15 @@ fn connect_global_core(
             {
                 continue;
             }
-            *attempts = attempts.checked_add(1).ok_or(
-                GeneratorError::ArithmeticOverflow {
+            *attempts = attempts
+                .checked_add(1)
+                .ok_or(GeneratorError::ArithmeticOverflow {
                     stage: ErrorStage::Topology,
                     operation: "connectivity_search_attempts",
-                },
-            )?;
+                })?;
             let edge_checkpoint = search_workspace.checkpoint();
             let selected_checkpoint = selected.clone();
-            if !add_edge_if_legal(
-                topology,
-                graph,
-                selected,
-                edge,
-                true,
-                search_workspace,
-            )? {
+            if !add_edge_if_legal(topology, graph, selected, edge, true, search_workspace)? {
                 continue;
             }
             let branch_result = search(
@@ -2205,8 +2210,7 @@ fn attach_dead_ends(
             .iter()
             .enumerate()
             .filter(|(_, edge)| {
-                let incident =
-                    edge.source_region == region.id || edge.target_region == region.id;
+                let incident = edge.source_region == region.id || edge.target_region == region.id;
                 let other = if edge.source_region == region.id {
                     edge.target_region
                 } else {
@@ -2271,12 +2275,12 @@ fn dead_end_search(
         if selected.contains(&edge.id) {
             continue;
         }
-        *search_steps = search_steps.checked_add(1).ok_or(
-            GeneratorError::ArithmeticOverflow {
+        *search_steps = search_steps
+            .checked_add(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
                 stage: ErrorStage::Topology,
                 operation: "dead_end_search_steps",
-            },
-        )?;
+            })?;
         if *search_steps > max_search_steps {
             return Err(GeneratorError::SearchExhausted {
                 stage: ErrorStage::Topology,
@@ -2356,7 +2360,8 @@ fn ensure_route_redundancy(
         if count >= required {
             return Ok(());
         }
-        let Some(primary) = selected_region_path(topology, graph, selected, spawn, landmark)? else {
+        let Some(primary) = selected_region_path(topology, graph, selected, spawn, landmark)?
+        else {
             return Err(GeneratorError::TopologyInfeasible {
                 stage: ErrorStage::Topology,
                 constraint: "redundancy_primary_path_missing",
@@ -2365,21 +2370,13 @@ fn ensure_route_redundancy(
             });
         };
         let blocked: BTreeSet<EdgeId> = primary.into_iter().collect();
-        let Some((_, alternate)) = shortest_path(
-            topology,
-            graph,
-            spawn,
-            landmark,
-            &blocked,
-            None,
-        )? else {
+        let Some((_, alternate)) = shortest_path(topology, graph, spawn, landmark, &blocked, None)?
+        else {
             return Err(GeneratorError::TopologyInfeasible {
                 stage: ErrorStage::Topology,
                 constraint: "edge_disjoint_route_candidate",
                 required: u64::from(required),
-                available: u64::from(edge_disjoint_route_count(
-                    graph, selected, spawn, landmark,
-                )?),
+                available: u64::from(edge_disjoint_route_count(graph, selected, spawn, landmark)?),
             });
         };
         if !add_path(topology, graph, selected, &alternate, true, search)? {
@@ -2387,9 +2384,7 @@ fn ensure_route_redundancy(
                 stage: ErrorStage::Topology,
                 constraint: "edge_disjoint_route_coexistence",
                 required: u64::from(required),
-                available: u64::from(edge_disjoint_route_count(
-                    graph, selected, spawn, landmark,
-                )?),
+                available: u64::from(edge_disjoint_route_count(graph, selected, spawn, landmark)?),
             });
         }
         let next_count = edge_disjoint_route_count(graph, selected, spawn, landmark)?;
@@ -2593,26 +2588,22 @@ fn add_required_layer_cycles(
                         closing_edge.target_region,
                         &blocked,
                         None,
-                    )? else {
+                    )?
+                    else {
                         continue;
                     };
                     let edge_checkpoint = search.checkpoint();
                     let selected_checkpoint = selected.clone();
-                    let accepted = add_path(
-                        topology,
-                        graph,
-                        selected,
-                        &path,
-                        true,
-                        search,
-                    )? && add_edge_if_legal(
-                        topology,
-                        graph,
-                        selected,
-                        closing_edge,
-                        true,
-                        search,
-                    )? && layer_cycle_rank(topology, graph, selected, layer)? <= maximum;
+                    let accepted = add_path(topology, graph, selected, &path, true, search)?
+                        && add_edge_if_legal(
+                            topology,
+                            graph,
+                            selected,
+                            closing_edge,
+                            true,
+                            search,
+                        )?
+                        && layer_cycle_rank(topology, graph, selected, layer)? <= maximum;
                     if accepted {
                         added = true;
                         break;
@@ -2630,9 +2621,7 @@ fn add_required_layer_cycles(
                         stage: ErrorStage::Topology,
                         constraint: "useful_layer_cycle_candidate",
                         required: u64::from(minimum),
-                        available: u64::from(layer_cycle_rank(
-                            topology, graph, selected, layer,
-                        )?),
+                        available: u64::from(layer_cycle_rank(topology, graph, selected, layer)?),
                     });
                 }
             }
@@ -2765,9 +2754,7 @@ fn check_topology_feasibility(
             }
             let source_label = raw_labels.get(&edge.source_region);
             let target_label = raw_labels.get(&edge.target_region);
-            source_label.is_some()
-                && target_label.is_some()
-                && source_label != target_label
+            source_label.is_some() && target_label.is_some() && source_label != target_label
         });
         if !has_bridge {
             return Err(GeneratorError::TopologyInfeasible {
@@ -2791,8 +2778,7 @@ fn check_topology_feasibility(
             continue;
         }
         let has_candidate = graph.edges.iter().any(|edge| {
-            let incident =
-                edge.source_region == region.id || edge.target_region == region.id;
+            let incident = edge.source_region == region.id || edge.target_region == region.id;
             let other = if edge.source_region == region.id {
                 edge.target_region
             } else {
@@ -2893,10 +2879,12 @@ fn raw_component_labels(
         {
             continue;
         }
-        component = component.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Topology,
-            operation: "raw_component_label_count",
-        })?;
+        component = component
+            .checked_add(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Topology,
+                operation: "raw_component_label_count",
+            })?;
         let mut stack = vec![region.id];
         labels.insert(region.id, component);
         while let Some(current) = stack.pop() {
@@ -3107,10 +3095,12 @@ fn degree_map(
     for edge in selected_edges(graph, selected) {
         for region in endpoints(edge) {
             let value = degree.entry(region).or_insert(0u32);
-            *value = value.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Topology,
-                operation: "region_degree",
-            })?;
+            *value = value
+                .checked_add(1)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Topology,
+                    operation: "region_degree",
+                })?;
         }
     }
     Ok(degree)
@@ -3180,12 +3170,12 @@ fn count_components_excluding(
         if skip == Some(region.id) || visited.contains(&region.id) {
             continue;
         }
-        components = components.checked_add(1).ok_or(
-            GeneratorError::ArithmeticOverflow {
+        components = components
+            .checked_add(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
                 stage: ErrorStage::Topology,
                 operation: "component_count",
-            },
-        )?;
+            })?;
         let mut stack = vec![region.id];
         visited.insert(region.id);
         while let Some(current) = stack.pop() {
@@ -3210,10 +3200,12 @@ fn articulation_count(
     let mut count = 0u32;
     for region in &topology.regions {
         if count_components_excluding(topology, graph, selected, Some(region.id))? > baseline {
-            count = count.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Topology,
-                operation: "articulation_count",
-            })?;
+            count = count
+                .checked_add(1)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Topology,
+                    operation: "articulation_count",
+                })?;
         }
     }
     Ok(count)
@@ -3263,18 +3255,20 @@ fn crossing_count(
     let edges = selected_edges(graph, selected);
     let mut crossings = 0u32;
     for (index, left) in edges.iter().enumerate() {
-        let start = index.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Topology,
-            operation: "crossing_pair_start",
-        })?;
+        let start = index
+            .checked_add(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Topology,
+                operation: "crossing_pair_start",
+            })?;
         for right in edges.iter().skip(start) {
             if !edges_coexist(topology, left, right)? {
-                crossings = crossings.checked_add(1).ok_or(
-                    GeneratorError::ArithmeticOverflow {
+                crossings = crossings
+                    .checked_add(1)
+                    .ok_or(GeneratorError::ArithmeticOverflow {
                         stage: ErrorStage::Topology,
                         operation: "crossing_count",
-                    },
-                )?;
+                    })?;
             }
         }
     }
@@ -3295,12 +3289,12 @@ fn edge_disjoint_route_count(
             (edge.target_region, edge.source_region),
         ] {
             let capacity = residual.entry(endpoints).or_default();
-            *capacity = capacity.checked_add(1).ok_or(
-                GeneratorError::ArithmeticOverflow {
+            *capacity = capacity
+                .checked_add(1)
+                .ok_or(GeneratorError::ArithmeticOverflow {
                     stage: ErrorStage::Topology,
                     operation: "edge_disjoint_parallel_capacity",
-                },
-            )?;
+                })?;
         }
         neighbors
             .entry(edge.source_region)
@@ -3343,25 +3337,27 @@ fn edge_disjoint_route_count(
                 });
             };
             let forward = residual.entry((previous, cursor)).or_default();
-            *forward = forward.checked_sub(1).ok_or(
-                GeneratorError::ArithmeticOverflow {
+            *forward = forward
+                .checked_sub(1)
+                .ok_or(GeneratorError::ArithmeticOverflow {
                     stage: ErrorStage::Topology,
                     operation: "max_flow_forward",
-                },
-            )?;
+                })?;
             let reverse = residual.entry((cursor, previous)).or_default();
-            *reverse = reverse.checked_add(1).ok_or(
-                GeneratorError::ArithmeticOverflow {
+            *reverse = reverse
+                .checked_add(1)
+                .ok_or(GeneratorError::ArithmeticOverflow {
                     stage: ErrorStage::Topology,
                     operation: "max_flow_reverse",
-                },
-            )?;
+                })?;
             cursor = previous;
         }
-        flow = flow.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Topology,
-            operation: "max_flow_count",
-        })?;
+        flow = flow
+            .checked_add(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Topology,
+                operation: "max_flow_count",
+            })?;
     }
     Ok(flow)
 }
@@ -3391,12 +3387,13 @@ fn compute_metrics(
         .filter(|region| region.role == RegionRole::DeadEnd)
     {
         if degree.get(&region.id).copied().unwrap_or(0) == 1 {
-            dead_end_count = dead_end_count.checked_add(1).ok_or(
-                GeneratorError::ArithmeticOverflow {
-                    stage: ErrorStage::Topology,
-                    operation: "dead_end_count",
-                },
-            )?;
+            dead_end_count =
+                dead_end_count
+                    .checked_add(1)
+                    .ok_or(GeneratorError::ArithmeticOverflow {
+                        stage: ErrorStage::Topology,
+                        operation: "dead_end_count",
+                    })?;
         }
     }
     Ok(TopologyMetrics {
@@ -3500,34 +3497,40 @@ fn rectangles_overlap(
     left: (u16, u16, u16, u16),
     right: (u16, u16, u16, u16),
 ) -> Result<bool, GeneratorError> {
-    let left_max_x = left.0.checked_add(left.2).ok_or(
-        GeneratorError::ArithmeticOverflow {
+    let left_max_x = left
+        .0
+        .checked_add(left.2)
+        .ok_or(GeneratorError::ArithmeticOverflow {
             stage: ErrorStage::Topology,
             operation: "transition_rect_left_x",
-        },
-    )?;
-    let left_max_y = left.1.checked_add(left.3).ok_or(
-        GeneratorError::ArithmeticOverflow {
+        })?;
+    let left_max_y = left
+        .1
+        .checked_add(left.3)
+        .ok_or(GeneratorError::ArithmeticOverflow {
             stage: ErrorStage::Topology,
             operation: "transition_rect_left_y",
-        },
-    )?;
-    let right_max_x = right.0.checked_add(right.2).ok_or(
-        GeneratorError::ArithmeticOverflow {
+        })?;
+    let right_max_x = right
+        .0
+        .checked_add(right.2)
+        .ok_or(GeneratorError::ArithmeticOverflow {
             stage: ErrorStage::Topology,
             operation: "transition_rect_right_x",
-        },
-    )?;
-    let right_max_y = right.1.checked_add(right.3).ok_or(
-        GeneratorError::ArithmeticOverflow {
+        })?;
+    let right_max_y = right
+        .1
+        .checked_add(right.3)
+        .ok_or(GeneratorError::ArithmeticOverflow {
             stage: ErrorStage::Topology,
             operation: "transition_rect_right_y",
-        },
-    )?;
-    Ok(left.0 < right_max_x
-        && left_max_x > right.0
-        && left.1 < right_max_y
-        && left_max_y > right.1)
+        })?;
+    Ok(
+        left.0 < right_max_x
+            && left_max_x > right.0
+            && left.1 < right_max_y
+            && left_max_y > right.1,
+    )
 }
 
 fn verify_transition_independence(
@@ -3537,28 +3540,31 @@ fn verify_transition_independence(
 ) -> Result<(), GeneratorError> {
     // Hub projections cannot overlap on any shared endpoint layer.
     for (index, left) in topology.transitions.iter().enumerate() {
-        let start = index.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Topology,
-            operation: "transition_pair_start",
-        })?;
+        let start = index
+            .checked_add(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Topology,
+                operation: "transition_pair_start",
+            })?;
         for right in topology.transitions.iter().skip(start) {
             let left_layers = [
                 left.lower_layer,
-                left.lower_layer.checked_add(1).ok_or(
-                    GeneratorError::ArithmeticOverflow {
+                left.lower_layer
+                    .checked_add(1)
+                    .ok_or(GeneratorError::ArithmeticOverflow {
                         stage: ErrorStage::Topology,
                         operation: "transition_left_upper",
-                    },
-                )?,
+                    })?,
             ];
             let right_layers = [
                 right.lower_layer,
-                right.lower_layer.checked_add(1).ok_or(
-                    GeneratorError::ArithmeticOverflow {
+                right
+                    .lower_layer
+                    .checked_add(1)
+                    .ok_or(GeneratorError::ArithmeticOverflow {
                         stage: ErrorStage::Topology,
                         operation: "transition_right_upper",
-                    },
-                )?,
+                    })?,
             ];
             if left_layers.iter().any(|layer| right_layers.contains(layer))
                 && rectangles_overlap(left.hub_footprint, right.hub_footprint)?
@@ -3573,16 +3579,23 @@ fn verify_transition_independence(
         }
     }
 
-    for lower in 0..topology.config.layers().2.checked_sub(1).ok_or(
-        GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Topology,
-            operation: "transition_proof_layer_pairs",
-        },
-    )? {
-        let upper = lower.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Topology,
-            operation: "transition_proof_upper",
-        })?;
+    for lower in
+        0..topology
+            .config
+            .layers()
+            .2
+            .checked_sub(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Topology,
+                operation: "transition_proof_layer_pairs",
+            })?
+    {
+        let upper = lower
+            .checked_add(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Topology,
+                operation: "transition_proof_upper",
+            })?;
         let reservations: Vec<_> = topology
             .transitions
             .iter()
@@ -3592,11 +3605,9 @@ fn verify_transition_independence(
             "transition_count_per_pair",
             u64::from(topology.config.transitions_per_adjacent_pair()),
             u64::from(topology.config.transitions_per_adjacent_pair()),
-            u64::try_from(reservations.len()).map_err(|_| {
-                GeneratorError::ArithmeticOverflow {
-                    stage: ErrorStage::Topology,
-                    operation: "transition_reservation_count_convert",
-                }
+            u64::try_from(reservations.len()).map_err(|_| GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Topology,
+                operation: "transition_reservation_count_convert",
             })?,
         )?;
         let mut transition_edges = Vec::new();
@@ -3612,13 +3623,14 @@ fn verify_transition_independence(
                     reason: "selected_vertical_edge_count_not_one",
                 });
             }
-            let edge = matching.first().copied().ok_or(
-                GeneratorError::TransitionBinding {
+            let edge = matching
+                .first()
+                .copied()
+                .ok_or(GeneratorError::TransitionBinding {
                     stage: ErrorStage::Topology,
                     transition: reservation.id.raw(),
                     reason: "selected_vertical_edge_missing",
-                },
-            )?;
+                })?;
             if edge.source_region != reservation.lower_region
                 || edge.target_region != reservation.upper_region
                 || edge.source_socket != reservation.lower_socket
@@ -3659,7 +3671,6 @@ fn verify_transition_independence(
 mod tests {
     use std::path::PathBuf;
 
-    use super::*;
     use super::super::config::{GeneratorConfig, QualifiedProfile};
     use super::super::context::{AttemptContext, TelemetryMode};
     use super::super::determinism::{
@@ -3668,6 +3679,7 @@ mod tests {
     use super::super::ir::Direction;
     use super::super::placement::place_regions;
     use super::super::prefab::PrefabCatalog;
+    use super::*;
 
     fn catalog() -> PrefabCatalog {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/prefabs");
@@ -3714,7 +3726,11 @@ mod tests {
         let lower = PlacedSocket {
             id: SocketId(0),
             variant_socket_index: 0,
-            global_anchor: GridCoord { layer: 0, x: 2, y: 4 },
+            global_anchor: GridCoord {
+                layer: 0,
+                x: 2,
+                y: 4,
+            },
             direction: super::super::ir::Direction::South,
             width: 1,
             role: SocketRole::LowerRampApproach,
@@ -3723,13 +3739,23 @@ mod tests {
         let upper = PlacedSocket {
             id: SocketId(1),
             variant_socket_index: 1,
-            global_anchor: GridCoord { layer: 1, x: 2, y: 0 },
+            global_anchor: GridCoord {
+                layer: 1,
+                x: 2,
+                y: 0,
+            },
             direction: super::super::ir::Direction::North,
             width: 1,
             role: SocketRole::UpperLanding,
             paired_socket_id: Some(SocketId(0)),
         };
-        assert_eq!(lower.global_anchor.layer.abs_diff(upper.global_anchor.layer), 1);
+        assert_eq!(
+            lower
+                .global_anchor
+                .layer
+                .abs_diff(upper.global_anchor.layer),
+            1
+        );
         assert!(matches!(
             (lower.role, upper.role),
             (SocketRole::LowerRampApproach, SocketRole::UpperLanding)
@@ -3752,7 +3778,12 @@ mod tests {
             role,
             paired_socket_id: None,
         };
-        let east = socket(0, super::super::ir::Direction::East, 1, SocketRole::Corridor);
+        let east = socket(
+            0,
+            super::super::ir::Direction::East,
+            1,
+            SocketRole::Corridor,
+        );
         let west = socket(1, super::super::ir::Direction::West, 1, SocketRole::Doorway);
         assert_eq!(
             ordinary_socket_compatibility(&east, &west),
@@ -3795,7 +3826,11 @@ mod tests {
         let source_socket = PlacedSocket {
             id: SocketId(0),
             variant_socket_index: 0,
-            global_anchor: GridCoord { layer: 0, x: 7, y: 6 },
+            global_anchor: GridCoord {
+                layer: 0,
+                x: 7,
+                y: 6,
+            },
             direction: super::super::ir::Direction::East,
             width: 1,
             role: SocketRole::Corridor,
@@ -3804,7 +3839,11 @@ mod tests {
         let target_socket = PlacedSocket {
             id: SocketId(1),
             variant_socket_index: 0,
-            global_anchor: GridCoord { layer: 0, x: 15, y: 6 },
+            global_anchor: GridCoord {
+                layer: 0,
+                x: 15,
+                y: 6,
+            },
             direction: super::super::ir::Direction::West,
             width: 1,
             role: SocketRole::Corridor,
@@ -3830,12 +3869,8 @@ mod tests {
             transitions: vec![],
             marker_variant_indices: vec![],
         };
-        let mut grid = OccupancyGrid::new(
-            config.width(),
-            config.height(),
-            config.layers().2,
-        )
-        .expect("grid");
+        let mut grid =
+            OccupancyGrid::new(config.width(), config.height(), config.layers().2).expect("grid");
         grid.reserve_rect(0, 5, 5, 3, 3, OccupancyClass::Region(source.id.raw()))
             .expect("source footprint");
         grid.reserve_rect(0, 15, 5, 3, 3, OccupancyClass::Region(target.id.raw()))
@@ -3850,15 +3885,8 @@ mod tests {
             OccupancyClass::Socket(target_socket.id.raw()),
         )
         .expect("target socket");
-        let blocked = GridCoord::new(
-            0,
-            11,
-            6,
-            config.width(),
-            config.height(),
-            config.layers().2,
-        )
-        .expect("blocked transition cell");
+        let blocked = GridCoord::new(0, 11, 6, config.width(), config.height(), config.layers().2)
+            .expect("blocked transition cell");
         grid.set(blocked, OccupancyClass::Transition(999))
             .expect("transition obstacle");
 
@@ -3874,17 +3902,13 @@ mod tests {
         )
         .expect("path search");
         let (path, _) = result.expect("routed path");
-        let goal = GridCoord::new(
-            0,
-            16,
-            6,
-            config.width(),
-            config.height(),
-            config.layers().2,
-        )
-        .expect("target goal");
+        let goal = GridCoord::new(0, 16, 6, config.width(), config.height(), config.layers().2)
+            .expect("target goal");
         assert_eq!(path.last(), Some(&goal));
-        assert_eq!(grid.get(goal), Some(OccupancyClass::Region(target.id.raw())));
+        assert_eq!(
+            grid.get(goal),
+            Some(OccupancyClass::Region(target.id.raw()))
+        );
         assert!(!path.contains(&blocked));
         assert!(path.iter().all(|cell| {
             !matches!(grid.get(*cell), Some(OccupancyClass::Region(owner)) if owner != source.id.raw() && *cell != goal)
@@ -3899,9 +3923,20 @@ mod tests {
         let catalog = catalog();
         let factory = factory(&config, &catalog, 5);
         let mut roles = factory.stream(SemanticStage::Roles, &[]);
-        let (topology, grid) =
-            place_regions(&config, &catalog, &mut roles, factory, &mut AttemptContext::new(TelemetryMode::Off)).expect("placement");
-        let graph = build_candidate_graph(&topology, &grid, &mut AttemptContext::new(TelemetryMode::Off)).expect("candidate graph");
+        let (topology, grid) = place_regions(
+            &config,
+            &catalog,
+            &mut roles,
+            factory,
+            &mut AttemptContext::new(TelemetryMode::Off),
+        )
+        .expect("placement");
+        let graph = build_candidate_graph(
+            &topology,
+            &grid,
+            &mut AttemptContext::new(TelemetryMode::Off),
+        )
+        .expect("candidate graph");
         let vertical: Vec<_> = graph
             .edges
             .iter()
@@ -3924,12 +3959,26 @@ mod tests {
         let catalog = catalog();
         let factory = factory(&config, &catalog, 23);
         let mut roles = factory.stream(SemanticStage::Roles, &[]);
-        let (placed, grid) =
-            place_regions(&config, &catalog, &mut roles, factory, &mut AttemptContext::new(TelemetryMode::Off)).expect("placement");
-        let graph = build_candidate_graph(&placed, &grid, &mut AttemptContext::new(TelemetryMode::Off)).expect("candidate graph");
+        let (placed, grid) = place_regions(
+            &config,
+            &catalog,
+            &mut roles,
+            factory,
+            &mut AttemptContext::new(TelemetryMode::Off),
+        )
+        .expect("placement");
+        let graph =
+            build_candidate_graph(&placed, &grid, &mut AttemptContext::new(TelemetryMode::Off))
+                .expect("candidate graph");
         let mut topology_rng = factory.stream(SemanticStage::Topology, &[]);
-        let selected = select_topology(placed, &config, &graph, &mut topology_rng, &mut AttemptContext::new(TelemetryMode::Off))
-            .expect("topology selection");
+        let selected = select_topology(
+            placed,
+            &config,
+            &graph,
+            &mut topology_rng,
+            &mut AttemptContext::new(TelemetryMode::Off),
+        )
+        .expect("topology selection");
         assert!(!selected.edges.is_empty());
         assert_eq!(
             selected
@@ -3942,8 +3991,10 @@ mod tests {
         selected
             .validate_transition_bindings()
             .expect("transition bindings");
-        assert!((config.required_route_min() as u64..=config.required_route_max() as u64)
-            .contains(&selected.route_distance));
+        assert!(
+            (config.required_route_min() as u64..=config.required_route_max() as u64)
+                .contains(&selected.route_distance)
+        );
         assert!(selected.per_layer_cycles.iter().all(|cycles| {
             (config.per_layer_cycles_min()..=config.per_layer_cycles_max()).contains(cycles)
         }));
@@ -3975,11 +4026,7 @@ mod tests {
         let socket = PlacedSocket {
             id: SocketId(id * 10),
             variant_socket_index: 0,
-            global_anchor: GridCoord {
-                layer,
-                x: x + 1,
-                y,
-            },
+            global_anchor: GridCoord { layer, x: x + 1, y },
             direction,
             width: 1,
             role: SocketRole::Corridor,
@@ -4109,11 +4156,7 @@ mod tests {
         let socket = |id, x, direction| PlacedSocket {
             id: SocketId(id),
             variant_socket_index: 0,
-            global_anchor: GridCoord {
-                layer: 0,
-                x,
-                y: 10,
-            },
+            global_anchor: GridCoord { layer: 0, x, y: 10 },
             direction,
             width: 1,
             role: SocketRole::Corridor,
@@ -4155,12 +4198,8 @@ mod tests {
             },
         ];
         let topology = minimal_topology(regions, config.clone());
-        let mut occupancy = OccupancyGrid::new(
-            config.width(),
-            config.height(),
-            config.layers().2,
-        )
-        .expect("occupancy");
+        let mut occupancy = OccupancyGrid::new(config.width(), config.height(), config.layers().2)
+            .expect("occupancy");
         occupancy
             .reserve_rect(0, 5, 9, 3, 3, OccupancyClass::Region(0))
             .expect("source region");
@@ -4185,15 +4224,8 @@ mod tests {
         .expect("conflict cell");
         let original_path: Vec<_> = (6..=21)
             .map(|x| {
-                GridCoord::new(
-                    0,
-                    x,
-                    10,
-                    config.width(),
-                    config.height(),
-                    config.layers().2,
-                )
-                .expect("path cell")
+                GridCoord::new(0, x, 10, config.width(), config.height(), config.layers().2)
+                    .expect("path cell")
             })
             .collect();
         let blocking_edge = CandidateEdge {
@@ -4230,18 +4262,19 @@ mod tests {
         topology_search_workspace!(search, astar);
         let edge_checkpoint = search.checkpoint();
 
-        assert!(
-            add_edge_if_legal(
-                &topology,
-                &mut graph,
-                &mut selected,
-                &trial_edge,
-                false,
-                &mut search,
-            )
-            .expect("rerouted trial")
+        assert!(add_edge_if_legal(
+            &topology,
+            &mut graph,
+            &mut selected,
+            &trial_edge,
+            false,
+            &mut search,
+        )
+        .expect("rerouted trial"));
+        assert_ne!(
+            graph, original_graph,
+            "fixture must realize a rerouted witness"
         );
-        assert_ne!(graph, original_graph, "fixture must realize a rerouted witness");
         assert!(selected.contains(&trial_edge.id));
 
         rollback_topology_trial(
@@ -4309,14 +4342,8 @@ mod tests {
         ]);
         let sizes = BTreeMap::from([(1, 2), (2, 1), (3, 1)]);
 
-        let candidates = ordered_layer_core_candidates(
-            &topology,
-            &ordered,
-            &selected,
-            &labels,
-            &sizes,
-            2,
-        );
+        let candidates =
+            ordered_layer_core_candidates(&topology, &ordered, &selected, &labels, &sizes, 2);
         assert_eq!(
             candidates.iter().map(|edge| edge.id).collect::<Vec<_>>(),
             vec![EdgeId(3), EdgeId(2), EdgeId(1)]
@@ -4454,7 +4481,12 @@ mod tests {
         let ordered = edge_order(&graph, 0);
         let candidate_indices = [EdgeId(1), EdgeId(2)]
             .into_iter()
-            .map(|id| ordered.iter().position(|edge| edge.id == id).expect("edge index"))
+            .map(|id| {
+                ordered
+                    .iter()
+                    .position(|edge| edge.id == id)
+                    .expect("edge index")
+            })
             .collect::<Vec<_>>();
         let entries = vec![(RegionId(2), candidate_indices), (RegionId(3), vec![])];
         let mut selected = BTreeSet::from([EdgeId(0)]);
@@ -4484,7 +4516,10 @@ mod tests {
             })
         ));
         assert_eq!(search_steps, 2);
-        assert_eq!(selected, original_selected, "failed branches must stay isolated");
+        assert_eq!(
+            selected, original_selected,
+            "failed branches must stay isolated"
+        );
     }
 
     #[test]
@@ -4515,17 +4550,12 @@ mod tests {
             occupancy: minimal_grid(),
         };
         // Non-dead-end only: regions 0 and 1 in same component, region 2 excluded
-        let labels =
-            raw_component_labels(&topology, &graph, Some(0), true).expect("labels");
+        let labels = raw_component_labels(&topology, &graph, Some(0), true).expect("labels");
         assert_eq!(labels.get(&RegionId(0)), labels.get(&RegionId(1)));
         assert!(!labels.contains_key(&RegionId(2)));
         // Including dead-ends
-        let all_labels =
-            raw_component_labels(&topology, &graph, Some(0), false).expect("labels");
-        assert_eq!(
-            all_labels.get(&RegionId(0)),
-            all_labels.get(&RegionId(2))
-        );
+        let all_labels = raw_component_labels(&topology, &graph, Some(0), false).expect("labels");
+        assert_eq!(all_labels.get(&RegionId(0)), all_labels.get(&RegionId(2)));
     }
 
     #[test]
@@ -4712,13 +4742,7 @@ mod tests {
         let mut selected = BTreeSet::new();
         let ordered = edge_order(&graph, 0);
         topology_search_workspace!(search, astar);
-        let result = attach_dead_ends(
-            &topology,
-            &mut graph,
-            &ordered,
-            &mut selected,
-            &mut search,
-        );
+        let result = attach_dead_ends(&topology, &mut graph, &ordered, &mut selected, &mut search);
         assert!(result.is_err());
         match result {
             Err(GeneratorError::TopologyInfeasible { constraint, .. }) => {
@@ -4770,14 +4794,8 @@ mod tests {
         // Pre-select the spine so route minimum is already satisfied.
         selected.insert(EdgeId(0));
         topology_search_workspace!(search, astar);
-        attach_dead_ends(
-            &topology,
-            &mut graph,
-            &ordered,
-            &mut selected,
-            &mut search,
-        )
-        .expect("should attach dead-end via one candidate");
+        attach_dead_ends(&topology, &mut graph, &ordered, &mut selected, &mut search)
+            .expect("should attach dead-end via one candidate");
         assert_eq!(selected.len(), 2);
         let dead_edge = selected.iter().find(|e| **e != EdgeId(0)).unwrap();
         assert!(graph.edges.iter().any(|e| e.id == *dead_edge));
@@ -4826,18 +4844,18 @@ mod tests {
         let mut selected = BTreeSet::from([EdgeId(0)]);
 
         topology_search_workspace!(search, astar);
-        attach_dead_ends(
-            &topology,
-            &mut graph,
-            &ordered,
-            &mut selected,
-            &mut search,
-        )
-        .expect("backtracking assignment");
+        attach_dead_ends(&topology, &mut graph, &ordered, &mut selected, &mut search)
+            .expect("backtracking assignment");
 
         assert!(selected.contains(&EdgeId(2)), "constrained dead end first");
-        assert!(selected.contains(&EdgeId(3)), "fallback selected after conflict");
-        assert!(!selected.contains(&EdgeId(1)), "greedy conflicting edge rejected");
+        assert!(
+            selected.contains(&EdgeId(3)),
+            "fallback selected after conflict"
+        );
+        assert!(
+            !selected.contains(&EdgeId(1)),
+            "greedy conflicting edge rejected"
+        );
     }
 
     #[test]
@@ -4961,13 +4979,8 @@ mod tests {
         let mut selected = BTreeSet::new();
         let ordered = edge_order(&graph, 0);
         topology_search_workspace!(search, astar);
-        let result = connect_layer_cores(
-            &topology,
-            &mut graph,
-            &ordered,
-            &mut selected,
-            &mut search,
-        );
+        let result =
+            connect_layer_cores(&topology, &mut graph, &ordered, &mut selected, &mut search);
         assert!(result.is_err());
         match result {
             Err(GeneratorError::SearchExhausted { search, .. }) => {
@@ -4986,12 +4999,29 @@ mod tests {
         let catalog = catalog();
         let factory = factory(&config, &catalog, 23);
         let mut roles = factory.stream(SemanticStage::Roles, &[]);
-        let (topology, grid) =
-            place_regions(&config, &catalog, &mut roles, factory, &mut AttemptContext::new(TelemetryMode::Off)).expect("placement");
-        let graph = build_candidate_graph(&topology, &grid, &mut AttemptContext::new(TelemetryMode::Off)).expect("candidate graph");
+        let (topology, grid) = place_regions(
+            &config,
+            &catalog,
+            &mut roles,
+            factory,
+            &mut AttemptContext::new(TelemetryMode::Off),
+        )
+        .expect("placement");
+        let graph = build_candidate_graph(
+            &topology,
+            &grid,
+            &mut AttemptContext::new(TelemetryMode::Off),
+        )
+        .expect("candidate graph");
         let mut topology_rng = factory.stream(SemanticStage::Topology, &[]);
-        let selected = select_topology(topology, &config, &graph, &mut topology_rng, &mut AttemptContext::new(TelemetryMode::Off))
-            .expect("topology selection");
+        let selected = select_topology(
+            topology,
+            &config,
+            &graph,
+            &mut topology_rng,
+            &mut AttemptContext::new(TelemetryMode::Off),
+        )
+        .expect("topology selection");
         let dead_ends: Vec<_> = selected
             .regions
             .iter()
@@ -5002,9 +5032,7 @@ mod tests {
             let degree = selected
                 .edges
                 .iter()
-                .filter(|edge| {
-                    edge.source_region == region.id || edge.target_region == region.id
-                })
+                .filter(|edge| edge.source_region == region.id || edge.target_region == region.id)
                 .count();
             assert_eq!(degree, 1, "dead-end region {}", region.id.raw());
         }
@@ -5017,12 +5045,26 @@ mod tests {
         let run = || {
             let factory = factory(&config, &catalog, 23);
             let mut roles = factory.stream(SemanticStage::Roles, &[]);
-            let (placed, grid) = place_regions(&config, &catalog, &mut roles, factory, &mut AttemptContext::new(TelemetryMode::Off))
-                .expect("placement");
-            let graph = build_candidate_graph(&placed, &grid, &mut AttemptContext::new(TelemetryMode::Off)).expect("candidate graph");
+            let (placed, grid) = place_regions(
+                &config,
+                &catalog,
+                &mut roles,
+                factory,
+                &mut AttemptContext::new(TelemetryMode::Off),
+            )
+            .expect("placement");
+            let graph =
+                build_candidate_graph(&placed, &grid, &mut AttemptContext::new(TelemetryMode::Off))
+                    .expect("candidate graph");
             let mut topology_rng = factory.stream(SemanticStage::Topology, &[]);
-            select_topology(placed, &config, &graph, &mut topology_rng, &mut AttemptContext::new(TelemetryMode::Off))
-                .expect("topology selection")
+            select_topology(
+                placed,
+                &config,
+                &graph,
+                &mut topology_rng,
+                &mut AttemptContext::new(TelemetryMode::Off),
+            )
+            .expect("topology selection")
         };
         assert_eq!(run(), run());
     }

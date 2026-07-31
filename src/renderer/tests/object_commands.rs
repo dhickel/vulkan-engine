@@ -3,18 +3,17 @@
 //! These tests use the public [`Scene`] API and exercise all 7 built-in
 //! object commands through [`CommandHistory`].
 
+use engine_events::SceneObjectId;
 use glam::{Mat4, Vec3};
 use renderer::object::{
     component::{ComponentEnvelope, ComponentInstanceId, ComponentKey},
     ObjectKind, ObjectParent,
 };
 use renderer::{
-    AttachComponentCommand, Command, CommandError, CommandHistory,
-    DuplicateObjectsCommand, PointLight, RemoveComponentCommand, RemoveObjectsCommand,
-    ReplaceComponentStateCommand, Scene, SceneError, SetObjectParentCommand,
-    SetObjectTransformCommand,
+    AttachComponentCommand, Command, CommandError, CommandHistory, DuplicateObjectsCommand,
+    PointLight, RemoveComponentCommand, RemoveObjectsCommand, ReplaceComponentStateCommand, Scene,
+    SceneError, SetObjectParentCommand, SetObjectTransformCommand,
 };
-use engine_events::SceneObjectId;
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -26,26 +25,14 @@ fn make_history(depth: usize) -> CommandHistory {
     CommandHistory::new(depth)
 }
 
-fn add_root_node(
-    scene: &mut Scene,
-) -> (renderer::SceneNodeId, SceneObjectId) {
-    let id = scene
-        .create_node_default(None)
-        .expect("create root node");
-    scene
-        .set_node_name(id, "Root")
-        .expect("set name");
-    let persistent = scene
-        .get_node_record(id)
-        .unwrap()
-        .persistent_id
-        .clone();
+fn add_root_node(scene: &mut Scene) -> (renderer::SceneNodeId, SceneObjectId) {
+    let id = scene.create_node_default(None).expect("create root node");
+    scene.set_node_name(id, "Root").expect("set name");
+    let persistent = scene.get_node_record(id).unwrap().persistent_id.clone();
     (id, persistent)
 }
 
-fn add_point_light(
-    scene: &mut Scene,
-) -> (renderer::PointLightId, SceneObjectId) {
+fn add_point_light(scene: &mut Scene) -> (renderer::PointLightId, SceneObjectId) {
     let id = scene
         .create_point_light(PointLight {
             position: Vec3::new(1.0, 2.0, 3.0),
@@ -127,8 +114,7 @@ fn set_transform_node_execute_undo_redo() {
     let (_nid, persistent) = add_root_node(&mut scene);
 
     let new_t = Mat4::from_translation(Vec3::new(5.0, 0.0, 0.0));
-    let mut cmd =
-        SetObjectTransformCommand::new(persistent.clone(), ObjectKind::Node, new_t);
+    let mut cmd = SetObjectTransformCommand::new(persistent.clone(), ObjectKind::Node, new_t);
 
     cmd.execute(scene.world_mut()).unwrap();
     let nid = scene
@@ -156,8 +142,7 @@ fn set_transform_node_execute_undo_redo() {
 fn set_transform_reuse_rejected() {
     let mut scene = make_scene();
     let (_nid, persistent) = add_root_node(&mut scene);
-    let mut cmd =
-        SetObjectTransformCommand::new(persistent, ObjectKind::Node, Mat4::IDENTITY);
+    let mut cmd = SetObjectTransformCommand::new(persistent, ObjectKind::Node, Mat4::IDENTITY);
 
     cmd.execute(scene.world_mut()).unwrap();
     let err = cmd.execute(scene.world_mut()).unwrap_err();
@@ -173,8 +158,7 @@ fn set_transform_point_light() {
     let (_pl_id, persistent) = add_point_light(&mut scene);
 
     let new_t = Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0));
-    let mut cmd =
-        SetObjectTransformCommand::new(persistent.clone(), ObjectKind::PointLight, new_t);
+    let mut cmd = SetObjectTransformCommand::new(persistent.clone(), ObjectKind::PointLight, new_t);
 
     cmd.execute(scene.world_mut()).unwrap();
 
@@ -184,10 +168,7 @@ fn set_transform_point_light() {
         .and_then(|oid| scene.try_get_point_light_id(oid).ok())
         .unwrap();
     let transform = scene.point_light_transform(pl_id).unwrap();
-    assert_eq!(
-        transform.w_axis.truncate(),
-        Vec3::new(1.0, 2.0, 3.0)
-    );
+    assert_eq!(transform.w_axis.truncate(), Vec3::new(1.0, 2.0, 3.0));
 }
 
 #[test]
@@ -195,14 +176,8 @@ fn set_transform_rejects_non_finite() {
     let mut scene = make_scene();
     let (_nid, persistent) = add_root_node(&mut scene);
 
-    let bad = Mat4::from_cols(
-        glam::Vec4::NAN,
-        glam::Vec4::Y,
-        glam::Vec4::Z,
-        glam::Vec4::W,
-    );
-    let mut cmd =
-        SetObjectTransformCommand::new(persistent, ObjectKind::Node, bad);
+    let bad = Mat4::from_cols(glam::Vec4::NAN, glam::Vec4::Y, glam::Vec4::Z, glam::Vec4::W);
+    let mut cmd = SetObjectTransformCommand::new(persistent, ObjectKind::Node, bad);
     let err = cmd.execute(scene.world_mut()).unwrap_err();
     assert!(matches!(err, SceneError::InvalidMutation(_)));
 }
@@ -213,8 +188,7 @@ fn set_transform_point_light_rejects_non_translation() {
     let (_pl_id, persistent) = add_point_light(&mut scene);
 
     let rot = Mat4::from_rotation_x(0.5) * Mat4::from_translation(Vec3::X);
-    let mut cmd =
-        SetObjectTransformCommand::new(persistent, ObjectKind::PointLight, rot);
+    let mut cmd = SetObjectTransformCommand::new(persistent, ObjectKind::PointLight, rot);
     let err = cmd.execute(scene.world_mut()).unwrap_err();
     assert!(matches!(err, SceneError::InvalidMutation(_)));
 }
@@ -322,10 +296,7 @@ fn remove_node_undo_restores_with_remap() {
         .create_node_default(Some(node_id))
         .expect("create child");
 
-    let mut cmd = RemoveObjectsCommand::new(
-        vec![persistent.clone()],
-        vec![ObjectKind::Node],
-    );
+    let mut cmd = RemoveObjectsCommand::new(vec![persistent.clone()], vec![ObjectKind::Node]);
 
     cmd.execute(scene.world_mut()).unwrap();
     assert!(!scene.is_valid_node(node_id));
@@ -347,10 +318,7 @@ fn remove_node_then_redo_removes_again() {
     let mut scene = make_scene();
     let (_node_id, persistent) = add_root_node(&mut scene);
 
-    let mut cmd = RemoveObjectsCommand::new(
-        vec![persistent.clone()],
-        vec![ObjectKind::Node],
-    );
+    let mut cmd = RemoveObjectsCommand::new(vec![persistent.clone()], vec![ObjectKind::Node]);
 
     cmd.execute(scene.world_mut()).unwrap();
     cmd.undo(scene.world_mut()).unwrap();
@@ -369,10 +337,7 @@ fn remove_point_light_undo_restores() {
     let mut scene = make_scene();
     let (_pl_id, persistent) = add_point_light(&mut scene);
 
-    let mut cmd = RemoveObjectsCommand::new(
-        vec![persistent.clone()],
-        vec![ObjectKind::PointLight],
-    );
+    let mut cmd = RemoveObjectsCommand::new(vec![persistent.clone()], vec![ObjectKind::PointLight]);
 
     cmd.execute(scene.world_mut()).unwrap();
     assert!(scene.find_object_by_persistent_id(&persistent).is_none());
@@ -388,23 +353,16 @@ fn duplicate_node_produces_new_persistent_ids() {
     let mut scene = make_scene();
     let (_nid, persistent) = add_root_node(&mut scene);
 
-    let mut cmd = DuplicateObjectsCommand::new(
-        vec![persistent.clone()],
-        vec![ObjectKind::Node],
-        None,
-    );
+    let mut cmd =
+        DuplicateObjectsCommand::new(vec![persistent.clone()], vec![ObjectKind::Node], None);
 
     cmd.execute(scene.world_mut()).unwrap();
     let remaps = cmd.object_remaps();
     assert!(!remaps.is_empty());
-    assert!(scene
-        .find_object_by_persistent_id(&persistent)
-        .is_some());
+    assert!(scene.find_object_by_persistent_id(&persistent).is_some());
     let dup_persistent = &remaps[0].persistent;
     assert_ne!(dup_persistent, &persistent);
-    assert!(scene
-        .find_object_by_persistent_id(dup_persistent)
-        .is_some());
+    assert!(scene.find_object_by_persistent_id(dup_persistent).is_some());
 }
 
 #[test]
@@ -412,20 +370,15 @@ fn duplicate_then_undo_removes_duplicates() {
     let mut scene = make_scene();
     let (_nid, persistent) = add_root_node(&mut scene);
 
-    let mut cmd = DuplicateObjectsCommand::new(
-        vec![persistent.clone()],
-        vec![ObjectKind::Node],
-        None,
-    );
+    let mut cmd =
+        DuplicateObjectsCommand::new(vec![persistent.clone()], vec![ObjectKind::Node], None);
 
     cmd.execute(scene.world_mut()).unwrap();
     let remaps = cmd.object_remaps();
     let dup_persistent = remaps[0].persistent.clone();
 
     cmd.undo(scene.world_mut()).unwrap();
-    assert!(scene
-        .find_object_by_persistent_id(&persistent)
-        .is_some());
+    assert!(scene.find_object_by_persistent_id(&persistent).is_some());
     assert!(scene
         .find_object_by_persistent_id(&dup_persistent)
         .is_none());
@@ -436,11 +389,8 @@ fn duplicate_light() {
     let mut scene = make_scene();
     let (_pl_id, persistent) = add_point_light(&mut scene);
 
-    let mut cmd = DuplicateObjectsCommand::new(
-        vec![persistent.clone()],
-        vec![ObjectKind::PointLight],
-        None,
-    );
+    let mut cmd =
+        DuplicateObjectsCommand::new(vec![persistent.clone()], vec![ObjectKind::PointLight], None);
 
     cmd.execute(scene.world_mut()).unwrap();
     let remaps = cmd.object_remaps();
@@ -459,12 +409,13 @@ fn attach_component_undo_removes() {
     let key = envelope.key.clone();
     let instance_id = envelope.instance_id.clone();
 
-    let mut cmd =
-        AttachComponentCommand::new(persistent.clone(), envelope.clone());
+    let mut cmd = AttachComponentCommand::new(persistent.clone(), envelope.clone());
 
     cmd.execute(scene.world_mut()).unwrap();
     let envs = scene.component_envelopes(nid).unwrap();
-    assert!(envs.iter().any(|e| e.key == key && e.instance_id == instance_id));
+    assert!(envs
+        .iter()
+        .any(|e| e.key == key && e.instance_id == instance_id));
 
     cmd.undo(scene.world_mut()).unwrap();
     let envs = scene.component_envelopes(nid).unwrap();
@@ -486,11 +437,7 @@ fn remove_component_undo_reattaches() {
 
     scene.attach_component(nid, envelope.clone()).unwrap();
 
-    let mut cmd = RemoveComponentCommand::new(
-        persistent.clone(),
-        key.clone(),
-        instance_id.clone(),
-    );
+    let mut cmd = RemoveComponentCommand::new(persistent.clone(), key.clone(), instance_id.clone());
 
     cmd.execute(scene.world_mut()).unwrap();
     let envs = scene.component_envelopes(nid).unwrap();
@@ -519,13 +466,8 @@ fn replace_component_state_undo_restores_old() {
     scene.attach_component(nid, envelope.clone()).unwrap();
 
     use serde_json::json;
-    let new_envelope = ComponentEnvelope::new(
-        instance_id.clone(),
-        key.clone(),
-        1,
-        json!({"value": 99}),
-    )
-    .unwrap();
+    let new_envelope =
+        ComponentEnvelope::new(instance_id.clone(), key.clone(), 1, json!({"value": 99})).unwrap();
     let new_hydrated: std::sync::Arc<dyn std::any::Any + Send + Sync> =
         std::sync::Arc::new(json!({"value": 99}));
 
@@ -567,18 +509,11 @@ fn execute_failure_preserves_redo_stack() {
         ObjectKind::Node,
         Mat4::from_translation(Vec3::X),
     );
-    history
-        .execute(Box::new(cmd1), scene.world_mut())
-        .unwrap();
+    history.execute(Box::new(cmd1), scene.world_mut()).unwrap();
     history.undo(scene.world_mut()).unwrap();
     assert!(history.can_redo());
 
-    let bad_t = Mat4::from_cols(
-        glam::Vec4::NAN,
-        glam::Vec4::Y,
-        glam::Vec4::Z,
-        glam::Vec4::W,
-    );
+    let bad_t = Mat4::from_cols(glam::Vec4::NAN, glam::Vec4::Y, glam::Vec4::Z, glam::Vec4::W);
     let cmd2 = SetObjectTransformCommand::new(persistent, ObjectKind::Node, bad_t);
     let err = history.execute(Box::new(cmd2), scene.world_mut());
     assert!(err.is_err());
@@ -596,9 +531,7 @@ fn undo_failure_keeps_command_on_undo_stack() {
         ObjectKind::Node,
         Mat4::from_translation(Vec3::X),
     );
-    history
-        .execute(Box::new(cmd), scene.world_mut())
-        .unwrap();
+    history.execute(Box::new(cmd), scene.world_mut()).unwrap();
 
     // Remove the node to make undo fail.
     let nid = scene
@@ -623,9 +556,7 @@ fn redo_failure_keeps_command_on_redo_stack() {
         ObjectKind::Node,
         Mat4::from_translation(Vec3::X),
     );
-    history
-        .execute(Box::new(cmd), scene.world_mut())
-        .unwrap();
+    history.execute(Box::new(cmd), scene.world_mut()).unwrap();
     history.undo(scene.world_mut()).unwrap();
     assert!(history.can_redo());
 
@@ -690,15 +621,10 @@ fn redo_resolves_by_persistent_id_after_restore_changes_handle() {
         ObjectKind::Node,
         Mat4::from_translation(Vec3::new(3.0, 0.0, 0.0)),
     );
-    history
-        .execute(Box::new(cmd), scene.world_mut())
-        .unwrap();
+    history.execute(Box::new(cmd), scene.world_mut()).unwrap();
 
     // Remove the node and restore it (changing runtime handle).
-    let remove_cmd = RemoveObjectsCommand::new(
-        vec![persistent.clone()],
-        vec![ObjectKind::Node],
-    );
+    let remove_cmd = RemoveObjectsCommand::new(vec![persistent.clone()], vec![ObjectKind::Node]);
     history
         .execute(Box::new(remove_cmd), scene.world_mut())
         .unwrap();
@@ -740,8 +666,7 @@ fn commands_report_correct_descriptions() {
     let mut scene = make_scene();
     let (_nid, persistent) = add_root_node(&mut scene);
 
-    let mut cmd =
-        SetObjectTransformCommand::new(persistent, ObjectKind::Node, Mat4::IDENTITY);
+    let mut cmd = SetObjectTransformCommand::new(persistent, ObjectKind::Node, Mat4::IDENTITY);
     assert_eq!(cmd.description(), "set_object_transform");
 
     cmd.execute(scene.world_mut()).unwrap();

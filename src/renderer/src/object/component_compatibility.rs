@@ -31,30 +31,32 @@ impl ComponentKindMatrix {
         match component_key {
             // Collider components are valid on nodes and point lights
             // (point lights are valid targets for trigger volumes).
-            "physics.box_collider"
-            | "physics.sphere_collider"
-            | "physics.capsule_collider" => match kind {
-                ObjectKind::Node | ObjectKind::PointLight => ComponentKindCompatibility::Allowed,
-                ObjectKind::DirectionalLight | ObjectKind::SpotLight => {
-                    ComponentKindCompatibility::Rejected
+            "physics.box_collider" | "physics.sphere_collider" | "physics.capsule_collider" => {
+                match kind {
+                    ObjectKind::Node | ObjectKind::PointLight => {
+                        ComponentKindCompatibility::Allowed
+                    }
+                    ObjectKind::DirectionalLight | ObjectKind::SpotLight => {
+                        ComponentKindCompatibility::Rejected
+                    }
                 }
-            },
+            }
 
             // RigidBody requires an object with FullAffine or RigidWithPosition
             // transform capability — only nodes qualify.
             "physics.rigid_body" => match kind {
                 ObjectKind::Node => ComponentKindCompatibility::Allowed,
-                ObjectKind::PointLight
-                | ObjectKind::DirectionalLight
-                | ObjectKind::SpotLight => ComponentKindCompatibility::Rejected,
+                ObjectKind::PointLight | ObjectKind::DirectionalLight | ObjectKind::SpotLight => {
+                    ComponentKindCompatibility::Rejected
+                }
             },
 
             // CharacterController requires a node with FullAffine transform.
             "physics.character_controller" => match kind {
                 ObjectKind::Node => ComponentKindCompatibility::Allowed,
-                ObjectKind::PointLight
-                | ObjectKind::DirectionalLight
-                | ObjectKind::SpotLight => ComponentKindCompatibility::Rejected,
+                ObjectKind::PointLight | ObjectKind::DirectionalLight | ObjectKind::SpotLight => {
+                    ComponentKindCompatibility::Rejected
+                }
             },
 
             // Unknown component keys are allowed (caller decides).

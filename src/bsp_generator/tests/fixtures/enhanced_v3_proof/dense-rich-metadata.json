@@ -1,0 +1,366 @@
+{
+  "schema": "enhanced-v3-proof-metadata/v3",
+  "preset": "rich",
+  "xy_extent": 3072,
+  "construction_quantum": 16,
+  "room_count": 4,
+  "portal_count": 2,
+  "route_count": 2,
+  "transition_count": 0,
+  "surface_count": 24,
+  "instance_count": 12,
+  "simplified_count": 0,
+  "rejected_count": 0,
+  "grammar_families": [
+    "portal_chamber",
+    "buttressed_hall",
+    "column_grove"
+  ],
+  "estimated_total_faces": 956,
+  "estimated_total_entities": 6,
+  "identity_satisfied": true,
+  "spawn_origin": [
+    256,
+    512,
+    56
+  ],
+  "spawn_yaw": 0,
+  "light_origins": [
+    [
+      256,
+      512,
+      144
+    ],
+    [
+      768,
+      512,
+      144
+    ],
+    [
+      1536,
+      512,
+      336
+    ],
+    [
+      2048,
+      512,
+      336
+    ]
+  ],
+  "rooms": [
+    {
+      "id": "room/0000",
+      "layer": 0,
+      "shell": [
+        0,
+        0,
+        512,
+        1024
+      ],
+      "floor_z": 0,
+      "dims": [
+        512,
+        1024,
+        176
+      ]
+    },
+    {
+      "id": "room/0001",
+      "layer": 0,
+      "shell": [
+        512,
+        0,
+        1024,
+        1024
+      ],
+      "floor_z": 0,
+      "dims": [
+        512,
+        1024,
+        176
+      ]
+    },
+    {
+      "id": "room/0002",
+      "layer": 1,
+      "shell": [
+        1280,
+        0,
+        1792,
+        1024
+      ],
+      "floor_z": 192,
+      "dims": [
+        512,
+        1024,
+        176
+      ]
+    },
+    {
+      "id": "room/0003",
+      "layer": 1,
+      "shell": [
+        1792,
+        0,
+        2304,
+        1024
+      ],
+      "floor_z": 192,
+      "dims": [
+        512,
+        1024,
+        176
+      ]
+    }
+  ],
+  "portals": [
+    {
+      "id": "portal/0000",
+      "source_room": "room/0000",
+      "target_room": "room/0001",
+      "wall": "east",
+      "width": 128,
+      "height": 128
+    },
+    {
+      "id": "portal/0001",
+      "source_room": "room/0002",
+      "target_room": "room/0003",
+      "wall": "east",
+      "width": 128,
+      "height": 128
+    }
+  ],
+  "instances": [
+    {
+      "id": "instance/0000",
+      "feature_id": "feature/0000",
+      "room_id": "room/0000",
+      "volume": [
+        184,
+        184,
+        16,
+        216,
+        216,
+        96
+      ],
+      "support_kind": "floor",
+      "estimated_faces": 6
+    },
+    {
+      "id": "instance/0001",
+      "feature_id": "feature/0001",
+      "room_id": "room/0000",
+      "volume": [
+        184,
+        376,
+        16,
+        216,
+        408,
+        96
+      ],
+      "support_kind": "floor",
+      "estimated_faces": 6
+    },
+    {
+      "id": "instance/0002",
+      "feature_id": "feature/0002",
+      "room_id": "room/0000",
+      "volume": [
+        376,
+        184,
+        16,
+        408,
+        216,
+        96
+      ],
+      "support_kind": "floor",
+      "estimated_faces": 6
+    },
+    {
+      "id": "instance/0003",
+      "feature_id": "feature/0003",
+      "room_id": "room/0000",
+      "volume": [
+        376,
+        376,
+        16,
+        408,
+        408,
+        96
+      ],
+      "support_kind": "floor",
+      "estimated_faces": 6
+    },
+    {
+      "id": "instance/0004",
+      "feature_id": "feature/0004",
+      "room_id": "room/0000",
+      "volume": [
+        128,
+        128,
+        96,
+        272,
+        464,
+        112
+      ],
+      "support_kind": "supported_by:instance/0000",
+      "estimated_faces": 6
+    },
+    {
+      "id": "instance/0005",
+      "feature_id": "feature/0005",
+      "room_id": "room/0000",
+      "volume": [
+        320,
+        128,
+        96,
+        464,
+        464,
+        112
+      ],
+      "support_kind": "supported_by:instance/0002",
+      "estimated_faces": 6
+    },
+    {
+      "id": "instance/0006",
+      "feature_id": "feature/0006",
+      "room_id": "room/0002",
+      "volume": [
+        1464,
+        184,
+        208,
+        1496,
+        216,
+        288
+      ],
+      "support_kind": "floor",
+      "estimated_faces": 6
+    },
+    {
+      "id": "instance/0007",
+      "feature_id": "feature/0007",
+      "room_id": "room/0002",
+      "volume": [
+        1464,
+        376,
+        208,
+        1496,
+        408,
+        288
+      ],
+      "support_kind": "floor",
+      "estimated_faces": 6
+    },
+    {
+      "id": "instance/0008",
+      "feature_id": "feature/0008",
+      "room_id": "room/0002",
+      "volume": [
+        1656,
+        184,
+        208,
+        1688,
+        216,
+        288
+      ],
+      "support_kind": "floor",
+      "estimated_faces": 6
+    },
+    {
+      "id": "instance/0009",
+      "feature_id": "feature/0009",
+      "room_id": "room/0002",
+      "volume": [
+        1656,
+        376,
+        208,
+        1688,
+        408,
+        288
+      ],
+      "support_kind": "floor",
+      "estimated_faces": 6
+    },
+    {
+      "id": "instance/0010",
+      "feature_id": "feature/0010",
+      "room_id": "room/0002",
+      "volume": [
+        1408,
+        128,
+        288,
+        1552,
+        464,
+        304
+      ],
+      "support_kind": "supported_by:instance/0006",
+      "estimated_faces": 6
+    },
+    {
+      "id": "instance/0011",
+      "feature_id": "feature/0011",
+      "room_id": "room/0002",
+      "volume": [
+        1600,
+        128,
+        288,
+        1744,
+        464,
+        304
+      ],
+      "support_kind": "supported_by:instance/0008",
+      "estimated_faces": 6
+    }
+  ],
+  "support_edges": [
+    {
+      "dependent": "instance/0000",
+      "parent": "surface:surface/0000"
+    },
+    {
+      "dependent": "instance/0001",
+      "parent": "surface:surface/0000"
+    },
+    {
+      "dependent": "instance/0002",
+      "parent": "surface:surface/0000"
+    },
+    {
+      "dependent": "instance/0003",
+      "parent": "surface:surface/0000"
+    },
+    {
+      "dependent": "instance/0004",
+      "parent": "instance/0000"
+    },
+    {
+      "dependent": "instance/0005",
+      "parent": "instance/0002"
+    },
+    {
+      "dependent": "instance/0006",
+      "parent": "surface:surface/0012"
+    },
+    {
+      "dependent": "instance/0007",
+      "parent": "surface:surface/0012"
+    },
+    {
+      "dependent": "instance/0008",
+      "parent": "surface:surface/0012"
+    },
+    {
+      "dependent": "instance/0009",
+      "parent": "surface:surface/0012"
+    },
+    {
+      "dependent": "instance/0010",
+      "parent": "instance/0006"
+    },
+    {
+      "dependent": "instance/0011",
+      "parent": "instance/0008"
+    }
+  ]
+}

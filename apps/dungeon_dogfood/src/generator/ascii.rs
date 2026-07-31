@@ -44,13 +44,14 @@ pub(super) fn serialize_level(level: &ParsedLevel) -> Result<String, GeneratorEr
 }
 
 fn validate_level_shape(level: &ParsedLevel) -> Result<(), GeneratorError> {
-    let expected = level
-        .width
-        .checked_mul(level.height)
-        .ok_or(GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Ir,
-            operation: "ascii_level_area",
-        })?;
+    let expected =
+        level
+            .width
+            .checked_mul(level.height)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Ir,
+                operation: "ascii_level_area",
+            })?;
     if level.width == 0
         || level.height == 0
         || level.layers.is_empty()
@@ -203,7 +204,11 @@ mod tests {
     #[test]
     fn marker_on_ramp_is_rejected() {
         let mut level = parse_level("####\n#SR0>#\n####").unwrap();
-        level.model_markers.push(TileCoord { layer: 0, x: 2, y: 1 });
+        level.model_markers.push(TileCoord {
+            layer: 0,
+            x: 2,
+            y: 1,
+        });
         let error = serialize_level(&level).unwrap_err();
         assert!(error.to_string().contains("marker_not_floor"));
     }

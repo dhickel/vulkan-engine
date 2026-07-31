@@ -356,9 +356,7 @@ impl GeneratorError {
                 | ErrorStage::Prefab
                 | ErrorStage::Generation
                 | ErrorStage::Ir => false,
-                ErrorStage::Placement
-                | ErrorStage::Topology
-                | ErrorStage::Materialization => true,
+                ErrorStage::Placement | ErrorStage::Topology | ErrorStage::Materialization => true,
             },
             Self::PlacementExhausted { .. }
             | Self::TopologyInfeasible { .. }

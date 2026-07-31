@@ -4,10 +4,21 @@
 //! history manipulation, use `renderer` directly.
 
 pub use renderer::{
-    Command, CommandHistory, CommandResult, SceneNodeRemap,
     // Concrete commands
-    AddNodeCommand, PlaceAssetCommand, RemoveNodeCommand, SetTransformCommand,
-    AttachComponentCommand, DuplicateObjectsCommand, RemoveComponentCommand,
-    RemoveObjectsCommand, ReplaceComponentStateCommand, SetComponentPropertyCommand,
-    SetObjectParentCommand, SetObjectTransformCommand,
+    AddNodeCommand,
+    AttachComponentCommand,
+    Command,
+    CommandHistory,
+    CommandResult,
+    DuplicateObjectsCommand,
+    PlaceAssetCommand,
+    RemoveComponentCommand,
+    RemoveNodeCommand,
+    RemoveObjectsCommand,
+    ReplaceComponentStateCommand,
+    SceneNodeRemap,
+    SetComponentPropertyCommand,
+    SetObjectParentCommand,
+    SetObjectTransformCommand,
+    SetTransformCommand,
 };

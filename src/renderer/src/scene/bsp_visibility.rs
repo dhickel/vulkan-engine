@@ -278,18 +278,11 @@ impl BspMountState {
             return Ok(());
         }
 
-        let render_batches: Vec<bsp::geometry::RenderBatch> = mounted_batches
-            .iter()
-            .map(|mb| mb.render.clone())
-            .collect();
-        let batch_meshes: Vec<MeshHandle> = mounted_batches
-            .iter()
-            .map(|mb| mb.mesh)
-            .collect();
-        let batch_materials: Vec<BspMaterialHandle> = mounted_batches
-            .iter()
-            .map(|mb| mb.material)
-            .collect();
+        let render_batches: Vec<bsp::geometry::RenderBatch> =
+            mounted_batches.iter().map(|mb| mb.render.clone()).collect();
+        let batch_meshes: Vec<MeshHandle> = mounted_batches.iter().map(|mb| mb.mesh).collect();
+        let batch_materials: Vec<BspMaterialHandle> =
+            mounted_batches.iter().map(|mb| mb.material).collect();
 
         if render_batches.len() != batch_meshes.len()
             || render_batches.len() != batch_materials.len()
@@ -315,7 +308,8 @@ impl BspMountState {
                 if face_materials[slot] != Some(mb.material) {
                     return Err(format!(
                         "face {source_face} material handle mismatch: face={:?} batch={:?}",
-                        face_materials[slot], Some(mb.material)
+                        face_materials[slot],
+                        Some(mb.material)
                     ));
                 }
             }
@@ -1271,7 +1265,11 @@ mod tests {
         assert_eq!(diag.pvs_culled, 0);
     }
 
-    fn make_test_batch(leaf_signature: Vec<u32>, pvs_eligible: bool, is_inline: bool) -> bsp::geometry::RenderBatch {
+    fn make_test_batch(
+        leaf_signature: Vec<u32>,
+        pvs_eligible: bool,
+        is_inline: bool,
+    ) -> bsp::geometry::RenderBatch {
         let model_index = if is_inline { 1 } else { 0 };
         bsp::geometry::RenderBatch {
             key: bsp::geometry::BatchKey {

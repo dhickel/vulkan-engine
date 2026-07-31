@@ -424,9 +424,7 @@ pub(crate) fn reap_texture_retirement(
 #[cfg(feature = "bsp")]
 pub(crate) fn reap_bsp_retirement(
     latest_completed_serial: u64,
-    bsp_retirement_queue: &mut GpuRetirementQueue<
-        crate::data::retirement::BspRetirementClosure,
-    >,
+    bsp_retirement_queue: &mut GpuRetirementQueue<crate::data::retirement::BspRetirementClosure>,
     data_cache: &Arc<VkDataCache>,
     device: &ash::Device,
     allocator: &std::sync::Arc<std::sync::Mutex<vk_mem::Allocator>>,
@@ -488,17 +486,19 @@ pub(crate) fn reap_bsp_retirement(
 
     // Release mesh handles through the mesh cache.
     if !mesh_handles_to_free.is_empty() {
-        let mut mesh_cache = data_cache.mesh_cache.lock().map_err(|_| {
-            "mesh_cache lock poisoned during BSP retirement reaping".to_string()
-        })?;
+        let mut mesh_cache = data_cache
+            .mesh_cache
+            .lock()
+            .map_err(|_| "mesh_cache lock poisoned during BSP retirement reaping".to_string())?;
         mesh_cache.deallocate_ids(&mesh_handles_to_free);
     }
 
     // Release texture handles through the texture cache.
     if !texture_handles_to_free.is_empty() {
-        let mut texture_cache = data_cache.texture_cache.lock().map_err(|_| {
-            "texture_cache lock poisoned during BSP retirement reaping".to_string()
-        })?;
+        let mut texture_cache = data_cache
+            .texture_cache
+            .lock()
+            .map_err(|_| "texture_cache lock poisoned during BSP retirement reaping".to_string())?;
         for handle in texture_handles_to_free {
             texture_cache.deallocate_texture(handle);
         }

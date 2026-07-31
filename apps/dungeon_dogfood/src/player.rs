@@ -76,7 +76,11 @@ impl PlayerState {
         }
 
         let horizontal = world_move_dir * move_speed * dt;
-        let vert = if self.noclip { vertical * move_speed * dt } else { 0.0 };
+        let vert = if self.noclip {
+            vertical * move_speed * dt
+        } else {
+            0.0
+        };
 
         let desired = Vec3::new(horizontal.x, vert, horizontal.y);
         let attempted_displacement = desired.length();
@@ -114,12 +118,7 @@ mod tests {
     fn clamps_large_horizontal_frame_displacement() {
         let mut player = PlayerState::new(Vec3::ZERO);
 
-        let guard = player.ingest_movement_intent(
-            Vec2::new(3.0, 4.0),
-            0.0,
-            1.0,
-            1.0,
-        );
+        let guard = player.ingest_movement_intent(Vec2::new(3.0, 4.0), 0.0, 1.0, 1.0);
 
         assert_eq!(
             guard,
@@ -138,12 +137,7 @@ mod tests {
     fn rejects_non_finite_input() {
         let mut player = PlayerState::new(Vec3::ZERO);
 
-        let guard = player.ingest_movement_intent(
-            Vec2::new(f32::NAN, 0.0),
-            0.0,
-            1.0,
-            1.0,
-        );
+        let guard = player.ingest_movement_intent(Vec2::new(f32::NAN, 0.0), 0.0, 1.0, 1.0);
 
         assert_eq!(guard, CameraIntentGuard::RejectedNonFinite);
         assert_eq!(player.desired_translation, Vec3::ZERO);
@@ -154,12 +148,7 @@ mod tests {
         let mut player = PlayerState::new(Vec3::ZERO);
         player.noclip = true;
 
-        let guard = player.ingest_movement_intent(
-            Vec2::new(0.0, 0.0),
-            2.0,
-            0.5,
-            1.0,
-        );
+        let guard = player.ingest_movement_intent(Vec2::new(0.0, 0.0), 2.0, 0.5, 1.0);
 
         assert_eq!(guard, CameraIntentGuard::Accepted);
         assert!((player.desired_translation.y - 1.0).abs() < 1e-6);
@@ -169,12 +158,7 @@ mod tests {
     fn normal_movement_applies_horizontal_without_vertical() {
         let mut player = PlayerState::new(Vec3::ZERO);
 
-        let guard = player.ingest_movement_intent(
-            Vec2::new(1.0, 0.0),
-            2.0,
-            0.5,
-            1.0,
-        );
+        let guard = player.ingest_movement_intent(Vec2::new(1.0, 0.0), 2.0, 0.5, 1.0);
 
         assert_eq!(guard, CameraIntentGuard::Accepted);
         assert!((player.desired_translation.x - 0.5).abs() < 1e-6);

@@ -1171,10 +1171,7 @@ mod tests {
 
         q.enqueue(RetirementClass::BspArenaRetirement, FrameSerial(5), closure);
         assert_eq!(q.pending_count(), 1);
-        assert_eq!(
-            q.pending_by_class(RetirementClass::BspArenaRetirement),
-            1
-        );
+        assert_eq!(q.pending_by_class(RetirementClass::BspArenaRetirement), 1);
 
         // Not yet eligible
         let reaped = q.reap_through(FrameSerial(4)).unwrap();

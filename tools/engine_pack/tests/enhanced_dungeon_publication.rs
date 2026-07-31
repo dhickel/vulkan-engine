@@ -93,10 +93,8 @@ fn enhanced_full_pipeline_generate_compile_validate() {
     std::fs::write(&map_path, &map_text).expect("write .map");
 
     // 3. Compile through compiler::compile_map
-    let profile_content =
-        include_str!("../../bsp_authoring/ericw-q1-bsp2-generated-profile.toml");
-    let profile = compiler::parse_compiler_profile(profile_content)
-        .expect("parse profile");
+    let profile_content = include_str!("../../bsp_authoring/ericw-q1-bsp2-generated-profile.toml");
+    let profile = compiler::parse_compiler_profile(profile_content).expect("parse profile");
 
     let work_dir = staging.join(".compile-work");
     std::fs::create_dir_all(&work_dir).unwrap();
@@ -114,9 +112,19 @@ fn enhanced_full_pipeline_generate_compile_validate() {
     // Clean up work dir
     let _ = std::fs::remove_dir_all(&work_dir);
 
-    assert!(!compile_result.bsp_data.is_empty(), "compiled .bsp must be nonempty");
-    assert_eq!(&compile_result.bsp_data[0..4], b"BSP2", "output must be BSP2");
-    assert!(compile_result.lit_data.is_some(), "BSP2 profile must produce .lit");
+    assert!(
+        !compile_result.bsp_data.is_empty(),
+        "compiled .bsp must be nonempty"
+    );
+    assert_eq!(
+        &compile_result.bsp_data[0..4],
+        b"BSP2",
+        "output must be BSP2"
+    );
+    assert!(
+        compile_result.lit_data.is_some(),
+        "BSP2 profile must produce .lit"
+    );
 
     let lit = compile_result.lit_data.as_ref().unwrap();
     assert!(lit.len() > 8, ".lit must have payload");
@@ -140,8 +148,8 @@ fn enhanced_full_pipeline_generate_compile_validate() {
         source_identity: "enhanced.map".to_string(),
     };
 
-    let world = BspLoader::load(&compile_result.bsp_data, &options)
-        .expect("strict load must succeed");
+    let world =
+        BspLoader::load(&compile_result.bsp_data, &options).expect("strict load must succeed");
 
     assert!(
         world.diagnostics.is_empty(),
@@ -158,8 +166,14 @@ fn enhanced_full_pipeline_generate_compile_validate() {
     // 5. Budget validation
     let face_count = world.faces.len();
     let entity_count = world.entities.len();
-    assert!(face_count < 10000, "face count {face_count} must be < 10000");
-    assert!(entity_count < 100, "entity count {entity_count} must be < 100");
+    assert!(
+        face_count < 10000,
+        "face count {face_count} must be < 10000"
+    );
+    assert!(
+        entity_count < 100,
+        "entity count {entity_count} must be < 100"
+    );
 
     // 6. Hashes for evidence
     let bsp_hash = sha256(&compile_result.bsp_data);
@@ -220,13 +234,20 @@ fn cli_enhanced_dungeon_publishes_valid_closure() {
     let output = Command::new(env!("CARGO_BIN_EXE_engine_pack"))
         .args([
             "enhanced-dungeon",
-            "--seed", "42",
-            "--out", out_dir.to_str().expect("UTF-8"),
-            "--tool-path", tool_dir.to_str().expect("UTF-8"),
-            "--name", "test_dungeon",
-            "--rooms", "28",
-            "--loops", "3",
-            "--vertical-edges", "1",
+            "--seed",
+            "42",
+            "--out",
+            out_dir.to_str().expect("UTF-8"),
+            "--tool-path",
+            tool_dir.to_str().expect("UTF-8"),
+            "--name",
+            "test_dungeon",
+            "--rooms",
+            "28",
+            "--loops",
+            "3",
+            "--vertical-edges",
+            "1",
         ])
         .output()
         .expect("run engine_pack enhanced-dungeon");
@@ -242,9 +263,18 @@ fn cli_enhanced_dungeon_publishes_valid_closure() {
     assert!(out_dir.join("test_dungeon.map").exists(), ".map must exist");
     assert!(out_dir.join("test_dungeon.bsp").exists(), ".bsp must exist");
     assert!(out_dir.join("test_dungeon.lit").exists(), ".lit must exist");
-    assert!(out_dir.join("palette.lmp").exists(), "palette.lmp must exist");
-    assert!(out_dir.join("cc0_dungeon_v2.wad").exists(), "WAD must exist");
-    assert!(out_dir.join("metadata.json").exists(), "metadata.json must exist");
+    assert!(
+        out_dir.join("palette.lmp").exists(),
+        "palette.lmp must exist"
+    );
+    assert!(
+        out_dir.join("cc0_dungeon_v2.wad").exists(),
+        "WAD must exist"
+    );
+    assert!(
+        out_dir.join("metadata.json").exists(),
+        "metadata.json must exist"
+    );
 
     // Verify no staging marker leaked
     assert!(
@@ -258,20 +288,26 @@ fn cli_enhanced_dungeon_publishes_valid_closure() {
 
     // Verify .lit is valid
     let lit_data = std::fs::read(out_dir.join("test_dungeon.lit")).expect("read lit");
-    assert_eq!(&lit_data[0..4], b"QLIT", "published .lit must have QLIT magic");
+    assert_eq!(
+        &lit_data[0..4],
+        b"QLIT",
+        "published .lit must have QLIT magic"
+    );
     assert!(lit_data.len() > 8, ".lit must have payload");
 
     // Verify metadata.json is valid JSON with expected keys
     let metadata_bytes = std::fs::read(out_dir.join("metadata.json")).expect("read metadata");
-    let metadata: serde_json::Value =
-        serde_json::from_slice(&metadata_bytes).expect("valid JSON");
+    let metadata: serde_json::Value = serde_json::from_slice(&metadata_bytes).expect("valid JSON");
     assert_eq!(metadata["seed"], 42);
     assert_eq!(metadata["config"]["rooms"], 28);
     assert_eq!(metadata["generator"], "bsp_generator::enhanced");
 
     // ── PBR companion closure ────────────────────────────────────
     let textures_dir = out_dir.join("textures");
-    assert!(textures_dir.is_dir(), "textures/ must exist in published closure");
+    assert!(
+        textures_dir.is_dir(),
+        "textures/ must exist in published closure"
+    );
 
     // Collect all files in textures/
     let mut companion_files: Vec<String> = std::fs::read_dir(&textures_dir)
@@ -280,7 +316,11 @@ fn cli_enhanced_dungeon_publishes_valid_closure() {
             let entry = entry.ok()?;
             let name = entry.file_name().to_string_lossy().to_string();
             let path = entry.path();
-            if path.is_file() { Some(name) } else { None }
+            if path.is_file() {
+                Some(name)
+            } else {
+                None
+            }
         })
         .collect();
     companion_files.sort();
@@ -288,12 +328,18 @@ fn cli_enhanced_dungeon_publishes_valid_closure() {
     // Seed-42 nominal generates base_stone + connector textures (6 identities).
     // Expected: 6 × 2 = 12 companion files (normal + gloss for each identity).
     let expected_companions = vec![
-        "bs_ceil_gloss.png", "bs_ceil_norm.png",
-        "bs_floor_gloss.png", "bs_floor_norm.png",
-        "bs_wall_gloss.png", "bs_wall_norm.png",
-        "conn_ceil_gloss.png", "conn_ceil_norm.png",
-        "conn_floor_gloss.png", "conn_floor_norm.png",
-        "conn_wall_gloss.png", "conn_wall_norm.png",
+        "bs_ceil_gloss.png",
+        "bs_ceil_norm.png",
+        "bs_floor_gloss.png",
+        "bs_floor_norm.png",
+        "bs_wall_gloss.png",
+        "bs_wall_norm.png",
+        "conn_ceil_gloss.png",
+        "conn_ceil_norm.png",
+        "conn_floor_gloss.png",
+        "conn_floor_norm.png",
+        "conn_wall_gloss.png",
+        "conn_wall_norm.png",
     ];
     assert_eq!(
         companion_files, expected_companions,
@@ -314,16 +360,27 @@ fn cli_enhanced_dungeon_publishes_valid_closure() {
         let path = textures_dir.join(fname);
         let data = std::fs::read(&path).expect("read companion");
         assert!(data.len() >= 24, "companion {fname} lacks a complete IHDR");
-        assert_eq!(&data[0..8], b"\x89PNG\r\n\x1a\n", "companion {fname} not valid PNG");
-        assert_eq!(&data[12..16], b"IHDR", "companion {fname} lacks an IHDR chunk");
+        assert_eq!(
+            &data[0..8],
+            b"\x89PNG\r\n\x1a\n",
+            "companion {fname} not valid PNG"
+        );
+        assert_eq!(
+            &data[12..16],
+            b"IHDR",
+            "companion {fname} lacks an IHDR chunk"
+        );
         // Dimensions are in the mandatory first IHDR chunk at bytes 16..24.
         let w = u32::from_be_bytes(data[16..20].try_into().unwrap());
         let h = u32::from_be_bytes(data[20..24].try_into().unwrap());
         assert_eq!((w, h), (1024, 1024), "companion {fname} must be 1024×1024");
     }
 
-    eprintln!("PASS: CLI enhanced-dungeon published valid closure with {} PBR companions to {}",
-              companion_files.len(), out_dir.display());
+    eprintln!(
+        "PASS: CLI enhanced-dungeon published valid closure with {} PBR companions to {}",
+        companion_files.len(),
+        out_dir.display()
+    );
 
     let _ = std::fs::remove_dir_all(&staging);
 }
@@ -348,17 +405,28 @@ fn enhanced_dungeon_deterministic_publication() {
         let output = Command::new(env!("CARGO_BIN_EXE_engine_pack"))
             .args([
                 "enhanced-dungeon",
-                "--seed", "100",
-                "--out", out_dir.to_str().expect("UTF-8"),
-                "--tool-path", tool_dir.to_str().expect("UTF-8"),
-                "--name", "dungeon",
-                "--rooms", "20",
-                "--loops", "2",
-                "--vertical-edges", "1",
+                "--seed",
+                "100",
+                "--out",
+                out_dir.to_str().expect("UTF-8"),
+                "--tool-path",
+                tool_dir.to_str().expect("UTF-8"),
+                "--name",
+                "dungeon",
+                "--rooms",
+                "20",
+                "--loops",
+                "2",
+                "--vertical-edges",
+                "1",
             ])
             .output()
             .expect("run engine_pack");
-        assert!(output.status.success(), "run failed for {}", staging.display());
+        assert!(
+            output.status.success(),
+            "run failed for {}",
+            staging.display()
+        );
     }
 
     // Compare all root-level files
@@ -405,11 +473,17 @@ fn enhanced_dungeon_deterministic_publication() {
     for fname in &companion_names {
         let data1 = std::fs::read(textures1.join(fname)).expect("read companion from run 1");
         let data2 = std::fs::read(textures2.join(fname)).expect("read companion from run 2");
-        assert_eq!(data1, data2, "companion {fname} must be identical across runs");
+        assert_eq!(
+            data1, data2,
+            "companion {fname} must be identical across runs"
+        );
     }
 
-    eprintln!("PASS: deterministic publication verified ({} root + {} companion files identical)",
-              root_files.len(), companion_names.len());
+    eprintln!(
+        "PASS: deterministic publication verified ({} root + {} companion files identical)",
+        root_files.len(),
+        companion_names.len()
+    );
 
     let _ = std::fs::remove_dir_all(&staging1);
     let _ = std::fs::remove_dir_all(&staging2);
@@ -431,19 +505,28 @@ fn enhanced_metadata_consistent_with_output() {
     let output = Command::new(env!("CARGO_BIN_EXE_engine_pack"))
         .args([
             "enhanced-dungeon",
-            "--seed", "42",
-            "--out", out_dir.to_str().expect("UTF-8"),
-            "--tool-path", tool_dir.to_str().expect("UTF-8"),
-            "--name", "meta_test",
-            "--rooms", "22",
-            "--loops", "2",
-            "--vertical-edges", "2",
+            "--seed",
+            "42",
+            "--out",
+            out_dir.to_str().expect("UTF-8"),
+            "--tool-path",
+            tool_dir.to_str().expect("UTF-8"),
+            "--name",
+            "meta_test",
+            "--rooms",
+            "22",
+            "--loops",
+            "2",
+            "--vertical-edges",
+            "2",
         ])
         .output()
         .expect("run engine_pack");
-    assert!(output.status.success(),
+    assert!(
+        output.status.success(),
         "enhanced-dungeon failed:\n{}",
-        String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Parse metadata
     let metadata_bytes = std::fs::read(out_dir.join("metadata.json")).expect("read metadata");
@@ -504,9 +587,12 @@ fn invalid_config_leaves_destination_untouched() {
     let output = Command::new(env!("CARGO_BIN_EXE_engine_pack"))
         .args([
             "enhanced-dungeon",
-            "--seed", "1",
-            "--out", out_dir.to_str().expect("UTF-8"),
-            "--rooms", "8", // M2 minimum is 17, so this should fail
+            "--seed",
+            "1",
+            "--out",
+            out_dir.to_str().expect("UTF-8"),
+            "--rooms",
+            "8", // M2 minimum is 17, so this should fail
         ])
         .output()
         .expect("run engine_pack");
@@ -514,10 +600,16 @@ fn invalid_config_leaves_destination_untouched() {
     assert!(!output.status.success(), "invalid config must fail");
 
     // Destination must not exist
-    assert!(!out_dir.exists(), "destination must not be created on failure");
+    assert!(
+        !out_dir.exists(),
+        "destination must not be created on failure"
+    );
 
     // Pre-existing sibling must still exist
-    assert!(pre_existing.exists(), "pre-existing files must be untouched");
+    assert!(
+        pre_existing.exists(),
+        "pre-existing files must be untouched"
+    );
 
     eprintln!("PASS: invalid config leaves destination untouched");
 
@@ -538,9 +630,8 @@ fn legacy_compile_bsp_still_works_with_m1() {
     let out_dir = staging.join("published");
 
     // Generate an M1 map
-    let (map_text, _meta) =
-        bsp_generator::generate(0, bsp_generator::DungeonConfig::nominal_m1())
-            .expect("generate M1");
+    let (map_text, _meta) = bsp_generator::generate(0, bsp_generator::DungeonConfig::nominal_m1())
+        .expect("generate M1");
     let map_path = staging.join("legacy.map");
     std::fs::write(&map_path, &map_text).expect("write map");
 
@@ -551,7 +642,9 @@ fn legacy_compile_bsp_still_works_with_m1() {
     let palette = legacy_palette_path()
         .canonicalize()
         .expect("canonical palette path");
-    let wad = legacy_wad_path().canonicalize().expect("canonical WAD path");
+    let wad = legacy_wad_path()
+        .canonicalize()
+        .expect("canonical WAD path");
 
     let output = Command::new(env!("CARGO_BIN_EXE_engine_pack"))
         .args([
@@ -578,9 +671,18 @@ fn legacy_compile_bsp_still_works_with_m1() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    assert!(out_dir.join("legacy.bsp").exists(), "legacy .bsp must exist");
-    assert!(out_dir.join("legacy.lit").exists(), "legacy .lit must exist");
-    assert!(out_dir.join("legacy.manifest.toml").exists(), "legacy manifest must exist");
+    assert!(
+        out_dir.join("legacy.bsp").exists(),
+        "legacy .bsp must exist"
+    );
+    assert!(
+        out_dir.join("legacy.lit").exists(),
+        "legacy .lit must exist"
+    );
+    assert!(
+        out_dir.join("legacy.manifest.toml").exists(),
+        "legacy manifest must exist"
+    );
 
     eprintln!("PASS: legacy compile-bsp still works");
 

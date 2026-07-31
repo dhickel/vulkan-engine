@@ -38,7 +38,11 @@ impl GridCoord {
         if x >= width {
             return Err(GeneratorError::IrInvariant {
                 stage: ErrorStage::Ir,
-                detail: format!("coord_x_out_of_bounds x={} max={}", x, width.saturating_sub(1)),
+                detail: format!(
+                    "coord_x_out_of_bounds x={} max={}",
+                    x,
+                    width.saturating_sub(1)
+                ),
             });
         }
         if y >= height {
@@ -59,22 +63,25 @@ impl GridCoord {
     pub(super) fn to_flat_index(self, width: u16, height: u16) -> Result<usize, GeneratorError> {
         let w = u64::from(width);
         let h = u64::from(height);
-        let layer_dim = w.checked_mul(h).ok_or_else(|| GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Ir,
-            operation: "grid_index_layer_dim",
-        })?;
+        let layer_dim = w
+            .checked_mul(h)
+            .ok_or_else(|| GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Ir,
+                operation: "grid_index_layer_dim",
+            })?;
         let layer_offset = u64::from(self.layer)
             .checked_mul(layer_dim)
             .ok_or_else(|| GeneratorError::ArithmeticOverflow {
                 stage: ErrorStage::Ir,
                 operation: "grid_index_layer_offset",
             })?;
-        let row_offset = u64::from(self.y)
-            .checked_mul(w)
-            .ok_or_else(|| GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Ir,
-                operation: "grid_index_row_offset",
-            })?;
+        let row_offset =
+            u64::from(self.y)
+                .checked_mul(w)
+                .ok_or_else(|| GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Ir,
+                    operation: "grid_index_row_offset",
+                })?;
         let idx = layer_offset
             .checked_add(row_offset)
             .and_then(|v| v.checked_add(u64::from(self.x)))
@@ -113,17 +120,19 @@ impl GridCoord {
         })?;
         let w = u64::from(width);
         let h = u64::from(height);
-        let layer_dim = w.checked_mul(h).ok_or_else(|| GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Ir,
-            operation: "grid_index_layer_dim_inverse",
-        })?;
-        // The division by layer_dim is safe because layer_dim > 0 (width>0 && height>0).
-        let max_idx = u64::from(layers)
-            .checked_mul(layer_dim)
+        let layer_dim = w
+            .checked_mul(h)
             .ok_or_else(|| GeneratorError::ArithmeticOverflow {
                 stage: ErrorStage::Ir,
-                operation: "grid_index_max_idx",
+                operation: "grid_index_layer_dim_inverse",
             })?;
+        // The division by layer_dim is safe because layer_dim > 0 (width>0 && height>0).
+        let max_idx = u64::from(layers).checked_mul(layer_dim).ok_or_else(|| {
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Ir,
+                operation: "grid_index_max_idx",
+            }
+        })?;
         if idx >= max_idx {
             return Err(GeneratorError::IrInvariant {
                 stage: ErrorStage::Ir,
@@ -172,34 +181,37 @@ impl IdAllocator {
     pub(super) fn next_region(&mut self) -> Result<RegionId, GeneratorError> {
         let id = self.next_region;
         // Allow allocating u32::MAX; subsequent allocation returns error.
-        self.next_region = self.next_region.checked_add(1).ok_or_else(|| {
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Ir,
-                operation: "region_id_overflow",
-            }
-        })?;
+        self.next_region =
+            self.next_region
+                .checked_add(1)
+                .ok_or_else(|| GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Ir,
+                    operation: "region_id_overflow",
+                })?;
         Ok(RegionId(id))
     }
 
     pub(super) fn next_socket(&mut self) -> Result<SocketId, GeneratorError> {
         let id = self.next_socket;
-        self.next_socket = self.next_socket.checked_add(1).ok_or_else(|| {
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Ir,
-                operation: "socket_id_overflow",
-            }
-        })?;
+        self.next_socket =
+            self.next_socket
+                .checked_add(1)
+                .ok_or_else(|| GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Ir,
+                    operation: "socket_id_overflow",
+                })?;
         Ok(SocketId(id))
     }
 
     pub(super) fn next_edge(&mut self) -> Result<EdgeId, GeneratorError> {
         let id = self.next_edge;
-        self.next_edge = self.next_edge.checked_add(1).ok_or_else(|| {
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Ir,
-                operation: "edge_id_overflow",
-            }
-        })?;
+        self.next_edge =
+            self.next_edge
+                .checked_add(1)
+                .ok_or_else(|| GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Ir,
+                    operation: "edge_id_overflow",
+                })?;
         Ok(EdgeId(id))
     }
 
@@ -374,11 +386,7 @@ pub(super) struct OccupancyGrid {
 
 impl OccupancyGrid {
     /// Create a new occupancy grid. Returns error on overflow or zero dimensions.
-    pub(super) fn new(
-        width: u16,
-        height: u16,
-        layers: u16,
-    ) -> Result<Self, GeneratorError> {
+    pub(super) fn new(width: u16, height: u16, layers: u16) -> Result<Self, GeneratorError> {
         if width == 0 || height == 0 || layers == 0 {
             return Err(GeneratorError::IrInvariant {
                 stage: ErrorStage::Ir,
@@ -469,20 +477,19 @@ impl OccupancyGrid {
     ) -> Result<bool, GeneratorError> {
         for dy in 0..h {
             for dx in 0..w {
-                let cx = x.checked_add(dx).ok_or_else(|| {
-                    GeneratorError::ArithmeticOverflow {
+                let cx = x
+                    .checked_add(dx)
+                    .ok_or_else(|| GeneratorError::ArithmeticOverflow {
                         stage: ErrorStage::Ir,
                         operation: "is_rect_empty_x_add",
-                    }
-                })?;
-                let cy = y.checked_add(dy).ok_or_else(|| {
-                    GeneratorError::ArithmeticOverflow {
+                    })?;
+                let cy = y
+                    .checked_add(dy)
+                    .ok_or_else(|| GeneratorError::ArithmeticOverflow {
                         stage: ErrorStage::Ir,
                         operation: "is_rect_empty_y_add",
-                    }
-                })?;
-                let coord =
-                    GridCoord::new(layer, cx, cy, self.width, self.height, self.layers)?;
+                    })?;
+                let coord = GridCoord::new(layer, cx, cy, self.width, self.height, self.layers)?;
                 if self.get(coord) != Some(OccupancyClass::Empty) {
                     return Ok(false);
                 }
@@ -504,20 +511,19 @@ impl OccupancyGrid {
     ) -> Result<(), GeneratorError> {
         for dy in 0..h {
             for dx in 0..w {
-                let cx = x.checked_add(dx).ok_or_else(|| {
-                    GeneratorError::ArithmeticOverflow {
+                let cx = x
+                    .checked_add(dx)
+                    .ok_or_else(|| GeneratorError::ArithmeticOverflow {
                         stage: ErrorStage::Ir,
                         operation: "reserve_rect_x_add",
-                    }
-                })?;
-                let cy = y.checked_add(dy).ok_or_else(|| {
-                    GeneratorError::ArithmeticOverflow {
+                    })?;
+                let cy = y
+                    .checked_add(dy)
+                    .ok_or_else(|| GeneratorError::ArithmeticOverflow {
                         stage: ErrorStage::Ir,
                         operation: "reserve_rect_y_add",
-                    }
-                })?;
-                let coord =
-                    GridCoord::new(layer, cx, cy, self.width, self.height, self.layers)?;
+                    })?;
+                let coord = GridCoord::new(layer, cx, cy, self.width, self.height, self.layers)?;
                 let prev = self.get(coord);
                 if prev != Some(OccupancyClass::Empty) {
                     return Err(GeneratorError::OccupancyConflict {
@@ -532,20 +538,19 @@ impl OccupancyGrid {
         }
         for dy in 0..h {
             for dx in 0..w {
-                let cx = x.checked_add(dx).ok_or_else(|| {
-                    GeneratorError::ArithmeticOverflow {
+                let cx = x
+                    .checked_add(dx)
+                    .ok_or_else(|| GeneratorError::ArithmeticOverflow {
                         stage: ErrorStage::Ir,
                         operation: "reserve_rect_x_add2",
-                    }
-                })?;
-                let cy = y.checked_add(dy).ok_or_else(|| {
-                    GeneratorError::ArithmeticOverflow {
+                    })?;
+                let cy = y
+                    .checked_add(dy)
+                    .ok_or_else(|| GeneratorError::ArithmeticOverflow {
                         stage: ErrorStage::Ir,
                         operation: "reserve_rect_y_add2",
-                    }
-                })?;
-                let coord =
-                    GridCoord::new(layer, cx, cy, self.width, self.height, self.layers)?;
+                    })?;
+                let coord = GridCoord::new(layer, cx, cy, self.width, self.height, self.layers)?;
                 self.set(coord, class)?;
             }
         }
@@ -830,13 +835,19 @@ impl IntendedTopology {
             if socket_map.get(&e.source_socket) != Some(&e.source_region) {
                 return Err(GeneratorError::IrInvariant {
                     stage: ErrorStage::Ir,
-                    detail: format!("dangling_or_misowned_source_socket {}", e.source_socket.raw()),
+                    detail: format!(
+                        "dangling_or_misowned_source_socket {}",
+                        e.source_socket.raw()
+                    ),
                 });
             }
             if socket_map.get(&e.target_socket) != Some(&e.target_region) {
                 return Err(GeneratorError::IrInvariant {
                     stage: ErrorStage::Ir,
-                    detail: format!("dangling_or_misowned_target_socket {}", e.target_socket.raw()),
+                    detail: format!(
+                        "dangling_or_misowned_target_socket {}",
+                        e.target_socket.raw()
+                    ),
                 });
             }
         }
@@ -845,8 +856,11 @@ impl IntendedTopology {
 
     /// Verify explicit transition endpoint region/socket bindings.
     pub(super) fn validate_transition_bindings(&self) -> Result<(), GeneratorError> {
-        let regions: BTreeMap<RegionId, &PlacedRegion> =
-            self.regions.iter().map(|region| (region.id, region)).collect();
+        let regions: BTreeMap<RegionId, &PlacedRegion> = self
+            .regions
+            .iter()
+            .map(|region| (region.id, region))
+            .collect();
         for transition in &self.transitions {
             let lower = regions.get(&transition.lower_region).ok_or_else(|| {
                 GeneratorError::TransitionBinding {
@@ -1038,7 +1052,9 @@ mod tests {
         assert!(grid
             .reserve_rect(0, 3, 0, 3, 5, OccupancyClass::Region(1))
             .is_err());
-        assert!(grid.reserve_rect(1, 0, 0, 1, 1, OccupancyClass::Empty).is_err());
+        assert!(grid
+            .reserve_rect(1, 0, 0, 1, 1, OccupancyClass::Empty)
+            .is_err());
     }
 
     #[test]

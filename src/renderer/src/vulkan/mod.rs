@@ -3,10 +3,12 @@
 //! Entry point for Vulkan subsystems: init, descriptors, pipelines, frame execution, memory,
 //! and debug helpers.
 
-pub(crate) mod vk_commands;
 #[cfg(feature = "bsp")]
 pub mod vk_bsp;
+pub(crate) mod vk_commands;
 pub mod vk_debug;
+#[cfg(feature = "debug-draw")]
+pub(crate) mod vk_debug_lines;
 pub mod vk_descriptor;
 #[cfg(test)]
 mod vk_device_budget;
@@ -17,10 +19,8 @@ pub mod vk_instancing;
 pub mod vk_pipeline;
 pub mod vk_render;
 pub mod vk_shadow;
+pub(crate) mod vk_sprites;
 pub mod vk_storage;
 pub mod vk_swapchain;
 pub mod vk_types;
 pub mod vk_util;
-#[cfg(feature = "debug-draw")]
-pub(crate) mod vk_debug_lines;
-pub(crate) mod vk_sprites;

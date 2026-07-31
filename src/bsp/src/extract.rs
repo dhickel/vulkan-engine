@@ -242,7 +242,10 @@ fn lightmap_style_ids(layout: &FaceLightmapLayout) -> [u8; MAX_STYLES_PER_FACE] 
     let mut ids = [lightmaps::STYLE_SENTINEL; MAX_STYLES_PER_FACE];
     for style in &layout.style_layers {
         let slot = style.source_slot as usize;
-        if slot < MAX_STYLES_PER_FACE && style.has_data && style.style_id <= lightmaps::MAX_STYLE_IDENTIFIER {
+        if slot < MAX_STYLES_PER_FACE
+            && style.has_data
+            && style.style_id <= lightmaps::MAX_STYLE_IDENTIFIER
+        {
             ids[slot] = style.style_id;
         }
     }
@@ -461,7 +464,12 @@ fn extract_internal(request: BspExtractionRequest) -> Result<ExtractionResult, B
     // Get exactly one lightmap page value per source face.
     let lightmap_pages: Vec<u32> = face_lightmap_layouts
         .iter()
-        .map(|layout| layout.has_data.then_some(layout.page_index).unwrap_or(u32::MAX))
+        .map(|layout| {
+            layout
+                .has_data
+                .then_some(layout.page_index)
+                .unwrap_or(u32::MAX)
+        })
         .collect();
     let batch_style_ids: Vec<[u8; MAX_STYLES_PER_FACE]> = face_lightmap_layouts
         .iter()

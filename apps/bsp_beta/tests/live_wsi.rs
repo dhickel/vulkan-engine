@@ -163,8 +163,8 @@ struct LifecycleCell {
 fn live_wsi_available() -> bool {
     let has_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
     let has_x11 = std::env::var("DISPLAY").is_ok();
-    let has_vulkan = std::env::var("VK_ICD_FILENAMES").is_ok()
-        || Path::new("/usr/share/vulkan/icd.d").is_dir();
+    let has_vulkan =
+        std::env::var("VK_ICD_FILENAMES").is_ok() || Path::new("/usr/share/vulkan/icd.d").is_dir();
 
     has_vulkan && (has_wayland || has_x11)
 }
@@ -224,11 +224,7 @@ fn detect_vulkan_info() -> (String, String) {
 // ── Child-process helpers ─────────────────────────────────────────────────
 
 /// Run a child process with timeout and capture output.
-fn run_child(
-    label: &str,
-    mut cmd: Command,
-    timeout_secs: u64,
-) -> (Option<Output>, bool) {
+fn run_child(label: &str, mut cmd: Command, timeout_secs: u64) -> (Option<Output>, bool) {
     let start = SystemTime::now();
     eprintln!("[{label}] Running: {cmd:?}");
 
@@ -264,7 +260,8 @@ fn scan_forbidden(output: &Output) -> Vec<String> {
     if combined.contains("panic") || combined.contains("panicked") {
         issues.push("panic".to_string());
     }
-    if combined.contains("VUID-") || combined.contains("validation layer")
+    if combined.contains("VUID-")
+        || combined.contains("validation layer")
         || combined.contains("Validation Error")
     {
         issues.push("validation_layer_error".to_string());
@@ -361,8 +358,7 @@ fn compile_bsp_for_wsi() -> Result<(PathBuf, Vec<u8>, Option<Vec<u8>>), String> 
     let captures = captures_dir();
     std::fs::create_dir_all(&captures).map_err(|e| format!("create captures dir: {e}"))?;
     let bsp_dest = captures.join(format!("{SELECTED_LABEL}.bsp"));
-    std::fs::write(&bsp_dest, &result.bsp_data)
-        .map_err(|e| format!("write BSP: {e}"))?;
+    std::fs::write(&bsp_dest, &result.bsp_data).map_err(|e| format!("write BSP: {e}"))?;
     if let Some(ref lit) = result.lit_data {
         let lit_dest = captures.join(format!("{SELECTED_LABEL}.lit"));
         std::fs::write(&lit_dest, lit).map_err(|e| format!("write LIT: {e}"))?;
@@ -422,14 +418,10 @@ fn live_wsi_acceptance() {
             std::env::var("DISPLAY").is_ok(),
         );
         report.overall_status = "NOT_RUN".to_string();
-        report
-            .environment
-            .note = "Live WSI environment not available; acquire/present cannot be proven"
-                .to_string();
+        report.environment.note =
+            "Live WSI environment not available; acquire/present cannot be proven".to_string();
         write_report(&report);
-        panic!(
-            "Live WSI acceptance requires a live GPU + WSI environment. Got NOT_RUN."
-        );
+        panic!("Live WSI acceptance requires a live GPU + WSI environment. Got NOT_RUN.");
     }
 
     // ── Compile BSP for bsp_beta entrypoint ────────────────────────────
@@ -439,8 +431,7 @@ fn live_wsi_acceptance() {
         Err(msg) => {
             eprintln!("Cannot compile BSP: {msg}");
             report.overall_status = "NOT_RUN".to_string();
-            report.environment.note =
-                format!("BSP compilation blocked: {msg}");
+            report.environment.note = format!("BSP compilation blocked: {msg}");
             write_report(&report);
             panic!("BSP compilation required for live WSI acceptance");
         }
@@ -464,11 +455,17 @@ fn live_wsi_acceptance() {
             {
                 let mut c = Command::new("cargo");
                 c.args([
-                    "run", "-p", "bsp_beta", "--",
+                    "run",
+                    "-p",
+                    "bsp_beta",
+                    "--",
                     "--strict",
-                    "--bsp", &bsp_path.display().to_string(),
-                    "--palette", &palette.display().to_string(),
-                    "--wad", &wad.display().to_string(),
+                    "--bsp",
+                    &bsp_path.display().to_string(),
+                    "--palette",
+                    &palette.display().to_string(),
+                    "--wad",
+                    &wad.display().to_string(),
                 ]);
                 c.env("RUST_LOG", "warn");
                 c
@@ -522,8 +519,12 @@ fn live_wsi_acceptance() {
             {
                 let mut c = Command::new("cargo");
                 c.args([
-                    "run", "-p", "voxel_demo", "--",
-                    "--config", "presets/default.toml",
+                    "run",
+                    "-p",
+                    "voxel_demo",
+                    "--",
+                    "--config",
+                    "presets/default.toml",
                 ]);
                 c.env("RUST_LOG", "warn");
                 c
@@ -607,13 +608,13 @@ fn live_wsi_acceptance() {
     write_report(&report);
 
     if report.overall_status != "PASS" {
-        panic!(
-            "Live WSI acceptance NOT PASS: {}",
-            report.overall_status
-        );
+        panic!("Live WSI acceptance NOT PASS: {}", report.overall_status);
     }
 
-    eprintln!("Live WSI acceptance PASS: all {} entrypoints", report.entrypoints.len());
+    eprintln!(
+        "Live WSI acceptance PASS: all {} entrypoints",
+        report.entrypoints.len()
+    );
 }
 
 fn build_entrypoint_cell(
@@ -697,7 +698,10 @@ fn live_wsi_report_schema() {
     };
     let serialized = serde_json::to_string_pretty(&report).unwrap();
     let _: LiveWsiReport = serde_json::from_str(&serialized).unwrap();
-    eprintln!("Live WSI report schema validated: {} bytes", serialized.len());
+    eprintln!(
+        "Live WSI report schema validated: {} bytes",
+        serialized.len()
+    );
 }
 
 #[test]

@@ -28,8 +28,8 @@ use crate::cave_gen::lattice::VoxelWorld;
 use crate::cave_gen::metrics::flood_fill_air;
 use crate::config::{
     compute_geometry_identity, compute_scene_config_identity, get_embedded_preset,
-    known_catalog_ids, normalize_document, resolve_asset_ref, DocumentSource,
-    ResolvedAppConfig, ResolvedAssetRef, RuntimeOptions,
+    known_catalog_ids, normalize_document, resolve_asset_ref, DocumentSource, ResolvedAppConfig,
+    ResolvedAssetRef, RuntimeOptions,
 };
 
 use crate::scene_package::build_scene_package;
@@ -131,10 +131,10 @@ fn build_campaign_plan() -> Result<Vec<CampaignCase>, String> {
     let gates_toml = std::fs::read_to_string(&gates_path)
         .map_err(|e| format!("read {}: {e}", gates_path.display()))?;
 
-    let corpus: SeedCorpus = toml::from_str(&corpus_toml)
-        .map_err(|e| format!("parse seed-corpus.toml: {e}"))?;
-    let gates: PresetGates = toml::from_str(&gates_toml)
-        .map_err(|e| format!("parse preset-gates.toml: {e}"))?;
+    let corpus: SeedCorpus =
+        toml::from_str(&corpus_toml).map_err(|e| format!("parse seed-corpus.toml: {e}"))?;
+    let gates: PresetGates =
+        toml::from_str(&gates_toml).map_err(|e| format!("parse preset-gates.toml: {e}"))?;
 
     let mut cases = Vec::new();
 
@@ -192,7 +192,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
             passed: false,
             error: Some(format!("normalize: {e}")),
             timing: None,
-                build_env: crate::telemetry::BuildEnv::default(),
+            build_env: crate::telemetry::BuildEnv::default(),
         };
     }
 
@@ -206,7 +206,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
             passed: false,
             error: Some(format!("validation: {}", msgs.join("; "))),
             timing: None,
-                build_env: crate::telemetry::BuildEnv::default(),
+            build_env: crate::telemetry::BuildEnv::default(),
         };
     }
 
@@ -329,7 +329,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
             passed: false,
             error: Some("shell breach detected".to_string()),
             timing: None,
-                build_env: crate::telemetry::BuildEnv::default(),
+            build_env: crate::telemetry::BuildEnv::default(),
         };
     }
 
@@ -346,7 +346,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
             passed: false,
             error: Some("no sites placed".to_string()),
             timing: None,
-                build_env: crate::telemetry::BuildEnv::default(),
+            build_env: crate::telemetry::BuildEnv::default(),
         };
     };
     let reachable = flood_fill_air(
@@ -363,7 +363,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
             passed: false,
             error: Some("spawn site is not in air".to_string()),
             timing: None,
-                build_env: crate::telemetry::BuildEnv::default(),
+            build_env: crate::telemetry::BuildEnv::default(),
         };
     }
 
@@ -429,7 +429,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
             passed: false,
             error: Some("zero triangles in both wall and floor partitions".to_string()),
             timing: None,
-                build_env: crate::telemetry::BuildEnv::default(),
+            build_env: crate::telemetry::BuildEnv::default(),
         };
     }
 
@@ -470,7 +470,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
                                     gen_result.sites.len()
                                 )),
                                 timing: None,
-                build_env: crate::telemetry::BuildEnv::default(),
+                                build_env: crate::telemetry::BuildEnv::default(),
                             };
                         }
                     }
@@ -500,7 +500,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
                                     "gate: expected {expected_maze} maze links, got {maze_count}"
                                 )),
                                 timing: None,
-                build_env: crate::telemetry::BuildEnv::default(),
+                                build_env: crate::telemetry::BuildEnv::default(),
                             };
                         }
                     }
@@ -528,7 +528,10 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
         light_count: package.lights.len(),
         viewpoint_count: package.viewpoints.len(),
         build_env: crate::telemetry::BuildEnv::default(),
-        request_id: format!("campaign-{}-{}-{}", case.preset_name, case.seed, case.resolution),
+        request_id: format!(
+            "campaign-{}-{}-{}",
+            case.preset_name, case.seed, case.resolution
+        ),
         upload_ms: 0.0,
         material_create_ms: 0.0,
     };
@@ -540,7 +543,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
         passed: true,
         error: None,
         timing: Some(timing),
-                build_env: crate::telemetry::BuildEnv::default(),
+        build_env: crate::telemetry::BuildEnv::default(),
     }
 }
 
@@ -605,7 +608,10 @@ pub fn run_campaign(output_path: &std::path::Path) -> Result<(usize, usize), Str
                 );
             }
         } else {
-            log::error!("    ✗ FAIL: {}", record.error.as_deref().unwrap_or("unknown"));
+            log::error!(
+                "    ✗ FAIL: {}",
+                record.error.as_deref().unwrap_or("unknown")
+            );
         }
         recorder.record(&record)?;
     }
@@ -646,7 +652,10 @@ mod tests {
                     );
                     assert!(t.total_voxels > 0, "{preset_name}: zero voxels");
                     assert!(t.site_count >= 5, "{preset_name}: fewer than 5 sites");
-                    assert!(t.viewpoint_count >= 5, "{preset_name}: fewer than 5 viewpoints");
+                    assert!(
+                        t.viewpoint_count >= 5,
+                        "{preset_name}: fewer than 5 viewpoints"
+                    );
                     // Exactly 9 generator-anchor lights: 5 CoreLight + 4 BackboneLight.
                     assert_eq!(t.light_count, 9, "{preset_name}: expected exactly 9 lights");
                 }
@@ -666,7 +675,10 @@ mod tests {
                 failed.join("\n")
             );
         }
-        assert_eq!(passed, 4, "expected all 4 presets to pass structural campaign");
+        assert_eq!(
+            passed, 4,
+            "expected all 4 presets to pass structural campaign"
+        );
     }
 
     #[test]
@@ -739,15 +751,14 @@ mod tests {
 
     #[test]
     fn full_campaign_record_to_jsonl() {
-        let output_path = std::path::PathBuf::from(
-            std::env::var("CAMPAIGN_OUTPUT")
-                .unwrap_or_else(|_| ".internal-dev/debug_reports/voxel-demo-v2-profile.jsonl".to_string()),
-        );
+        let output_path =
+            std::path::PathBuf::from(std::env::var("CAMPAIGN_OUTPUT").unwrap_or_else(|_| {
+                ".internal-dev/debug_reports/voxel-demo-v2-profile.jsonl".to_string()
+            }));
         if let Some(parent) = output_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        let (passed, total) = run_campaign(&output_path)
-            .expect("campaign should succeed");
+        let (passed, total) = run_campaign(&output_path).expect("campaign should succeed");
         assert_eq!(passed, total, "all campaign cases must pass");
     }
 }

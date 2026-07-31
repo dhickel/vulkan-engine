@@ -140,10 +140,7 @@ impl CaptureView {
 // ─── Grid-to-world conversion ───────────────────────────────────────────────
 
 fn grid_to_world(coord: GridCoord) -> Vec3 {
-    let base = tile_to_world(
-        usize::from(coord.x),
-        usize::from(coord.y),
-    );
+    let base = tile_to_world(usize::from(coord.x), usize::from(coord.y));
     Vec3::new(
         base.x + 0.5,
         f32::from(coord.layer) * WALL_HEIGHT + PLAYER_EYE_HEIGHT,
@@ -168,11 +165,12 @@ pub(crate) fn derive_capture_views(
     let mut views = Vec::new();
 
     // ── Spawn ──────────────────────────────────────────────────────────
-    let spawn_region = find_region_by_role(topology, RegionRole::Spawn)
-        .ok_or_else(|| GeneratorError::IrInvariant {
+    let spawn_region = find_region_by_role(topology, RegionRole::Spawn).ok_or_else(|| {
+        GeneratorError::IrInvariant {
             stage: ErrorStage::Ir,
             detail: "capture_view_no_spawn_region".into(),
-        })?;
+        }
+    })?;
     let spawn_coord = to_grid_coord(
         level.spawn.layer as u16,
         level.spawn.x as u16,
@@ -237,7 +235,14 @@ fn to_grid_coord(
     y: u16,
     config: &super::config::NormalizedGeneratorConfig,
 ) -> Result<GridCoord, GeneratorError> {
-    GridCoord::new(layer, x, y, config.width(), config.height(), config.layers().2)
+    GridCoord::new(
+        layer,
+        x,
+        y,
+        config.width(),
+        config.height(),
+        config.layers().2,
+    )
 }
 
 fn find_interior_cell(
@@ -259,8 +264,7 @@ fn find_interior_cell(
                 && n.y < region.footprint.1.saturating_add(region.footprint.3)
         })
         .map(|n| {
-            let dist =
-                u64::from(n.x.abs_diff(avoid.x)) + u64::from(n.y.abs_diff(avoid.y));
+            let dist = u64::from(n.x.abs_diff(avoid.x)) + u64::from(n.y.abs_diff(avoid.y));
             (*n, dist)
         })
         .collect();
@@ -277,10 +281,7 @@ fn find_interior_cell(
         .transpose()?
         .ok_or_else(|| GeneratorError::IrInvariant {
             stage: ErrorStage::Ir,
-            detail: format!(
-                "capture_view_no_interior_cell region={}",
-                region.id.raw()
-            ),
+            detail: format!("capture_view_no_interior_cell region={}", region.id.raw()),
         })
 }
 
@@ -343,14 +344,8 @@ fn derive_landmark_view(
         config,
     )?;
 
-    let center = ensure_walkable_or_in_region(
-        center,
-        region,
-        movement,
-        level,
-        config,
-        "distant_landmark",
-    )?;
+    let center =
+        ensure_walkable_or_in_region(center, region, movement, level, config, "distant_landmark")?;
 
     let look = find_interior_cell(region, movement, level, config, center)?;
 
@@ -516,46 +511,42 @@ fn derive_dark_branch_view(
     let mut ranked: Vec<(RankedRegion, &super::ir::PlacedRegion)> = dead_end_regions
         .iter()
         .map(|region| {
-            let dx = region
-                .footprint
-                .0
-                .abs_diff(spawn_region.footprint.0)
-                .max(
-                    region
-                        .footprint
-                        .0
-                        .saturating_add(region.footprint.2)
-                        .abs_diff(
-                            spawn_region
-                                .footprint
-                                .0
-                                .saturating_add(spawn_region.footprint.2),
-                        ),
-                );
-            let dy = region
-                .footprint
-                .1
-                .abs_diff(spawn_region.footprint.1)
-                .max(
-                    region
-                        .footprint
-                        .1
-                        .saturating_add(region.footprint.3)
-                        .abs_diff(
-                            spawn_region
-                                .footprint
-                                .1
-                                .saturating_add(spawn_region.footprint.3),
-                        ),
-                );
+            let dx = region.footprint.0.abs_diff(spawn_region.footprint.0).max(
+                region
+                    .footprint
+                    .0
+                    .saturating_add(region.footprint.2)
+                    .abs_diff(
+                        spawn_region
+                            .footprint
+                            .0
+                            .saturating_add(spawn_region.footprint.2),
+                    ),
+            );
+            let dy = region.footprint.1.abs_diff(spawn_region.footprint.1).max(
+                region
+                    .footprint
+                    .1
+                    .saturating_add(region.footprint.3)
+                    .abs_diff(
+                        spawn_region
+                            .footprint
+                            .1
+                            .saturating_add(spawn_region.footprint.3),
+                    ),
+            );
             let dist = u64::from(dx) + u64::from(dy);
-            (RankedRegion { dist, region_id: region.id.raw() }, *region)
+            (
+                RankedRegion {
+                    dist,
+                    region_id: region.id.raw(),
+                },
+                *region,
+            )
         })
         .collect();
 
-    ranked.sort_by(|a, b| {
-        b.0.cmp(&a.0)
-    });
+    ranked.sort_by(|a, b| b.0.cmp(&a.0));
 
     let (_, region) = ranked[0];
     let center = to_grid_coord(
@@ -596,21 +587,14 @@ fn ensure_walkable(
     if !movement.nodes.contains(&node) {
         return Err(GeneratorError::IrInvariant {
             stage: ErrorStage::Ir,
-            detail: format!(
-                "capture_view_{category}_not_walkable coord={coord}"
-            ),
+            detail: format!("capture_view_{category}_not_walkable coord={coord}"),
         });
     }
     // Also check tile is walkable.
-    if coord.layer >= config.layers().2
-        || coord.x >= config.width()
-        || coord.y >= config.height()
-    {
+    if coord.layer >= config.layers().2 || coord.x >= config.width() || coord.y >= config.height() {
         return Err(GeneratorError::IrInvariant {
             stage: ErrorStage::Ir,
-            detail: format!(
-                "capture_view_{category}_oob coord={coord}"
-            ),
+            detail: format!("capture_view_{category}_oob coord={coord}"),
         });
     }
     let tile = level.tile_at_3d(
@@ -628,9 +612,7 @@ fn ensure_walkable(
     ) {
         return Err(GeneratorError::IrInvariant {
             stage: ErrorStage::Ir,
-            detail: format!(
-                "capture_view_{category}_not_floor coord={coord} tile={tile:?}"
-            ),
+            detail: format!("capture_view_{category}_not_floor coord={coord} tile={tile:?}"),
         });
     }
     Ok(())
@@ -686,8 +668,8 @@ fn ensure_walkable_or_in_region(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::config::GeneratorConfig;
+    use super::*;
     use crate::layout::{ParsedLevel, Tile, TileCoord};
 
     fn test_config() -> super::super::config::NormalizedGeneratorConfig {
@@ -732,13 +714,6 @@ mod tests {
     fn capture_view_rejects_degenerate_eye_equals_lookat() {
         let config = test_config();
         let coord = GridCoord::new(0, 5, 5, 64, 64, 2).unwrap();
-        assert!(CaptureView::new(
-            CaptureViewCategory::Spawn,
-            "",
-            coord,
-            coord,
-            &config,
-        )
-        .is_err());
+        assert!(CaptureView::new(CaptureViewCategory::Spawn, "", coord, coord, &config,).is_err());
     }
 }

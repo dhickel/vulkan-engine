@@ -355,7 +355,10 @@ impl FindingLedger {
     pub fn validate_expected_counts(&self) -> Result<(), String> {
         let counts = self.count_by_status();
         let resolved = counts.get(&FindingStatus::Resolved).copied().unwrap_or(0);
-        let partial = counts.get(&FindingStatus::PartiallyResolved).copied().unwrap_or(0);
+        let partial = counts
+            .get(&FindingStatus::PartiallyResolved)
+            .copied()
+            .unwrap_or(0);
         let deferred = counts.get(&FindingStatus::Deferred).copied().unwrap_or(0);
         let total = resolved + partial + deferred;
 
@@ -400,10 +403,7 @@ mod tests {
     fn every_entry_has_non_empty_id_and_summary() {
         let ledger = FindingLedger::canonical();
         for entry in ledger.entries() {
-            assert!(
-                !entry.id.is_empty(),
-                "entry must have non-empty id"
-            );
+            assert!(!entry.id.is_empty(), "entry must have non-empty id");
             assert!(
                 !entry.summary.is_empty(),
                 "entry {id} must have non-empty summary",

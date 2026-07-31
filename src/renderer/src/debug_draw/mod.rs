@@ -122,7 +122,14 @@ impl DebugDrawState {
     }
 
     /// Append a cross/gizmo at `position` with `size` per axis.
-    pub fn push_cross(&mut self, position: Vec3, size: f32, color_x: Vec3, color_y: Vec3, color_z: Vec3) {
+    pub fn push_cross(
+        &mut self,
+        position: Vec3,
+        size: f32,
+        color_x: Vec3,
+        color_y: Vec3,
+        color_z: Vec3,
+    ) {
         let half = size * 0.5;
         self.push_line(
             position - Vec3::X * half,

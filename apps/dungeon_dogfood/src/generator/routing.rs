@@ -37,12 +37,12 @@ impl TileBuffer {
                 detail: format!("tile_buffer_zero_dimensions w={width} h={height} l={layers}"),
             });
         }
-        let layer_capacity = usize::from(width)
-            .checked_mul(usize::from(height))
-            .ok_or(GeneratorError::ArithmeticOverflow {
+        let layer_capacity = usize::from(width).checked_mul(usize::from(height)).ok_or(
+            GeneratorError::ArithmeticOverflow {
                 stage: ErrorStage::Materialization,
                 operation: "tile_buffer_layer_capacity",
-            })?;
+            },
+        )?;
         let mut cells = Vec::with_capacity(usize::from(layers));
         let mut ownership = Vec::with_capacity(usize::from(layers));
         for _ in 0..layers {
@@ -284,18 +284,19 @@ pub(super) fn stamp_prefab_region(
 
     let mut staged = buffer.clone();
     for (layer_offset, layer_grid) in variant.layers.iter().enumerate() {
-        let layer_offset = u16::try_from(layer_offset).map_err(|_| {
-            GeneratorError::ArithmeticOverflow {
+        let layer_offset =
+            u16::try_from(layer_offset).map_err(|_| GeneratorError::ArithmeticOverflow {
                 stage: ErrorStage::Materialization,
                 operation: "stamp_layer_offset",
-            }
-        })?;
-        let global_layer = region.layer.checked_add(layer_offset).ok_or(
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Materialization,
-                operation: "stamp_global_layer",
-            },
-        )?;
+            })?;
+        let global_layer =
+            region
+                .layer
+                .checked_add(layer_offset)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Materialization,
+                    operation: "stamp_global_layer",
+                })?;
         for (local_y, row) in layer_grid.iter().enumerate() {
             for (local_x, tile) in row.iter().enumerate() {
                 let cell = translated_cell(
@@ -356,7 +357,12 @@ pub(super) fn stamp_prefab_region(
                 config.height(),
                 config.layers().2,
             )
-            .map_err(|_| materialization_error("stamp_reservation_oob", format!("region={}", region.id.raw())))?;
+            .map_err(|_| {
+                materialization_error(
+                    "stamp_reservation_oob",
+                    format!("region={}", region.id.raw()),
+                )
+            })?;
             if matches!(
                 reservation.kind,
                 ReservationKind::SocketFunnel | ReservationKind::CorridorApproach
@@ -411,15 +417,29 @@ fn carve_single_edge(
         .path_witness
         .iter()
         .copied()
-        .find(|cell| buffer.get_tile(cell.layer, cell.x, cell.y) == Some(crate::layout::Tile::Floor))
-        .ok_or_else(|| materialization_error("corridor_source_floor_connector_missing", format!("edge={}", edge.id.raw())))?;
+        .find(|cell| {
+            buffer.get_tile(cell.layer, cell.x, cell.y) == Some(crate::layout::Tile::Floor)
+        })
+        .ok_or_else(|| {
+            materialization_error(
+                "corridor_source_floor_connector_missing",
+                format!("edge={}", edge.id.raw()),
+            )
+        })?;
     let route_goal = edge
         .path_witness
         .iter()
         .rev()
         .copied()
-        .find(|cell| buffer.get_tile(cell.layer, cell.x, cell.y) == Some(crate::layout::Tile::Floor))
-        .ok_or_else(|| materialization_error("corridor_target_floor_connector_missing", format!("edge={}", edge.id.raw())))?;
+        .find(|cell| {
+            buffer.get_tile(cell.layer, cell.x, cell.y) == Some(crate::layout::Tile::Floor)
+        })
+        .ok_or_else(|| {
+            materialization_error(
+                "corridor_target_floor_connector_missing",
+                format!("edge={}", edge.id.raw()),
+            )
+        })?;
     if route_start.layer != route_goal.layer {
         return Err(materialization_error(
             "corridor_cross_layer_witness",
@@ -441,12 +461,14 @@ fn carve_single_edge(
     }
 
     let protected = protected_transition_cells(topology);
-    let max_steps = edge.path_witness.len().checked_sub(1).ok_or(
-        GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Materialization,
-            operation: "corridor_max_steps",
-        },
-    )?;
+    let max_steps =
+        edge.path_witness
+            .len()
+            .checked_sub(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Materialization,
+                operation: "corridor_max_steps",
+            })?;
     let path = target_seeking_path(
         route_start,
         route_goal,
@@ -549,14 +571,7 @@ fn target_seeking_path(
             if visited.contains(&next)
                 || !center_cell_legal(next, edge, topology, buffer, config, envelope, protected)
                 || !segment_width_legal(
-                    current,
-                    next,
-                    edge,
-                    topology,
-                    buffer,
-                    config,
-                    envelope,
-                    protected,
+                    current, next, edge, topology, buffer, config, envelope, protected,
                 )
             {
                 continue;
@@ -651,17 +666,22 @@ fn astar_path(
             let mut states = vec![current.state];
             let mut cursor = current.state;
             while cursor != start_state {
-                cursor = *parent.get(&cursor).ok_or(GeneratorError::CorridorInvariant {
-                    stage: ErrorStage::Materialization,
-                    edge: edge.id.raw(),
-                    detail: "astar_parent_missing".into(),
-                })?;
+                cursor = *parent
+                    .get(&cursor)
+                    .ok_or(GeneratorError::CorridorInvariant {
+                        stage: ErrorStage::Materialization,
+                        edge: edge.id.raw(),
+                        detail: "astar_parent_missing".into(),
+                    })?;
                 states.push(cursor);
             }
             states.reverse();
             return Ok(Some(states.into_iter().map(|state| state.coord).collect()));
         }
-        if usize::try_from(current.g).ok().is_none_or(|g| g >= max_steps) {
+        if usize::try_from(current.g)
+            .ok()
+            .is_none_or(|g| g >= max_steps)
+        {
             continue;
         }
         for direction in canonical_directions() {
@@ -697,14 +717,20 @@ fn astar_path(
                 direction: Some(direction),
                 run_length,
             };
-            let g = current.g.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Materialization,
-                operation: "corridor_astar_g",
-            })?;
+            let g = current
+                .g
+                .checked_add(1)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Materialization,
+                    operation: "corridor_astar_g",
+                })?;
             let turns = current
                 .turns
                 .checked_add(u64::from(
-                    current.state.direction.is_some_and(|previous| previous != direction),
+                    current
+                        .state
+                        .direction
+                        .is_some_and(|previous| previous != direction),
                 ))
                 .ok_or(GeneratorError::ArithmeticOverflow {
                     stage: ErrorStage::Materialization,
@@ -716,10 +742,12 @@ fn astar_path(
             }
             best.insert(next, score);
             parent.insert(next, current.state);
-            sequence = sequence.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Materialization,
-                operation: "corridor_astar_sequence",
-            })?;
+            sequence = sequence
+                .checked_add(1)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Materialization,
+                    operation: "corridor_astar_sequence",
+                })?;
             frontier.push(Frontier {
                 state: next,
                 f: g.checked_add(manhattan(next_coord, goal)).ok_or(
@@ -751,10 +779,7 @@ fn segment_width_legal(
     expanded_path(&[from, to], edge.width, config).is_ok_and(|cells| {
         cells.iter().all(|cell| {
             envelope.contains(cell)
-                && validate_corridor_cell(
-                    *cell, edge, topology, buffer, config, protected,
-                )
-                .is_ok()
+                && validate_corridor_cell(*cell, edge, topology, buffer, config, protected).is_ok()
         })
     })
 }
@@ -787,7 +812,10 @@ fn validate_corridor_cell(
         || cell.x.checked_add(1) == Some(config.width())
         || cell.y.checked_add(1) == Some(config.height())
     {
-        return Err(materialization_error("corridor_border_violation", cell.to_string()));
+        return Err(materialization_error(
+            "corridor_border_violation",
+            cell.to_string(),
+        ));
     }
     if protected.contains(&cell) && !transition_connector_cell(cell, edge, topology) {
         return Err(materialization_error(
@@ -804,7 +832,10 @@ fn validate_corridor_cell(
     {
         return Err(GeneratorError::TileBufferConflict {
             stage: ErrorStage::Materialization,
-            detail: format!("corridor_blocked edge={} cell={cell} tile={tile:?}", edge.id.raw()),
+            detail: format!(
+                "corridor_blocked edge={} cell={cell} tile={tile:?}",
+                edge.id.raw()
+            ),
         });
     }
 
@@ -813,9 +844,9 @@ fn validate_corridor_cell(
     let in_target = region_by_id(topology, edge.target_region)
         .is_some_and(|region| cell_in_region(cell, region));
     if tile == crate::layout::Tile::Floor && !in_source && !in_target {
-        let owners = buffer.ownership(cell).ok_or_else(|| {
-            materialization_error("corridor_ownership_missing", cell.to_string())
-        })?;
+        let owners = buffer
+            .ownership(cell)
+            .ok_or_else(|| materialization_error("corridor_ownership_missing", cell.to_string()))?;
         if owners.corridors.is_empty()
             || !owners
                 .corridors
@@ -848,7 +879,11 @@ fn authorized_merger(
     other_id: EdgeId,
     topology: &IntendedTopology,
 ) -> bool {
-    let Some(other) = topology.edges.iter().find(|candidate| candidate.id == other_id) else {
+    let Some(other) = topology
+        .edges
+        .iter()
+        .find(|candidate| candidate.id == other_id)
+    else {
         return false;
     };
     if shared_socket_funnel_cell(cell, edge, other) {
@@ -857,7 +892,9 @@ fn authorized_merger(
     [edge.source_region, edge.target_region]
         .into_iter()
         .filter(|region| [other.source_region, other.target_region].contains(region))
-        .any(|shared| region_by_id(topology, shared).is_some_and(|region| cell_in_region(cell, region)))
+        .any(|shared| {
+            region_by_id(topology, shared).is_some_and(|region| cell_in_region(cell, region))
+        })
         || (edge.allowed_envelope_cells.contains(&cell)
             && other.allowed_envelope_cells.contains(&cell))
 }
@@ -901,7 +938,10 @@ fn expanded_path(
     config: &NormalizedGeneratorConfig,
 ) -> Result<BTreeSet<GridCoord>, GeneratorError> {
     if width == 0 || path.is_empty() {
-        return Err(materialization_error("corridor_width_or_path_empty", "".into()));
+        return Err(materialization_error(
+            "corridor_width_or_path_empty",
+            "".into(),
+        ));
     }
     let mut cells = BTreeSet::new();
     if path.len() == 1 {
@@ -951,12 +991,13 @@ fn checked_component_offset(
     perpendicular: i32,
     offset_value: i32,
 ) -> Result<u16, GeneratorError> {
-    let delta = perpendicular
-        .checked_mul(offset_value)
-        .ok_or(GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Materialization,
-            operation: "corridor_width_offset_mul",
-        })?;
+    let delta =
+        perpendicular
+            .checked_mul(offset_value)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Materialization,
+                operation: "corridor_width_offset_mul",
+            })?;
     let value = i32::from(value)
         .checked_add(delta)
         .ok_or(GeneratorError::ArithmeticOverflow {
@@ -980,14 +1021,24 @@ fn validate_socket_terminal(
             operation: "socket_terminal_x",
         },
     )?)
-    .map_err(|_| materialization_error("socket_terminal_oob", format!("edge={} side={side}", edge.raw())))?;
+    .map_err(|_| {
+        materialization_error(
+            "socket_terminal_oob",
+            format!("edge={} side={side}", edge.raw()),
+        )
+    })?;
     let y = u16::try_from(i32::from(socket.global_anchor.y).checked_sub(dy).ok_or(
         GeneratorError::ArithmeticOverflow {
             stage: ErrorStage::Materialization,
             operation: "socket_terminal_y",
         },
     )?)
-    .map_err(|_| materialization_error("socket_terminal_oob", format!("edge={} side={side}", edge.raw())))?;
+    .map_err(|_| {
+        materialization_error(
+            "socket_terminal_oob",
+            format!("edge={} side={side}", edge.raw()),
+        )
+    })?;
     let expected = GridCoord::new(
         socket.global_anchor.layer,
         x,
@@ -1118,14 +1169,18 @@ fn translated_cell(
         stage: ErrorStage::Materialization,
         operation: "stamp_local_y_convert",
     })?;
-    let x = origin_x.checked_add(local_x).ok_or(GeneratorError::ArithmeticOverflow {
-        stage: ErrorStage::Materialization,
-        operation: "stamp_x_add",
-    })?;
-    let y = origin_y.checked_add(local_y).ok_or(GeneratorError::ArithmeticOverflow {
-        stage: ErrorStage::Materialization,
-        operation: "stamp_y_add",
-    })?;
+    let x = origin_x
+        .checked_add(local_x)
+        .ok_or(GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Materialization,
+            operation: "stamp_x_add",
+        })?;
+    let y = origin_y
+        .checked_add(local_y)
+        .ok_or(GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Materialization,
+            operation: "stamp_y_add",
+        })?;
     GridCoord::new(
         layer,
         x,
@@ -1231,12 +1286,14 @@ fn clear_transition_crest_exits(
                 format!("transition={} crest={crest}", transition.id.raw()),
             )
         })?;
-        let upper_layer = transition.lower_layer.checked_add(1).ok_or(
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Materialization,
-                operation: "transition_crest_exit_upper_layer",
-            },
-        )?;
+        let upper_layer =
+            transition
+                .lower_layer
+                .checked_add(1)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Materialization,
+                    operation: "transition_crest_exit_upper_layer",
+                })?;
         if !transition.landing_cells.iter().any(|landing| {
             landing.layer == upper_layer && landing.x == exit.x && landing.y == exit.y
         }) {
@@ -1259,8 +1316,11 @@ pub(super) fn materialize_topology(
     ctx: &mut AttemptContext,
 ) -> Result<TileBuffer, GeneratorError> {
     let mut buffer = TileBuffer::new(config.width(), config.height(), config.layers().2)?;
-    let upper_endpoint_ids: BTreeSet<RegionId> =
-        topology.transitions.iter().map(|transition| transition.upper_region).collect();
+    let upper_endpoint_ids: BTreeSet<RegionId> = topology
+        .transitions
+        .iter()
+        .map(|transition| transition.upper_region)
+        .collect();
     let mut regions: Vec<_> = topology
         .regions
         .iter()
@@ -1285,7 +1345,6 @@ pub(super) fn materialize_topology(
 mod tests {
     use std::path::PathBuf;
 
-    use super::*;
     use super::super::config::GeneratorConfig;
     use super::super::context::{AttemptContext, TelemetryMode};
     use super::super::determinism::{
@@ -1293,6 +1352,7 @@ mod tests {
     };
     use super::super::placement::place_regions;
     use super::super::topology::{build_candidate_graph, select_topology};
+    use super::*;
 
     fn catalog() -> PrefabCatalog {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/prefabs");
@@ -1323,21 +1383,41 @@ mod tests {
         let identity = GeneratorIdentity::new(&config, catalog.identity_bytes(), seed);
         let factory = SemanticStreamFactory::new(AttemptIdentity::new(identity, 0));
         let mut roles = factory.stream(SemanticStage::Roles, &[]);
-        let (placed, grid) = place_regions(&config, &catalog, &mut roles, factory, &mut AttemptContext::new(TelemetryMode::Off)).expect("placement");
-        let graph = build_candidate_graph(&placed, &grid, &mut AttemptContext::new(TelemetryMode::Off)).expect("graph");
+        let (placed, grid) = place_regions(
+            &config,
+            &catalog,
+            &mut roles,
+            factory,
+            &mut AttemptContext::new(TelemetryMode::Off),
+        )
+        .expect("placement");
+        let graph =
+            build_candidate_graph(&placed, &grid, &mut AttemptContext::new(TelemetryMode::Off))
+                .expect("graph");
         let mut topology_rng = factory.stream(SemanticStage::Topology, &[]);
-        let topology = select_topology(placed, &config, &graph, &mut topology_rng, &mut AttemptContext::new(TelemetryMode::Off)).expect("topology");
+        let topology = select_topology(
+            placed,
+            &config,
+            &graph,
+            &mut topology_rng,
+            &mut AttemptContext::new(TelemetryMode::Off),
+        )
+        .expect("topology");
         (config, catalog, topology)
     }
 
     #[test]
     fn tile_buffer_layers_bounds_and_conflicts_are_isolated() {
         let mut buffer = TileBuffer::new(4, 4, 2).expect("buffer");
-        buffer.set_tile(0, 1, 1, crate::layout::Tile::Floor).expect("first write");
+        buffer
+            .set_tile(0, 1, 1, crate::layout::Tile::Floor)
+            .expect("first write");
         assert_eq!(buffer.get_tile(0, 1, 1), Some(crate::layout::Tile::Floor));
         assert_eq!(buffer.get_tile(1, 1, 1), Some(crate::layout::Tile::Void));
         assert!(buffer.set_tile(0, 1, 1, crate::layout::Tile::Wall).is_err());
-        assert!(buffer.set_tile(2, 0, 0, crate::layout::Tile::Floor).is_err());
+        assert!(buffer
+            .set_tile(2, 0, 0, crate::layout::Tile::Floor)
+            .is_err());
         assert_eq!(buffer.get_tile(2, 0, 0), None);
     }
 
@@ -1416,16 +1496,40 @@ mod tests {
 
     #[test]
     fn exact_width_expansion_uses_n_cells_and_checked_bounds() {
-        let config = GeneratorConfig::custom(64, 64, 2).normalize().expect("config");
+        let config = GeneratorConfig::custom(64, 64, 2)
+            .normalize()
+            .expect("config");
         let path = [
-            GridCoord { layer: 0, x: 5, y: 5 },
-            GridCoord { layer: 0, x: 6, y: 5 },
+            GridCoord {
+                layer: 0,
+                x: 5,
+                y: 5,
+            },
+            GridCoord {
+                layer: 0,
+                x: 6,
+                y: 5,
+            },
         ];
-        assert_eq!(expanded_path(&path, 1, &config).expect("width one").len(), 2);
-        assert_eq!(expanded_path(&path, 2, &config).expect("width two").len(), 4);
+        assert_eq!(
+            expanded_path(&path, 1, &config).expect("width one").len(),
+            2
+        );
+        assert_eq!(
+            expanded_path(&path, 2, &config).expect("width two").len(),
+            4
+        );
         let boundary = [
-            GridCoord { layer: 0, x: 0, y: 0 },
-            GridCoord { layer: 0, x: 1, y: 0 },
+            GridCoord {
+                layer: 0,
+                x: 0,
+                y: 0,
+            },
+            GridCoord {
+                layer: 0,
+                x: 1,
+                y: 0,
+            },
         ];
         assert!(expanded_path(&boundary, 2, &config).is_err());
     }
@@ -1457,9 +1561,14 @@ mod tests {
                 edge.id.raw()
             );
         }
-        let level = materialize_topology(&topology, &catalog, &config, &mut AttemptContext::new(TelemetryMode::Off))
-            .expect("seed 77 topology should materialize after border reservation")
-            .into_parsed_level((1, 1));
+        let level = materialize_topology(
+            &topology,
+            &catalog,
+            &config,
+            &mut AttemptContext::new(TelemetryMode::Off),
+        )
+        .expect("seed 77 topology should materialize after border reservation")
+        .into_parsed_level((1, 1));
         let lookup = |layer, x, y| {
             (layer < config.layers().2 && x < config.width() && y < config.height())
                 .then(|| level.tile_at_3d(usize::from(layer), usize::from(x), usize::from(y)))

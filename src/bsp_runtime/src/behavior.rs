@@ -904,8 +904,8 @@ impl StructuralBehaviorAdapter {
     /// Export current mutable behavior state for persistence.
     pub fn export_state(&self) -> crate::source_link::MutableBehaviorState {
         use crate::source_link::{
-            CanonicalFloat, SerializedButtonState, SerializedDoorState,
-            SerializedPlatformState, SerializedTriggerState,
+            CanonicalFloat, SerializedButtonState, SerializedDoorState, SerializedPlatformState,
+            SerializedTriggerState,
         };
         let mut state = crate::source_link::MutableBehaviorState::default();
 

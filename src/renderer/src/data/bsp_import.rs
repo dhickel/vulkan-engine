@@ -335,11 +335,7 @@ fn decode_pbr_companion_rgba(
     if dimensions != (expected_width, expected_height) {
         return Err(format!(
             "BSP texture {texture_index} {role} companion '{}' is {}x{}; expected {}x{}",
-            companion.logical_path,
-            dimensions.0,
-            dimensions.1,
-            expected_width,
-            expected_height
+            companion.logical_path, dimensions.0, dimensions.1, expected_width, expected_height
         ));
     }
 
@@ -503,7 +499,10 @@ fn style_id_array(layout: &FaceLightmapLayout) -> [u32; 4] {
 }
 
 #[cfg(feature = "bsp")]
-fn material_key_for_face(extracted: &ExtractedBsp, face_index: usize) -> Result<PlannedMaterialKey, String> {
+fn material_key_for_face(
+    extracted: &ExtractedBsp,
+    face_index: usize,
+) -> Result<PlannedMaterialKey, String> {
     let material = extracted
         .face_materials
         .get(face_index)
@@ -515,7 +514,10 @@ fn material_key_for_face(extracted: &ExtractedBsp, face_index: usize) -> Result<
     Ok(PlannedMaterialKey {
         render_class: render_class_index(material.surface_class),
         texture_index: material.material_index,
-        lightmap_page: layout.has_data.then_some(layout.page_index).unwrap_or(u32::MAX),
+        lightmap_page: layout
+            .has_data
+            .then_some(layout.page_index)
+            .unwrap_or(u32::MAX),
         style_ids: style_id_array(layout),
         pbr_flags: pbr_flags_for_texture(
             extracted,
@@ -526,7 +528,9 @@ fn material_key_for_face(extracted: &ExtractedBsp, face_index: usize) -> Result<
 }
 
 #[cfg(feature = "bsp")]
-fn surface_class_from_render_class(render_class: u8) -> Result<bsp::materials::SurfaceClass, String> {
+fn surface_class_from_render_class(
+    render_class: u8,
+) -> Result<bsp::materials::SurfaceClass, String> {
     use bsp::materials::SurfaceClass;
     match render_class {
         0 => Ok(SurfaceClass::Opaque),
@@ -610,7 +614,10 @@ fn collect_planned_faces(
     let mut inline_models = std::collections::HashMap::<u32, u32>::new();
     for model in &extracted.inline_models {
         for &source_face_index in &model.face_indices {
-            if inline_models.insert(source_face_index, model.model_index).is_some() {
+            if inline_models
+                .insert(source_face_index, model.model_index)
+                .is_some()
+            {
                 return Err(format!(
                     "BSP source face {source_face_index} belongs to multiple inline models"
                 ));
@@ -634,7 +641,10 @@ fn collect_planned_faces(
         let material_plan_index = *material_indices
             .get(&key)
             .ok_or_else(|| format!("BSP face {face_index} material was not planned"))?;
-        let model_index = inline_models.get(&geometry.face_index).copied().unwrap_or(0);
+        let model_index = inline_models
+            .get(&geometry.face_index)
+            .copied()
+            .unwrap_or(0);
         faces.push(PlannedFace {
             face_index,
             source_face_index: geometry.face_index,
@@ -646,11 +656,7 @@ fn collect_planned_faces(
 }
 
 #[cfg(feature = "bsp")]
-fn bake_lightmap_uv(
-    extracted: &ExtractedBsp,
-    face_index: usize,
-    uv: Vec2,
-) -> Result<Vec2, String> {
+fn bake_lightmap_uv(extracted: &ExtractedBsp, face_index: usize, uv: Vec2) -> Result<Vec2, String> {
     let layout = &extracted.face_lightmap_layouts[face_index];
     let (image_width, image_height) = extracted.lightmap_atlas.common_used_extent();
     if !layout.has_data {
@@ -681,7 +687,9 @@ fn bake_lightmap_uv(
     );
     let atlas_uv = texel / Vec2::new(image_width as f32, image_height as f32);
     if !atlas_uv.is_finite() {
-        return Err(format!("BSP face {face_index} produced non-finite atlas UV"));
+        return Err(format!(
+            "BSP face {face_index} produced non-finite atlas UV"
+        ));
     }
     Ok(atlas_uv)
 }
@@ -710,13 +718,14 @@ fn merge_batch_mesh(
     let mut indices = Vec::with_capacity(index_count);
 
     for face in faces {
-        let mut mesh = face_to_procedural_mesh(
-            &extracted.face_geometries[face.face_index],
-            1.0,
-            1.0,
-            None,
-        )
-        .ok_or_else(|| format!("renderable BSP face {} is not triangulable", face.face_index))?;
+        let mut mesh =
+            face_to_procedural_mesh(&extracted.face_geometries[face.face_index], 1.0, 1.0, None)
+                .ok_or_else(|| {
+                    format!(
+                        "renderable BSP face {} is not triangulable",
+                        face.face_index
+                    )
+                })?;
         let base_vertex = u32::try_from(vertices.len())
             .map_err(|_| format!("BSP batch {batch_index} vertex offset exceeds u32"))?;
         let texture_extent = extracted
@@ -744,7 +753,9 @@ fn merge_batch_mesh(
     }
 
     if vertices.is_empty() || indices.is_empty() {
-        return Err(format!("BSP batch {batch_index} has no renderable geometry"));
+        return Err(format!(
+            "BSP batch {batch_index} has no renderable geometry"
+        ));
     }
     Ok(ProceduralMeshData {
         name: format!("bsp_batch_{batch_index}"),
@@ -794,30 +805,55 @@ fn compute_upload_demand(
         if used_w == 0 || used_h == 0 {
             (1u64, 1u64, 1u64)
         } else {
-            (used_w as u64, used_h as u64, extracted.lightmap_atlas.pages.len() as u64)
+            (
+                used_w as u64,
+                used_h as u64,
+                extracted.lightmap_atlas.pages.len() as u64,
+            )
         }
     };
     let atlas_layers = checked_mul(atlas_pages, 4, "lightmap layer")?;
     let lightmap_image_bytes = checked_mul(
-        checked_mul(checked_mul(atlas_width, atlas_height, "lightmap pixels")?, atlas_layers, "lightmap layers")?,
+        checked_mul(
+            checked_mul(atlas_width, atlas_height, "lightmap pixels")?,
+            atlas_layers,
+            "lightmap layers",
+        )?,
         4,
         "lightmap image",
     )?;
-    let style_pixels = extracted.face_lightmap_layouts.iter().try_fold(1u64, |total, layout| {
-        layout.style_layers.iter().take(4).filter(|layer| layer.has_data).try_fold(total, |sum, layer| {
-            let pixels = checked_mul(layer.luxel_extents.0 as u64, layer.luxel_extents.1 as u64, "lightmap rectangle")?;
-            checked_add(sum, pixels, "lightmap staging pixels")
-        })
-    })?;
+    let style_pixels = extracted
+        .face_lightmap_layouts
+        .iter()
+        .try_fold(1u64, |total, layout| {
+            layout
+                .style_layers
+                .iter()
+                .take(4)
+                .filter(|layer| layer.has_data)
+                .try_fold(total, |sum, layer| {
+                    let pixels = checked_mul(
+                        layer.luxel_extents.0 as u64,
+                        layer.luxel_extents.1 as u64,
+                        "lightmap rectangle",
+                    )?;
+                    checked_add(sum, pixels, "lightmap staging pixels")
+                })
+        })?;
     let lightmap_staging_bytes = checked_mul(style_pixels, 4, "lightmap staging")?;
     let surface_uniform_bytes = checked_mul(
         material_count as u64,
         std::mem::size_of::<BspSurfaceUniform>() as u64,
         "surface uniform",
     )?;
-    let estimated_gpu_bytes = [geometry_bytes, texture_bytes, lightmap_image_bytes, surface_uniform_bytes]
-        .into_iter()
-        .try_fold(0u64, |sum, bytes| checked_add(sum, bytes, "estimated GPU"))?;
+    let estimated_gpu_bytes = [
+        geometry_bytes,
+        texture_bytes,
+        lightmap_image_bytes,
+        surface_uniform_bytes,
+    ]
+    .into_iter()
+    .try_fold(0u64, |sum, bytes| checked_add(sum, bytes, "estimated GPU"))?;
 
     if batches.len() > MAX_BSP_RENDER_BATCHES {
         return Err(format!(
@@ -986,10 +1022,7 @@ pub(crate) fn verify_exact_renderable_face_coverage(
 }
 
 #[cfg(feature = "bsp")]
-fn extracted_face_geometry(
-    plan: &BspUploadPlan,
-    face_index: usize,
-) -> Option<&FaceGeometry> {
+fn extracted_face_geometry(plan: &BspUploadPlan, face_index: usize) -> Option<&FaceGeometry> {
     // The plan doesn't hold the ExtractedBsp. This function exists as a
     // documentation-of-intent helper; the actual validation is done at the
     // callsite with access to the extracted data.
@@ -1085,7 +1118,9 @@ pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan,
             ));
         }
         if texture.fullbright_mask.len()
-            != (texture.width as usize).checked_mul(texture.height as usize).unwrap_or(0)
+            != (texture.width as usize)
+                .checked_mul(texture.height as usize)
+                .unwrap_or(0)
         {
             return Err(format!(
                 "BSP texture {texture_index} fullbright mask size mismatch"
@@ -1117,7 +1152,9 @@ pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan,
             return Err(format!("BSP face {face_index} has no material"));
         };
         if geometry.is_valid && material.surface_class.is_visible() {
-            material_keys.entry(material_key_for_face(extracted, face_index)?).or_insert(0);
+            material_keys
+                .entry(material_key_for_face(extracted, face_index)?)
+                .or_insert(0);
         }
     }
     if material_keys.len() > MAX_BSP_MATERIALS {
@@ -1168,7 +1205,10 @@ pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan,
     // ── Build source-face → canonical planned-face maps ───────────
     let mut source_face_to_slot = std::collections::HashMap::with_capacity(face_count);
     for (slot, geometry) in extracted.face_geometries.iter().enumerate() {
-        if source_face_to_slot.insert(geometry.face_index, slot).is_some() {
+        if source_face_to_slot
+            .insert(geometry.face_index, slot)
+            .is_some()
+        {
             return Err(format!(
                 "BSP extraction contains duplicate source face identity {}",
                 geometry.face_index
@@ -1177,14 +1217,22 @@ pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan,
     }
     let mut planned_face_by_slot = vec![None; face_count];
     for &face in &faces {
-        if planned_face_by_slot[face.face_index].replace(face).is_some() {
-            return Err(format!("BSP face {} has duplicate material assignment", face.face_index));
+        if planned_face_by_slot[face.face_index]
+            .replace(face)
+            .is_some()
+        {
+            return Err(format!(
+                "BSP face {} has duplicate material assignment",
+                face.face_index
+            ));
         }
     }
 
     // ── Materialize neutral batches one-for-one ────────────────────
     if extracted.render_batches.is_empty() {
-        return Err("BSP has renderable faces but produces zero neutral render batches".to_string());
+        return Err(
+            "BSP has renderable faces but produces zero neutral render batches".to_string(),
+        );
     }
     let mut face_to_batch = vec![None; face_count];
     let mut face_to_material = vec![None; face_count];
@@ -1273,7 +1321,10 @@ pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan,
                     material.material_index,
                     material.surface_class,
                 ),
-                lightmap_page: layout.has_data.then_some(layout.page_index).unwrap_or(u32::MAX),
+                lightmap_page: layout
+                    .has_data
+                    .then_some(layout.page_index)
+                    .unwrap_or(u32::MAX),
                 style_ids: [
                     style_ids[0] as u8,
                     style_ids[1] as u8,
@@ -1291,8 +1342,14 @@ pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan,
         }
 
         for face in &group_faces {
-            if face_to_batch[face.face_index].replace(batch_index).is_some() {
-                return Err(format!("BSP face {} assigned to multiple batches", face.face_index));
+            if face_to_batch[face.face_index]
+                .replace(batch_index)
+                .is_some()
+            {
+                return Err(format!(
+                    "BSP face {} assigned to multiple batches",
+                    face.face_index
+                ));
             }
             face_to_material[face.face_index] = Some(face.material_plan_index);
         }
@@ -1361,13 +1418,7 @@ pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan,
     }
 
     // Enforce aggregate demand before decoding and packing companion images.
-    let demand = compute_upload_demand(
-        extracted,
-        &batches,
-        materials.len(),
-        faces.len(),
-        0,
-    )?;
+    let demand = compute_upload_demand(extracted, &batches, materials.len(), faces.len(), 0)?;
     let textures = plan_bsp_textures(extracted)?;
     Ok(BspUploadPlan {
         materials,
@@ -1848,7 +1899,12 @@ mod tests {
         let lightmap_pages = extracted
             .face_lightmap_layouts
             .iter()
-            .map(|layout| layout.has_data.then_some(layout.page_index).unwrap_or(u32::MAX))
+            .map(|layout| {
+                layout
+                    .has_data
+                    .then_some(layout.page_index)
+                    .unwrap_or(u32::MAX)
+            })
             .collect::<Vec<_>>();
         let style_ids = extracted
             .face_lightmap_layouts
@@ -1929,12 +1985,10 @@ mod tests {
     #[test]
     fn one_pbr_companion_routes_pbr_and_supplies_missing_channel_defaults() {
         let mut extracted = stress_extracted(1, 1);
-        extracted.textures[0].pbr_companions.gloss = Some(
-            bsp::resources::TextureCompanion::new(
-                "textures/texture_0_gloss.png",
-                one_pixel_png([153, 0, 0, 255]),
-            ),
-        );
+        extracted.textures[0].pbr_companions.gloss = Some(bsp::resources::TextureCompanion::new(
+            "textures/texture_0_gloss.png",
+            one_pixel_png([153, 0, 0, 255]),
+        ));
 
         let plan = plan_bsp_upload(&extracted).expect("gloss-only BSP plan");
         assert_eq!(plan.textures[0].material_data_rgba, [0, 128, 128, 153]);
@@ -1949,12 +2003,10 @@ mod tests {
     #[test]
     fn normal_only_pbr_companion_sets_normal_flag_and_default_gloss() {
         let mut extracted = stress_extracted(1, 1);
-        extracted.textures[0].pbr_companions.normal = Some(
-            bsp::resources::TextureCompanion::new(
-                "textures/texture_0_norm.png",
-                one_pixel_png([64, 192, 255, 255]),
-            ),
-        );
+        extracted.textures[0].pbr_companions.normal = Some(bsp::resources::TextureCompanion::new(
+            "textures/texture_0_norm.png",
+            one_pixel_png([64, 192, 255, 255]),
+        ));
 
         let plan = plan_bsp_upload(&extracted).expect("normal-only BSP plan");
         assert_eq!(plan.textures[0].material_data_rgba, [0, 64, 192, 0]);
@@ -2028,11 +2080,8 @@ mod tests {
         extracted.face_lightmap_layouts[0].style_layers.clear();
 
         let albedo_handles = [BspTextureHandle::new(10, 1), BspTextureHandle::new(11, 1)];
-        let descs = build_bsp_material_descs(
-            &extracted,
-            &albedo_handles,
-            BspTextureHandle::new(12, 1),
-        );
+        let descs =
+            build_bsp_material_descs(&extracted, &albedo_handles, BspTextureHandle::new(12, 1));
         let desc = descs[0].as_ref().expect("visible face descriptor");
 
         assert_eq!(desc.textures.albedo, albedo_handles[1]);
@@ -2048,12 +2097,10 @@ mod tests {
         let mut extracted = stress_extracted(1, 1);
         extracted.face_materials[0].surface_class = bsp::materials::SurfaceClass::Liquid;
         rebuild_test_render_batches(&mut extracted);
-        extracted.textures[0].pbr_companions.normal = Some(
-            bsp::resources::TextureCompanion::new(
-                "textures/texture_0_norm.png",
-                vec![1, 2, 3],
-            ),
-        );
+        extracted.textures[0].pbr_companions.normal = Some(bsp::resources::TextureCompanion::new(
+            "textures/texture_0_norm.png",
+            vec![1, 2, 3],
+        ));
 
         let plan = plan_bsp_upload(&extracted).expect("liquid legacy BSP plan");
         assert_eq!(plan.textures[0].pbr_flags, 0);
@@ -2064,12 +2111,10 @@ mod tests {
     #[test]
     fn pbr_companion_dimension_mismatch_fails_before_gpu_allocation() {
         let mut extracted = stress_extracted(1, 1);
-        extracted.textures[0].pbr_companions.normal = Some(
-            bsp::resources::TextureCompanion::new(
-                "textures/texture_0_norm.png",
-                solid_png(2, 1, [128, 128, 255, 255]),
-            ),
-        );
+        extracted.textures[0].pbr_companions.normal = Some(bsp::resources::TextureCompanion::new(
+            "textures/texture_0_norm.png",
+            solid_png(2, 1, [128, 128, 255, 255]),
+        ));
         let error = plan_bsp_upload(&extracted).unwrap_err();
         assert!(error.contains("is 2x1; expected 1x1"));
     }
@@ -2323,7 +2368,10 @@ mod tests {
         let _vertices = std::mem::take(&mut batch.mesh.vertices);
         let _indices = std::mem::take(&mut batch.mesh.indices);
         assert!(compute_batch_bounds(&batch.mesh).is_err());
-        assert_eq!(retained_bounds, (glam::Vec3::ZERO, glam::Vec3::X.max(glam::Vec3::Y)));
+        assert_eq!(
+            retained_bounds,
+            (glam::Vec3::ZERO, glam::Vec3::X.max(glam::Vec3::Y))
+        );
     }
 
     #[cfg(feature = "bsp")]
@@ -2344,16 +2392,14 @@ mod tests {
     fn compute_batch_bounds_rejects_non_finite_vertex() {
         let mesh = ProceduralMeshData {
             name: "nan".to_string(),
-            vertices: vec![
-                crate::api::ProceduralVertex {
-                    position: glam::Vec3::NAN,
-                    normal: glam::Vec3::Z,
-                    tangent: glam::Vec4::W,
-                    uv0: glam::Vec2::ZERO,
-                    uv1: glam::Vec2::ZERO,
-                    color: glam::Vec4::ONE,
-                },
-            ],
+            vertices: vec![crate::api::ProceduralVertex {
+                position: glam::Vec3::NAN,
+                normal: glam::Vec3::Z,
+                tangent: glam::Vec4::W,
+                uv0: glam::Vec2::ZERO,
+                uv1: glam::Vec2::ZERO,
+                color: glam::Vec4::ONE,
+            }],
             indices: vec![0],
             material: None,
         };
@@ -2424,8 +2470,8 @@ mod tests {
     #[test]
     fn mounted_batch_material_slot_zero_rules() {
         use crate::api::bsp::MountedBspBatch;
-        use crate::api::MeshHandle;
         use crate::api::BspMaterialHandle;
+        use crate::api::MeshHandle;
 
         let batch = bsp::geometry::RenderBatch {
             key: bsp::geometry::BatchKey {
@@ -2449,7 +2495,10 @@ mod tests {
         // Full validation happens in from_canonical with a resource lease.
         let mat_null = BspMaterialHandle::new(0, 0);
         let result = MountedBspBatch::try_new(&batch, mesh, mat_null, bounds);
-        assert!(result.is_ok(), "try_new accepts slot-0 material (lease validates later)");
+        assert!(
+            result.is_ok(),
+            "try_new accepts slot-0 material (lease validates later)"
+        );
 
         // Cache-issued: slot 0, gen 1 — valid
         let mat_issued = BspMaterialHandle::new(0, 1);
@@ -2466,8 +2515,8 @@ mod tests {
     #[cfg(feature = "bsp")]
     #[test]
     fn canonical_mount_rejects_material_not_in_lease() {
-        use crate::api::bsp::{MountedBspBatch, PreparedBspMount, BspResourceLease};
-        use crate::api::{MeshHandle, BspMaterialHandle};
+        use crate::api::bsp::{BspResourceLease, MountedBspBatch, PreparedBspMount};
+        use crate::api::{BspMaterialHandle, MeshHandle};
         use crate::scene::bsp_visibility::BspMountState;
 
         let batch = bsp::geometry::RenderBatch {
@@ -2518,8 +2567,8 @@ mod tests {
     #[cfg(feature = "bsp")]
     #[test]
     fn canonical_mount_accepts_first_material_handle_with_lease() {
-        use crate::api::bsp::{MountedBspBatch, PreparedBspMount, BspResourceLease};
-        use crate::api::{MeshHandle, BspMaterialHandle};
+        use crate::api::bsp::{BspResourceLease, MountedBspBatch, PreparedBspMount};
+        use crate::api::{BspMaterialHandle, MeshHandle};
         use crate::scene::bsp_visibility::BspMountState;
 
         let batch = bsp::geometry::RenderBatch {

@@ -106,7 +106,11 @@ fn golden_pvs_corrupt_stream_fallback() {
 
     let pvs = state.decompress_for_leaf(0, &leaf, &vis_data);
     assert!(!pvs.valid, "corrupt PVS should produce invalid result");
-    assert_eq!(pvs.bits, vec![0xFF, 0xFF], "corrupt PVS falls back to all-visible");
+    assert_eq!(
+        pvs.bits,
+        vec![0xFF, 0xFF],
+        "corrupt PVS falls back to all-visible"
+    );
 }
 
 #[test]
@@ -238,8 +242,24 @@ fn golden_camera_on_plane_defaults_front() {
         face_num: 0,
     }];
     let leaves = vec![
-        lumps::Leaf { contents: 0, visofs: 0, mins: [0; 3], maxs: [0; 3], mark_id: 0, mark_num: 0, ambient: [0; 4] },
-        lumps::Leaf { contents: 0, visofs: 0, mins: [0; 3], maxs: [0; 3], mark_id: 0, mark_num: 0, ambient: [0; 4] },
+        lumps::Leaf {
+            contents: 0,
+            visofs: 0,
+            mins: [0; 3],
+            maxs: [0; 3],
+            mark_id: 0,
+            mark_num: 0,
+            ambient: [0; 4],
+        },
+        lumps::Leaf {
+            contents: 0,
+            visofs: 0,
+            mins: [0; 3],
+            maxs: [0; 3],
+            mark_id: 0,
+            mark_num: 0,
+            ambient: [0; 4],
+        },
     ];
 
     // Exactly on plane → front child (default)
@@ -434,7 +454,10 @@ fn golden_hull_extents_different() {
     assert!((player_ext.z - 16.0 * qte.scale).abs() < 1e-6);
 
     let monster_ext = StoredHull::LargeMonster.extents_engine(&qte);
-    assert!(monster_ext.x > player_ext.x, "large monster wider than player");
+    assert!(
+        monster_ext.x > player_ext.x,
+        "large monster wider than player"
+    );
 }
 
 // ── Leaf Membership Maps ──
@@ -486,8 +509,8 @@ fn golden_leaf_membership_deduplicated() {
 // ═══════════════════════════════════════════════════════════════════════
 
 mod navigation {
-    use bsp::*;
     use bsp::coords::QuakeToEngine;
+    use bsp::*;
     use glam::Vec3;
     use std::path::Path;
 
@@ -510,8 +533,7 @@ mod navigation {
             source_identity: "dungeon-navigation-bsp2".into(),
             ..LoadOptions::default()
         };
-        BspLoader::load(&bsp_data, &options)
-            .expect("strict load of dungeon-navigation-bsp2")
+        BspLoader::load(&bsp_data, &options).expect("strict load of dungeon-navigation-bsp2")
     }
 
     fn load_straight_junction_fixture() -> BspWorld {
@@ -521,8 +543,7 @@ mod navigation {
             source_identity: "dungeon-junction-straight-bsp2".into(),
             ..LoadOptions::default()
         };
-        BspLoader::load(&bsp_data, &options)
-            .expect("strict load of dungeon-junction-straight-bsp2")
+        BspLoader::load(&bsp_data, &options).expect("strict load of dungeon-junction-straight-bsp2")
     }
 
     // ── EVIDENCE FINDING: Hull 0 and Hull 1 share headnodes ──────────
@@ -552,14 +573,18 @@ mod navigation {
         // info_player_start is at Quake (-128, 0, 0) in the navigation fixture
         let spawn_q = Vec3::new(-128.0, 0.0, 0.0);
         let spawn_eng = qte.position_vec3(spawn_q);
-        let contents = queries::point_contents(
-            spawn_eng,
-            &world.nodes,
-            &world.leaves,
-            &world.planes,
+        let contents =
+            queries::point_contents(spawn_eng, &world.nodes, &world.leaves, &world.planes);
+        assert!(
+            !contents.is_solid(),
+            "spawn point must be non-solid, got {:?}",
+            contents
         );
-        assert!(!contents.is_solid(), "spawn point must be non-solid, got {:?}", contents);
-        assert!(contents.is_empty(), "spawn point must be in empty space, got {:?}", contents);
+        assert!(
+            contents.is_empty(),
+            "spawn point must be in empty space, got {:?}",
+            contents
+        );
     }
 
     #[test]
@@ -570,11 +595,18 @@ mod navigation {
         let spawn_eng = qte.position_vec3(spawn_q);
 
         let result = queries::trace_line(
-            spawn_eng, spawn_eng,
+            spawn_eng,
+            spawn_eng,
             StoredHull::Point,
-            &world.clipnodes, &world.planes, &world.models, &qte,
+            &world.clipnodes,
+            &world.planes,
+            &world.models,
+            &qte,
         );
-        assert!(!result.starts_solid, "spawn must not be start-solid for point hull");
+        assert!(
+            !result.starts_solid,
+            "spawn must not be start-solid for point hull"
+        );
     }
 
     // ── NAV-STRAIGHT-LINE-TRAVERSAL ───────────────────────────────────
@@ -591,14 +623,20 @@ mod navigation {
         let end_eng = qte.position_vec3(end_q);
 
         let result = queries::trace_line(
-            start_eng, end_eng,
+            start_eng,
+            end_eng,
             StoredHull::Point,
-            &world.clipnodes, &world.planes, &world.models, &qte,
+            &world.clipnodes,
+            &world.planes,
+            &world.models,
+            &qte,
         );
         assert!(!result.starts_solid);
-        assert!(result.no_hit,
+        assert!(
+            result.no_hit,
             "straight line north of pillar must complete without hitting, got fraction={}",
-            result.hit_fraction);
+            result.hit_fraction
+        );
     }
 
     #[test]
@@ -613,9 +651,13 @@ mod navigation {
         let end_eng = qte.position_vec3(end_q);
 
         let result = queries::trace_line(
-            start_eng, end_eng,
+            start_eng,
+            end_eng,
             StoredHull::Point,
-            &world.clipnodes, &world.planes, &world.models, &qte,
+            &world.clipnodes,
+            &world.planes,
+            &world.models,
+            &qte,
         );
         assert!(!result.starts_solid);
         assert!(!result.no_hit, "trace through pillar must hit something");
@@ -636,14 +678,20 @@ mod navigation {
         let end_eng = qte.position_vec3(end_q);
 
         let result = queries::trace_line(
-            start_eng, end_eng,
+            start_eng,
+            end_eng,
             StoredHull::Point,
-            &world.clipnodes, &world.planes, &world.models, &qte,
+            &world.clipnodes,
+            &world.planes,
+            &world.models,
+            &qte,
         );
         assert!(!result.starts_solid);
-        assert!(result.no_hit,
+        assert!(
+            result.no_hit,
             "point trace from Room A to Room B must complete without hitting, got fraction={}",
-            result.hit_fraction);
+            result.hit_fraction
+        );
     }
 
     // ── NAV-CORNER-SLIDING ────────────────────────────────────────────
@@ -660,14 +708,20 @@ mod navigation {
         let end_eng = qte.position_vec3(end_q);
 
         let result = queries::trace_line(
-            start_eng, end_eng,
+            start_eng,
+            end_eng,
             StoredHull::Point,
-            &world.clipnodes, &world.planes, &world.models, &qte,
+            &world.clipnodes,
+            &world.planes,
+            &world.models,
+            &qte,
         );
         assert!(!result.starts_solid);
-        assert!(result.no_hit,
+        assert!(
+            result.no_hit,
             "trace south of pillar must complete without hitting, got fraction={}",
-            result.hit_fraction);
+            result.hit_fraction
+        );
     }
 
     // ── NAV-WALL-HIT ──────────────────────────────────────────────────
@@ -683,9 +737,13 @@ mod navigation {
         let end_eng = qte.position_vec3(end_q);
 
         let result = queries::trace_line(
-            start_eng, end_eng,
+            start_eng,
+            end_eng,
             StoredHull::Point,
-            &world.clipnodes, &world.planes, &world.models, &qte,
+            &world.clipnodes,
+            &world.planes,
+            &world.models,
+            &qte,
         );
         assert!(!result.starts_solid);
         assert!(!result.no_hit, "westward trace must hit wall");
@@ -710,13 +768,19 @@ mod navigation {
             let start_eng = qte.position_vec3(start_q);
             let end_eng = qte.position_vec3(*target_q);
             let result = queries::trace_line(
-                start_eng, end_eng,
+                start_eng,
+                end_eng,
                 StoredHull::Point,
-                &world.clipnodes, &world.planes, &world.models, &qte,
+                &world.clipnodes,
+                &world.planes,
+                &world.models,
+                &qte,
             );
-            assert!(result.no_hit,
+            assert!(
+                result.no_hit,
                 "spawn to {} quadrant must be reachable, got fraction={}",
-                label, result.hit_fraction);
+                label, result.hit_fraction
+            );
         }
     }
 
@@ -734,14 +798,20 @@ mod navigation {
         let end_eng = qte.position_vec3(end_q);
 
         let result = queries::trace_line(
-            start_eng, end_eng,
+            start_eng,
+            end_eng,
             StoredHull::LargeMonster,
-            &world.clipnodes, &world.planes, &world.models, &qte,
+            &world.clipnodes,
+            &world.planes,
+            &world.models,
+            &qte,
         );
         assert!(!result.starts_solid);
-        assert!(result.no_hit,
+        assert!(
+            result.no_hit,
             "hull 2 trace north of pillar must complete, got fraction={}",
-            result.hit_fraction);
+            result.hit_fraction
+        );
     }
 
     // ── NAV-FIXTURE-INTEGRITY ─────────────────────────────────────────
@@ -753,7 +823,10 @@ mod navigation {
         assert!(world.num_leaves() > 0);
         assert!(!world.entities.is_empty());
         assert!(world.worldspawn().is_some());
-        assert!(!world.clipnodes.is_empty(), "navigation fixture must have clipnodes");
+        assert!(
+            !world.clipnodes.is_empty(),
+            "navigation fixture must have clipnodes"
+        );
     }
 
     #[test]
@@ -763,16 +836,23 @@ mod navigation {
             .entities
             .iter()
             .any(|e| matches!(e.class, bsp::entities::EntityClass::SpawnMarker));
-        assert!(has_player_start, "navigation fixture must have info_player_start");
+        assert!(
+            has_player_start,
+            "navigation fixture must have info_player_start"
+        );
     }
 
     #[test]
     fn nav_fixture_hull_headnodes_valid() {
         let world = load_navigation_fixture();
         let model0 = &world.models[0];
-        assert!((model0.headnode[0] as usize) < world.clipnodes.len(),
-            "hull 0 headnode must be within clipnodes");
-        assert!((model0.headnode[2] as usize) < world.clipnodes.len() || model0.headnode[2] == 0,
-            "hull 2 headnode must be within clipnodes");
+        assert!(
+            (model0.headnode[0] as usize) < world.clipnodes.len(),
+            "hull 0 headnode must be within clipnodes"
+        );
+        assert!(
+            (model0.headnode[2] as usize) < world.clipnodes.len() || model0.headnode[2] == 0,
+            "hull 2 headnode must be within clipnodes"
+        );
     }
 }

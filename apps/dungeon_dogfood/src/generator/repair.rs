@@ -46,7 +46,12 @@ impl StateHash {
             hasher.update([region.role.ordinal()]);
             hasher.update(region.variant_index.to_be_bytes());
             hasher.update(region.layer.to_be_bytes());
-            for value in [region.footprint.0, region.footprint.1, region.footprint.2, region.footprint.3] {
+            for value in [
+                region.footprint.0,
+                region.footprint.1,
+                region.footprint.2,
+                region.footprint.3,
+            ] {
                 hasher.update(value.to_be_bytes());
             }
             for socket in &region.sockets {
@@ -57,7 +62,12 @@ impl StateHash {
                 hasher.update(socket.global_anchor.y.to_be_bytes());
                 hasher.update([socket.direction as u8, socket.role as u8]);
                 hasher.update(socket.width.to_be_bytes());
-                hasher.update(socket.paired_socket_id.map_or(u32::MAX, |id| id.raw()).to_be_bytes());
+                hasher.update(
+                    socket
+                        .paired_socket_id
+                        .map_or(u32::MAX, |id| id.raw())
+                        .to_be_bytes(),
+                );
             }
             for transition in &region.transitions {
                 hasher.update(transition.raw().to_be_bytes());
@@ -75,7 +85,11 @@ impl StateHash {
             hasher.update([u8::from(edge.required)]);
             hasher.update(edge.cost.to_be_bytes());
             hasher.update(edge.width.to_be_bytes());
-            hasher.update(edge.transition.map_or(u32::MAX, |id| id.raw()).to_be_bytes());
+            hasher.update(
+                edge.transition
+                    .map_or(u32::MAX, |id| id.raw())
+                    .to_be_bytes(),
+            );
             for cell in edge.path_witness.iter().chain(&edge.allowed_envelope_cells) {
                 hasher.update(cell.layer.to_be_bytes());
                 hasher.update(cell.x.to_be_bytes());
@@ -90,7 +104,9 @@ impl StateHash {
             hasher.update(transition.upper_region.raw().to_be_bytes());
             hasher.update(transition.lower_socket.raw().to_be_bytes());
             hasher.update(transition.upper_socket.raw().to_be_bytes());
-            for cell in transition.ramp_run_cells.iter()
+            for cell in transition
+                .ramp_run_cells
+                .iter()
                 .chain(&transition.upper_opening_cells)
                 .chain(&transition.landing_cells)
                 .chain(&transition.headroom_cells)
@@ -223,7 +239,13 @@ impl AcceptedIr {
         }
         super::ascii::round_trip_exact(&full_level)?;
 
-        Ok((Self { topology, level: full_level }, report))
+        Ok((
+            Self {
+                topology,
+                level: full_level,
+            },
+            report,
+        ))
     }
 
     /// One-shot lowering consumes the only accepted wrapper.
@@ -307,10 +329,7 @@ impl RepairEngine {
         ctx: &mut AttemptContext,
     ) -> Self {
         let _ = ctx; // reserved for future telemetry
-        let repair_stream = factory.stream(
-            SemanticStage::Repair,
-            &[SemanticComponent::Index(0)],
-        );
+        let repair_stream = factory.stream(SemanticStage::Repair, &[SemanticComponent::Index(0)]);
         Self {
             budgets: RepairBudgets::from_config(config),
             rejected: BTreeSet::new(),
@@ -431,24 +450,22 @@ impl RepairEngine {
                 if before_len == after_len {
                     return Err(GeneratorError::IrInvariant {
                         stage: ErrorStage::Ir,
-                        detail: format!(
-                            "repair_remove_optional_edge_{}_not_found",
-                            edge_id.raw()
-                        ),
+                        detail: format!("repair_remove_optional_edge_{}_not_found", edge_id.raw()),
                     });
                 }
                 // Deduct budget.
-                self.budgets.optional_edge_removal_budget = self
-                    .budgets
-                    .optional_edge_removal_budget
-                    .saturating_sub(1);
+                self.budgets.optional_edge_removal_budget =
+                    self.budgets.optional_edge_removal_budget.saturating_sub(1);
                 Ok(topology)
             }
             RepairOperation::Reroute { edge_id } => {
                 self.budgets.reroute_budget = self.budgets.reroute_budget.saturating_sub(1);
                 Err(GeneratorError::IrInvariant {
                     stage: ErrorStage::Ir,
-                    detail: format!("repair_reroute_requires_materialization_context edge={}", edge_id.raw()),
+                    detail: format!(
+                        "repair_reroute_requires_materialization_context edge={}",
+                        edge_id.raw()
+                    ),
                 })
             }
             RepairOperation::RelocateMarker { .. } => Err(GeneratorError::IrInvariant {
@@ -554,11 +571,11 @@ fn violation_tuple(report: &ValidationReport) -> (usize, usize, usize, usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::config::GeneratorConfig;
     use super::super::context::{AttemptContext, TelemetryMode};
     use super::super::determinism::{AttemptIdentity, GeneratorIdentity};
     use super::super::ir::IdAllocator;
+    use super::*;
 
     fn dummy_config() -> NormalizedGeneratorConfig {
         GeneratorConfig::custom(64, 64, 2).normalize().unwrap()
@@ -615,7 +632,11 @@ mod tests {
         let identity = GeneratorIdentity::new(&config, catalog.identity_bytes(), 0);
         let factory = SemanticStreamFactory::new(AttemptIdentity::new(identity, 0));
 
-        let engine = RepairEngine::new(&config, factory, &mut AttemptContext::new(TelemetryMode::Off));
+        let engine = RepairEngine::new(
+            &config,
+            factory,
+            &mut AttemptContext::new(TelemetryMode::Off),
+        );
         // With a fresh engine, the budgets should be non-zero.
         assert!(!engine.budgets.is_exhausted());
         assert!(engine.rejected.is_empty());
@@ -671,7 +692,11 @@ mod tests {
         let identity = GeneratorIdentity::new(&config, catalog.identity_bytes(), 0);
         let factory = SemanticStreamFactory::new(AttemptIdentity::new(identity, 0));
 
-        let mut engine = RepairEngine::new(&config, factory, &mut AttemptContext::new(TelemetryMode::Off));
+        let mut engine = RepairEngine::new(
+            &config,
+            factory,
+            &mut AttemptContext::new(TelemetryMode::Off),
+        );
         let action = RepairAction {
             reason: GeneratorError::IrInvariant {
                 stage: ErrorStage::Ir,

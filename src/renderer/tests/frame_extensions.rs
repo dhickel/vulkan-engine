@@ -21,7 +21,10 @@ fn frame_extensions_with_transform_overrides() {
         .insert(node_id, Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0)));
     assert!(!ext.is_empty());
     assert_eq!(ext.transform_overrides.len(), 1);
-    assert!((ext.transform_overrides[&node_id].w_axis.truncate() - Vec3::new(1.0, 2.0, 3.0)).length() < 0.001);
+    assert!(
+        (ext.transform_overrides[&node_id].w_axis.truncate() - Vec3::new(1.0, 2.0, 3.0)).length()
+            < 0.001
+    );
 }
 
 #[cfg(feature = "debug-draw")]
@@ -48,5 +51,8 @@ fn frame_extensions_clone_works() {
     ext.transform_overrides
         .insert(SceneNodeId::new(2, 1), Mat4::IDENTITY);
     let cloned = ext.clone();
-    assert_eq!(ext.transform_overrides.len(), cloned.transform_overrides.len());
+    assert_eq!(
+        ext.transform_overrides.len(),
+        cloned.transform_overrides.len()
+    );
 }

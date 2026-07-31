@@ -114,9 +114,8 @@ impl SpriteRenderer {
     /// Color is RGBA in linear space. The quad is axis-aligned unless
     /// [`push_rotated`] is used.
     pub fn push_colored(&mut self, position: Vec2, size: Vec2, color: [f32; 4]) {
-        self.sprites.push(
-            SpriteInstance::new(position, size).with_color(color),
-        );
+        self.sprites
+            .push(SpriteInstance::new(position, size).with_color(color));
     }
 
     /// Add a colored quad with rotation (radians) and z-order layer.

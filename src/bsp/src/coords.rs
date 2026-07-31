@@ -222,10 +222,7 @@ mod tests {
     #[test]
     fn aabb_converts_both_corners() {
         let qte = QuakeToEngine::default();
-        let (emins, emaxs) = qte.aabb(
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(100.0, 200.0, 300.0),
-        );
+        let (emins, emaxs) = qte.aabb(Vec3::new(0.0, 0.0, 0.0), Vec3::new(100.0, 200.0, 300.0));
         assert!(emins.x < emaxs.x);
         assert!(emins.y < emaxs.y);
         assert!(emins.z < emaxs.z);

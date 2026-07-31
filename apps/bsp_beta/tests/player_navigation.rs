@@ -96,7 +96,11 @@ fn player_mover_traverse_clear_path() {
     );
 
     let pos_q = engine_to_quake(mover.position, &qte);
-    assert!(pos_q.x > 0.0, "mover should traverse east past center, x={}", pos_q.x);
+    assert!(
+        pos_q.x > 0.0,
+        "mover should traverse east past center, x={}",
+        pos_q.x
+    );
     assert!(
         mover.validate_position(&world.nodes, &world.leaves, &world.planes),
         "final position must be valid"
@@ -125,7 +129,11 @@ fn player_mover_traverse_straight_junction_corridor() {
     );
 
     let pos_q = engine_to_quake(mover.position, &qte);
-    assert!(pos_q.x > 100.0, "mover should reach east room through corridor, x={}", pos_q.x);
+    assert!(
+        pos_q.x > 100.0,
+        "mover should reach east room through corridor, x={}",
+        pos_q.x
+    );
     assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
 }
 
@@ -154,7 +162,11 @@ fn player_mover_stopped_by_pillar() {
 
     let pos_q = engine_to_quake(mover.position, &qte);
     // Pillar at x=-16..16; mover should be stopped before entering it
-    assert!(pos_q.x < -10.0, "mover must stop before pillar, x={}", pos_q.x);
+    assert!(
+        pos_q.x < -10.0,
+        "mover must stop before pillar, x={}",
+        pos_q.x
+    );
     assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
 }
 
@@ -181,7 +193,11 @@ fn player_mover_stopped_by_west_wall() {
 
     let pos_q = engine_to_quake(mover.position, &qte);
     // West wall inner face at x=-240; mover should not penetrate
-    assert!(pos_q.x > -245.0, "mover must not penetrate west wall, x={}", pos_q.x);
+    assert!(
+        pos_q.x > -245.0,
+        "mover must not penetrate west wall, x={}",
+        pos_q.x
+    );
     assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
 }
 
@@ -213,7 +229,11 @@ fn player_mover_slides_along_wall() {
 
     let pos_q = engine_to_quake(mover.position, &qte);
     // Should not penetrate the south wall (y >= -240, with epsilon for hull)
-    assert!(pos_q.y > -245.0, "mover must not pass south wall, y={}", pos_q.y);
+    assert!(
+        pos_q.y > -245.0,
+        "mover must not pass south wall, y={}",
+        pos_q.y
+    );
     // Should have moved east (sliding along wall or from remaining x component)
     assert!(pos_q.x > -80.0, "mover should move east, x={}", pos_q.x);
     assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
@@ -244,7 +264,11 @@ fn player_mover_slides_around_pillar() {
     let pos_q = engine_to_quake(mover.position, &qte);
     // Should not be inside the pillar
     let inside_pillar = pos_q.x.abs() < 16.0 && pos_q.y.abs() < 16.0;
-    assert!(!inside_pillar, "mover must not end up inside pillar, pos={:?}", pos_q);
+    assert!(
+        !inside_pillar,
+        "mover must not end up inside pillar, pos={:?}",
+        pos_q
+    );
     assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
 }
 
@@ -284,11 +308,14 @@ fn player_mover_reaches_all_quadrants() {
         assert!(
             pos_q.x * target_q.x.signum() > 0.0 || target_q.x == 0.0,
             "{} quadrant: mover should move toward target, pos={:?}, target={:?}",
-            label, pos_q, target_q
+            label,
+            pos_q,
+            target_q
         );
         assert!(
             mover.validate_position(&world.nodes, &world.leaves, &world.planes),
-            "{} quadrant: final position must be valid", label
+            "{} quadrant: final position must be valid",
+            label
         );
     }
 }
@@ -319,7 +346,11 @@ fn player_mover_no_slide_stops_at_wall() {
     let pos_q = engine_to_quake(mover.position, &qte);
     // In no-slide mode, should stop at wall contact, not slide along it
     assert!(pos_q.x > -245.0, "mover must stop at wall, x={}", pos_q.x);
-    assert!(pos_q.y.abs() < 1.0, "no-slide: y should not change much, y={}", pos_q.y);
+    assert!(
+        pos_q.y.abs() < 1.0,
+        "no-slide: y should not change much, y={}",
+        pos_q.y
+    );
     assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
 }
 
@@ -345,5 +376,8 @@ fn player_mover_zero_delta_no_change() {
     );
 
     let pos_q = engine_to_quake(mover.position, &qte);
-    assert!((pos_q.x + 128.0).abs() < 0.1, "zero delta: x should not change");
+    assert!(
+        (pos_q.x + 128.0).abs() < 0.1,
+        "zero delta: x should not change"
+    );
 }

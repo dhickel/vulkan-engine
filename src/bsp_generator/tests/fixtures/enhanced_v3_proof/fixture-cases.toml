@@ -1,0 +1,214 @@
+schema = "enhanced-v3-fixture-cases/v1"
+profile = "ericw-q1-bsp2-generated"
+
+[[cases]]
+id = "pointed-portal"
+map_file = "pointed-portal"
+description = "Two large chambers connected by a full-depth pointed-arch portal"
+minimum_source_brushes = 50
+expect_bsp2 = true
+expect_lit = true
+min_solid_leaves = 1
+min_empty_leaves = 2
+min_clipnodes = 16
+
+[[cases.witnesses]]
+id = "portal-throat-center"
+description = "Center of the complete wall-depth throat is empty"
+expected_pass = true
+query_coords = [[480.0, 512.0, 96.0], [504.0, 512.0, 96.0], [528.0, 512.0, 96.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "portal-jamb-solid"
+description = "Point beside the aperture is solid wall"
+expected_pass = false
+query_coords = [[504.0, 440.0, 80.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "arch-apex-open"
+description = "Point below the pointed apex remains open"
+expected_pass = true
+query_coords = [[504.0, 512.0, 184.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "arch-above-apex-solid"
+description = "Wall above the pointed apex is solid"
+expected_pass = false
+query_coords = [[504.0, 512.0, 208.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "chamber-centers-empty"
+description = "Both chamber centers are empty"
+expected_pass = true
+query_coords = [[256.0, 512.0, 80.0], [768.0, 512.0, 80.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "spawn-clearance"
+description = "Spawn origin is non-solid"
+expected_pass = true
+query_coords = [[256.0, 512.0, 56.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "floor-solid-below"
+description = "Floor slab is solid"
+expected_pass = false
+query_coords = [[256.0, 512.0, 8.0]]
+tolerance = 1.0
+
+[[cases]]
+id = "segmented-portal"
+map_file = "segmented-portal"
+description = "Two full-depth portal segments separated by a grounded central column"
+minimum_source_brushes = 50
+expect_bsp2 = true
+expect_lit = true
+min_solid_leaves = 1
+min_empty_leaves = 2
+min_clipnodes = 16
+
+[[cases.witnesses]]
+id = "left-segment-open"
+description = "First segment and both approaches are empty"
+expected_pass = true
+query_coords = [[480.0, 440.0, 80.0], [504.0, 440.0, 80.0], [528.0, 440.0, 80.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "right-segment-open"
+description = "Second segment and both approaches are empty"
+expected_pass = true
+query_coords = [[480.0, 584.0, 80.0], [504.0, 584.0, 80.0], [528.0, 584.0, 80.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "center-column-solid"
+description = "Grounded column between segments is solid"
+expected_pass = false
+query_coords = [[504.0, 512.0, 80.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "upper-wall-solid"
+description = "Wall above the segments is solid"
+expected_pass = false
+query_coords = [[504.0, 512.0, 200.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "chamber-centers-empty"
+description = "Both chamber centers are empty"
+expected_pass = true
+query_coords = [[256.0, 512.0, 80.0], [768.0, 512.0, 80.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "spawn-clearance"
+description = "Spawn origin is non-solid"
+expected_pass = true
+query_coords = [[256.0, 512.0, 56.0]]
+tolerance = 1.0
+
+[[cases]]
+id = "convex-45-shell"
+map_file = "convex-45-shell"
+description = "Large octagonal interior with four exact 45-degree corner shell prisms"
+minimum_source_brushes = 50
+expect_bsp2 = true
+expect_lit = true
+min_solid_leaves = 1
+min_empty_leaves = 1
+min_clipnodes = 16
+
+[[cases.witnesses]]
+id = "center-empty"
+description = "Octagonal room center is empty"
+expected_pass = true
+query_coords = [[512.0, 512.0, 80.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "corner-shells-solid"
+description = "All four 45-degree corner shell prisms are solid"
+expected_pass = false
+query_coords = [[64.0, 64.0, 80.0], [960.0, 64.0, 80.0], [64.0, 960.0, 80.0], [960.0, 960.0, 80.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "diagonal-face-interior-empty"
+description = "Points immediately inside two diagonal faces are empty"
+expected_pass = true
+query_coords = [[176.0, 32.0, 80.0], [848.0, 32.0, 80.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "cardinal-shell-wall-solid"
+description = "Cardinal perimeter wall remains solid"
+expected_pass = false
+query_coords = [[8.0, 512.0, 80.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "spawn-clearance"
+description = "Spawn origin is non-solid"
+expected_pass = true
+query_coords = [[512.0, 512.0, 56.0]]
+tolerance = 1.0
+
+[[cases]]
+id = "grounded-assembly"
+map_file = "grounded-assembly"
+description = "Large room with four grounded pillars supporting two raised slabs"
+minimum_source_brushes = 50
+expect_bsp2 = true
+expect_lit = true
+min_solid_leaves = 1
+min_empty_leaves = 4
+min_clipnodes = 24
+
+[[cases.witnesses]]
+id = "pillars-solid"
+description = "All four support pillars are solid"
+expected_pass = false
+query_coords = [[200.0, 200.0, 56.0], [200.0, 392.0, 56.0], [392.0, 200.0, 56.0], [392.0, 392.0, 56.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "platforms-solid"
+description = "Both supported platform slabs are solid"
+expected_pass = false
+query_coords = [[160.0, 296.0, 136.0], [352.0, 296.0, 136.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "central-aisle-empty"
+description = "Central aisle between platform slabs is empty"
+expected_pass = true
+query_coords = [[296.0, 296.0, 56.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "under-platform-empty"
+description = "Space below a platform away from supports is empty"
+expected_pass = true
+query_coords = [[160.0, 296.0, 56.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "spawn-clearance"
+description = "Spawn origin is non-solid"
+expected_pass = true
+query_coords = [[512.0, 512.0, 56.0]]
+tolerance = 1.0
+
+[[cases.witnesses]]
+id = "floor-solid-below"
+description = "Floor slab is solid"
+expected_pass = false
+query_coords = [[512.0, 512.0, 8.0]]
+tolerance = 1.0

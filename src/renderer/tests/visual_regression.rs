@@ -153,11 +153,9 @@ fn validate_sidecar(
             && !region.expected_content.is_empty()
             && width > 0
             && height > 0
-            && x
-                .checked_add(width)
+            && x.checked_add(width)
                 .is_some_and(|right| right <= capture.extent[0])
-            && y
-                .checked_add(height)
+            && y.checked_add(height)
                 .is_some_and(|bottom| bottom <= capture.extent[1]);
         if !valid {
             return Err(format!("invalid declared region {region:?}"));
@@ -213,7 +211,10 @@ fn run_regression_case(case: &RegressionCase, fixture_dir: &Path) -> Result<(), 
     let capture_json = fixture_dir.join(case.capture_json);
     for path in [&baseline_png, &capture_png, &baseline_json, &capture_json] {
         if !path.exists() {
-            return Err(format!("required visual-regression fixture missing: {}", path.display()));
+            return Err(format!(
+                "required visual-regression fixture missing: {}",
+                path.display()
+            ));
         }
     }
 

@@ -63,7 +63,10 @@ fn materials_embedded_miptex_decode() {
     // The map uses WALL01; the auto-generated project_palette.wad embeds miptex
     // entries into the BSP (lump 2). Verify the miptex lump is nonempty and
     // contains a WALL01 texture entry.
-    assert!(!world.miptex_data.is_empty(), "miptex lump must be nonempty");
+    assert!(
+        !world.miptex_data.is_empty(),
+        "miptex lump must be nonempty"
+    );
 
     let miptex_names = resources::collect_miptex_names(&world.miptex_data);
     assert!(
@@ -142,11 +145,13 @@ fn materials_wad_texture_lookup() {
 #[test]
 fn materials_nonempty_lit_colored_light() {
     let (bsp_data, lit_data) = load_dungeon_materials_bsp2();
-    assert!(lit_data.len() > 8, ".lit must be larger than minimal QLIT header");
+    assert!(
+        lit_data.len() > 8,
+        ".lit must be larger than minimal QLIT header"
+    );
 
     // Validate the .lit header
-    let rgb_size = companions::validate_lit_header(&lit_data, false)
-        .expect("valid .lit header");
+    let rgb_size = companions::validate_lit_header(&lit_data, false).expect("valid .lit header");
     assert!(rgb_size > 0, ".lit RGB payload must be nonempty");
 
     // Load the BSP and verify the lightmap lump is nonempty
@@ -162,7 +167,8 @@ fn materials_nonempty_lit_colored_light() {
     // Verify the .lit payload size matches the lightmap size * 3
     let expected_rgb = (world.lightmap_data.len() as u32).saturating_mul(3);
     assert_eq!(
-        rgb_size, expected_rgb,
+        rgb_size,
+        expected_rgb,
         ".lit RGB size {rgb_size} must equal lightmap size {} * 3 = {expected_rgb}",
         world.lightmap_data.len()
     );
@@ -187,14 +193,8 @@ fn materials_pbr_companion_discovery() {
     let found = resources::discover_pbr_texture_companions("WALL01", &companions);
     assert!(found.normal.is_some(), "WALL01_norm.png must be discovered");
     assert!(found.gloss.is_some(), "WALL01_gloss.png must be discovered");
-    assert_eq!(
-        found.normal.unwrap().bytes,
-        vec![1, 2, 3]
-    );
-    assert_eq!(
-        found.gloss.unwrap().bytes,
-        vec![4, 5, 6]
-    );
+    assert_eq!(found.normal.unwrap().bytes, vec![1, 2, 3]);
+    assert_eq!(found.gloss.unwrap().bytes, vec![4, 5, 6]);
 }
 
 #[test]
@@ -205,8 +205,14 @@ fn materials_pbr_companion_case_insensitive_fallback() {
     ];
 
     let found = resources::discover_pbr_texture_companions("WALL01", &companions);
-    assert!(found.normal.is_some(), "case-insensitive match on _norm.png");
-    assert!(found.gloss.is_some(), "case-insensitive match on _gloss.png");
+    assert!(
+        found.normal.is_some(),
+        "case-insensitive match on _norm.png"
+    );
+    assert!(
+        found.gloss.is_some(),
+        "case-insensitive match on _gloss.png"
+    );
     assert_eq!(found.normal.unwrap().bytes, vec![10, 20, 30]);
     assert_eq!(found.gloss.unwrap().bytes, vec![40, 50, 60]);
 }
@@ -215,9 +221,10 @@ fn materials_pbr_companion_case_insensitive_fallback() {
 
 #[test]
 fn materials_no_companion_fallback() {
-    let companions: Vec<TextureCompanion> = vec![
-        TextureCompanion::new("textures/unrelated_norm.png", vec![1]),
-    ];
+    let companions: Vec<TextureCompanion> = vec![TextureCompanion::new(
+        "textures/unrelated_norm.png",
+        vec![1],
+    )];
 
     let found = resources::discover_pbr_texture_companions("WALL01", &companions);
     assert!(found.is_empty(), "no matching companions → empty");
@@ -238,9 +245,10 @@ fn materials_malformed_companion_bytes_accepted_as_opaque() {
     // The bsp crate carries companion bytes opaquely — it does not inspect
     // PNG headers. Malformed bytes must still be discoverable and returned.
     let garbage = vec![0xFF, 0xFE, 0x00, 0x01];
-    let companions = vec![
-        TextureCompanion::new("textures/WALL01_norm.png", garbage.clone()),
-    ];
+    let companions = vec![TextureCompanion::new(
+        "textures/WALL01_norm.png",
+        garbage.clone(),
+    )];
 
     let found = resources::discover_pbr_texture_companions("WALL01", &companions);
     assert!(found.normal.is_some());
@@ -257,7 +265,7 @@ fn materials_miptex_header_parse() {
     header[16..20].copy_from_slice(&64u32.to_le_bytes()); // width = 64
     header[20..24].copy_from_slice(&64u32.to_le_bytes()); // height = 64
     header[24..28].copy_from_slice(&40u32.to_le_bytes()); // mip0 offset = 40
-    // mip1-3 = 0
+                                                          // mip1-3 = 0
 
     let info = wad::parse_miptex_header(&header).expect("valid header");
     assert_eq!(info.name, "WALL01");
@@ -357,10 +365,14 @@ fn materials_full_extraction_with_companions() {
     assert!(wall_tex.pbr_companions.normal.is_some());
     assert!(wall_tex.pbr_companions.gloss.is_some());
     assert!(!extracted.face_geometries.is_empty());
-    assert!(!extracted.light_descriptors.is_empty(),
-        "must have light descriptors from colored lights");
-    assert!(extracted.light_descriptors.len() >= 2,
-        "must detect both warm and cool colored lights");
+    assert!(
+        !extracted.light_descriptors.is_empty(),
+        "must have light descriptors from colored lights"
+    );
+    assert!(
+        extracted.light_descriptors.len() >= 2,
+        "must detect both warm and cool colored lights"
+    );
 }
 
 // ── .lit validation edge cases ─────────────────────────────────────────────
@@ -417,22 +429,25 @@ fn phase08_lightmap_slot_preserves_source_order() {
         }
         for style_layout in &layout.style_layers {
             let source_slot = style_layout.source_slot as usize;
-            assert!(source_slot < 4,
-                "face {fi} style layout has invalid source_slot {source_slot}");
+            assert!(
+                source_slot < 4,
+                "face {fi} style layout has invalid source_slot {source_slot}"
+            );
             // Verify the style_id matches the face's style at that slot
             // (we can't directly access BSP faces from ExtractedBsp, but
             // we can verify source_slot is in range and the style_id is valid)
-            assert!(style_layout.style_id <= 63,
+            assert!(
+                style_layout.style_id <= 63,
                 "face {fi} source_slot {source_slot} has invalid style_id {}",
-                style_layout.style_id);
+                style_layout.style_id
+            );
         }
 
         // Verify no duplicate source_slots within a face
         let mut slots = [false; 4];
         for style_layout in &layout.style_layers {
             let s = style_layout.source_slot as usize;
-            assert!(!slots[s],
-                "face {fi} has duplicate source_slot {s}");
+            assert!(!slots[s], "face {fi} has duplicate source_slot {s}");
             slots[s] = true;
         }
     }
@@ -473,9 +488,9 @@ fn phase08_common_used_extent_not_nominal() {
     assert_eq!(atlas.common_used_extent(), (1, 1));
 
     let luxels = vec![lightmaps::Luxel::from_gray(128); 64]; // 8×8
-    atlas.allocate_face_style_with_limit(
-        0, 0, 0, &luxels, 8, 8, 4,
-    ).expect("allocate face style");
+    atlas
+        .allocate_face_style_with_limit(0, 0, 0, &luxels, 8, 8, 4)
+        .expect("allocate face style");
 
     let (w, h) = atlas.common_used_extent();
     // Used extent should be much smaller than 4096
@@ -491,7 +506,7 @@ fn phase08_common_used_extent_not_nominal() {
 fn phase08_style_id_64_254_rejected() {
     let mut world = bsp_test_minimal_world();
     world.faces[0].styles = [64, 255, 255, 255]; // invalid: 64 is not 255 and not <=63
-    // Provide enough lightmap data
+                                                 // Provide enough lightmap data
     world.lightmap_data = vec![128; 16];
 
     let result = extract(BspExtractionRequest {
@@ -532,7 +547,8 @@ fn phase08_demand_uses_common_used_extent() {
     let extracted = extract(BspExtractionRequest {
         world,
         ..Default::default()
-    }).expect("extract");
+    })
+    .expect("extract");
 
     let (used_w, used_h) = extracted.lightmap_atlas.common_used_extent();
     assert!(used_w > 0 && used_h > 0);
@@ -555,11 +571,7 @@ fn bsp_test_minimal_world() -> BspWorld {
         plane_type: 0,
     }];
     // Three vertices for a small triangle
-    world.vertices = vec![
-        glam::Vec3::ZERO,
-        glam::Vec3::X * 16.0,
-        glam::Vec3::Y * 16.0,
-    ];
+    world.vertices = vec![glam::Vec3::ZERO, glam::Vec3::X * 16.0, glam::Vec3::Y * 16.0];
     world.edges = vec![
         lumps::Edge { v: [0, 1] },
         lumps::Edge { v: [1, 2] },
@@ -591,13 +603,13 @@ fn bsp_test_minimal_world() -> BspWorld {
     let mut name = [0u8; 16];
     name[..4].copy_from_slice(b"TEST");
     miptex.extend_from_slice(&name);
-    miptex.extend_from_slice(&4u32.to_le_bytes());  // width
-    miptex.extend_from_slice(&4u32.to_le_bytes());  // height
+    miptex.extend_from_slice(&4u32.to_le_bytes()); // width
+    miptex.extend_from_slice(&4u32.to_le_bytes()); // height
     miptex.extend_from_slice(&40u32.to_le_bytes()); // mip0 offset
-    miptex.extend_from_slice(&0u32.to_le_bytes());  // mip1
-    miptex.extend_from_slice(&0u32.to_le_bytes());  // mip2
-    miptex.extend_from_slice(&0u32.to_le_bytes());  // mip3
-    // 4×4 palette indices (16 bytes) + 2 bytes padding
+    miptex.extend_from_slice(&0u32.to_le_bytes()); // mip1
+    miptex.extend_from_slice(&0u32.to_le_bytes()); // mip2
+    miptex.extend_from_slice(&0u32.to_le_bytes()); // mip3
+                                                   // 4×4 palette indices (16 bytes) + 2 bytes padding
     miptex.extend_from_slice(&[0u8; 18]);
     world.miptex_data = miptex;
     world.palette = Some([[128u8; 3]; 256]);
@@ -636,7 +648,10 @@ fn phase01_sparse_styles_source_slot_preserved() {
     .expect("sparse style extraction should succeed");
 
     let layout = &extracted.face_lightmap_layouts[0];
-    assert!(layout.has_data, "face must have lightmap data from source slot 1");
+    assert!(
+        layout.has_data,
+        "face must have lightmap data from source slot 1"
+    );
     assert_eq!(layout.style_layers.len(), 1);
     assert_eq!(layout.style_layers[0].source_slot, 1);
     assert_eq!(layout.style_layers[0].style_id, 3);

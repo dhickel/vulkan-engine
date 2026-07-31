@@ -252,7 +252,9 @@ fn run_load_query_physics_behavior_proof(
 
     for (entity_index, position) in runtime_bridge.update(FIXED_DT) {
         let _ = physics_bridge.sync_body_transform(
-            entity_index, position, &mut physics_active_state.world,
+            entity_index,
+            position,
+            &mut physics_active_state.world,
         );
     }
     physics_active_state
@@ -767,7 +769,11 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
         (1920, 1080)
     };
 
-    log::info!("Starting BSP beta headless mode ({}×{})", vp_width, vp_height);
+    log::info!(
+        "Starting BSP beta headless mode ({}×{})",
+        vp_width,
+        vp_height
+    );
     let HeadlessRuntime {
         mut renderer,
         mut scene,
@@ -796,24 +802,36 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
         } else {
             BspEvidenceVisibility::NormalPvs
         };
-        let corpus = args.corpus_identity.clone()
+        let corpus = args
+            .corpus_identity
+            .clone()
             .unwrap_or_else(|| "bsp-beta-headless".to_string());
         let stats_key = renderer
             .request_bsp_frame_evidence(corpus, "headless-stats".to_string(), visibility)
-            .map_err(|e| AppError::RendererInit(renderer::RendererError::InvalidState(
-                format!("evidence request: {e}")
-            )))?;
+            .map_err(|e| {
+                AppError::RendererInit(renderer::RendererError::InvalidState(format!(
+                    "evidence request: {e}"
+                )))
+            })?;
 
         // Render until evidence is sealed.
         for _attempt in 0..16 {
-            render_app_frame(&mut renderer, &mut scene, &mut loop_state, vp_width, vp_height, true)
-                .map_err(AppError::Renderer)?;
+            render_app_frame(
+                &mut renderer,
+                &mut scene,
+                &mut loop_state,
+                vp_width,
+                vp_height,
+                true,
+            )
+            .map_err(AppError::Renderer)?;
             match renderer.take_bsp_frame_evidence(stats_key) {
                 renderer::api::bsp::BspEvidenceStatus::Sealed(report) => {
-                    let serialized = serde_json::to_string_pretty(&report)
-                        .map_err(|e| AppError::RendererInit(
-                            renderer::RendererError::InvalidState(format!("serialize report: {e}"))
-                        ))?;
+                    let serialized = serde_json::to_string_pretty(&report).map_err(|e| {
+                        AppError::RendererInit(renderer::RendererError::InvalidState(format!(
+                            "serialize report: {e}"
+                        )))
+                    })?;
                     println!("{serialized}");
                     if !report.eligible {
                         log::warn!("Stats report is not eligible for acceptance");
@@ -868,8 +886,15 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
                 })?;
 
             for _ in 0..8 {
-                render_app_frame(&mut renderer, &mut scene, &mut loop_state, vp_width, vp_height, true)
-                    .map_err(AppError::Renderer)?;
+                render_app_frame(
+                    &mut renderer,
+                    &mut scene,
+                    &mut loop_state,
+                    vp_width,
+                    vp_height,
+                    true,
+                )
+                .map_err(AppError::Renderer)?;
                 if png_path.is_file() {
                     break;
                 }
@@ -913,8 +938,15 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
     } else {
         let smoke_frames = 5u32;
         for frame_num in 0..smoke_frames {
-            render_app_frame(&mut renderer, &mut scene, &mut loop_state, vp_width, vp_height, true)
-                .map_err(AppError::Renderer)?;
+            render_app_frame(
+                &mut renderer,
+                &mut scene,
+                &mut loop_state,
+                vp_width,
+                vp_height,
+                true,
+            )
+            .map_err(AppError::Renderer)?;
             log::info!("Smoke frame {frame_num}/{smoke_frames} rendered");
         }
     }
@@ -937,7 +969,11 @@ fn run_mcp(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
         mut scene,
         mut loop_state,
         mcp_map,
-    } = prepare_headless_runtime(coordinator, Some(&extracted_clone), &cli::CliArgs::default())?;
+    } = prepare_headless_runtime(
+        coordinator,
+        Some(&extracted_clone),
+        &cli::CliArgs::default(),
+    )?;
     let mcp_map = mcp_map
         .ok_or_else(|| AppError::BridgeProof("MCP map data was not retained".to_string()))?;
 

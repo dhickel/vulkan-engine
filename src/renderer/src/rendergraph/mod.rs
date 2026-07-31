@@ -47,13 +47,13 @@
 //! - **Explicit ordering**: The default graph makes the current pass list easy to inspect
 //!   without implying automatic scheduling or resource aliasing.
 
+#[cfg(feature = "debug-draw")]
+use crate::rendergraph::passes::DebugLinesPass;
+use crate::rendergraph::passes::SpritesPass;
 use crate::rendergraph::passes::{
     DebugCapturePass, GeometryPass, ImguiPass, PrepareTargetsPass, PresentCopyPass, ShadowPass,
     SkyboxPass, TerminalPresentPass,
 };
-#[cfg(feature = "debug-draw")]
-use crate::rendergraph::passes::DebugLinesPass;
-use crate::rendergraph::passes::SpritesPass;
 use crate::scene::render_submission::RenderSubmission;
 use crate::vulkan::vk_commands::RecordingDispatcher;
 use crate::vulkan::vk_types::VkFrame;

@@ -314,19 +314,19 @@ pub use package::{
     CompilerHashes, CompilerProfile, CompilerProvenance, PackageContentHash,
 };
 pub use queries::{
-    point_contents, point_contents_with_transform, trace_line, trace_stored_hull,
-    PointContents, StoredHull, TraceResult,
+    point_contents, point_contents_with_transform, trace_line, trace_stored_hull, PointContents,
+    StoredHull, TraceResult,
+};
+pub use resources::{
+    discover_pbr_texture_companions, pbr_companion_file_names, ExtractedTexture,
+    PbrCompanionFileNames, PbrTextureCompanions, TextureCompanion, TextureSource, PBR_GLOSS_SUFFIX,
+    PBR_NORMAL_SUFFIX,
 };
 pub use visibility::{
     build_leaf_membership, camera_leaf_index, camera_pvs, camera_pvs_with_scale, CameraLeafResult,
     PvsSet, PvsState,
 };
 pub use wad::MiptexPixels;
-pub use resources::{
-    discover_pbr_texture_companions, pbr_companion_file_names, ExtractedTexture,
-    PbrCompanionFileNames, PbrTextureCompanions, TextureCompanion, TextureSource, PBR_GLOSS_SUFFIX,
-    PBR_NORMAL_SUFFIX,
-};
 
 #[cfg(test)]
 mod tests {

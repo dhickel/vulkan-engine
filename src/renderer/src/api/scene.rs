@@ -2192,7 +2192,8 @@ impl Scene {
         &mut self,
         overrides: &std::collections::HashMap<SceneNodeId, glam::Mat4>,
     ) -> Result<RenderSubmission, String> {
-        self.world.build_submission_with_transform_overrides(overrides)
+        self.world
+            .build_submission_with_transform_overrides(overrides)
     }
 
     fn validate_node(&self, node: SceneNodeId) -> Result<(), SceneError> {
@@ -2447,8 +2448,8 @@ impl Scene {
             }
             ObjectKind::DirectionalLight => {
                 let record = self.world.get_directional_light_record(DirectionalLightId {
-                        slot: id.slot(),
-                        generation: id.generation(),
+                    slot: id.slot(),
+                    generation: id.generation(),
                 });
                 (
                     Vec::new(),
@@ -2461,9 +2462,9 @@ impl Scene {
             }
             ObjectKind::SpotLight => {
                 let record = self.world.get_spot_light_record(SpotLightId {
-                            slot: id.slot(),
-                            generation: id.generation(),
-                        });
+                    slot: id.slot(),
+                    generation: id.generation(),
+                });
                 (
                     Vec::new(),
                     0,
@@ -2614,8 +2615,8 @@ impl Scene {
                     generation: id.generation(),
                 };
                 let light = self.world.point_light_entry(pl_id).ok_or_else(|| {
-                        SceneError::InvalidPointLight("point light not found".to_string())
-                    })?;
+                    SceneError::InvalidPointLight("point light not found".to_string())
+                })?;
                 Ok(ObjectTransform::PointLight(light.position))
             }
             ObjectKind::DirectionalLight => {
@@ -2625,7 +2626,7 @@ impl Scene {
                 };
                 let light = self.world.directional_light_entry(dl_id).ok_or_else(|| {
                     SceneError::InvalidDirectionalLight("directional light not found".to_string())
-                    })?;
+                })?;
                 let dir = light.direction.normalize();
                 Ok(ObjectTransform::DirectionalLight(dir))
             }
@@ -2635,8 +2636,8 @@ impl Scene {
                     generation: id.generation(),
                 };
                 let light = self.world.spot_light_entry(sl_id).ok_or_else(|| {
-                        SceneError::InvalidSpotLight("spot light not found".to_string())
-                    })?;
+                    SceneError::InvalidSpotLight("spot light not found".to_string())
+                })?;
                 let dir = light.direction.normalize();
                 Ok(ObjectTransform::SpotLight {
                     position: light.position,
@@ -3142,14 +3143,14 @@ impl Scene {
             .iter()
             .copied()
             .map(|id| SceneObjectLifecycleSnapshot {
-            scene: SceneId::new(&self.scene_id),
+                scene: SceneId::new(&self.scene_id),
                 object: self
                     .world
                     .object_persistent_id(id)
-                .expect("restored node must retain its persistent ID"),
-            kind: ObjectKind::Node,
-            name: self.world.object_name(id),
-            parent: None,
+                    .expect("restored node must retain its persistent ID"),
+                kind: ObjectKind::Node,
+                name: self.world.object_name(id),
+                parent: None,
             })
             .collect();
         let new_root_oid = self
@@ -3231,14 +3232,14 @@ impl Scene {
             .iter()
             .copied()
             .map(|id| SceneObjectLifecycleSnapshot {
-            scene: SceneId::new(&self.scene_id),
+                scene: SceneId::new(&self.scene_id),
                 object: self
                     .world
                     .object_persistent_id(id)
-                .expect("duplicated node must have a persistent ID"),
-            kind: ObjectKind::Node,
-            name: self.world.object_name(id),
-            parent: None,
+                    .expect("duplicated node must have a persistent ID"),
+                kind: ObjectKind::Node,
+                name: self.world.object_name(id),
+                parent: None,
             })
             .collect();
         let new_oid = self
@@ -3272,13 +3273,13 @@ impl Scene {
 
         let old_oid =
             self.world
-            .object_id_for_point_light(id)
+                .object_id_for_point_light(id)
                 .ok_or(SceneError::InvalidPointLight(format!(
                     "invalid point light"
                 )))?;
         let new_oid =
             self.world
-            .object_id_for_point_light(new_id)
+                .object_id_for_point_light(new_id)
                 .ok_or(SceneError::InvalidPointLight(format!(
                     "invalid point light"
                 )))?;
@@ -4359,20 +4360,20 @@ impl SerializedScene {
                 record.prefab = serialized_node.prefab.clone();
                 if !is_asset_backed {
                     for serialized_component in &serialized_node.components {
-                    record
-                        .component_store
+                        record
+                            .component_store
                             .attach(
                                 ComponentEnvelope::try_from(serialized_component.clone())
                                     .map_err(SceneError::SerializationError)?,
                             )
                             .map_err(|err| {
-                            SceneError::SerializationError(format!(
+                                SceneError::SerializationError(format!(
                                     "failed to attach component to node '{}': {err}",
-                                serialized_node.id
-                            ))
-                        })?;
+                                    serialized_node.id
+                                ))
+                            })?;
+                    }
                 }
-            }
             }
             let persistent_id = SceneObjectId::new(
                 serialized_node
@@ -4432,8 +4433,8 @@ impl SerializedScene {
             }
             let _id = scene.world.add_point_light_with_record(
                 PointLight {
-                color: pl.sanitize_color(),
-                ..pl
+                    color: pl.sanitize_color(),
+                    ..pl
                 },
                 record,
             );
@@ -4550,8 +4551,8 @@ impl SerializedScene {
             }
             scene.world.add_spot_light_with_record(
                 SpotLight {
-                color: sl.sanitize_color(),
-                ..sl
+                    color: sl.sanitize_color(),
+                    ..sl
                 },
                 record,
             );

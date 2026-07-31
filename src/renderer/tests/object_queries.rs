@@ -6,9 +6,9 @@
 use glam::{Mat4, Vec3};
 use renderer::{
     object::{
-        ObjectKind,
         query::{EditorProxyPolicy, ObjectQueryFilter, UnknownBoundsPolicy, VolumeQuery},
         selection::Selection,
+        ObjectKind,
     },
     Aabb, DirectionalLight, MeshBoundsEntry, PointLight, Ray, Scene, SceneBounds, SceneNodeId,
     SpotLight,
@@ -117,7 +117,11 @@ fn raycast_all_returns_multiple_hits_sorted() {
     let mut scene = Scene::new();
     let root = scene.create_node_default(None).expect("root");
     scene
-        .add_mesh_with_bounds(root, renderer::MeshHandle::new(1, 0), SceneBounds::Known(cube_aabb()))
+        .add_mesh_with_bounds(
+            root,
+            renderer::MeshHandle::new(1, 0),
+            SceneBounds::Known(cube_aabb()),
+        )
         .expect("mesh root");
 
     let child_a = scene.create_node_default(Some(root)).expect("child_a");
@@ -125,7 +129,11 @@ fn raycast_all_returns_multiple_hits_sorted() {
         .set_transform(child_a, Mat4::from_translation(Vec3::new(0.0, 0.0, -3.0)))
         .expect("set transform a");
     scene
-        .add_mesh_with_bounds(child_a, renderer::MeshHandle::new(2, 0), SceneBounds::Known(cube_aabb()))
+        .add_mesh_with_bounds(
+            child_a,
+            renderer::MeshHandle::new(2, 0),
+            SceneBounds::Known(cube_aabb()),
+        )
         .expect("mesh a");
 
     let child_b = scene.create_node_default(Some(root)).expect("child_b");
@@ -133,7 +141,11 @@ fn raycast_all_returns_multiple_hits_sorted() {
         .set_transform(child_b, Mat4::from_translation(Vec3::new(0.0, 0.0, -8.0)))
         .expect("set transform b");
     scene
-        .add_mesh_with_bounds(child_b, renderer::MeshHandle::new(3, 0), SceneBounds::Known(cube_aabb()))
+        .add_mesh_with_bounds(
+            child_b,
+            renderer::MeshHandle::new(3, 0),
+            SceneBounds::Known(cube_aabb()),
+        )
         .expect("mesh b");
 
     let ray = Ray {
@@ -172,7 +184,11 @@ fn volume_query_aabb_finds_nodes() {
     let mut scene = Scene::new();
     let root = scene.create_node_default(None).expect("root");
     scene
-        .add_mesh_with_bounds(root, renderer::MeshHandle::new(1, 0), SceneBounds::Known(cube_aabb()))
+        .add_mesh_with_bounds(
+            root,
+            renderer::MeshHandle::new(1, 0),
+            SceneBounds::Known(cube_aabb()),
+        )
         .expect("mesh root");
 
     let child = scene.create_node_default(Some(root)).expect("child");
@@ -180,7 +196,11 @@ fn volume_query_aabb_finds_nodes() {
         .set_transform(child, Mat4::from_translation(Vec3::new(100.0, 0.0, 0.0)))
         .expect("set transform");
     scene
-        .add_mesh_with_bounds(child, renderer::MeshHandle::new(2, 0), SceneBounds::Known(cube_aabb()))
+        .add_mesh_with_bounds(
+            child,
+            renderer::MeshHandle::new(2, 0),
+            SceneBounds::Known(cube_aabb()),
+        )
         .expect("mesh child");
 
     let query_aabb =
@@ -221,7 +241,11 @@ fn volume_query_filter_excludes_kinds() {
     let mut scene = Scene::new();
     let node = scene.create_node_default(None).expect("node");
     scene
-        .add_mesh_with_bounds(node, renderer::MeshHandle::new(1, 0), SceneBounds::Known(cube_aabb()))
+        .add_mesh_with_bounds(
+            node,
+            renderer::MeshHandle::new(1, 0),
+            SceneBounds::Known(cube_aabb()),
+        )
         .expect("mesh");
     scene
         .create_point_light(PointLight {
@@ -345,7 +369,11 @@ fn editor_pick_excludes_lights_with_nodes_only() {
         .set_transform(node, Mat4::from_translation(Vec3::new(0.0, 0.0, -5.0)))
         .expect("set transform");
     scene
-        .add_mesh_with_bounds(node, renderer::MeshHandle::new(1, 0), SceneBounds::Known(cube_aabb()))
+        .add_mesh_with_bounds(
+            node,
+            renderer::MeshHandle::new(1, 0),
+            SceneBounds::Known(cube_aabb()),
+        )
         .expect("mesh node");
 
     let ray = Ray {

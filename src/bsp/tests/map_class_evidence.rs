@@ -58,8 +58,7 @@ fn load_world(fixture_name: &str, bsp_data: &[u8], lit_data: &[u8]) -> BspWorld 
         source_identity: fixture_name.into(),
         ..LoadOptions::default()
     };
-    BspLoader::load(bsp_data, &options)
-        .expect(&format!("strict load of {fixture_name}"))
+    BspLoader::load(bsp_data, &options).expect(&format!("strict load of {fixture_name}"))
 }
 
 // ── Strict reload ──────────────────────────────────────────────────────────
@@ -93,8 +92,14 @@ fn map_class_m1_has_visible_faces() {
     let (bsp_data, lit_data) = load_m1_bsp2();
     let world = load_world("dungeon-m1-bsp2", &bsp_data, &lit_data);
     let face_count = world.faces.len();
-    assert!(face_count > 0, "M1 must have visible faces, got {face_count}");
-    assert!(face_count < 2000, "M1 face count {face_count} must be < 2000 (M1 ceiling)");
+    assert!(
+        face_count > 0,
+        "M1 must have visible faces, got {face_count}"
+    );
+    assert!(
+        face_count < 2000,
+        "M1 face count {face_count} must be < 2000 (M1 ceiling)"
+    );
 }
 
 #[test]
@@ -102,8 +107,14 @@ fn map_class_m2_has_visible_faces() {
     let (bsp_data, lit_data) = load_m2_bsp2();
     let world = load_world("dungeon-m2-bsp2", &bsp_data, &lit_data);
     let face_count = world.faces.len();
-    assert!(face_count > 0, "M2 must have visible faces, got {face_count}");
-    assert!(face_count < 10000, "M2 face count {face_count} must be < 10000 (M2 ceiling)");
+    assert!(
+        face_count > 0,
+        "M2 must have visible faces, got {face_count}"
+    );
+    assert!(
+        face_count < 10000,
+        "M2 face count {face_count} must be < 10000 (M2 ceiling)"
+    );
 }
 
 // ── Nonzero light data / nonempty QLIT v1 .lit ─────────────────────────────
@@ -111,13 +122,18 @@ fn map_class_m2_has_visible_faces() {
 #[test]
 fn map_class_m1_has_nonempty_lightdata() {
     let (bsp_data, lit_data) = load_m1_bsp2();
-    assert!(lit_data.len() > 8, "M1 .lit must be larger than minimal QLIT header");
-    let rgb_size = companions::validate_lit_header(&lit_data, false)
-        .expect("valid .lit header");
+    assert!(
+        lit_data.len() > 8,
+        "M1 .lit must be larger than minimal QLIT header"
+    );
+    let rgb_size = companions::validate_lit_header(&lit_data, false).expect("valid .lit header");
     assert!(rgb_size > 0, "M1 .lit RGB payload must be nonempty");
 
     let world = load_world("dungeon-m1-bsp2", &bsp_data, &lit_data);
-    assert!(!world.lightmap_data.is_empty(), "M1 must have lightmap data");
+    assert!(
+        !world.lightmap_data.is_empty(),
+        "M1 must have lightmap data"
+    );
     assert_eq!(
         world.colored_light_source,
         companions::ColoredLightSource::LitFile
@@ -127,13 +143,18 @@ fn map_class_m1_has_nonempty_lightdata() {
 #[test]
 fn map_class_m2_has_nonempty_lightdata() {
     let (bsp_data, lit_data) = load_m2_bsp2();
-    assert!(lit_data.len() > 8, "M2 .lit must be larger than minimal QLIT header");
-    let rgb_size = companions::validate_lit_header(&lit_data, false)
-        .expect("valid .lit header");
+    assert!(
+        lit_data.len() > 8,
+        "M2 .lit must be larger than minimal QLIT header"
+    );
+    let rgb_size = companions::validate_lit_header(&lit_data, false).expect("valid .lit header");
     assert!(rgb_size > 0, "M2 .lit RGB payload must be nonempty");
 
     let world = load_world("dungeon-m2-bsp2", &bsp_data, &lit_data);
-    assert!(!world.lightmap_data.is_empty(), "M2 must have lightmap data");
+    assert!(
+        !world.lightmap_data.is_empty(),
+        "M2 must have lightmap data"
+    );
     assert_eq!(
         world.colored_light_source,
         companions::ColoredLightSource::LitFile
@@ -242,8 +263,18 @@ fn map_class_m2_exceeds_m1_ceiling() {
     let m1_entities = w1.entities.len();
     let m2_entities = w2.entities.len();
 
-    let r1 = BspExtractionRequest { world: w1, palette: Some(palette.clone()), scale: 0.0254, ..Default::default() };
-    let r2 = BspExtractionRequest { world: w2, palette: Some(palette), scale: 0.0254, ..Default::default() };
+    let r1 = BspExtractionRequest {
+        world: w1,
+        palette: Some(palette.clone()),
+        scale: 0.0254,
+        ..Default::default()
+    };
+    let r2 = BspExtractionRequest {
+        world: w2,
+        palette: Some(palette),
+        scale: 0.0254,
+        ..Default::default()
+    };
     let e1 = extract(r1).expect("M1 extract");
     let e2 = extract(r2).expect("M2 extract");
     let m1_batches = e1.render_batches.len();
@@ -281,10 +312,7 @@ fn map_class_m1_extents() {
         xy_span <= 1536.0,
         "M1 XY extent {xy_span:.0} must be ≤ 1536"
     );
-    assert!(
-        z_span <= 256.0,
-        "M1 Z span {z_span:.0} must be ≤ 256"
-    );
+    assert!(z_span <= 256.0, "M1 Z span {z_span:.0} must be ≤ 256");
 }
 
 #[test]
@@ -300,10 +328,7 @@ fn map_class_m2_extents() {
         xy_span <= 3072.0,
         "M2 XY extent {xy_span:.0} must be ≤ 3072"
     );
-    assert!(
-        z_span <= 384.0,
-        "M2 Z span {z_span:.0} must be ≤ 384"
-    );
+    assert!(z_span <= 384.0, "M2 Z span {z_span:.0} must be ≤ 384");
 }
 
 // ── One-layer topology (no stacked XY spaces) ──────────────────────────────
@@ -317,7 +342,10 @@ fn map_class_m1_single_layer() {
     // A single-layer map has Z range within the locked M1 limit (≤ 256).
     let model0 = &world.models[0];
     let z_range = model0.maxs[2] - model0.mins[2];
-    assert!(z_range <= 256.0, "M1 Z range {z_range:.0} must be ≤ 256 (single layer)");
+    assert!(
+        z_range <= 256.0,
+        "M1 Z range {z_range:.0} must be ≤ 256 (single layer)"
+    );
 
     // Verify no stacked leaves by checking that the model Z range is bounded
     // and there are no leaves at distinctly different Z belts.
@@ -332,7 +360,10 @@ fn map_class_m2_single_layer() {
 
     let model0 = &world.models[0];
     let z_range = model0.maxs[2] - model0.mins[2];
-    assert!(z_range <= 384.0, "M2 Z range {z_range:.0} must be ≤ 384 (single layer)");
+    assert!(
+        z_range <= 384.0,
+        "M2 Z range {z_range:.0} must be ≤ 384 (single layer)"
+    );
 
     let _leaf_count = world.num_leaves();
     assert!(_leaf_count > 0, "M2 must have leaves");
@@ -348,9 +379,7 @@ fn map_class_m1_route_clearance() {
     // The map must have leaves (rooms/corridors). Each empty leaf's dimensions
     // represent traversable space. Verify that empty leaves have sufficient
     // XY extent for player movement (≥ 64 units in at least one axis).
-    let empty_leaves: Vec<_> = world.leaves.iter()
-        .filter(|l| l.contents == -1)
-        .collect();
+    let empty_leaves: Vec<_> = world.leaves.iter().filter(|l| l.contents == -1).collect();
 
     assert!(!empty_leaves.is_empty(), "M1 must have empty leaves");
 
@@ -360,12 +389,13 @@ fn map_class_m1_route_clearance() {
         let d = l.maxs[1] - l.mins[1];
         w >= 64 || d >= 64
     });
-    assert!(route_wide_enough, "M1 must have leaves with route width ≥ 64");
+    assert!(
+        route_wide_enough,
+        "M1 must have leaves with route width ≥ 64"
+    );
 
     // At least some leaves should have headroom ≥ 80
-    let headroom_enough = empty_leaves.iter().any(|l| {
-        l.maxs[2] - l.mins[2] >= 80
-    });
+    let headroom_enough = empty_leaves.iter().any(|l| l.maxs[2] - l.mins[2] >= 80);
     assert!(headroom_enough, "M1 must have leaves with headroom ≥ 80");
 }
 
@@ -376,10 +406,15 @@ fn map_class_m1_exactly_one_spawn() {
     let (bsp_data, lit_data) = load_m1_bsp2();
     let world = load_world("dungeon-m1-bsp2", &bsp_data, &lit_data);
 
-    let spawn_count = world.entities.iter()
+    let spawn_count = world
+        .entities
+        .iter()
         .filter(|e| matches!(e.class, entities::EntityClass::SpawnMarker))
         .count();
-    assert_eq!(spawn_count, 1, "M1 must have exactly 1 spawn, got {spawn_count}");
+    assert_eq!(
+        spawn_count, 1,
+        "M1 must have exactly 1 spawn, got {spawn_count}"
+    );
 }
 
 #[test]
@@ -387,10 +422,15 @@ fn map_class_m2_exactly_one_spawn() {
     let (bsp_data, lit_data) = load_m2_bsp2();
     let world = load_world("dungeon-m2-bsp2", &bsp_data, &lit_data);
 
-    let spawn_count = world.entities.iter()
+    let spawn_count = world
+        .entities
+        .iter()
         .filter(|e| matches!(e.class, entities::EntityClass::SpawnMarker))
         .count();
-    assert_eq!(spawn_count, 1, "M2 must have exactly 1 spawn, got {spawn_count}");
+    assert_eq!(
+        spawn_count, 1,
+        "M2 must have exactly 1 spawn, got {spawn_count}"
+    );
 }
 
 #[test]
@@ -399,7 +439,9 @@ fn map_class_m1_no_doors() {
     let world = load_world("dungeon-m1-bsp2", &bsp_data, &lit_data);
 
     // Check classname via key_values for func_door
-    let door_count = world.entities.iter()
+    let door_count = world
+        .entities
+        .iter()
         .filter(|e| entity_classname(e) == Some("func_door"))
         .count();
     assert_eq!(door_count, 0, "M1 must have no doors, got {door_count}");
@@ -410,7 +452,9 @@ fn map_class_m2_no_doors() {
     let (bsp_data, lit_data) = load_m2_bsp2();
     let world = load_world("dungeon-m2-bsp2", &bsp_data, &lit_data);
 
-    let door_count = world.entities.iter()
+    let door_count = world
+        .entities
+        .iter()
         .filter(|e| entity_classname(e) == Some("func_door"))
         .count();
     assert_eq!(door_count, 0, "M2 must have no doors, got {door_count}");
@@ -448,7 +492,9 @@ fn map_class_m2_no_monsters() {
 
 /// Extract classname from entity key_values.
 fn entity_classname(entity: &entities::Entity) -> Option<&str> {
-    entity.key_values.iter()
+    entity
+        .key_values
+        .iter()
         .find(|kv| kv.key == "classname")
         .map(|kv| kv.value.as_str())
 }
@@ -460,10 +506,15 @@ fn map_class_m1_has_lights() {
     let (bsp_data, lit_data) = load_m1_bsp2();
     let world = load_world("dungeon-m1-bsp2", &bsp_data, &lit_data);
 
-    let light_count = world.entities.iter()
+    let light_count = world
+        .entities
+        .iter()
         .filter(|e| matches!(e.class, entities::EntityClass::Light))
         .count();
-    assert!(light_count > 0, "M1 must have light entities for lightmapped geometry");
+    assert!(
+        light_count > 0,
+        "M1 must have light entities for lightmapped geometry"
+    );
 }
 
 #[test]
@@ -471,10 +522,15 @@ fn map_class_m2_has_lights() {
     let (bsp_data, lit_data) = load_m2_bsp2();
     let world = load_world("dungeon-m2-bsp2", &bsp_data, &lit_data);
 
-    let light_count = world.entities.iter()
+    let light_count = world
+        .entities
+        .iter()
         .filter(|e| matches!(e.class, entities::EntityClass::Light))
         .count();
-    assert!(light_count > 0, "M2 must have light entities for lightmapped geometry");
+    assert!(
+        light_count > 0,
+        "M2 must have light entities for lightmapped geometry"
+    );
 }
 
 // ── Parse time measurements (functional, not benchmark) ────────────────────
@@ -550,8 +606,7 @@ fn strict_extract_fixture(bsp_name: &str, bsp_data: &[u8], lit_data: &[u8]) -> E
         source_identity: bsp_name.into(),
         ..LoadOptions::default()
     };
-    let world = BspLoader::load(bsp_data, &options)
-        .expect(&format!("strict load of {bsp_name}"));
+    let world = BspLoader::load(bsp_data, &options).expect(&format!("strict load of {bsp_name}"));
 
     let request = BspExtractionRequest {
         world,
@@ -603,9 +658,10 @@ fn phase01_m2_strict_extraction_uses_lightmap_fallback() {
         ..Default::default()
     };
     let extracted = extract(request).expect("strict M2 extraction uses the unlit fallback");
-    assert!(extracted.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == DiagnosticCode::FallbackMissingLightmap
-    }));
+    assert!(extracted
+        .diagnostics
+        .iter()
+        .any(|diagnostic| { diagnostic.code == DiagnosticCode::FallbackMissingLightmap }));
 }
 
 /// Every Opaque/AlphaMask face in strict extraction has lightmap data.
@@ -633,7 +689,8 @@ fn phase01_non_baked_consumers_skip_lightmaps() {
     let extracted = strict_extract_fixture("dungeon-m1-bsp2", &bsp_data, &lit_data);
 
     for (fi, material) in extracted.face_materials.iter().enumerate() {
-        if !material.surface_class.requires_baked_lightmap() && material.surface_class.is_visible() {
+        if !material.surface_class.requires_baked_lightmap() && material.surface_class.is_visible()
+        {
             let layout = &extracted.face_lightmap_layouts[fi];
             assert!(
                 !layout.has_data,
@@ -658,4 +715,3 @@ fn phase01_material_surface_class_consistency() {
         );
     }
 }
-

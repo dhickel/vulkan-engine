@@ -11,9 +11,7 @@ use glam::Mat4;
 use renderer::object::{
     is_identity_basis_matrix, is_rigid_direction_only, is_rigid_matrix, ObjectTransform,
 };
-use renderer::{
-    DirectionalLight, PointLight, Scene, SpotLight,
-};
+use renderer::{DirectionalLight, PointLight, Scene, SpotLight};
 
 // ── ObjectTransform round-trip ──────────────────────────────────────────
 
@@ -234,10 +232,7 @@ fn set_directional_light_transform_rejects_translation() {
     let id = scene.object_id_for_directional_light(dl_id).unwrap();
 
     // Rigid with translation should be rejected for directional lights.
-    let bad = Mat4::from_rotation_translation(
-        glam::Quat::IDENTITY,
-        glam::Vec3::new(1.0, 0.0, 0.0),
-    );
+    let bad = Mat4::from_rotation_translation(glam::Quat::IDENTITY, glam::Vec3::new(1.0, 0.0, 0.0));
     let result = scene.set_object_transform(id, &bad);
     assert!(result.is_err());
 }

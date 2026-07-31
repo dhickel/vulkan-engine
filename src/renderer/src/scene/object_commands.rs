@@ -13,8 +13,7 @@
 use crate::api::scene::{DirectionalLightId, PointLightId, SpotLightId};
 use crate::api::{CommandError, SceneError};
 use crate::object::component::{
-    commit_full_state_replacement, ComponentEnvelope, ComponentInstanceId,
-    ComponentKey,
+    commit_full_state_replacement, ComponentEnvelope, ComponentInstanceId, ComponentKey,
 };
 use crate::object::identity::ObjectId;
 use crate::object::{ObjectParent, ObjectRemap};
@@ -354,9 +353,11 @@ impl Command for SetObjectParentCommand {
         match self.kind {
             ObjectKind::Node => {
                 let node_id = SceneNodeId::new(current_id.slot(), current_id.generation());
-                world.reparent_node(node_id, self.old_node_parent_id).map_err(|err| {
-                    SceneError::InvalidMutation(format!("undo reparent failed: {err:?}"))
-                })?;
+                world
+                    .reparent_node(node_id, self.old_node_parent_id)
+                    .map_err(|err| {
+                        SceneError::InvalidMutation(format!("undo reparent failed: {err:?}"))
+                    })?;
             }
             ObjectKind::PointLight => {
                 let pl_id = PointLightId {
@@ -534,9 +535,8 @@ impl Command for RemoveObjectsCommand {
                     self.removed_subtree_ids
                         .insert(persistent_id.clone(), subtree_ids);
 
-                    let (subtree, detached) = world
-                        .prepare_remove_node_subtree(node_id)
-                        .map_err(|e| {
+                    let (subtree, detached) =
+                        world.prepare_remove_node_subtree(node_id).map_err(|e| {
                             SceneError::InvalidMutation(format!("snapshot failed: {e}"))
                         })?;
                     node_snapshots_temp.push((persistent_id.clone(), subtree, detached));
@@ -545,9 +545,7 @@ impl Command for RemoveObjectsCommand {
                     let handle = world
                         .find_object_by_persistent_id(persistent_id)
                         .ok_or_else(|| {
-                            SceneError::InvalidMutation(format!(
-                                "object {persistent_id} not found"
-                            ))
+                            SceneError::InvalidMutation(format!("object {persistent_id} not found"))
                         })?;
                     let pl_id = PointLightId {
                         slot: handle.slot(),
@@ -566,9 +564,7 @@ impl Command for RemoveObjectsCommand {
                     let handle = world
                         .find_object_by_persistent_id(persistent_id)
                         .ok_or_else(|| {
-                            SceneError::InvalidMutation(format!(
-                                "object {persistent_id} not found"
-                            ))
+                            SceneError::InvalidMutation(format!("object {persistent_id} not found"))
                         })?;
                     let dl_id = DirectionalLightId {
                         slot: handle.slot(),
@@ -577,9 +573,7 @@ impl Command for RemoveObjectsCommand {
                     let plan = world
                         .prepare_remove_directional_light(dl_id)
                         .ok_or_else(|| {
-                            SceneError::InvalidMutation(
-                                "directional light not found".into(),
-                            )
+                            SceneError::InvalidMutation("directional light not found".into())
                         })?;
                     self.removed_light_ids.insert(persistent_id.clone(), handle);
                     self.directional_light_snapshots
@@ -591,9 +585,7 @@ impl Command for RemoveObjectsCommand {
                     let handle = world
                         .find_object_by_persistent_id(persistent_id)
                         .ok_or_else(|| {
-                            SceneError::InvalidMutation(format!(
-                                "object {persistent_id} not found"
-                            ))
+                            SceneError::InvalidMutation(format!("object {persistent_id} not found"))
                         })?;
                     let sl_id = SpotLightId {
                         slot: handle.slot(),
@@ -758,24 +750,21 @@ impl Command for RemoveObjectsCommand {
                 ObjectKind::PointLight => {
                     if let Some(ObjectHandle::PointLight(pl_id)) = resolved {
                         if let Some(record) = world.get_point_light_record_mut(pl_id) {
-                            record.light_group_parent =
-                                Some(dl.old_group_parent.clone());
+                            record.light_group_parent = Some(dl.old_group_parent.clone());
                         }
                     }
                 }
                 ObjectKind::DirectionalLight => {
                     if let Some(ObjectHandle::DirectionalLight(dl_id)) = resolved {
                         if let Some(record) = world.get_directional_light_record_mut(dl_id) {
-                            record.light_group_parent =
-                                Some(dl.old_group_parent.clone());
+                            record.light_group_parent = Some(dl.old_group_parent.clone());
                         }
                     }
                 }
                 ObjectKind::SpotLight => {
                     if let Some(ObjectHandle::SpotLight(sl_id)) = resolved {
                         if let Some(record) = world.get_spot_light_record_mut(sl_id) {
-                            record.light_group_parent =
-                                Some(dl.old_group_parent.clone());
+                            record.light_group_parent = Some(dl.old_group_parent.clone());
                         }
                     }
                 }
@@ -789,16 +778,14 @@ impl Command for RemoveObjectsCommand {
                 let record = self.light_records.get(persistent_id).cloned();
                 if let Some(record) = record {
                     let new_id = world.add_point_light_with_record(*light, record);
-                    let new_oid = world
-                        .object_id_for_point_light(new_id)
-                        .unwrap_or_else(|| {
-                            ObjectId::from_parts(
-                                world.provenance(),
-                                ObjectKind::PointLight,
-                                new_id.slot,
-                                new_id.generation,
-                            )
-                        });
+                    let new_oid = world.object_id_for_point_light(new_id).unwrap_or_else(|| {
+                        ObjectId::from_parts(
+                            world.provenance(),
+                            ObjectKind::PointLight,
+                            new_id.slot,
+                            new_id.generation,
+                        )
+                    });
                     let old = *self.removed_light_ids.get(persistent_id).ok_or_else(|| {
                         SceneError::InvalidMutation(
                             "missing point-light remap snapshot during restore".into(),
@@ -814,8 +801,7 @@ impl Command for RemoveObjectsCommand {
             if let Some(light) = self.directional_light_snapshots.get(persistent_id) {
                 let record = self.light_records.get(persistent_id).cloned();
                 if let Some(record) = record {
-                    let new_id =
-                        world.add_directional_light_with_record(*light, record);
+                    let new_id = world.add_directional_light_with_record(*light, record);
                     let new_oid = world
                         .object_id_for_directional_light(new_id)
                         .unwrap_or_else(|| {
@@ -842,16 +828,14 @@ impl Command for RemoveObjectsCommand {
                 let record = self.light_records.get(persistent_id).cloned();
                 if let Some(record) = record {
                     let new_id = world.add_spot_light_with_record(*light, record);
-                    let new_oid = world
-                        .object_id_for_spot_light(new_id)
-                        .unwrap_or_else(|| {
-                            ObjectId::from_parts(
-                                world.provenance(),
-                                ObjectKind::SpotLight,
-                                new_id.slot,
-                                new_id.generation,
-                            )
-                        });
+                    let new_oid = world.object_id_for_spot_light(new_id).unwrap_or_else(|| {
+                        ObjectId::from_parts(
+                            world.provenance(),
+                            ObjectKind::SpotLight,
+                            new_id.slot,
+                            new_id.generation,
+                        )
+                    });
                     let old = *self.removed_light_ids.get(persistent_id).ok_or_else(|| {
                         SceneError::InvalidMutation(
                             "missing spot-light remap snapshot during restore".into(),
@@ -987,36 +971,27 @@ impl Command for DuplicateObjectsCommand {
             let handle = world
                 .find_object_by_persistent_id(persistent_id)
                 .ok_or_else(|| {
-                    SceneError::InvalidMutation(format!(
-                        "source object {persistent_id} not found"
-                    ))
+                    SceneError::InvalidMutation(format!("source object {persistent_id} not found"))
                 })?;
 
             match kind {
                 ObjectKind::Node => {
                     let node_id = SceneNodeId::new(handle.slot(), handle.generation());
                     let old_subtree_ids = world.subtree_node_ids_preorder(node_id);
-                    let duplicated_root = world
-                        .duplicate_node(node_id, parent_node)
-                        .map_err(|e| {
+                    let duplicated_root =
+                        world.duplicate_node(node_id, parent_node).map_err(|e| {
                             SceneError::InvalidMutation(format!("duplicate failed: {e}"))
                         })?;
-                    let new_subtree_ids =
-                        world.subtree_node_ids_preorder(duplicated_root);
+                    let new_subtree_ids = world.subtree_node_ids_preorder(duplicated_root);
 
                     let new_root_oid = world
                         .object_id_for_node(duplicated_root)
                         .ok_or(SceneError::InvalidNode(duplicated_root))?;
                     self.created_roots.push(new_root_oid);
 
-                    for (old, new) in
-                        old_subtree_ids.into_iter().zip(new_subtree_ids.into_iter())
-                    {
+                    for (old, new) in old_subtree_ids.into_iter().zip(new_subtree_ids.into_iter()) {
                         let p = world
-                            .get_node_record(SceneNodeId::new(
-                                new.slot(),
-                                new.generation(),
-                            ))
+                            .get_node_record(SceneNodeId::new(new.slot(), new.generation()))
                             .map(|r| r.persistent_id.clone())
                             .unwrap_or_else(|| {
                                 SceneObjectId::new(format!(
@@ -1039,9 +1014,7 @@ impl Command for DuplicateObjectsCommand {
                         generation: handle.generation(),
                     };
                     let duplicated = world.duplicate_point_light(pl_id).map_err(|e| {
-                        SceneError::InvalidMutation(format!(
-                            "duplicate point light failed: {e}"
-                        ))
+                        SceneError::InvalidMutation(format!("duplicate point light failed: {e}"))
                     })?;
                     let new_oid = ObjectId::from_parts(
                         world.provenance(),
@@ -1071,13 +1044,11 @@ impl Command for DuplicateObjectsCommand {
                         slot: handle.slot(),
                         generation: handle.generation(),
                     };
-                    let duplicated = world
-                        .duplicate_directional_light(dl_id)
-                        .map_err(|e| {
-                            SceneError::InvalidMutation(format!(
-                                "duplicate directional light failed: {e}"
-                            ))
-                        })?;
+                    let duplicated = world.duplicate_directional_light(dl_id).map_err(|e| {
+                        SceneError::InvalidMutation(format!(
+                            "duplicate directional light failed: {e}"
+                        ))
+                    })?;
                     let new_oid = ObjectId::from_parts(
                         world.provenance(),
                         ObjectKind::DirectionalLight,
@@ -1107,9 +1078,7 @@ impl Command for DuplicateObjectsCommand {
                         generation: handle.generation(),
                     };
                     let duplicated = world.duplicate_spot_light(sl_id).map_err(|e| {
-                        SceneError::InvalidMutation(format!(
-                            "duplicate spot light failed: {e}"
-                        ))
+                        SceneError::InvalidMutation(format!("duplicate spot light failed: {e}"))
                     })?;
                     let new_oid = ObjectId::from_parts(
                         world.provenance(),
@@ -1153,10 +1122,7 @@ impl Command for DuplicateObjectsCommand {
             if let Some(handle) = world.find_object_by_persistent_id(persistent_id) {
                 match handle.kind() {
                     ObjectKind::Node => {
-                        world.remove_node(SceneNodeId::new(
-                            handle.slot(),
-                            handle.generation(),
-                        ));
+                        world.remove_node(SceneNodeId::new(handle.slot(), handle.generation()));
                     }
                     ObjectKind::PointLight => {
                         world.remove_point_light(PointLightId {
@@ -1224,10 +1190,7 @@ impl Command for AttachComponentCommand {
         let handle = world
             .find_object_by_persistent_id(&self.node_persistent_id)
             .ok_or_else(|| {
-                SceneError::InvalidMutation(format!(
-                    "node {0} not found",
-                    self.node_persistent_id
-                ))
+                SceneError::InvalidMutation(format!("node {0} not found", self.node_persistent_id))
             })?;
         let node_id = SceneNodeId::new(handle.slot(), handle.generation());
         world
@@ -1247,10 +1210,7 @@ impl Command for AttachComponentCommand {
         let handle = world
             .find_object_by_persistent_id(&self.node_persistent_id)
             .ok_or_else(|| {
-                SceneError::InvalidMutation(format!(
-                    "node {0} not found",
-                    self.node_persistent_id
-                ))
+                SceneError::InvalidMutation(format!("node {0} not found", self.node_persistent_id))
             })?;
         let node_id = SceneNodeId::new(handle.slot(), handle.generation());
         let key = self.envelope.key.clone();
@@ -1258,9 +1218,7 @@ impl Command for AttachComponentCommand {
         world
             .remove_component(node_id, &key, &instance_id)
             .ok_or_else(|| {
-                SceneError::InvalidMutation(
-                    "component instance not found for undo".into(),
-                )
+                SceneError::InvalidMutation("component instance not found for undo".into())
             })?;
         self.state = CommandState::Undone;
         Ok(())
@@ -1311,10 +1269,7 @@ impl Command for RemoveComponentCommand {
         let handle = world
             .find_object_by_persistent_id(&self.node_persistent_id)
             .ok_or_else(|| {
-                SceneError::InvalidMutation(format!(
-                    "node {0} not found",
-                    self.node_persistent_id
-                ))
+                SceneError::InvalidMutation(format!("node {0} not found", self.node_persistent_id))
             })?;
         let node_id = SceneNodeId::new(handle.slot(), handle.generation());
         let removed = world
@@ -1340,10 +1295,7 @@ impl Command for RemoveComponentCommand {
         let handle = world
             .find_object_by_persistent_id(&self.node_persistent_id)
             .ok_or_else(|| {
-                SceneError::InvalidMutation(format!(
-                    "node {0} not found",
-                    self.node_persistent_id
-                ))
+                SceneError::InvalidMutation(format!("node {0} not found", self.node_persistent_id))
             })?;
         let node_id = SceneNodeId::new(handle.slot(), handle.generation());
         if let Some(ref envelope) = self.removed_envelope {
@@ -1413,10 +1365,7 @@ impl Command for ReplaceComponentStateCommand {
         let handle = world
             .find_object_by_persistent_id(&self.node_persistent_id)
             .ok_or_else(|| {
-                SceneError::InvalidMutation(format!(
-                    "node {0} not found",
-                    self.node_persistent_id
-                ))
+                SceneError::InvalidMutation(format!("node {0} not found", self.node_persistent_id))
             })?;
         let node_id = SceneNodeId::new(handle.slot(), handle.generation());
         let store = world
@@ -1428,12 +1377,8 @@ impl Command for ReplaceComponentStateCommand {
         self.old_envelope = old;
 
         // Apply new state.
-        commit_full_state_replacement(
-            store,
-            self.new_envelope.clone(),
-            self.new_hydrated.clone(),
-        )
-        .map_err(SceneError::from)?;
+        commit_full_state_replacement(store, self.new_envelope.clone(), self.new_hydrated.clone())
+            .map_err(SceneError::from)?;
         self.state = CommandState::Executed;
         Ok(())
     }
@@ -1448,10 +1393,7 @@ impl Command for ReplaceComponentStateCommand {
         let handle = world
             .find_object_by_persistent_id(&self.node_persistent_id)
             .ok_or_else(|| {
-                SceneError::InvalidMutation(format!(
-                    "node {0} not found",
-                    self.node_persistent_id
-                ))
+                SceneError::InvalidMutation(format!("node {0} not found", self.node_persistent_id))
             })?;
         let node_id = SceneNodeId::new(handle.slot(), handle.generation());
         let store = world
@@ -1528,10 +1470,7 @@ impl Command for SetComponentPropertyCommand {
         let handle = world
             .find_object_by_persistent_id(&self.node_persistent_id)
             .ok_or_else(|| {
-                SceneError::InvalidMutation(format!(
-                    "node {0} not found",
-                    self.node_persistent_id
-                ))
+                SceneError::InvalidMutation(format!("node {0} not found", self.node_persistent_id))
             })?;
         let node_id = SceneNodeId::new(handle.slot(), handle.generation());
         let store = world
@@ -1543,12 +1482,8 @@ impl Command for SetComponentPropertyCommand {
         self.old_envelope = old;
 
         // Apply new state.
-        commit_full_state_replacement(
-            store,
-            self.new_envelope.clone(),
-            self.new_hydrated.clone(),
-        )
-        .map_err(SceneError::from)?;
+        commit_full_state_replacement(store, self.new_envelope.clone(), self.new_hydrated.clone())
+            .map_err(SceneError::from)?;
         self.state = CommandState::Executed;
         Ok(())
     }
@@ -1563,10 +1498,7 @@ impl Command for SetComponentPropertyCommand {
         let handle = world
             .find_object_by_persistent_id(&self.node_persistent_id)
             .ok_or_else(|| {
-                SceneError::InvalidMutation(format!(
-                    "node {0} not found",
-                    self.node_persistent_id
-                ))
+                SceneError::InvalidMutation(format!("node {0} not found", self.node_persistent_id))
             })?;
         let node_id = SceneNodeId::new(handle.slot(), handle.generation());
         let store = world

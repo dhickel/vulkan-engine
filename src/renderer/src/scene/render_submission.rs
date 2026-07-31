@@ -6,8 +6,8 @@
 use crate::data::data_cache::MeshCache;
 use crate::data::gpu_data::SceneDataUBO;
 use crate::data::handles::{EnvironmentHandle, MeshHandle};
-use glam::{Mat4, Vec3};
 use crate::vulkan::vk_sprites::SpriteInstance;
+use glam::{Mat4, Vec3};
 
 /// Maximum number of directional lights that can be uploaded to GPU per frame.
 pub const MAX_DIRECTIONAL_LIGHTS_GPU: usize = 4;
@@ -101,9 +101,15 @@ pub enum BspRecordingFailure {
     /// Cache lock poisoned.
     CacheLockPoisoned(String),
     /// Missing or stale mesh handle.
-    MissingMesh { batch_index: usize, mesh: MeshHandle },
+    MissingMesh {
+        batch_index: usize,
+        mesh: MeshHandle,
+    },
     /// Missing or stale material handle.
-    MissingMaterial { batch_index: usize, material: crate::data::handles::BspMaterialHandle },
+    MissingMaterial {
+        batch_index: usize,
+        material: crate::data::handles::BspMaterialHandle,
+    },
     /// Missing or stale albedo texture.
     MissingAlbedoTexture { batch_index: usize },
     /// Missing or stale lightmap texture.
@@ -119,13 +125,23 @@ pub enum BspRecordingFailure {
     /// Mesh index/vertex buffer missing.
     MissingMeshBuffer { batch_index: usize },
     /// Null or incompatible BSP pipeline.
-    NullOrIncompatiblePipeline { batch_index: usize, expected: String },
+    NullOrIncompatiblePipeline {
+        batch_index: usize,
+        expected: String,
+    },
     /// Invalid frame slot index.
     InvalidFrameSlot { slot: u32 },
     /// Pipeline class mismatch between draw item and resolved material.
-    PipelineClassDrift { batch_index: usize, expected: String, actual: String },
+    PipelineClassDrift {
+        batch_index: usize,
+        expected: String,
+        actual: String,
+    },
     /// Failed to mark mesh referenced (stale generation or cache error).
-    FailedMeshReference { batch_index: usize, mesh: MeshHandle },
+    FailedMeshReference {
+        batch_index: usize,
+        mesh: MeshHandle,
+    },
     /// Failed to mark albedo texture referenced.
     FailedAlbedoReference { batch_index: usize },
     /// Failed to mark fullbright texture referenced.
@@ -249,9 +265,19 @@ pub struct BspEvidenceCollector {
 #[cfg(feature = "bsp")]
 #[derive(Debug, Clone)]
 pub enum BspRecordedOutcome {
-    Recorded { batch_index: usize, digest: u64 },
-    Culled { batch_index: usize, reason: BspCullReason },
-    Failed { batch_index: usize, digest: u64, failure: crate::api::bsp::BspEvidenceFailure },
+    Recorded {
+        batch_index: usize,
+        digest: u64,
+    },
+    Culled {
+        batch_index: usize,
+        reason: BspCullReason,
+    },
+    Failed {
+        batch_index: usize,
+        digest: u64,
+        failure: crate::api::bsp::BspEvidenceFailure,
+    },
 }
 
 #[cfg(feature = "bsp")]
@@ -292,21 +318,25 @@ impl BspEvidenceCollector {
         self.neutral_identities
             .iter()
             .zip(self.mounted_identities.iter())
-            .all(|(n, m)| n.canonical_digest == m.canonical_digest
-                && n.batch_index == m.batch_index
-                && n.face_count == m.face_count)
+            .all(|(n, m)| {
+                n.canonical_digest == m.canonical_digest
+                    && n.batch_index == m.batch_index
+                    && n.face_count == m.face_count
+            })
     }
 
     /// Seal the collector into a [`BspFrameEvidence`] report.
     pub fn seal(mut self) -> crate::api::bsp::BspFrameEvidence {
         use crate::api::bsp::{
-            BspCanonicalDigest, BspEvidenceBatchEntry, BspEvidenceBoundary,
-            BspEvidenceFailure, BspFrameEvidence, BSP_EVIDENCE_MAX_BATCH_ENTRIES,
-            BSP_EVIDENCE_MAX_FAILURES, BSP_EVIDENCE_MAX_SOURCE_FACES,
+            BspCanonicalDigest, BspEvidenceBatchEntry, BspEvidenceBoundary, BspEvidenceFailure,
+            BspFrameEvidence, BSP_EVIDENCE_MAX_BATCH_ENTRIES, BSP_EVIDENCE_MAX_FAILURES,
+            BSP_EVIDENCE_MAX_SOURCE_FACES,
         };
 
         self.sealed = true;
-        let failures: Vec<BspEvidenceFailure> = self.failures.iter()
+        let failures: Vec<BspEvidenceFailure> = self
+            .failures
+            .iter()
             .take(BSP_EVIDENCE_MAX_FAILURES)
             .cloned()
             .collect();
@@ -327,7 +357,9 @@ impl BspEvidenceCollector {
                         batch_index: id.batch_index,
                         digest: BspCanonicalDigest(id.canonical_digest),
                         face_count: id.face_count,
-                        source_faces: id.source_faces.iter()
+                        source_faces: id
+                            .source_faces
+                            .iter()
                             .take(BSP_EVIDENCE_MAX_SOURCE_FACES)
                             .copied()
                             .collect(),
@@ -351,27 +383,32 @@ impl BspEvidenceCollector {
 
         // Recorded gets additional draw/triangle counts from outcomes.
         let recorded_batch_count = self.recorded_outcomes.len() as u32;
-        let recorded_draw_calls = self.recorded_outcomes.iter()
+        let recorded_draw_calls = self
+            .recorded_outcomes
+            .iter()
             .filter(|o| matches!(o, BspRecordedOutcome::Recorded { .. }))
             .count() as u32;
         let mut recorded_aggregate = 0u64;
         let recorded_truncated = self.recorded_outcomes.len() > BSP_EVIDENCE_MAX_BATCH_ENTRIES;
-        let recorded_entries: Vec<BspEvidenceBatchEntry> = self.recorded_outcomes.iter()
+        let recorded_entries: Vec<BspEvidenceBatchEntry> = self
+            .recorded_outcomes
+            .iter()
             .take(BSP_EVIDENCE_MAX_BATCH_ENTRIES)
-            .filter_map(|outcome| {
-                match outcome {
-                    BspRecordedOutcome::Recorded { batch_index, digest } => {
-                        recorded_aggregate ^= digest;
-                        Some(BspEvidenceBatchEntry {
-                            batch_index: *batch_index,
-                            digest: BspCanonicalDigest(*digest),
-                            face_count: 0,
-                            source_faces: Vec::new(),
-                        })
-                    }
-                    BspRecordedOutcome::Culled { .. } => None,
-                    BspRecordedOutcome::Failed { .. } => None,
+            .filter_map(|outcome| match outcome {
+                BspRecordedOutcome::Recorded {
+                    batch_index,
+                    digest,
+                } => {
+                    recorded_aggregate ^= digest;
+                    Some(BspEvidenceBatchEntry {
+                        batch_index: *batch_index,
+                        digest: BspCanonicalDigest(*digest),
+                        face_count: 0,
+                        source_faces: Vec::new(),
+                    })
                 }
+                BspRecordedOutcome::Culled { .. } => None,
+                BspRecordedOutcome::Failed { .. } => None,
             })
             .collect();
 

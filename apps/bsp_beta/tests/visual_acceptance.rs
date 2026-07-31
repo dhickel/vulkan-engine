@@ -38,10 +38,8 @@ const SELECTED_SEED: u64 = 1;
 const SELECTED_CLASS: &str = "M1";
 
 /// Frozen hashes from the Phase 08 transport manifest.
-const EXPECTED_BSP_HASH: &str =
-    "833b03631d480295c2d64b7c7f3f3489fedb788d0a14bae508dc5b84b91313f8";
-const EXPECTED_LIT_HASH: &str =
-    "70bf2795cc1d3ddc26806f494a68417281920a017e3b963d6eefea682b81c7d8";
+const EXPECTED_BSP_HASH: &str = "833b03631d480295c2d64b7c7f3f3489fedb788d0a14bae508dc5b84b91313f8";
+const EXPECTED_LIT_HASH: &str = "70bf2795cc1d3ddc26806f494a68417281920a017e3b963d6eefea682b81c7d8";
 
 // ── Frozen Capture Settings ───────────────────────────────────────────────
 
@@ -87,7 +85,7 @@ fn spawn_camera() -> SemanticCamera {
         // Approximate engine-space spawn: map center XY ≈ (480, 504) * 0.0254
         // ≈ (12.19, 12.80), Z = 48 * 0.0254 ≈ 1.22, + 2.0m eye height ≈ 3.22
         position: [12.19, 3.22, 12.80],
-        yaw: std::f32::consts::PI,  // face +Z (interior)
+        yaw: std::f32::consts::PI, // face +Z (interior)
         pitch: 0.0,
         expected_routes: vec![
             "wall".to_string(),
@@ -278,8 +276,7 @@ fn sha256_hex(data: &[u8]) -> String {
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
-    let data = std::fs::read(path)
-        .map_err(|e| format!("read '{}': {e}", path.display()))?;
+    let data = std::fs::read(path).map_err(|e| format!("read '{}': {e}", path.display()))?;
     Ok(sha256_hex(&data))
 }
 
@@ -299,17 +296,15 @@ fn generate_and_compile_m1_seed1() -> Result<(PathBuf, Vec<u8>, Option<Vec<u8>>)
         .map_err(|e| format!("generation failed for seed {}: {e}", SELECTED_SEED))?;
 
     let map_path = staging.join(format!("{SELECTED_ENTRY_ID}.map"));
-    std::fs::write(&map_path, &map_text)
-        .map_err(|e| format!("write .map: {e}"))?;
+    std::fs::write(&map_path, &map_text).map_err(|e| format!("write .map: {e}"))?;
 
-    let profile_content = std::fs::read_to_string(profile_path())
-        .map_err(|e| format!("read profile: {e}"))?;
+    let profile_content =
+        std::fs::read_to_string(profile_path()).map_err(|e| format!("read profile: {e}"))?;
     let profile = engine_pack::compiler::parse_compiler_profile(&profile_content)
         .map_err(|e| format!("parse profile: {e}"))?;
 
     let work_dir = staging.join(".compile-work");
-    std::fs::create_dir_all(&work_dir)
-        .map_err(|e| format!("create work dir: {e}"))?;
+    std::fs::create_dir_all(&work_dir).map_err(|e| format!("create work dir: {e}"))?;
 
     let result = engine_pack::compiler::compile_map(
         &map_path,
@@ -339,23 +334,19 @@ fn generate_and_compile_m1_seed1() -> Result<(PathBuf, Vec<u8>, Option<Vec<u8>>)
 
     // Copy to captures directory.
     let captures = captures_dir();
-    std::fs::create_dir_all(&captures)
-        .map_err(|e| format!("create captures dir: {e}"))?;
+    std::fs::create_dir_all(&captures).map_err(|e| format!("create captures dir: {e}"))?;
     let bsp_dest = captures.join(format!("{SELECTED_ENTRY_ID}.bsp"));
     std::fs::write(&bsp_dest, &result.bsp_data)
         .map_err(|e| format!("write BSP to captures: {e}"))?;
     if let Some(ref lit) = result.lit_data {
         let lit_dest = captures.join(format!("{SELECTED_ENTRY_ID}.lit"));
-        std::fs::write(&lit_dest, lit)
-            .map_err(|e| format!("write LIT to captures: {e}"))?;
+        std::fs::write(&lit_dest, lit).map_err(|e| format!("write LIT to captures: {e}"))?;
     }
     // Copy companions.
     let palette_dest = captures.join("palette.lmp");
-    std::fs::copy(palette_path(), &palette_dest)
-        .map_err(|e| format!("copy palette: {e}"))?;
+    std::fs::copy(palette_path(), &palette_dest).map_err(|e| format!("copy palette: {e}"))?;
     let wad_dest = captures.join("cc0_stone_beta.wad");
-    std::fs::copy(wad_path(), &wad_dest)
-        .map_err(|e| format!("copy WAD: {e}"))?;
+    std::fs::copy(wad_path(), &wad_dest).map_err(|e| format!("copy WAD: {e}"))?;
 
     Ok((bsp_dest, result.bsp_data, result.lit_data))
 }
@@ -408,8 +399,8 @@ fn visual_acceptance_package_identity() {
                 source_identity: SELECTED_ENTRY_ID.to_string(),
             };
 
-            let world = bsp::BspLoader::load(&bsp_data, &options)
-                .expect("strict load must succeed");
+            let world =
+                bsp::BspLoader::load(&bsp_data, &options).expect("strict load must succeed");
             assert!(
                 world.diagnostics.is_empty(),
                 "strict reload must have 0 diagnostics, got {}",
@@ -502,8 +493,8 @@ fn visual_acceptance_manifest_schema() {
         resource_closure: ResourceClosure {
             bsp_hash: EXPECTED_BSP_HASH.to_string(),
             lit_hash: Some(EXPECTED_LIT_HASH.to_string()),
-            palette_hash: String::new(),   // filled at runtime
-            wad_hash: String::new(),       // filled at runtime
+            palette_hash: String::new(), // filled at runtime
+            wad_hash: String::new(),     // filled at runtime
             expected_bsp_hash: EXPECTED_BSP_HASH.to_string(),
             expected_lit_hash: EXPECTED_LIT_HASH.to_string(),
         },
@@ -519,8 +510,7 @@ fn visual_acceptance_manifest_schema() {
         status: "SCHEMA_VALID".to_string(),
     };
 
-    let serialized =
-        serde_json::to_string_pretty(&manifest).expect("manifest must serialize");
+    let serialized = serde_json::to_string_pretty(&manifest).expect("manifest must serialize");
     let _roundtripped: CaptureManifest =
         serde_json::from_str(&serialized).expect("manifest must roundtrip");
     eprintln!("Manifest schema validated: {} bytes", serialized.len());

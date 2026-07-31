@@ -13,9 +13,7 @@
 //!   Does not reset the previously active A.
 //! - **Teardown**: Resets the adapter, generation-specific cleanup.
 
-use bsp_runtime::behavior::{
-    BehaviorEntityInfo, StructuralBehaviorAdapter, TriggerEvent,
-};
+use bsp_runtime::behavior::{BehaviorEntityInfo, StructuralBehaviorAdapter, TriggerEvent};
 use bsp_runtime::bridge::{
     ActiveBridgeState, AppBridge, BehaviorEntityRecipe, EntityCollisionRecipe, LightEntityRecipe,
     PreparedBridgeState, WorldCollisionRecipe,
@@ -200,9 +198,7 @@ impl AppBridge for RuntimeBridge {
 
         let count = entity_infos.len();
         log::debug!("Runtime bridge prepare: {} behavior entities staged", count);
-        Ok(Box::new(RuntimePreparedState {
-            entity_infos,
-        }))
+        Ok(Box::new(RuntimePreparedState { entity_infos }))
     }
 
     fn validate(&self, prepared: &dyn PreparedBridgeState) -> Result<(), String> {

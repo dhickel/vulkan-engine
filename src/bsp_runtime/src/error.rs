@@ -33,20 +33,11 @@ pub enum BspRuntimeError {
         context: String,
     },
     /// Source content hash mismatch between persistence record and loaded bytes.
-    SourceMismatch {
-        expected: String,
-        actual: String,
-    },
+    SourceMismatch { expected: String, actual: String },
     /// Unsupported persistence schema version.
-    UnsupportedSchema {
-        version: u32,
-        current: u32,
-    },
+    UnsupportedSchema { version: u32, current: u32 },
     /// Migration from a prior schema version is not supported.
-    InvalidMigration {
-        from_version: u32,
-        reason: String,
-    },
+    InvalidMigration { from_version: u32, reason: String },
     /// Companion file hash mismatch during restore validation.
     CompanionMismatch {
         kind: String,
@@ -54,22 +45,13 @@ pub enum BspRuntimeError {
         actual: String,
     },
     /// Model-mapping identity mismatch during restore validation.
-    MappingMismatch {
-        reason: String,
-    },
+    MappingMismatch { reason: String },
     /// Required state is missing from the restored persistence payload.
-    MissingRequiredState {
-        detail: String,
-    },
+    MissingRequiredState { detail: String },
     /// External asset reference in persistence does not match current package state.
-    InvalidExternalAsset {
-        asset_path: String,
-        reason: String,
-    },
+    InvalidExternalAsset { asset_path: String, reason: String },
     /// Mutable behavior state in persistence is invalid or corrupt.
-    InvalidMutableBehavior {
-        detail: String,
-    },
+    InvalidMutableBehavior { detail: String },
     /// The restore candidate failed validation and the active generation is unchanged.
     RestoreCancelled {
         active_asset_id: String,
@@ -89,17 +71,11 @@ pub enum BspRuntimeError {
     },
     /// A duplicate renderer-ready lease was received: the candidate already
     /// holds a ready lease and the new one was sent to retirement.
-    DuplicateReadyLease {
-        generation: u64,
-    },
+    DuplicateReadyLease { generation: u64 },
     /// The renderer could not accept an opaque retirement handoff.
-    RetirementHandoffFailed {
-        reason: String,
-    },
+    RetirementHandoffFailed { reason: String },
     /// A supposedly prevalidated publication operation violated its contract.
-    CommitContractViolated {
-        detail: String,
-    },
+    CommitContractViolated { detail: String },
     /// Teardown of an active bridge receipt failed. The receipt is quarantined,
     /// not silently dropped.
     TeardownQuarantined {
@@ -115,19 +91,14 @@ pub enum BspRuntimeError {
     },
     /// Typed acknowledgement: a candidate was cancelled and its lease/receipts retired.
     /// The active mount (if any) is unchanged.
-    CandidateCancellationAcknowledged {
-        generation: u64,
-        detail: String,
-    },
+    CandidateCancellationAcknowledged { generation: u64, detail: String },
     /// Typed acknowledgement: the renderer accepted retirement of A's mount.
     ReplacementAcknowledged {
         retired_generation: u64,
         new_generation: u64,
     },
     /// Typed acknowledgement: an active mount was fully unloaded.
-    UnloadAcknowledged {
-        generation: u64,
-    },
+    UnloadAcknowledged { generation: u64 },
     /// B was published, but teardown of A's active bridge receipts failed.
     /// B is active; A's bridge receipts are quarantined.
     PublishedButQuarantined {
@@ -138,9 +109,7 @@ pub enum BspRuntimeError {
     },
     /// The coordinator is blocked from ordinary operations due to retained
     /// cleanup custody. Only terminal drain/recreation is permitted.
-    CleanupBlocked {
-        reason: String,
-    },
+    CleanupBlocked { reason: String },
 }
 
 /// Which phase of the two-step transaction a bridge failure occurred in.
@@ -159,14 +128,10 @@ pub enum BridgePhase {
 
 // ── Invariant Violation String Constants ─────────────────────────────
 
-pub(crate) const INVARIANT_REGISTRATION_MISMATCH: &str =
-    "bridge registration mismatch";
-pub(crate) const INVARIANT_DOUBLE_ACTIVATION: &str =
-    "double activation of prepared token";
-pub(crate) const INVARIANT_DUPLICATE_TEARDOWN: &str =
-    "duplicate teardown of active receipt";
-pub(crate) const INVARIANT_TEARDOWN_OF_PREPARED: &str =
-    "teardown of a prepared token";
+pub(crate) const INVARIANT_REGISTRATION_MISMATCH: &str = "bridge registration mismatch";
+pub(crate) const INVARIANT_DOUBLE_ACTIVATION: &str = "double activation of prepared token";
+pub(crate) const INVARIANT_DUPLICATE_TEARDOWN: &str = "duplicate teardown of active receipt";
+pub(crate) const INVARIANT_TEARDOWN_OF_PREPARED: &str = "teardown of a prepared token";
 
 /// States in the candidate lifecycle for transition validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,10 +283,7 @@ impl fmt::Display for BspRuntimeError {
                 write!(f, "missing required state: {detail}")
             }
             BspRuntimeError::InvalidExternalAsset { asset_path, reason } => {
-                write!(
-                    f,
-                    "invalid external asset '{asset_path}': {reason}"
-                )
+                write!(f, "invalid external asset '{asset_path}': {reason}")
             }
             BspRuntimeError::InvalidMutableBehavior { detail } => {
                 write!(f, "invalid mutable behavior state: {detail}")
@@ -391,14 +353,8 @@ impl fmt::Display for BspRuntimeError {
                     bridge_name, phase, detail
                 )
             }
-            BspRuntimeError::CandidateCancellationAcknowledged {
-                generation,
-                detail,
-            } => {
-                write!(
-                    f,
-                    "candidate generation {generation} cancelled: {detail}"
-                )
+            BspRuntimeError::CandidateCancellationAcknowledged { generation, detail } => {
+                write!(f, "candidate generation {generation} cancelled: {detail}")
             }
             BspRuntimeError::ReplacementAcknowledged {
                 retired_generation,

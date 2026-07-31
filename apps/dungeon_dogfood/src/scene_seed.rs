@@ -145,8 +145,12 @@ impl LevelScene {
             let world_origin = chunk.world_origin;
             let mesh = assets.upload_procedural_mesh(chunk.mesh)?;
             let bounds = assets.mesh_scene_bounds(mesh).unwrap_or_else(|err| {
-                log::warn!("Chunk mesh bounds lookup failed: {err}; using conservative-visible fallback.");
-                renderer::SceneBounds::ConservativeVisible(renderer::BoundsUnknownReason::StaleHandle)
+                log::warn!(
+                    "Chunk mesh bounds lookup failed: {err}; using conservative-visible fallback."
+                );
+                renderer::SceneBounds::ConservativeVisible(
+                    renderer::BoundsUnknownReason::StaleHandle,
+                )
             });
             let model_to_instance = Mat4::from_translation(world_origin);
             let node = scene.create_node(Some(level_root), model_to_instance)?;
@@ -373,10 +377,7 @@ impl LevelScene {
     /// [`PhysicsBridge`] can discover and register it.
     ///
     /// Call after the scene is fully seeded.
-    pub fn attach_physics_components(
-        &self,
-        scene: &mut Scene,
-    ) -> Result<(), SceneSeedError> {
+    pub fn attach_physics_components(&self, scene: &mut Scene) -> Result<(), SceneSeedError> {
         use renderer::object::component::{ComponentEnvelope, ComponentInstanceId, ComponentKey};
         use serde_json::json;
 
@@ -402,9 +403,7 @@ impl LevelScene {
             1,
             rigid_body_json,
         )
-        .map_err(|e| {
-            SceneSeedError::Scene(renderer::SceneError::InvalidMutation(e.to_string()))
-        })?;
+        .map_err(|e| SceneSeedError::Scene(renderer::SceneError::InvalidMutation(e.to_string())))?;
         scene.attach_component(proof_node, rigid_env)?;
 
         // Attach BoxCollider component (approximate bounds for the tetrahedron).
@@ -421,9 +420,7 @@ impl LevelScene {
             1,
             collider_json,
         )
-        .map_err(|e| {
-            SceneSeedError::Scene(renderer::SceneError::InvalidMutation(e.to_string()))
-        })?;
+        .map_err(|e| SceneSeedError::Scene(renderer::SceneError::InvalidMutation(e.to_string())))?;
         scene.attach_component(proof_node, collider_env)?;
 
         log::info!(
@@ -507,12 +504,7 @@ fn build_manifest_material(
         } else {
             find_texture_map(
                 &material_base_path,
-                &[
-                    "_arm_",
-                    "_arm",
-                    "_occlusionroughnessmetallic_",
-                    "_orm_",
-                ],
+                &["_arm_", "_arm", "_occlusionroughnessmetallic_", "_orm_"],
             )
         },
     };

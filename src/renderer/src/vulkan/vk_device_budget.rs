@@ -50,10 +50,7 @@ struct DeviceBudget {
 }
 
 impl DeviceBudget {
-    fn calculate(
-        props: &vk::PhysicalDeviceProperties,
-        d32_sampled_array_supported: bool,
-    ) -> Self {
+    fn calculate(props: &vk::PhysicalDeviceProperties, d32_sampled_array_supported: bool) -> Self {
         let limits = &props.limits;
         let device_name = unsafe { std::ffi::CStr::from_ptr(props.device_name.as_ptr()) }
             .to_string_lossy()
@@ -105,9 +102,11 @@ impl DeviceBudget {
             max_bound_descriptor_sets: limits.max_bound_descriptor_sets,
             max_per_stage_descriptor_sampled_images: limits.max_per_stage_descriptor_sampled_images,
             max_descriptor_set_sampled_images: limits.max_descriptor_set_sampled_images,
-            max_per_stage_descriptor_uniform_buffers: limits.max_per_stage_descriptor_uniform_buffers,
+            max_per_stage_descriptor_uniform_buffers: limits
+                .max_per_stage_descriptor_uniform_buffers,
             max_descriptor_set_uniform_buffers: limits.max_descriptor_set_uniform_buffers,
-            max_per_stage_descriptor_storage_buffers: limits.max_per_stage_descriptor_storage_buffers,
+            max_per_stage_descriptor_storage_buffers: limits
+                .max_per_stage_descriptor_storage_buffers,
             max_descriptor_set_storage_buffers: limits.max_descriptor_set_storage_buffers,
             max_storage_buffer_range: limits.max_storage_buffer_range,
             csm_dimension_ok,
@@ -217,8 +216,8 @@ mod tests {
         let entry = unsafe { ash::Entry::load() }.expect("load Vulkan entry");
         let app_info = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3);
         let create_info = vk::InstanceCreateInfo::default().application_info(&app_info);
-        let instance = unsafe { entry.create_instance(&create_info, None) }
-            .expect("create Vulkan instance");
+        let instance =
+            unsafe { entry.create_instance(&create_info, None) }.expect("create Vulkan instance");
         let device = unsafe { instance.enumerate_physical_devices() }
             .expect("enumerate Vulkan devices")
             .into_iter()
@@ -287,7 +286,11 @@ mod tests {
     }
 
     fn pass_fail(value: bool) -> &'static str {
-        if value { "PASS" } else { "FAIL" }
+        if value {
+            "PASS"
+        } else {
+            "FAIL"
+        }
     }
 
     use std::path::PathBuf;

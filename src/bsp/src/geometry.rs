@@ -84,11 +84,7 @@ pub fn build_face_geometry(
         .collect();
 
     // 6. Compute lightmap extents (per-value projection onto s/t axes)
-    let (luxel_extents, uv1) = compute_lightmap_layout(
-        &winding,
-        texinfo,
-        face.styles,
-    );
+    let (luxel_extents, uv1) = compute_lightmap_layout(&winding, texinfo, face.styles);
 
     // 7. Compute bounds
     let bounds = compute_bounds(&engine_verts);
@@ -166,12 +162,7 @@ fn validate_quake_winding(verts: &[Vec3], epsilon: f32) -> bool {
 
 /// Validate winding: reject degenerate faces (collinear, duplicate vertices,
 /// self-intersection).
-fn validate_winding(
-    verts: &[Vec3],
-    plane_normal: Vec3,
-    plane_dist: f32,
-    epsilon: f32,
-) -> bool {
+fn validate_winding(verts: &[Vec3], plane_normal: Vec3, plane_dist: f32, epsilon: f32) -> bool {
     if verts.len() < 3 {
         return false;
     }
@@ -371,7 +362,10 @@ pub fn batch_faces(
         if !geo.is_valid {
             continue;
         }
-        let rc = render_classes.get(fi).copied().unwrap_or(RenderClass::Opaque);
+        let rc = render_classes
+            .get(fi)
+            .copied()
+            .unwrap_or(RenderClass::Opaque);
         if rc == RenderClass::Hidden {
             continue;
         }
@@ -515,10 +509,7 @@ mod tests {
 
     #[test]
     fn validate_degenerate_line() {
-        let verts = vec![
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(1.0, 0.0, 0.0),
-        ];
+        let verts = vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)];
         // 2 vertices cannot form a face
         assert!(!validate_winding(&verts, Vec3::Z, 0.0, 1e-4));
     }

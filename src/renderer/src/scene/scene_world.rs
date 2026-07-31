@@ -196,7 +196,8 @@ pub struct SceneWorld {
     /// Phase 07: Pending evidence request data for the next submission build.
     /// Stored as (corpus_identity, request_identity, visibility).
     #[cfg(feature = "bsp")]
-    pub(crate) pending_evidence_data: Option<(String, String, crate::api::bsp::BspEvidenceVisibility)>,
+    pub(crate) pending_evidence_data:
+        Option<(String, String, crate::api::bsp::BspEvidenceVisibility)>,
     /// Phase 07: Frame number for the pending evidence request.
     #[cfg(feature = "bsp")]
     pub(crate) pending_evidence_frame: u32,
@@ -396,7 +397,10 @@ impl SceneWorld {
         persistent_id: SceneObjectId,
     ) -> Result<(), String> {
         if self.validate_node_ref(id).is_err() {
-            return Err(format!("invalid node handle ({}, {})", id.slot, id.generation));
+            return Err(format!(
+                "invalid node handle ({}, {})",
+                id.slot, id.generation
+            ));
         }
         if let Some(existing) = self.reverse_index.get(&persistent_id) {
             if *existing != ObjectHandle::Node(id) {
@@ -458,11 +462,7 @@ impl SceneWorld {
         self.compute_subtree_bounds_post_order(root_id);
     }
 
-    pub(crate) fn add_node(
-        &mut self,
-        parent: Option<SceneNodeId>,
-        node: SceneNode,
-    ) -> SceneNodeId {
+    pub(crate) fn add_node(&mut self, parent: Option<SceneNodeId>, node: SceneNode) -> SceneNodeId {
         // Direct world-side creators (for example command placement) provide
         // their stable ID on the node. Co-locate it in the record before the
         // object becomes live so save never has to synthesize identity.
@@ -615,8 +615,7 @@ impl SceneWorld {
         let mut snapshots = Vec::new();
         self.collect_removal_snapshots(node_id, None, &mut snapshots);
 
-        let root_replaced =
-            self.root == Some(node_id) && snapshots.iter().any(|s| s.id == node_id);
+        let root_replaced = self.root == Some(node_id) && snapshots.iter().any(|s| s.id == node_id);
 
         Some(RemoveNodePlan {
             snapshots,
@@ -905,10 +904,14 @@ impl SceneWorld {
     ) -> Result<RenderSubmission, String> {
         for (&node_id, &transform) in overrides {
             if !self.is_valid_node_id(node_id) {
-                return Err(format!("invalid or stale transform override for node {node_id:?}"));
+                return Err(format!(
+                    "invalid or stale transform override for node {node_id:?}"
+                ));
             }
             if !transform.is_finite() {
-                return Err(format!("non-finite transform override for node {node_id:?}"));
+                return Err(format!(
+                    "non-finite transform override for node {node_id:?}"
+                ));
             }
         }
         if overrides.is_empty() {
@@ -926,9 +929,8 @@ impl SceneWorld {
         submission.bounds_references.clear();
         submission.culling_stats = CullingStats::default();
 
-        let frustum = culling_enabled.then(|| {
-            Frustum::from_view_projection(&(self.camera.projection * self.camera.view))
-        });
+        let frustum = culling_enabled
+            .then(|| Frustum::from_view_projection(&(self.camera.projection * self.camera.view)));
         if let Some(root_id) = self.root.filter(|id| self.is_valid_node_id(*id)) {
             self.collect_draw_items_with_overrides(
                 root_id,
@@ -953,7 +955,9 @@ impl SceneWorld {
             if submission.directional_lights.len() >= MAX_DIRECTIONAL_LIGHTS_GPU {
                 break;
             }
-            let Some((light, _)) = entry.light else { continue };
+            let Some((light, _)) = entry.light else {
+                continue;
+            };
             let light_id = DirectionalLightId {
                 slot: slot as u32,
                 generation: entry.generation,
@@ -1034,10 +1038,21 @@ impl SceneWorld {
         #[cfg(feature = "bsp")]
         if let Some(ref mount) = self.bsp_mount {
             let evidence_active = self.evidence_active();
-            let all_visible = evidence_active && self.pending_evidence_data.as_ref()
-                .map(|(_, _, vis)| matches!(vis, crate::api::bsp::BspEvidenceVisibility::AllVisible))
-                .unwrap_or(false);
-            self.collect_bsp_draw_items_from_mount(mount, &mut submission, frustum.as_ref(), evidence_active, all_visible);
+            let all_visible = evidence_active
+                && self
+                    .pending_evidence_data
+                    .as_ref()
+                    .map(|(_, _, vis)| {
+                        matches!(vis, crate::api::bsp::BspEvidenceVisibility::AllVisible)
+                    })
+                    .unwrap_or(false);
+            self.collect_bsp_draw_items_from_mount(
+                mount,
+                &mut submission,
+                frustum.as_ref(),
+                evidence_active,
+                all_visible,
+            );
         }
         // Phase 07: Clear the pending evidence request after submission build.
         #[cfg(feature = "bsp")]
@@ -1070,13 +1085,13 @@ impl SceneWorld {
         evidence_active: bool,
         all_visible: bool,
     ) {
+        use crate::api::bsp::BspCanonicalDigest;
         use crate::scene::bsp_visibility::{
             classify_bsp_visibility, mounted_visibility_decision, VisibilityDecision,
         };
         use crate::scene::render_submission::{
             BspBatchSemanticIdentity, BspEvidenceCollector, BspSubmissionFailure,
         };
-        use crate::api::bsp::BspCanonicalDigest;
 
         let state = &mount.state;
         let diagnostics = classify_bsp_visibility(&state.mounted_batches, state);
@@ -1101,10 +1116,14 @@ impl SceneWorld {
                 visibility: *visibility,
                 key: crate::api::bsp::BspEvidenceRequestKey(0),
             };
-            let mut collector = BspEvidenceCollector::new(&request, arena_id, self.pending_evidence_frame);
+            let mut collector =
+                BspEvidenceCollector::new(&request, arena_id, self.pending_evidence_frame);
 
             // Derive atlas bytes from upload demand.
-            collector.atlas_bytes = mount.state.mounted_batches.first()
+            collector.atlas_bytes = mount
+                .state
+                .mounted_batches
+                .first()
                 .map(|_| 0u64)
                 .unwrap_or(0);
 
@@ -1169,8 +1188,13 @@ impl SceneWorld {
             match pvs_decision {
                 VisibilityDecision::PvsCulled => {
                     if evidence_active && is_static {
-                        if let Some(ref mut collector) = *submission.bsp_evidence_collector.borrow_mut() {
-                            collector.cull_decisions.push((batch_index, crate::scene::render_submission::BspCullReason::PvsCulled));
+                        if let Some(ref mut collector) =
+                            *submission.bsp_evidence_collector.borrow_mut()
+                        {
+                            collector.cull_decisions.push((
+                                batch_index,
+                                crate::scene::render_submission::BspCullReason::PvsCulled,
+                            ));
                         }
                     }
                     continue;
@@ -1190,10 +1214,8 @@ impl SceneWorld {
             };
 
             if batch.is_inline_model {
-                if let Some((world_min, world_max)) = state
-                    .inline_model_bounds
-                    .get(&batch.model_index)
-                    .copied()
+                if let Some((world_min, world_max)) =
+                    state.inline_model_bounds.get(&batch.model_index).copied()
                 {
                     if !crate::scene::bsp_visibility::aabb_intersects_frustum(
                         world_min, world_max, frustum,
@@ -1206,12 +1228,7 @@ impl SceneWorld {
             // --- Resource validation (fail-closed) ---
             let mesh_id = mounted.mesh;
             let bsp_material_id = mounted.material;
-            let source_face_first = mounted
-                .render
-                .face_indices
-                .first()
-                .copied()
-                .unwrap_or(0);
+            let source_face_first = mounted.render.face_indices.first().copied().unwrap_or(0);
             let source_face_count = mounted.render.face_indices.len() as u32;
 
             // Mesh slot zero is the explicit no-mesh sentinel. BSP material
@@ -1234,8 +1251,11 @@ impl SceneWorld {
                 }
                 // Evidence: record failure for static batches.
                 if evidence_active && is_static {
-                    if let Some(ref mut collector) = *submission.bsp_evidence_collector.borrow_mut() {
-                        collector.failures.push(crate::api::bsp::BspEvidenceFailure::MissingDescriptor { batch_index });
+                    if let Some(ref mut collector) = *submission.bsp_evidence_collector.borrow_mut()
+                    {
+                        collector.failures.push(
+                            crate::api::bsp::BspEvidenceFailure::MissingDescriptor { batch_index },
+                        );
                     }
                 }
                 continue;
@@ -1256,14 +1276,16 @@ impl SceneWorld {
             // Evidence: record submitted identity.
             if evidence_active && is_static {
                 if let Some(ref mut collector) = *submission.bsp_evidence_collector.borrow_mut() {
-                    collector.submitted_identities.push(BspBatchSemanticIdentity {
-                        batch_index,
-                        canonical_digest: canonical_digest.0,
-                        face_count: source_face_count,
-                        source_faces: mounted.render.face_indices.clone(),
-                        model_index,
-                        is_static: true,
-                    });
+                    collector
+                        .submitted_identities
+                        .push(BspBatchSemanticIdentity {
+                            batch_index,
+                            canonical_digest: canonical_digest.0,
+                            face_count: source_face_count,
+                            source_faces: mounted.render.face_indices.clone(),
+                            model_index,
+                            is_static: true,
+                        });
                 }
             }
 
@@ -1585,11 +1607,7 @@ impl SceneWorld {
         for child_id in node.children.iter().copied() {
             if self.is_valid_node_id(child_id) {
                 self.collect_draw_items_with_overrides(
-                    child_id,
-                    world,
-                    overrides,
-                    submission,
-                    frustum,
+                    child_id, world, overrides, submission, frustum,
                 );
             }
         }
@@ -1655,10 +1673,7 @@ impl SceneWorld {
         }
     }
 
-    pub(crate) fn commit_create_point_light(
-        &mut self,
-        plan: CreatePointLightPlan,
-    ) -> PointLightId {
+    pub(crate) fn commit_create_point_light(&mut self, plan: CreatePointLightPlan) -> PointLightId {
         let CreatePointLightPlan {
             slot,
             generation,
@@ -1870,10 +1885,7 @@ impl SceneWorld {
     }
 
     /// Get a directional light's record.
-    pub fn get_directional_light_record(
-        &self,
-        id: DirectionalLightId,
-    ) -> Option<&ObjectRecord> {
+    pub fn get_directional_light_record(&self, id: DirectionalLightId) -> Option<&ObjectRecord> {
         let entry = self.directional_lights.get(id.slot as usize)?;
         if entry.generation != id.generation {
             return None;
@@ -2124,7 +2136,10 @@ impl SceneWorld {
                 })
                 .map(|_| ObjectHandle::Node(SceneNodeId::new(id.slot(), id.generation()))),
             ObjectKind::PointLight => {
-                let light = PointLightId { slot: id.slot(), generation: id.generation() };
+                let light = PointLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
                 self.validate_point_light_ref(light)
                     .map_err(|err| match err {
                         PointLightRefError::OutOfBounds => ObjectError::InvalidObject(id),
@@ -2134,17 +2149,25 @@ impl SceneWorld {
                     .map(|_| ObjectHandle::PointLight(light))
             }
             ObjectKind::DirectionalLight => {
-                let light = DirectionalLightId { slot: id.slot(), generation: id.generation() };
+                let light = DirectionalLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
                 self.validate_directional_light_ref(light)
                     .map_err(|err| match err {
                         DirectionalLightRefError::OutOfBounds => ObjectError::InvalidObject(id),
                         DirectionalLightRefError::Vacant => ObjectError::VacantObject(id),
-                        DirectionalLightRefError::GenerationMismatch => ObjectError::StaleGeneration(id),
+                        DirectionalLightRefError::GenerationMismatch => {
+                            ObjectError::StaleGeneration(id)
+                        }
                     })
                     .map(|_| ObjectHandle::DirectionalLight(light))
             }
             ObjectKind::SpotLight => {
-                let light = SpotLightId { slot: id.slot(), generation: id.generation() };
+                let light = SpotLightId {
+                    slot: id.slot(),
+                    generation: id.generation(),
+                };
                 self.validate_spot_light_ref(light)
                     .map_err(|err| match err {
                         SpotLightRefError::OutOfBounds => ObjectError::InvalidObject(id),
@@ -2272,9 +2295,7 @@ impl SceneWorld {
                 }
                 // Shadow-owner validity.
                 if let Some(shadow_id) = self.shadow_casting_directional {
-                    if shadow_id.slot == slot as u32
-                        && shadow_id.generation != entry.generation
-                    {
+                    if shadow_id.slot == slot as u32 && shadow_id.generation != entry.generation {
                         return Err(format!(
                             "shadow-casting directional light slot {} has stale generation",
                             slot
@@ -2368,10 +2389,7 @@ impl SceneWorld {
         }
     }
 
-    pub(crate) fn commit_create_spot_light(
-        &mut self,
-        plan: CreateSpotLightPlan,
-    ) -> SpotLightId {
+    pub(crate) fn commit_create_spot_light(&mut self, plan: CreateSpotLightPlan) -> SpotLightId {
         let CreateSpotLightPlan {
             slot,
             generation,
@@ -2435,10 +2453,7 @@ impl SceneWorld {
     }
 
     /// Direct access to point light slot for transform reads.
-    pub fn point_light_entry(
-        &self,
-        id: PointLightId,
-    ) -> Option<&PointLight> {
+    pub fn point_light_entry(&self, id: PointLightId) -> Option<&PointLight> {
         let entry = self.point_lights.get(id.slot as usize)?;
         if entry.generation != id.generation {
             return None;
@@ -2459,10 +2474,7 @@ impl SceneWorld {
     }
 
     /// Direct access to directional light slot.
-    pub fn directional_light_entry(
-        &self,
-        id: DirectionalLightId,
-    ) -> Option<&DirectionalLight> {
+    pub fn directional_light_entry(&self, id: DirectionalLightId) -> Option<&DirectionalLight> {
         let entry = self.directional_lights.get(id.slot as usize)?;
         if entry.generation != id.generation {
             return None;
@@ -2483,10 +2495,7 @@ impl SceneWorld {
     }
 
     /// Direct access to spot light slot.
-    pub fn spot_light_entry(
-        &self,
-        id: SpotLightId,
-    ) -> Option<&SpotLight> {
+    pub fn spot_light_entry(&self, id: SpotLightId) -> Option<&SpotLight> {
         let entry = self.spot_lights.get(id.slot as usize)?;
         if entry.generation != id.generation {
             return None;
@@ -2506,8 +2515,6 @@ impl SceneWorld {
         entry.light.as_mut()
     }
 
-
-
     pub(crate) fn remove_spot_light(&mut self, id: SpotLightId) -> bool {
         let plan = match self.prepare_remove_spot_light(id) {
             Some(p) => p,
@@ -2517,10 +2524,7 @@ impl SceneWorld {
         true
     }
 
-    pub(crate) fn prepare_remove_spot_light(
-        &self,
-        id: SpotLightId,
-    ) -> Option<RemoveSpotLightPlan> {
+    pub(crate) fn prepare_remove_spot_light(&self, id: SpotLightId) -> Option<RemoveSpotLightPlan> {
         let entry = self.spot_lights.get(id.slot as usize)?;
         if entry.generation != id.generation {
             return None;
@@ -2560,10 +2564,7 @@ impl SceneWorld {
     ///
     /// The lease-bearing [`PublishedBspMount`] owns every GPU resource.
     #[cfg(feature = "bsp")]
-    pub(crate) fn set_bsp_mount(
-        &mut self,
-        mount: crate::api::bsp::PublishedBspMount,
-    ) {
+    pub(crate) fn set_bsp_mount(&mut self, mount: crate::api::bsp::PublishedBspMount) {
         self.bsp_mount = Some(mount);
     }
 
@@ -2572,7 +2573,10 @@ impl SceneWorld {
     /// Deprecated: this drops the resource lease. Use [`Self::retire_bsp_mount`]
     /// to obtain a [`DetachedBspMount`] for renderer retirement.
     #[cfg(feature = "bsp")]
-    #[deprecated(since = "0.14.0", note = "use retire_bsp_mount() to preserve the lease")]
+    #[deprecated(
+        since = "0.14.0",
+        note = "use retire_bsp_mount() to preserve the lease"
+    )]
     pub(crate) fn clear_bsp_mount(&mut self) {
         let _ = self.retire_bsp_mount();
     }
@@ -2583,9 +2587,7 @@ impl SceneWorld {
     /// The returned mount retains the full resource lease. The caller must
     /// pass it to the renderer's retirement path for fence-aware GPU teardown.
     #[cfg(feature = "bsp")]
-    pub(crate) fn retire_bsp_mount(
-        &mut self,
-    ) -> Option<crate::api::bsp::DetachedBspMount> {
+    pub(crate) fn retire_bsp_mount(&mut self) -> Option<crate::api::bsp::DetachedBspMount> {
         let published = self.bsp_mount.take()?;
         Some(crate::api::bsp::DetachedBspMount::from_published(published))
     }
@@ -2613,7 +2615,8 @@ impl SceneWorld {
     /// Returns true if there's active evidence data (non-empty corpus).
     #[cfg(feature = "bsp")]
     fn evidence_active(&self) -> bool {
-        self.pending_evidence_data.as_ref()
+        self.pending_evidence_data
+            .as_ref()
             .map(|(corpus, _, _)| !corpus.is_empty())
             .unwrap_or(false)
     }
@@ -2672,12 +2675,10 @@ impl SceneWorld {
         node_id: SceneNodeId,
         envelope: crate::object::component::ComponentEnvelope,
     ) -> Result<(), crate::object::component::ComponentError> {
-        let record = self
-            .get_node_record_mut(node_id)
-            .ok_or_else(|| {
-                use crate::object::component::ComponentError;
-                ComponentError::InvalidEnvelope("node not found".into())
-            })?;
+        let record = self.get_node_record_mut(node_id).ok_or_else(|| {
+            use crate::object::component::ComponentError;
+            ComponentError::InvalidEnvelope("node not found".into())
+        })?;
         record.component_store.attach(envelope)
     }
 
@@ -2718,13 +2719,9 @@ impl SceneWorld {
         key: &crate::object::component::ComponentKey,
         instance_id: &crate::object::component::ComponentInstanceId,
     ) -> Result<&T, crate::object::component::ComponentError> {
-        let record = self
-            .get_node_record(node_id)
-            .ok_or_else(|| {
-                crate::object::component::ComponentError::InvalidEnvelope(
-                    "node not found".into(),
-                )
-            })?;
+        let record = self.get_node_record(node_id).ok_or_else(|| {
+            crate::object::component::ComponentError::InvalidEnvelope("node not found".into())
+        })?;
         record.component_store.downcast::<T>(key, instance_id)
     }
 
@@ -2809,13 +2806,15 @@ impl SceneWorld {
             ObjectKind::Node => {
                 let node = self.get_node(SceneNodeId::new(id.slot(), id.generation()))?;
                 Some(if node.name.is_empty() {
-                    node.stable_id.clone().unwrap_or_else(|| format!("Node {}", id.slot()))
+                    node.stable_id
+                        .clone()
+                        .unwrap_or_else(|| format!("Node {}", id.slot()))
                 } else {
                     node.name.clone()
                 })
             }
-            ObjectKind::PointLight => {
-                self.get_point_light_record(PointLightId {
+            ObjectKind::PointLight => self
+                .get_point_light_record(PointLightId {
                     slot: id.slot(),
                     generation: id.generation(),
                 })
@@ -2823,10 +2822,9 @@ impl SceneWorld {
                     r.stable_id
                         .clone()
                         .unwrap_or_else(|| format!("PointLight {}", id.slot()))
-                })
-            }
-            ObjectKind::DirectionalLight => {
-                self.get_directional_light_record(DirectionalLightId {
+                }),
+            ObjectKind::DirectionalLight => self
+                .get_directional_light_record(DirectionalLightId {
                     slot: id.slot(),
                     generation: id.generation(),
                 })
@@ -2834,10 +2832,9 @@ impl SceneWorld {
                     r.stable_id
                         .clone()
                         .unwrap_or_else(|| format!("DirectionalLight {}", id.slot()))
-                })
-            }
-            ObjectKind::SpotLight => {
-                self.get_spot_light_record(SpotLightId {
+                }),
+            ObjectKind::SpotLight => self
+                .get_spot_light_record(SpotLightId {
                     slot: id.slot(),
                     generation: id.generation(),
                 })
@@ -2845,39 +2842,34 @@ impl SceneWorld {
                     r.stable_id
                         .clone()
                         .unwrap_or_else(|| format!("SpotLight {}", id.slot()))
-                })
-            }
+                }),
         }
     }
 
     /// Return the persistent ID for an object.
     pub(crate) fn object_persistent_id(&self, id: ObjectId) -> Option<SceneObjectId> {
         match id.kind() {
-            ObjectKind::Node => {
-                self.get_node_record(SceneNodeId::new(id.slot(), id.generation()))
-                    .map(|r| r.persistent_id.clone())
-            }
-            ObjectKind::PointLight => {
-                self.get_point_light_record(PointLightId {
+            ObjectKind::Node => self
+                .get_node_record(SceneNodeId::new(id.slot(), id.generation()))
+                .map(|r| r.persistent_id.clone()),
+            ObjectKind::PointLight => self
+                .get_point_light_record(PointLightId {
                     slot: id.slot(),
                     generation: id.generation(),
                 })
-                .map(|r| r.persistent_id.clone())
-            }
-            ObjectKind::DirectionalLight => {
-                self.get_directional_light_record(DirectionalLightId {
+                .map(|r| r.persistent_id.clone()),
+            ObjectKind::DirectionalLight => self
+                .get_directional_light_record(DirectionalLightId {
                     slot: id.slot(),
                     generation: id.generation(),
                 })
-                .map(|r| r.persistent_id.clone())
-            }
-            ObjectKind::SpotLight => {
-                self.get_spot_light_record(SpotLightId {
+                .map(|r| r.persistent_id.clone()),
+            ObjectKind::SpotLight => self
+                .get_spot_light_record(SpotLightId {
                     slot: id.slot(),
                     generation: id.generation(),
                 })
-                .map(|r| r.persistent_id.clone())
-            }
+                .map(|r| r.persistent_id.clone()),
         }
     }
 
@@ -2890,27 +2882,24 @@ impl SceneWorld {
             ObjectKind::Node => self
                 .get_node_record(SceneNodeId::new(id.slot(), id.generation()))
                 .map(|r| &r.component_store),
-            ObjectKind::PointLight => {
-                self.get_point_light_record(PointLightId {
+            ObjectKind::PointLight => self
+                .get_point_light_record(PointLightId {
                     slot: id.slot(),
                     generation: id.generation(),
                 })
-                .map(|r| &r.component_store)
-            }
-            ObjectKind::DirectionalLight => {
-                self.get_directional_light_record(DirectionalLightId {
+                .map(|r| &r.component_store),
+            ObjectKind::DirectionalLight => self
+                .get_directional_light_record(DirectionalLightId {
                     slot: id.slot(),
                     generation: id.generation(),
                 })
-                .map(|r| &r.component_store)
-            }
-            ObjectKind::SpotLight => {
-                self.get_spot_light_record(SpotLightId {
+                .map(|r| &r.component_store),
+            ObjectKind::SpotLight => self
+                .get_spot_light_record(SpotLightId {
                     slot: id.slot(),
                     generation: id.generation(),
                 })
-                .map(|r| &r.component_store)
-            }
+                .map(|r| &r.component_store),
         }
     }
 
@@ -2923,27 +2912,24 @@ impl SceneWorld {
             ObjectKind::Node => self
                 .get_node_record_mut(SceneNodeId::new(id.slot(), id.generation()))
                 .map(|r| &mut r.component_store),
-            ObjectKind::PointLight => {
-                self.get_point_light_record_mut(PointLightId {
+            ObjectKind::PointLight => self
+                .get_point_light_record_mut(PointLightId {
                     slot: id.slot(),
                     generation: id.generation(),
                 })
-                .map(|r| &mut r.component_store)
-            }
-            ObjectKind::DirectionalLight => {
-                self.get_directional_light_record_mut(DirectionalLightId {
+                .map(|r| &mut r.component_store),
+            ObjectKind::DirectionalLight => self
+                .get_directional_light_record_mut(DirectionalLightId {
                     slot: id.slot(),
                     generation: id.generation(),
                 })
-                .map(|r| &mut r.component_store)
-            }
-            ObjectKind::SpotLight => {
-                self.get_spot_light_record_mut(SpotLightId {
+                .map(|r| &mut r.component_store),
+            ObjectKind::SpotLight => self
+                .get_spot_light_record_mut(SpotLightId {
                     slot: id.slot(),
                     generation: id.generation(),
                 })
-                .map(|r| &mut r.component_store)
-            }
+                .map(|r| &mut r.component_store),
         }
     }
 
@@ -2984,7 +2970,8 @@ impl SceneWorld {
         String,
     > {
         // Validate
-        self.validate_node_ref(node_id).map_err(|e| format!("{e:?}"))?;
+        self.validate_node_ref(node_id)
+            .map_err(|e| format!("{e:?}"))?;
 
         // Clone subtree
         let subtree = self
@@ -3062,8 +3049,7 @@ impl SceneWorld {
         removed_ids: &[SceneObjectId],
     ) -> Vec<crate::scene::object_store::DetachedLightSnapshot> {
         use crate::scene::object_store::DetachedLightSnapshot;
-        let removed_set: std::collections::HashSet<&SceneObjectId> =
-            removed_ids.iter().collect();
+        let removed_set: std::collections::HashSet<&SceneObjectId> = removed_ids.iter().collect();
         let mut detached = Vec::new();
 
         for entry in &self.point_lights {
@@ -3163,9 +3149,7 @@ impl SceneWorld {
                 ObjectKind::DirectionalLight => {
                     if let Some(handle) = self.reverse_index.get(&dl.persistent_id) {
                         if let ObjectHandle::DirectionalLight(dl_id) = *handle {
-                            if let Some(record) =
-                                self.get_directional_light_record_mut(dl_id)
-                            {
+                            if let Some(record) = self.get_directional_light_record_mut(dl_id) {
                                 record.light_group_parent = new_parent.clone();
                             }
                         }
@@ -3278,10 +3262,7 @@ impl SceneWorld {
         if entry.generation != id.generation {
             return Err("generation mismatch".to_string());
         }
-        let (light, record) = entry
-            .light
-            .clone()
-            .ok_or("vacant".to_string())?;
+        let (light, record) = entry.light.clone().ok_or("vacant".to_string())?;
 
         let mut new_record = record.clone();
         new_record.persistent_id = crate::scene::object_store::mint_persistent_id();
@@ -3302,10 +3283,7 @@ impl SceneWorld {
         if entry.generation != id.generation {
             return Err("generation mismatch".to_string());
         }
-        let (light, record) = entry
-            .light
-            .clone()
-            .ok_or("vacant".to_string())?;
+        let (light, record) = entry.light.clone().ok_or("vacant".to_string())?;
 
         let mut new_record = record.clone();
         new_record.persistent_id = crate::scene::object_store::mint_persistent_id();
@@ -3317,10 +3295,7 @@ impl SceneWorld {
     }
 
     /// Duplicate a spot light.
-    pub(crate) fn duplicate_spot_light(
-        &mut self,
-        id: SpotLightId,
-    ) -> Result<SpotLightId, String> {
+    pub(crate) fn duplicate_spot_light(&mut self, id: SpotLightId) -> Result<SpotLightId, String> {
         let entry = self
             .spot_lights
             .get(id.slot as usize)
@@ -3328,10 +3303,7 @@ impl SceneWorld {
         if entry.generation != id.generation {
             return Err("generation mismatch".to_string());
         }
-        let (light, record) = entry
-            .light
-            .clone()
-            .ok_or("vacant".to_string())?;
+        let (light, record) = entry.light.clone().ok_or("vacant".to_string())?;
 
         let mut new_record = record.clone();
         new_record.persistent_id = crate::scene::object_store::mint_persistent_id();
@@ -3359,10 +3331,7 @@ impl SceneWorld {
     /// into scratch maps.  Hits are sorted by distance, then
     /// [`SceneObjectId`], then [`ObjectKind`].  Conservative-visible
     /// (unknown-bounds) mesh-bearing nodes are excluded.
-    pub(crate) fn raycast_readonly(
-        &self,
-        ray: &Ray,
-    ) -> Vec<crate::object::query::RayHit> {
+    pub(crate) fn raycast_readonly(&self, ray: &Ray) -> Vec<crate::object::query::RayHit> {
         use crate::object::query::RayHit;
 
         let root_id = match self.root {
@@ -3406,16 +3375,18 @@ impl SceneWorld {
         world_transforms.insert(node_id, world);
 
         // Test intersection using the same bounds logic as pick_readonly.
-        let hit_info = pick_bounds_readonly_general(node, &world)
-            .and_then(|aabb| aabb.intersect_ray_hit(ray));
+        let hit_info =
+            pick_bounds_readonly_general(node, &world).and_then(|aabb| aabb.intersect_ray_hit(ray));
 
         if let Some(aabb_hit) = hit_info {
             if let Some(oid) = self.object_id_for_node(node_id) {
                 if let Some(pid) = self.object_persistent_id(oid) {
                     // Determine if this was from a proxy vs known bound.
-                    let is_proxy = node.mesh_bounds.iter().any(|e| {
-                        matches!(e.bounds, SceneBounds::Proxy(_))
-                    }) || node.local_proxy_bounds.is_some();
+                    let is_proxy = node
+                        .mesh_bounds
+                        .iter()
+                        .any(|e| matches!(e.bounds, SceneBounds::Proxy(_)))
+                        || node.local_proxy_bounds.is_some();
 
                     hits.push(RayHit {
                         object: oid,
@@ -3452,14 +3423,26 @@ impl SceneWorld {
         if let Some(root_id) = self.root.filter(|id| self.is_valid_node_id(*id)) {
             let mut world_transforms: std::collections::HashMap<SceneNodeId, Mat4> =
                 std::collections::HashMap::with_capacity(self.nodes.len());
-            self.volume_walk(root_id, Mat4::IDENTITY, volume, &mut world_transforms, &mut hits);
+            self.volume_walk(
+                root_id,
+                Mat4::IDENTITY,
+                volume,
+                &mut world_transforms,
+                &mut hits,
+            );
         }
 
         // Walk point lights (only when kind filter allows).
         if volume.filter.allows_kind(ObjectKind::PointLight) {
             for (slot, entry) in self.point_lights.iter().enumerate() {
                 if let Some((light, record)) = &entry.light {
-                    if self.volume_hit_point_light(light, volume, record, slot as u32, entry.generation) {
+                    if self.volume_hit_point_light(
+                        light,
+                        volume,
+                        record,
+                        slot as u32,
+                        entry.generation,
+                    ) {
                         if let Some(oid) = self.object_id_for_point_light(PointLightId {
                             slot: slot as u32,
                             generation: entry.generation,
@@ -3651,15 +3634,12 @@ impl SceneWorld {
         }
 
         // Point lights (if policy allows).
-        if policy == EditorProxyPolicy::NodesAndBoundedLights
-            || policy == EditorProxyPolicy::All
-        {
+        if policy == EditorProxyPolicy::NodesAndBoundedLights || policy == EditorProxyPolicy::All {
             for (slot, entry) in self.point_lights.iter().enumerate() {
                 if let Some((light, _)) = &entry.light {
                     let radius = (light.range * 0.05).max(0.1).min(5.0);
                     let half = Vec3::splat(radius);
-                    let aabb =
-                        Aabb::from_min_max(light.position - half, light.position + half);
+                    let aabb = Aabb::from_min_max(light.position - half, light.position + half);
                     if let Some(hit) = aabb.intersect_ray_hit(ray) {
                         if let Some(oid) = self.object_id_for_point_light(PointLightId {
                             slot: slot as u32,
@@ -3681,8 +3661,7 @@ impl SceneWorld {
                 if let Some((light, _)) = &entry.light {
                     let radius = (light.range * 0.05).max(0.1).min(5.0);
                     let half = Vec3::splat(radius);
-                    let aabb =
-                        Aabb::from_min_max(light.position - half, light.position + half);
+                    let aabb = Aabb::from_min_max(light.position - half, light.position + half);
                     if let Some(hit) = aabb.intersect_ray_hit(ray) {
                         if let Some(oid) = self.object_id_for_spot_light(SpotLightId {
                             slot: slot as u32,
@@ -3757,7 +3736,9 @@ impl SceneWorld {
 /// Test whether an [`Aabb`] intersects a [`VolumeShape`].
 fn volume_intersects_aabb(volume: &crate::object::query::VolumeShape, aabb: &Aabb) -> bool {
     match volume {
-        crate::object::query::VolumeShape::Aabb(query_aabb) => aabb_intersects_aabb(query_aabb, aabb),
+        crate::object::query::VolumeShape::Aabb(query_aabb) => {
+            aabb_intersects_aabb(query_aabb, aabb)
+        }
         crate::object::query::VolumeShape::Frustum(frustum) => frustum.intersects_aabb(aabb),
     }
 }
@@ -3784,7 +3765,8 @@ fn node_bounds_for_world_transform(node: &SceneNode, world: Mat4) -> Option<Scen
     for entry in &node.mesh_bounds {
         match entry.bounds {
             SceneBounds::Known(bounds) | SceneBounds::Proxy(bounds)
-                if bounds.is_finite() && bounds.is_ordered() => {
+                if bounds.is_finite() && bounds.is_ordered() =>
+            {
                 match local_union {
                     Some(ref mut union) => {
                         union.extend_to_enclose(&bounds);
@@ -4431,11 +4413,7 @@ mod tests {
         );
         let child = scene.add_node(
             Some(root),
-            node_with_mesh_and_transform(
-                2,
-                make_unit_known(),
-                Mat4::from_translation(Vec3::X),
-            ),
+            node_with_mesh_and_transform(2, make_unit_known(), Mat4::from_translation(Vec3::X)),
         );
         scene.set_root(root);
         scene.enable_frustum_culling = false;
@@ -4457,8 +4435,14 @@ mod tests {
             submission.draw_items[1].transform.w_axis.truncate(),
             Vec3::new(11.0, 0.0, 0.0)
         );
-        assert_eq!(scene.get_node(root).unwrap().local_transform, canonical_root);
-        assert_eq!(scene.get_node(child).unwrap().local_transform, canonical_child);
+        assert_eq!(
+            scene.get_node(root).unwrap().local_transform,
+            canonical_root
+        );
+        assert_eq!(
+            scene.get_node(child).unwrap().local_transform,
+            canonical_child
+        );
     }
 
     // -- Exact local AABB under translation --

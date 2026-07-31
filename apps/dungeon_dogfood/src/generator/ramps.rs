@@ -45,7 +45,8 @@ pub(super) fn infer_ramp_transition(
     let mut x = anchor_x;
     let mut y = anchor_y;
     for step in 0..3u8 {
-        if x >= width || y >= height
+        if x >= width
+            || y >= height
             || lookup(lower_layer, x, y)? != layout_ramp_tile(direction, step)
         {
             return None;
@@ -169,12 +170,14 @@ pub(super) fn materialize_transition(
             format!("transition={}", transition.id.raw()),
         ));
     }
-    let upper_layer = transition.lower_layer.checked_add(1).ok_or(
-        GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Materialization,
-            operation: "ramp_upper_layer",
-        },
-    )?;
+    let upper_layer =
+        transition
+            .lower_layer
+            .checked_add(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Materialization,
+                operation: "ramp_upper_layer",
+            })?;
     if upper_layer >= dimensions.2 {
         return Err(materialization_error(
             "ramp_upper_layer_oob",
@@ -187,21 +190,29 @@ pub(super) fn materialize_transition(
     for cell in &transition.ramp_run_cells {
         require_in_bounds(*cell, dimensions, "ramp_cell_oob")?;
         if cell.layer != transition.lower_layer {
-            return Err(materialization_error("ramp_cell_wrong_layer", cell.to_string()));
+            return Err(materialization_error(
+                "ramp_cell_wrong_layer",
+                cell.to_string(),
+            ));
         }
-        let tile = buffer.get_tile(cell.layer, cell.x, cell.y).ok_or_else(|| {
-            materialization_error("ramp_cell_missing", cell.to_string())
-        })?;
-        let (tile_direction, step) = ramp_tile_parts(tile).ok_or_else(|| {
-            materialization_error("ramp_tile_missing", cell.to_string())
-        })?;
+        let tile = buffer
+            .get_tile(cell.layer, cell.x, cell.y)
+            .ok_or_else(|| materialization_error("ramp_cell_missing", cell.to_string()))?;
+        let (tile_direction, step) = ramp_tile_parts(tile)
+            .ok_or_else(|| materialization_error("ramp_tile_missing", cell.to_string()))?;
         if step > 2 || direction.is_some_and(|found| found != tile_direction) {
-            return Err(materialization_error("ramp_sequence_malformed", cell.to_string()));
+            return Err(materialization_error(
+                "ramp_sequence_malformed",
+                cell.to_string(),
+            ));
         }
         direction = Some(tile_direction);
         let slot = &mut step_cells[usize::from(step)];
         if slot.replace(*cell).is_some() {
-            return Err(materialization_error("ramp_step_duplicate", cell.to_string()));
+            return Err(materialization_error(
+                "ramp_step_duplicate",
+                cell.to_string(),
+            ));
         }
     }
     if transition.ramp_run_cells.len() != 3 || step_cells.iter().any(Option::is_none) {
@@ -211,7 +222,10 @@ pub(super) fn materialize_transition(
         ));
     }
     let direction = direction.ok_or_else(|| {
-        materialization_error("ramp_direction_missing", format!("transition={}", transition.id.raw()))
+        materialization_error(
+            "ramp_direction_missing",
+            format!("transition={}", transition.id.raw()),
+        )
     })?;
     let r0 = step_cells[0].ok_or_else(|| materialization_error("ramp_r0_missing", "".into()))?;
     let (dx, dy) = direction.delta();
@@ -238,7 +252,10 @@ pub(super) fn materialize_transition(
         "ramp_approach_oob",
     )?;
     if buffer.get_tile(approach.layer, approach.x, approach.y) != Some(crate::layout::Tile::Floor) {
-        return Err(materialization_error("ramp_approach_blocked", approach.to_string()));
+        return Err(materialization_error(
+            "ramp_approach_blocked",
+            approach.to_string(),
+        ));
     }
     let expected_openings: BTreeSet<GridCoord> = [r0, expected_r1, expected_r2]
         .into_iter()
@@ -269,7 +286,10 @@ pub(super) fn materialize_transition(
         "ramp_landing_oob",
     )?;
     if !transition.landing_cells.contains(&landing) {
-        return Err(materialization_error("ramp_landing_unreserved", landing.to_string()));
+        return Err(materialization_error(
+            "ramp_landing_unreserved",
+            landing.to_string(),
+        ));
     }
 
     let mut writes = Vec::new();
@@ -293,13 +313,19 @@ pub(super) fn materialize_transition(
         if cell.layer != upper_layer
             || buffer.get_tile(cell.layer, cell.x, cell.y) != Some(crate::layout::Tile::Floor)
         {
-            return Err(materialization_error("landing_cell_blocked", cell.to_string()));
+            return Err(materialization_error(
+                "landing_cell_blocked",
+                cell.to_string(),
+            ));
         }
     }
     for cell in &transition.headroom_cells {
         require_in_bounds(*cell, dimensions, "headroom_cell_oob")?;
         if buffer.get_tile(cell.layer, cell.x, cell.y) != Some(crate::layout::Tile::Void) {
-            return Err(materialization_error("headroom_cell_blocked", cell.to_string()));
+            return Err(materialization_error(
+                "headroom_cell_blocked",
+                cell.to_string(),
+            ));
         }
     }
 
@@ -372,7 +398,10 @@ fn validate_exact_or_clear(
                 cell, existing, wanted
             ),
         }),
-        None => Err(materialization_error("transition_cell_missing", cell.to_string())),
+        None => Err(materialization_error(
+            "transition_cell_missing",
+            cell.to_string(),
+        )),
     }
 }
 
@@ -462,9 +491,10 @@ pub(super) fn prefab_tile_to_layout(
         super::prefab::Tile::Wall => crate::layout::Tile::Wall,
         super::prefab::Tile::Floor => crate::layout::Tile::Floor,
         super::prefab::Tile::Void => crate::layout::Tile::Void,
-        super::prefab::Tile::Ramp { direction, step } => {
-            layout_ramp_tile(rotate_prefab_direction(direction, rotation_quarter_turns), step)
-        }
+        super::prefab::Tile::Ramp { direction, step } => layout_ramp_tile(
+            rotate_prefab_direction(direction, rotation_quarter_turns),
+            step,
+        ),
     }
 }
 
@@ -494,7 +524,8 @@ mod tests {
     fn fixture(direction: Direction, lower_layer: u16, layers: u16) -> (u16, u16, Vec<Tile>) {
         let width = 9u16;
         let height = 9u16;
-        let mut tiles = vec![Tile::Wall; usize::from(width) * usize::from(height) * usize::from(layers)];
+        let mut tiles =
+            vec![Tile::Wall; usize::from(width) * usize::from(height) * usize::from(layers)];
         let (anchor_x, anchor_y) = (4u16, 4u16);
         let (dx, dy) = direction.delta();
         let set = |tiles: &mut Vec<Tile>, layer: u16, x: u16, y: u16, tile| {
@@ -509,7 +540,13 @@ mod tests {
         let mut x = anchor_x;
         let mut y = anchor_y;
         for step in 0..3 {
-            set(&mut tiles, lower_layer, x, y, layout_ramp_tile(direction, step));
+            set(
+                &mut tiles,
+                lower_layer,
+                x,
+                y,
+                layout_ramp_tile(direction, step),
+            );
             set(&mut tiles, lower_layer + 1, x, y, Tile::Void);
             x = checked_offset(x, dx).expect("ramp x");
             y = checked_offset(y, dy).expect("ramp y");
@@ -534,8 +571,9 @@ mod tests {
                         let index = usize::from(layer) * 81 + usize::from(y) * 9 + usize::from(x);
                         tiles.get(index).copied()
                     };
-                    let inferred = infer_ramp_transition(9, 9, layers, &lookup, lower, x, y, direction)
-                        .expect("complete transition");
+                    let inferred =
+                        infer_ramp_transition(9, 9, layers, &lookup, lower, x, y, direction)
+                            .expect("complete transition");
                     assert_eq!(inferred.opening_cells.len(), 3);
                     assert_eq!(scan_transitions(9, 9, layers, &lookup), vec![inferred]);
                 }

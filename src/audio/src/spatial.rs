@@ -380,10 +380,7 @@ where
             lo.checked_mul(2)
                 .and_then(|v| v.checked_add(bonus))
                 .unwrap_or(usize::MAX),
-            hi.and_then(|h| {
-                h.checked_mul(2)
-                    .and_then(|v| v.checked_add(bonus))
-            }),
+            hi.and_then(|h| h.checked_mul(2).and_then(|v| v.checked_add(bonus))),
         )
     }
 }
@@ -439,7 +436,17 @@ mod tests {
 
         let out: Vec<f32> = collect_samples(spatial, 6);
         // s₀·L, s₀·R, s₁·L, s₁·R, s₂·L, s₂·R
-        assert_eq!(out, vec![1.0 * 1.0, 1.0 * 0.5, 0.5 * 1.0, 0.5 * 0.5, 0.0 * 1.0, 0.0 * 0.5]);
+        assert_eq!(
+            out,
+            vec![
+                1.0 * 1.0,
+                1.0 * 0.5,
+                0.5 * 1.0,
+                0.5 * 0.5,
+                0.0 * 1.0,
+                0.0 * 0.5
+            ]
+        );
     }
 
     #[test]
@@ -601,7 +608,10 @@ mod tests {
     fn attenuation_in_between_is_inverse_square() {
         let att = compute_attenuation(2.0, 1.0, 10.0);
         let expected = (1.0_f32 / 2.0).powi(2); // 0.25
-        assert!((att - expected).abs() < 1e-6, "got {att}, expected {expected}");
+        assert!(
+            (att - expected).abs() < 1e-6,
+            "got {att}, expected {expected}"
+        );
     }
 
     #[test]
@@ -633,8 +643,16 @@ mod tests {
             max_distance: 100.0,
         };
         let g = spatialize(&listener, &source, &att);
-        assert!((g.left - 0.0).abs() < 1e-5, "left should be 0, got {}", g.left);
-        assert!((g.right - 1.0).abs() < 1e-5, "right should be 1, got {}", g.right);
+        assert!(
+            (g.left - 0.0).abs() < 1e-5,
+            "left should be 0, got {}",
+            g.left
+        );
+        assert!(
+            (g.right - 1.0).abs() < 1e-5,
+            "right should be 1, got {}",
+            g.right
+        );
     }
 
     #[test]

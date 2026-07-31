@@ -515,7 +515,10 @@ mod tests {
         let material = renderer::MaterialHandle::new(0, 0);
         let chunks = crate::geometry::build_level_chunks(&level, material, material);
 
-        assert_eq!(usize::try_from(counts.non_empty_chunks).unwrap(), chunks.len());
+        assert_eq!(
+            usize::try_from(counts.non_empty_chunks).unwrap(),
+            chunks.len()
+        );
         assert_eq!(usize::try_from(manifest.chunk_count).unwrap(), chunks.len());
         assert_eq!(
             counts.estimated_vertices,

@@ -29,11 +29,9 @@ use crate::data::gpu_data::{BspFrameValuesUniform, BspModelPushConsts};
 use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle};
 use crate::debug_ui::DebugUiManager;
 use crate::rendergraph::{RenderGraph, RenderGraphContext, RenderGraphExecutionReport};
-#[cfg(feature = "bsp")]
-use crate::scene::render_submission::{
-    BspCommandDiag, BspDrawOutcome,
-};
 use crate::scene::render_submission::RenderSubmission;
+#[cfg(feature = "bsp")]
+use crate::scene::render_submission::{BspCommandDiag, BspDrawOutcome};
 use crate::vulkan::vk_debug::{record_frame_capture, FrameCaptureTargetDesc, PendingFrameCapture};
 use crate::vulkan::vk_frame::{imgui_pass_plan, ImguiPassPlan};
 use crate::vulkan::vk_render::VkRenderCore;
@@ -1711,19 +1709,23 @@ unsafe fn record_geometry_draw_sequence_impl(
                         for item in &submission.bsp_draw_items {
                             if item.model_index == 0 {
                                 use crate::scene::render_submission::BspRecordedOutcome;
-                                collector.recorded_outcomes.push(BspRecordedOutcome::Recorded {
-                                    batch_index: item.batch_index,
-                                    digest: item.canonical_digest,
-                                });
+                                collector
+                                    .recorded_outcomes
+                                    .push(BspRecordedOutcome::Recorded {
+                                        batch_index: item.batch_index,
+                                        digest: item.canonical_digest,
+                                    });
                             }
                         }
                     }
                     Err(e) => {
                         use crate::api::bsp::BspEvidenceFailure;
-                        collector.failures.push(BspEvidenceFailure::RecordingFailure {
-                            batch_index: 0,
-                            reason: e.clone(),
-                        });
+                        collector
+                            .failures
+                            .push(BspEvidenceFailure::RecordingFailure {
+                                batch_index: 0,
+                                reason: e.clone(),
+                            });
                     }
                 }
             }
@@ -1732,7 +1734,8 @@ unsafe fn record_geometry_draw_sequence_impl(
     }
 
     #[cfg(feature = "bsp")]
-    let mut transparent_draws = collect_transparent_draws(&draw_lists, data_cache, &submission.bsp_draw_items);
+    let mut transparent_draws =
+        collect_transparent_draws(&draw_lists, data_cache, &submission.bsp_draw_items);
     #[cfg(not(feature = "bsp"))]
     let mut transparent_draws = collect_transparent_draws(&draw_lists);
     sort_transparent_draws(&mut transparent_draws, scene_data.cam_pos);
@@ -1755,10 +1758,12 @@ unsafe fn record_geometry_draw_sequence_impl(
             if let Ok(mut collector_opt) = submission.bsp_evidence_collector.try_borrow_mut() {
                 if let Some(ref mut collector) = *collector_opt {
                     use crate::api::bsp::BspEvidenceFailure;
-                    collector.failures.push(BspEvidenceFailure::RecordingFailure {
-                        batch_index: 0,
-                        reason: e.clone(),
-                    });
+                    collector
+                        .failures
+                        .push(BspEvidenceFailure::RecordingFailure {
+                            batch_index: 0,
+                            reason: e.clone(),
+                        });
                 }
             }
         }
@@ -1939,29 +1944,55 @@ unsafe fn draw_bsp_item_impl(
         .lock()
         .map_err(|_| "bsp_surface_cache lock poisoned".to_string())?;
 
-    let bsp_mat = bsp_surface_cache
-        .get(item.bsp_material_id)
-        .map_err(|_| format!("BSP material handle {:?} is stale or missing (batch {})", item.bsp_material_id, item.batch_index))?;
+    let bsp_mat = bsp_surface_cache.get(item.bsp_material_id).map_err(|_| {
+        format!(
+            "BSP material handle {:?} is stale or missing (batch {})",
+            item.bsp_material_id, item.batch_index
+        )
+    })?;
 
     mesh_cache
         .mark_referenced(item.mesh_id, next_submit_serial)
-        .map_err(|_| format!("failed to mark BSP mesh {:?} referenced (batch {})", item.mesh_id, item.batch_index))?;
+        .map_err(|_| {
+            format!(
+                "failed to mark BSP mesh {:?} referenced (batch {})",
+                item.mesh_id, item.batch_index
+            )
+        })?;
 
-    let mesh = mesh_cache
-        .get_loaded_id(item.mesh_id)
-        .map_err(|_| format!("BSP mesh {:?} is stale or missing (batch {})", item.mesh_id, item.batch_index))?;
+    let mesh = mesh_cache.get_loaded_id(item.mesh_id).map_err(|_| {
+        format!(
+            "BSP mesh {:?} is stale or missing (batch {})",
+            item.mesh_id, item.batch_index
+        )
+    })?;
 
     texture_cache
         .mark_texture_referenced(bsp_mat.albedo_tex, next_submit_serial)
-        .map_err(|_| format!("failed to mark BSP albedo texture referenced (batch {})", item.batch_index))?;
+        .map_err(|_| {
+            format!(
+                "failed to mark BSP albedo texture referenced (batch {})",
+                item.batch_index
+            )
+        })?;
     if let Some(fullbright_tex) = bsp_mat.fullbright_tex {
         texture_cache
             .mark_texture_referenced(fullbright_tex, next_submit_serial)
-            .map_err(|_| format!("failed to mark BSP fullbright texture referenced (batch {})", item.batch_index))?;
+            .map_err(|_| {
+                format!(
+                    "failed to mark BSP fullbright texture referenced (batch {})",
+                    item.batch_index
+                )
+            })?;
     }
     texture_cache
         .mark_texture_referenced(bsp_mat.lightmap_tex, next_submit_serial)
-        .map_err(|_| format!("failed to mark BSP lightmap texture referenced (batch {})", item.batch_index))?;
+        .map_err(|_| {
+            format!(
+                "failed to mark BSP lightmap texture referenced (batch {})",
+                item.batch_index
+            )
+        })?;
 
     let pipeline = *vulkan_cache.pipelines.get_pipeline(bsp_mat.pipeline);
     let arena_id = bsp_surface_cache.active_arena_id();
@@ -2143,7 +2174,9 @@ unsafe fn record_bsp_opaque_draw_sequence_impl(
         if bsp_surface_cache.has_frame_values(id) {
             let desc = bsp_surface_cache.frame_values_descriptor_for_slot(id, frame_slot_index);
             if desc == vk::DescriptorSet::null() {
-                return Err(format!("BSP frame-values descriptor is null for slot {frame_slot_index}"));
+                return Err(format!(
+                    "BSP frame-values descriptor is null for slot {frame_slot_index}"
+                ));
             }
             desc
         } else {
@@ -2331,15 +2364,9 @@ unsafe fn record_bsp_opaque_draw_sequence_impl(
             curr_material_descriptor = Some(draw.material_descriptor);
         }
 
-        device.cmd_bind_index_buffer(
-            cmd_buffer,
-            draw.index_buffer,
-            0,
-            vk::IndexType::UINT32,
-        );
+        device.cmd_bind_index_buffer(cmd_buffer, draw.index_buffer, 0, vk::IndexType::UINT32);
 
-        let push_consts =
-            BspModelPushConsts::new(draw.transform, draw.vertex_buffer_addr);
+        let push_consts = BspModelPushConsts::new(draw.transform, draw.vertex_buffer_addr);
 
         device.cmd_push_constants(
             cmd_buffer,
@@ -2349,14 +2376,7 @@ unsafe fn record_bsp_opaque_draw_sequence_impl(
             push_consts.as_byte_slice(),
         );
 
-        device.cmd_draw_indexed(
-            cmd_buffer,
-            draw.index_count,
-            1,
-            draw.first_index,
-            0,
-            0,
-        );
+        device.cmd_draw_indexed(cmd_buffer, draw.index_count, 1, draw.first_index, 0, 0);
 
         // Record diagnostic.
         if command_diags.len() < BSP_COMMAND_DIAG_MAX {
@@ -2375,7 +2395,10 @@ unsafe fn record_bsp_opaque_draw_sequence_impl(
     }
 
     if resolved.len() >= BSP_COMMAND_DIAG_MAX {
-        warn!("BSP command diagnostic collector truncated at {} entries", BSP_COMMAND_DIAG_MAX);
+        warn!(
+            "BSP command diagnostic collector truncated at {} entries",
+            BSP_COMMAND_DIAG_MAX
+        );
     }
 
     Ok(())
@@ -2402,7 +2425,6 @@ fn push_diag_failed(
         });
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // draw_imgui
@@ -2783,13 +2805,12 @@ impl DebugLinesRecording<'_> {
             .allocator
             .lock()
             .map_err(|e| format!("allocator lock: {e}"))?;
-        self.debug_lines
-            .upload_lines(
-                self.device,
-                &allocator,
-                self.frame.index,
-                &self.submission.debug_lines,
-            )?;
+        self.debug_lines.upload_lines(
+            self.device,
+            &allocator,
+            self.frame.index,
+            &self.submission.debug_lines,
+        )?;
         drop(allocator);
 
         // Record draw.
@@ -2827,13 +2848,12 @@ impl SpritesRecording<'_> {
             .allocator
             .lock()
             .map_err(|e| format!("allocator lock: {e}"))?;
-        self.sprites
-            .upload_sprites(
-                self.device,
-                &allocator,
-                self.frame.index,
-                &self.submission.sprites,
-            )?;
+        self.sprites.upload_sprites(
+            self.device,
+            &allocator,
+            self.frame.index,
+            &self.submission.sprites,
+        )?;
         drop(allocator);
 
         // Record draw.

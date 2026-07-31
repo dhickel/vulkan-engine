@@ -28,12 +28,15 @@ use engine::input::{
 };
 use engine::time::{Time, TimeConfig};
 use generator::{generate, GeneratorConfig, GeneratorError};
+use glam::{Quat, Vec2, Vec3};
 use layout::{load_level_file, tile_to_world, ParsedLevel};
 use mesh_collider_bridge::MeshColliderBridge;
 use physics::BodyKind;
 use physics_bridge::PhysicsBridge;
-use glam::{Quat, Vec2, Vec3};
-use player::{CameraIntentGuard, PlayerState, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, PLAYER_EYE_HEIGHT};
+use player::{
+    CameraIntentGuard, PlayerState, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS,
+    PLAYER_EYE_HEIGHT,
+};
 use renderer::api::config::{CompressionConfig, TextureCompressionMode};
 use renderer::api::FrameSerial;
 use renderer::prelude::{
@@ -578,8 +581,7 @@ fn render_frame(
     viewport_height: u32,
     headless: bool,
 ) -> Result<renderer::FrameRenderOutcome, RendererError> {
-    let begin_report =
-        engine::frame::begin_app_frame_with_time(input, action_events, events, time);
+    let begin_report = engine::frame::begin_app_frame_with_time(input, action_events, events, time);
     log_dispatch_failures(begin_report.input_dispatch, "dogfood input");
     log_dispatch_failures(begin_report.frame_started, "dogfood lifecycle");
 
@@ -611,17 +613,12 @@ fn render_frame(
     let (move_x, move_z) = movement_axis.evaluate(input.snapshot());
     let mouse_delta = input.snapshot().mouse_delta();
     let up = input.snapshot().action_value(&ActionId::new("move.up"));
-    let down = input
-        .snapshot()
-        .action_value(&ActionId::new("move.down"));
+    let down = input.snapshot().action_value(&ActionId::new("move.down"));
 
     // Apply camera rotation from captured pointer delta (once).
     let delta_yaw = -mouse_delta.0 as f32 * fps_sensitivity as f32;
     *camera_yaw += delta_yaw;
-    camera.update_rotation(
-        delta_yaw,
-        -mouse_delta.1 as f32 * fps_sensitivity as f32,
-    );
+    camera.update_rotation(delta_yaw, -mouse_delta.1 as f32 * fps_sensitivity as f32);
 
     // Build normalized camera-local movement direction (FPSController convention:
     // x = right, y = up, z = forward-in-neg-z).
@@ -702,8 +699,7 @@ fn render_frame(
                 let desired = player.desired_translation.to_array();
                 match physics_bridge.move_character(&mut bridge.world, desired, FIXED_DT) {
                     Ok(_actual) => {
-                        if let Some(eye_pos) =
-                            physics_bridge.character_eye_position(&bridge.world)
+                        if let Some(eye_pos) = physics_bridge.character_eye_position(&bridge.world)
                         {
                             player.position = glam::Vec3::from_array(eye_pos);
                         }
@@ -786,10 +782,7 @@ fn render_frame(
     Ok(outcome)
 }
 
-fn log_manual_capture_status(
-    renderer: &renderer::Renderer,
-    reported_paths: &mut HashSet<PathBuf>,
-) {
+fn log_manual_capture_status(renderer: &renderer::Renderer, reported_paths: &mut HashSet<PathBuf>) {
     match renderer.last_frame_capture_status() {
         Some(FrameCaptureStatus::Succeeded {
             output_path,
@@ -855,25 +848,23 @@ fn seed_collider_bridge(
 
     for assignment in &level_scene.collider_policies {
         match assets.mesh_geometry(assignment.mesh) {
-            Ok(dto) => {
-                match bridge.register_policy(&dto, assignment.policy) {
-                    Ok(Some(handle)) => log::info!(
-                        "Collider recipe registered: mesh_slot={} policy={:?} recipe_slot={}",
-                        assignment.mesh.slot,
-                        assignment.policy,
-                        handle.slot,
-                    ),
-                    Ok(None) => log::info!(
-                        "Collider policy recorded without recipe: mesh_slot={} policy=None",
-                        assignment.mesh.slot,
-                    ),
-                    Err(err) => log::warn!(
-                        "Failed to register collider recipe for mesh slot {}: {}",
-                        assignment.mesh.slot,
-                        err,
-                    ),
-                }
-            }
+            Ok(dto) => match bridge.register_policy(&dto, assignment.policy) {
+                Ok(Some(handle)) => log::info!(
+                    "Collider recipe registered: mesh_slot={} policy={:?} recipe_slot={}",
+                    assignment.mesh.slot,
+                    assignment.policy,
+                    handle.slot,
+                ),
+                Ok(None) => log::info!(
+                    "Collider policy recorded without recipe: mesh_slot={} policy=None",
+                    assignment.mesh.slot,
+                ),
+                Err(err) => log::warn!(
+                    "Failed to register collider recipe for mesh slot {}: {}",
+                    assignment.mesh.slot,
+                    err,
+                ),
+            },
             Err(err) => {
                 log::warn!(
                     "Skipping collider recipe for mesh slot {} (no DTO): {}",
@@ -980,8 +971,9 @@ fn resolve_level_selector(selector: impl AsRef<str>) -> Result<LevelSelection, A
     if selector == GENERATED_SELECTOR {
         let seed = match parse_seed_arg() {
             Some(seed) => seed,
-            None => read_generator_env_u64(GENERATOR_SEED_ENV, "invalid_seed_override")?
-                .unwrap_or(0),
+            None => {
+                read_generator_env_u64(GENERATOR_SEED_ENV, "invalid_seed_override")?.unwrap_or(0)
+            }
         };
         return Ok(LevelSelection {
             label: GENERATED_SELECTOR.to_string(),
@@ -1015,20 +1007,19 @@ fn load_selected_level(selection: &LevelSelection) -> Result<LoadedLevel, AppErr
                 seed: *seed,
                 source,
             })?;
-            let catalog = generator::prefab::PrefabCatalog::load(
-                &std::path::PathBuf::from("apps/dungeon_dogfood/assets/prefabs"),
-            )
+            let catalog = generator::prefab::PrefabCatalog::load(&std::path::PathBuf::from(
+                "apps/dungeon_dogfood/assets/prefabs",
+            ))
             .map_err(|source| AppError::GeneratedLevel {
                 seed: *seed,
                 source,
             })?;
 
-            let result = generate(config, &catalog, *seed).map_err(|source| {
-                AppError::GeneratedLevel {
+            let result =
+                generate(config, &catalog, *seed).map_err(|source| AppError::GeneratedLevel {
                     seed: *seed,
                     source,
-                }
-            })?;
+                })?;
 
             let source_description = format!(
                 "generated sprawl (seed={} attempt={} config_hash={} lights={} models={})",
@@ -1104,10 +1095,7 @@ fn parse_seed_arg() -> Option<u64> {
     None
 }
 
-fn read_generator_env_u64(
-    name: &str,
-    reason: &'static str,
-) -> Result<Option<u64>, AppError> {
+fn read_generator_env_u64(name: &str, reason: &'static str) -> Result<Option<u64>, AppError> {
     generator_env_u64(name, reason).map_err(|source| AppError::GeneratedLevel { seed: 0, source })
 }
 
@@ -1141,7 +1129,10 @@ fn build_generator_config() -> Result<GeneratorConfig, GeneratorError> {
 fn print_generated_level_help() {
     eprintln!();
     eprintln!("Generated level selection:");
-    eprintln!("  --level {}  (or no argument — default)", GENERATED_SELECTOR);
+    eprintln!(
+        "  --level {}  (or no argument — default)",
+        GENERATED_SELECTOR
+    );
     eprintln!("  --seed <N>            Override generation seed");
     eprintln!();
     eprintln!("Generator environment overrides (generated only):");
@@ -1270,10 +1261,9 @@ fn run_headless(
 
         // Deterministic proof independent of wall-clock frame pacing.
         for _ in 0..180 {
-            bridge
-                .world
-                .step(FIXED_DT)
-                .map_err(|error| AppError::RendererInit(RendererError::InvalidState(error.to_string())))?;
+            bridge.world.step(FIXED_DT).map_err(|error| {
+                AppError::RendererInit(RendererError::InvalidState(error.to_string()))
+            })?;
         }
         let contacts = bridge.world.last_contact_records();
         log::info!(
@@ -1288,10 +1278,10 @@ fn run_headless(
         }
         let writes = bridge
             .writeback_dynamic_transforms(&mut scene)
-            .map_err(|error| AppError::RendererInit(RendererError::InvalidState(error.to_string())))?;
-        log::info!(
-            "[Collider Validation] Transform writeback proof: updated_nodes={writes}"
-        );
+            .map_err(|error| {
+                AppError::RendererInit(RendererError::InvalidState(error.to_string()))
+            })?;
+        log::info!("[Collider Validation] Transform writeback proof: updated_nodes={writes}");
         if writes == 0 {
             return Err(AppError::RendererInit(RendererError::InvalidState(
                 "collider validation produced no transform writeback".to_string(),

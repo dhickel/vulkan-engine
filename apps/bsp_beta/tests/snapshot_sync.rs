@@ -7,9 +7,7 @@ use bsp_beta::physics_bridge::PhysicsBridge;
 use bsp_beta::runtime_bridge::RuntimeBridge;
 use bsp_beta::scene_sync::{sync_snapshot_to_physics, sync_snapshot_to_scene, EntityNodeMap};
 use bsp_beta::snapshot::{InlineModelInfo, ModelMappings, SnapshotProducer};
-use bsp_runtime::{
-    BspSimulationSnapshot, SnapshotBuilder, SnapshotEntityPose,
-};
+use bsp_runtime::{BspSimulationSnapshot, SnapshotBuilder, SnapshotEntityPose};
 use glam::{Mat4, Vec3};
 
 fn make_test_snapshot() -> BspSimulationSnapshot {
@@ -69,8 +67,9 @@ fn snapshot_producer_advances_behavior() {
 
     // Register a moving door in runtime bridge
     let mut runtime = RuntimeBridge::new();
-    runtime.adapter.register_entities(vec![
-        bsp_runtime::behavior::BehaviorEntityInfo {
+    runtime
+        .adapter
+        .register_entities(vec![bsp_runtime::behavior::BehaviorEntityInfo {
             entity_index: 10,
             classname: "func_door".into(),
             targetname: Some("door_a".into()),
@@ -83,9 +82,10 @@ fn snapshot_producer_advances_behavior() {
             lip: Some(0.0),
             height: None,
             light_style: None,
-        },
-    ]);
-    runtime.adapter.activate_by_index(10, bsp_runtime::behavior::Activation::On);
+        }]);
+    runtime
+        .adapter
+        .activate_by_index(10, bsp_runtime::behavior::Activation::On);
 
     let inline_models = vec![InlineModelInfo {
         entity_index: 10,
@@ -145,8 +145,9 @@ fn light_styles_flow_through_snapshot() {
     let mut runtime = RuntimeBridge::new();
 
     // Register a light entity with style "5"
-    runtime.adapter.register_entities(vec![
-        bsp_runtime::behavior::BehaviorEntityInfo {
+    runtime
+        .adapter
+        .register_entities(vec![bsp_runtime::behavior::BehaviorEntityInfo {
             entity_index: 100,
             classname: "light".into(),
             targetname: None,
@@ -159,8 +160,7 @@ fn light_styles_flow_through_snapshot() {
             lip: None,
             height: None,
             light_style: Some("5".into()),
-        },
-    ]);
+        }]);
 
     // Set the style intensity
     runtime.adapter.set_light_style_intensity("5", 0.75);
@@ -177,8 +177,7 @@ fn compute_world_bounds_identity_is_local() {
     let local_maxs = [1.0_f32, 1.0, 1.0];
     let transform = Mat4::IDENTITY;
 
-    let (wmin, wmax) =
-        bsp_beta::snapshot::compute_world_aabb(&local_mins, &local_maxs, &transform);
+    let (wmin, wmax) = bsp_beta::snapshot::compute_world_aabb(&local_mins, &local_maxs, &transform);
     assert!((wmin - Vec3::new(-1.0, -1.0, -1.0)).length() < 0.001);
     assert!((wmax - Vec3::new(1.0, 1.0, 1.0)).length() < 0.001);
 }
@@ -189,8 +188,7 @@ fn compute_world_bounds_translated() {
     let local_maxs = [1.0_f32, 1.0, 1.0];
     let transform = Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0));
 
-    let (wmin, wmax) =
-        bsp_beta::snapshot::compute_world_aabb(&local_mins, &local_maxs, &transform);
+    let (wmin, wmax) = bsp_beta::snapshot::compute_world_aabb(&local_mins, &local_maxs, &transform);
     assert!((wmin - Vec3::new(9.0, -1.0, -1.0)).length() < 0.001);
     assert!((wmax - Vec3::new(11.0, 1.0, 1.0)).length() < 0.001);
 }
@@ -202,8 +200,7 @@ fn compute_world_bounds_rotated() {
     let rot = glam::Quat::from_rotation_y(90.0_f32.to_radians());
     let transform = Mat4::from_rotation_translation(rot, Vec3::ZERO);
 
-    let (wmin, wmax) =
-        bsp_beta::snapshot::compute_world_aabb(&local_mins, &local_maxs, &transform);
+    let (wmin, wmax) = bsp_beta::snapshot::compute_world_aabb(&local_mins, &local_maxs, &transform);
 
     // After 90° Y rotation, the X-extent should be about the same as Z-extent
     let extent = wmax - wmin;

@@ -182,13 +182,9 @@ fn restore_fails_on_source_hash_mismatch_with_bridges() {
     coordinator.unload(&mut scene).unwrap();
 
     // Restore should fail
-    let result = coordinator.restore_from_persistence(
-        &envelope,
-        &bsp_bytes,
-        None,
-        &mut scene,
-        |_| empty_mount(),
-    );
+    let result =
+        coordinator
+            .restore_from_persistence(&envelope, &bsp_bytes, None, &mut scene, |_| empty_mount());
     assert!(result.is_err());
     // Active state should be unchanged
     assert!(!coordinator.is_active());
@@ -220,13 +216,9 @@ fn restore_cancelled_proves_active_unchanged() {
     coordinator.unload(&mut scene).unwrap();
 
     // Failed restore — active state should still be empty
-    let result = coordinator.restore_from_persistence(
-        &envelope,
-        &bsp_bytes,
-        None,
-        &mut scene,
-        |_| empty_mount(),
-    );
+    let result =
+        coordinator
+            .restore_from_persistence(&envelope, &bsp_bytes, None, &mut scene, |_| empty_mount());
     assert!(result.is_err());
     assert!(!coordinator.is_active());
 
@@ -262,13 +254,9 @@ fn restore_validates_mutable_behavior_before_commit() {
     coordinator.unload(&mut scene).unwrap();
 
     // Restore should fail (invalid mutable behavior)
-    let result = coordinator.restore_from_persistence(
-        &envelope,
-        &bsp_bytes,
-        None,
-        &mut scene,
-        |_| empty_mount(),
-    );
+    let result =
+        coordinator
+            .restore_from_persistence(&envelope, &bsp_bytes, None, &mut scene, |_| empty_mount());
     assert!(result.is_err());
 }
 
@@ -299,7 +287,10 @@ fn schema_version_round_trip_is_stable() {
         }
 
         let link = scene.bsp_source_link().unwrap();
-        assert_eq!(link["schema_version"], 1, "schema version stable at cycle {i}");
+        assert_eq!(
+            link["schema_version"], 1,
+            "schema version stable at cycle {i}"
+        );
         assert!(!link["bsp_source"]["asset_id"].as_str().unwrap().is_empty());
     }
 }

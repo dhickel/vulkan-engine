@@ -28,9 +28,8 @@ pub mod prelude {
         FixedStepConfig, FixedStepUpdate, FrameClock, FrameInfo,
     };
     pub use crate::input::{
-        queue_routed_input_event, route_platform_input_to_app, ActionId, Axis2D,
-        AxisContributor, CompoundAxis, InputActionEventEmitter, InputEvent, InputSnapshot,
-        InputSystem,
+        queue_routed_input_event, route_platform_input_to_app, ActionId, Axis2D, AxisContributor,
+        CompoundAxis, InputActionEventEmitter, InputEvent, InputSnapshot, InputSystem,
     };
     pub use crate::object::{
         object_kind, object_kind_label, ObjectId, ObjectKind, ObjectQueryFilter, RayHit,

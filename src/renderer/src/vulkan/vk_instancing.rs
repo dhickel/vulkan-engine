@@ -169,7 +169,10 @@ pub fn build_instanced_groups(inputs: &[InstanceInput]) -> InstancedGroupBuilder
     for (index, input) in inputs.iter().enumerate() {
         if input.is_skinned_or_deformed
             || input.is_alpha_mask_or_blend
-            || !matches!(input.material.alpha_mode, crate::data::gpu_data::AlphaMode::Opaque)
+            || !matches!(
+                input.material.alpha_mode,
+                crate::data::gpu_data::AlphaMode::Opaque
+            )
         {
             legacy_indices.push(index);
             continue;
@@ -249,7 +252,9 @@ impl FrameInstanceBuffer {
     }
 
     pub fn buffer_handle(&self) -> vk::Buffer {
-        self.vk_buffer.as_ref().map_or(vk::Buffer::null(), |b| b.buffer)
+        self.vk_buffer
+            .as_ref()
+            .map_or(vk::Buffer::null(), |b| b.buffer)
     }
 
     pub fn mapped_ptr(&self) -> *mut std::ffi::c_void {
@@ -271,7 +276,9 @@ pub struct InstanceBufferRing {
 impl InstanceBufferRing {
     pub fn new(frame_count: usize) -> Self {
         Self {
-            buffers: (0..frame_count).map(|_| FrameInstanceBuffer::new()).collect(),
+            buffers: (0..frame_count)
+                .map(|_| FrameInstanceBuffer::new())
+                .collect(),
         }
     }
 
@@ -387,9 +394,7 @@ mod tests {
                 pipeline,
                 alpha_mode: alpha,
                 image_descriptor: vk::DescriptorSet::null(),
-                meta_alloc: unsafe {
-                    std::mem::zeroed()
-                },
+                meta_alloc: unsafe { std::mem::zeroed() },
                 requires_uv1: false,
             },
             index_buffer: vk::Buffer::null(),
@@ -406,9 +411,27 @@ mod tests {
     #[test]
     fn identical_inputs_group_together() {
         let inputs = vec![
-            mk_input(1, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
-            mk_input(1, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
-            mk_input(1, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
+            mk_input(
+                1,
+                0,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Opaque,
+                false,
+            ),
+            mk_input(
+                1,
+                0,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Opaque,
+                false,
+            ),
+            mk_input(
+                1,
+                0,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Opaque,
+                false,
+            ),
         ];
         let result = build_instanced_groups(&inputs);
         assert_eq!(result.groups.len(), 1);
@@ -419,8 +442,20 @@ mod tests {
     #[test]
     fn different_mesh_generation_splits_groups() {
         let inputs = vec![
-            mk_input(1, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
-            mk_input(1, 1, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
+            mk_input(
+                1,
+                0,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Opaque,
+                false,
+            ),
+            mk_input(
+                1,
+                1,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Opaque,
+                false,
+            ),
         ];
         let result = build_instanced_groups(&inputs);
         // Different generations = different keys = both legacy (singletons).
@@ -431,8 +466,20 @@ mod tests {
     #[test]
     fn skinned_draws_go_to_legacy() {
         let inputs = vec![
-            mk_input(1, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, true),
-            mk_input(1, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, true),
+            mk_input(
+                1,
+                0,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Opaque,
+                true,
+            ),
+            mk_input(
+                1,
+                0,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Opaque,
+                true,
+            ),
         ];
         let result = build_instanced_groups(&inputs);
         assert!(result.groups.is_empty());
@@ -442,8 +489,20 @@ mod tests {
     #[test]
     fn alpha_mask_draws_go_to_legacy() {
         let inputs = vec![
-            mk_input(1, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Mask, false),
-            mk_input(1, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Mask, false),
+            mk_input(
+                1,
+                0,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Mask,
+                false,
+            ),
+            mk_input(
+                1,
+                0,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Mask,
+                false,
+            ),
         ];
         let result = build_instanced_groups(&inputs);
         assert!(result.groups.is_empty());
@@ -453,8 +512,20 @@ mod tests {
     #[test]
     fn blend_draws_go_to_legacy() {
         let inputs = vec![
-            mk_input(1, 0, VkPipelineType::PbrMetRoughAlpha, AlphaMode::Blend, false),
-            mk_input(1, 0, VkPipelineType::PbrMetRoughAlpha, AlphaMode::Blend, false),
+            mk_input(
+                1,
+                0,
+                VkPipelineType::PbrMetRoughAlpha,
+                AlphaMode::Blend,
+                false,
+            ),
+            mk_input(
+                1,
+                0,
+                VkPipelineType::PbrMetRoughAlpha,
+                AlphaMode::Blend,
+                false,
+            ),
         ];
         let result = build_instanced_groups(&inputs);
         assert!(result.groups.is_empty());
@@ -463,9 +534,13 @@ mod tests {
 
     #[test]
     fn singleton_opaque_goes_to_legacy() {
-        let inputs = vec![
-            mk_input(1, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
-        ];
+        let inputs = vec![mk_input(
+            1,
+            0,
+            VkPipelineType::PbrMetRoughOpaque,
+            AlphaMode::Opaque,
+            false,
+        )];
         let result = build_instanced_groups(&inputs);
         assert!(result.groups.is_empty());
         assert_eq!(result.legacy.len(), 1);
@@ -474,10 +549,34 @@ mod tests {
     #[test]
     fn mixed_eligible_and_ineligible() {
         let inputs = vec![
-            mk_input(1, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
-            mk_input(1, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
-            mk_input(2, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, true),
-            mk_input(3, 0, VkPipelineType::PbrMetRoughAlpha, AlphaMode::Blend, false),
+            mk_input(
+                1,
+                0,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Opaque,
+                false,
+            ),
+            mk_input(
+                1,
+                0,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Opaque,
+                false,
+            ),
+            mk_input(
+                2,
+                0,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Opaque,
+                true,
+            ),
+            mk_input(
+                3,
+                0,
+                VkPipelineType::PbrMetRoughAlpha,
+                AlphaMode::Blend,
+                false,
+            ),
         ];
         let result = build_instanced_groups(&inputs);
         assert_eq!(result.groups.len(), 1);
@@ -488,20 +587,64 @@ mod tests {
     #[test]
     fn deterministic_group_and_legacy_order() {
         let mut inputs = vec![
-            mk_input(9, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, true),
-            mk_input(3, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
-            mk_input(1, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
-            mk_input(3, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
-            mk_input(1, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
-            mk_input(8, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
+            mk_input(
+                9,
+                0,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Opaque,
+                true,
+            ),
+            mk_input(
+                3,
+                0,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Opaque,
+                false,
+            ),
+            mk_input(
+                1,
+                0,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Opaque,
+                false,
+            ),
+            mk_input(
+                3,
+                0,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Opaque,
+                false,
+            ),
+            mk_input(
+                1,
+                0,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Opaque,
+                false,
+            ),
+            mk_input(
+                8,
+                0,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Opaque,
+                false,
+            ),
         ];
         let result = build_instanced_groups(&inputs);
         assert_eq!(
-            result.groups.iter().map(|group| group.key.mesh_slot).collect::<Vec<_>>(),
+            result
+                .groups
+                .iter()
+                .map(|group| group.key.mesh_slot)
+                .collect::<Vec<_>>(),
             vec![1, 3]
         );
         assert_eq!(
-            result.legacy.iter().map(|input| input.mesh_handle.slot).collect::<Vec<_>>(),
+            result
+                .legacy
+                .iter()
+                .map(|input| input.mesh_handle.slot)
+                .collect::<Vec<_>>(),
             vec![9, 8],
             "legacy draws must preserve source order"
         );
@@ -509,7 +652,11 @@ mod tests {
         inputs.reverse();
         let reversed = build_instanced_groups(&inputs);
         assert_eq!(
-            reversed.groups.iter().map(|group| group.key.mesh_slot).collect::<Vec<_>>(),
+            reversed
+                .groups
+                .iter()
+                .map(|group| group.key.mesh_slot)
+                .collect::<Vec<_>>(),
             vec![1, 3],
             "group ordering must depend on the key, not input order"
         );
@@ -517,7 +664,13 @@ mod tests {
 
     #[test]
     fn different_material_metadata_splits_groups() {
-        let mut a = mk_input(1, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false);
+        let mut a = mk_input(
+            1,
+            0,
+            VkPipelineType::PbrMetRoughOpaque,
+            AlphaMode::Opaque,
+            false,
+        );
         let mut b = a.clone();
         a.material.meta_alloc.alloc_address = 100;
         b.material.meta_alloc.alloc_address = 200;
@@ -529,8 +682,20 @@ mod tests {
     #[test]
     fn unlit_opaque_groups_separate_from_pbr() {
         let inputs = vec![
-            mk_input(1, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
-            mk_input(1, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
+            mk_input(
+                1,
+                0,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Opaque,
+                false,
+            ),
+            mk_input(
+                1,
+                0,
+                VkPipelineType::PbrMetRoughOpaque,
+                AlphaMode::Opaque,
+                false,
+            ),
             mk_input(1, 0, VkPipelineType::UnlitOpaque, AlphaMode::Opaque, false),
             mk_input(1, 0, VkPipelineType::UnlitOpaque, AlphaMode::Opaque, false),
         ];

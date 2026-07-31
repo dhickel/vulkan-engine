@@ -9,25 +9,18 @@
 //! - duplicate object_id rejected at validation
 //! - component API: attach, enumerate, hydrate on nodes
 
-use renderer::{
-    MeshHandle, Scene, SceneError, SceneNodeId,
-};
 use renderer::api::SceneFragment;
-use renderer::object::{
-    ComponentEnvelope, ComponentInstanceId, ComponentKey,
-};
-use renderer::api::{
-    validate_scene_file, validate_scene_str,
-};
+use renderer::api::{validate_scene_file, validate_scene_str};
+use renderer::object::{ComponentEnvelope, ComponentInstanceId, ComponentKey};
+use renderer::{MeshHandle, Scene, SceneError, SceneNodeId};
 use serde_json::json;
 
 // ── tests ───────────────────────────────────────────────────────────────
 
 #[test]
 fn v2_object_components_fixture_passes_validation() {
-    let result = validate_scene_file(
-        "tests/fixtures/scenes/v2-object-components.engine.scene.json",
-    );
+    let result =
+        validate_scene_file("tests/fixtures/scenes/v2-object-components.engine.scene.json");
     assert!(result.is_ok(), "fixture should pass validation: {result:?}");
 }
 
@@ -44,8 +37,8 @@ fn scene_round_trip_preserves_component_data() {
     )
     .unwrap();
     let key = ComponentKey::new("test.xp").unwrap();
-    let envelope = ComponentEnvelope::new(iid.clone(), key.clone(), 1, json!({"level": 42}))
-        .unwrap();
+    let envelope =
+        ComponentEnvelope::new(iid.clone(), key.clone(), 1, json!({"level": 42})).unwrap();
     scene.attach_component(root, envelope).unwrap();
 
     // Verify it's there.
@@ -79,7 +72,10 @@ fn save_to_string_includes_object_id_and_components_fields() {
     let json = scene.save_to_string().unwrap();
     assert!(json.contains("\"format_version\": 2"));
     assert!(json.contains("\"object_id\""));
-    assert!(json.contains("\"components\""), "JSON should contain components array");
+    assert!(
+        json.contains("\"components\""),
+        "JSON should contain components array"
+    );
     assert!(json.contains("\"test.tags\""));
 }
 
@@ -92,7 +88,9 @@ fn component_free_objects_save_with_identity_and_without_empty_components() {
 
     let saved: serde_json::Value = serde_json::from_str(&scene.save_to_string().unwrap()).unwrap();
     let node = &saved["nodes"][0];
-    assert!(node["object_id"].as_str().is_some_and(|id| id.starts_with("object.")));
+    assert!(node["object_id"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("object.")));
     assert!(node.get("components").is_none());
 }
 
@@ -140,10 +138,7 @@ fn attachment_limit_enforced() {
     let root = scene.create_node_default(None).unwrap();
     // Attach 256 components (the max).
     for i in 0u64..256 {
-        let iid = ComponentInstanceId::new(
-            format!("component.{i:064x}"),
-        )
-        .unwrap();
+        let iid = ComponentInstanceId::new(format!("component.{i:064x}")).unwrap();
         let key = ComponentKey::new("test.foo").unwrap();
         let env = ComponentEnvelope::new(iid, key, 1, json!({"i": i})).unwrap();
         scene.attach_component(root, env).unwrap();
@@ -155,8 +150,8 @@ fn attachment_limit_enforced() {
     )
     .unwrap();
     let overflow_key = ComponentKey::new("test.overflow").unwrap();
-    let overflow_env = ComponentEnvelope::new(overflow_iid, overflow_key, 1, json!({"x": 1}))
-        .unwrap();
+    let overflow_env =
+        ComponentEnvelope::new(overflow_iid, overflow_key, 1, json!({"x": 1})).unwrap();
     let result = scene.attach_component(root, overflow_env);
     assert!(result.is_err(), "should reject 257th component: {result:?}");
 }
@@ -228,7 +223,10 @@ fn duplicate_object_id_rejected_at_validation() {
 
     let json_str = serde_json::to_string_pretty(&scene_json).unwrap();
     let result = validate_scene_str(&json_str);
-    assert!(result.is_err(), "should reject duplicate object_id: {result:?}");
+    assert!(
+        result.is_err(),
+        "should reject duplicate object_id: {result:?}"
+    );
 }
 
 #[test]
@@ -259,7 +257,10 @@ fn deterministic_save_has_stable_structure() {
     // after first save because persistent IDs are already in the records).
     let json1 = scene.save_to_string().unwrap();
     let json2 = scene.save_to_string().unwrap();
-    assert_eq!(json1, json2, "same scene saved twice must produce identical JSON");
+    assert_eq!(
+        json1, json2,
+        "same scene saved twice must produce identical JSON"
+    );
 
     // Verify structure contains expected fields.
     assert!(json1.contains("\"format_version\": 2"));

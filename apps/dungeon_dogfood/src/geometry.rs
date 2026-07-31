@@ -76,9 +76,7 @@ pub fn build_level_chunks(
 }
 
 /// Build a complete, material-independent geometry plan.
-pub(crate) fn build_chunk_geometry_plan(
-    level: &ParsedLevel,
-) -> ChunkGeometryPlan {
+pub(crate) fn build_chunk_geometry_plan(level: &ParsedLevel) -> ChunkGeometryPlan {
     let suppressed_ceiling_cells = inferred_ramp_ceiling_openings(level);
     let mut leaves = Vec::new();
 
@@ -112,11 +110,7 @@ fn inferred_ramp_ceiling_openings(level: &ParsedLevel) -> BTreeSet<(usize, usize
         return BTreeSet::new();
     };
     let lookup = |layer: u16, x: u16, y: u16| {
-        Some(level.tile_at_3d(
-            usize::from(layer),
-            usize::from(x),
-            usize::from(y),
-        ))
+        Some(level.tile_at_3d(usize::from(layer), usize::from(x), usize::from(y)))
     };
     scan_transitions(width, height, layers, &lookup)
         .into_iter()
@@ -148,9 +142,15 @@ fn plan_chunk_geometry(
         for y in y0..y1 {
             for x in x0..x1 {
                 emit_tile_geometry(
-                    level, layer_idx, x, y, opening_cells,
-                    &mut wall_verts, &mut wall_indices,
-                    &mut floor_verts, &mut floor_indices,
+                    level,
+                    layer_idx,
+                    x,
+                    y,
+                    opening_cells,
+                    &mut wall_verts,
+                    &mut wall_indices,
+                    &mut floor_verts,
+                    &mut floor_indices,
                 );
             }
         }
@@ -160,7 +160,9 @@ fn plan_chunk_geometry(
         }
 
         // Compute combined bounds from both domains.
-        let all_positions = wall_verts.iter().map(|v| v.position)
+        let all_positions = wall_verts
+            .iter()
+            .map(|v| v.position)
             .chain(floor_verts.iter().map(|v| v.position));
         let (bounds_min, bounds_max) = all_positions.fold(
             (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
@@ -190,14 +192,26 @@ fn plan_chunk_geometry(
         if width > CHUNK_SIZE {
             let mid = x0 + width / 2;
             plan_chunk_geometry(
-                level, layer_idx, x0, y0, mid, y1,
+                level,
+                layer_idx,
+                x0,
+                y0,
+                mid,
+                y1,
                 &format!("{base_name}_a"),
-                opening_cells, leaves,
+                opening_cells,
+                leaves,
             );
             plan_chunk_geometry(
-                level, layer_idx, mid, y0, x1, y1,
+                level,
+                layer_idx,
+                mid,
+                y0,
+                x1,
+                y1,
                 &format!("{base_name}_b"),
-                opening_cells, leaves,
+                opening_cells,
+                leaves,
             );
             return;
         }
@@ -205,14 +219,26 @@ fn plan_chunk_geometry(
         if height > CHUNK_SIZE {
             let mid = y0 + height / 2;
             plan_chunk_geometry(
-                level, layer_idx, x0, y0, x1, mid,
+                level,
+                layer_idx,
+                x0,
+                y0,
+                x1,
+                mid,
                 &format!("{base_name}_a"),
-                opening_cells, leaves,
+                opening_cells,
+                leaves,
             );
             plan_chunk_geometry(
-                level, layer_idx, x0, mid, x1, y1,
+                level,
+                layer_idx,
+                x0,
+                mid,
+                x1,
+                y1,
                 &format!("{base_name}_b"),
-                opening_cells, leaves,
+                opening_cells,
+                leaves,
             );
             return;
         }
@@ -237,7 +263,16 @@ fn emit_tile_geometry(
     if is_walkable(tile) {
         match tile {
             Tile::RampNorth(_) | Tile::RampEast(_) | Tile::RampSouth(_) | Tile::RampWest(_) => {
-                emit_ramp_wedge(level, layer_idx, x, y, y_offset, tile, floor_verts, floor_indices);
+                emit_ramp_wedge(
+                    level,
+                    layer_idx,
+                    x,
+                    y,
+                    y_offset,
+                    tile,
+                    floor_verts,
+                    floor_indices,
+                );
             }
             _ => emit_floor_slab(level, layer_idx, x, y, y_offset, floor_verts, floor_indices),
         }
@@ -253,7 +288,16 @@ fn emit_tile_geometry(
             if is_ramp {
                 emit_ceiling_for_tile(level, layer_idx, x, y, y_offset, wall_verts, wall_indices);
             } else {
-                emit_ceiling_closure(level, layer_idx, x, y, y_offset, opening_cells, wall_verts, wall_indices);
+                emit_ceiling_closure(
+                    level,
+                    layer_idx,
+                    x,
+                    y,
+                    y_offset,
+                    opening_cells,
+                    wall_verts,
+                    wall_indices,
+                );
             }
         }
     }
@@ -397,10 +441,30 @@ fn emit_floor_slab(
         push_quad(
             verts,
             inds,
-            make_vertex(Vec3::new(x0, y_offset, z0), normal, tangent, Vec2::new(0.0, 0.0)),
-            make_vertex(Vec3::new(x1, y_offset, z0), normal, tangent, Vec2::new(1.0, 0.0)),
-            make_vertex(Vec3::new(x1, y_offset, z1), normal, tangent, Vec2::new(1.0, 1.0)),
-            make_vertex(Vec3::new(x0, y_offset, z1), normal, tangent, Vec2::new(0.0, 1.0)),
+            make_vertex(
+                Vec3::new(x0, y_offset, z0),
+                normal,
+                tangent,
+                Vec2::new(0.0, 0.0),
+            ),
+            make_vertex(
+                Vec3::new(x1, y_offset, z0),
+                normal,
+                tangent,
+                Vec2::new(1.0, 0.0),
+            ),
+            make_vertex(
+                Vec3::new(x1, y_offset, z1),
+                normal,
+                tangent,
+                Vec2::new(1.0, 1.0),
+            ),
+            make_vertex(
+                Vec3::new(x0, y_offset, z1),
+                normal,
+                tangent,
+                Vec2::new(0.0, 1.0),
+            ),
         );
     }
 
@@ -1282,9 +1346,7 @@ fn ramp_edge_cover_heights(
         neighbor @ (Tile::RampNorth(_)
         | Tile::RampEast(_)
         | Tile::RampSouth(_)
-        | Tile::RampWest(_)) => {
-            surface_edge_heights(neighbor, y_offset, edge.opposite())
-        }
+        | Tile::RampWest(_)) => surface_edge_heights(neighbor, y_offset, edge.opposite()),
         Tile::Floor | Tile::Void => (y_offset, y_offset),
     }
 }
@@ -1529,9 +1591,7 @@ fn emit_ramp_wedge(
 
     // Side and end faces are clipped against adjacent volume. This avoids both
     // shared interior faces and full quads hidden only in part by another ramp.
-    let west_cover = ramp_edge_cover_heights(
-        level, layer_idx, x, y, y_offset, RampEdge::West,
-    );
+    let west_cover = ramp_edge_cover_heights(level, layer_idx, x, y, y_offset, RampEdge::West);
     emit_clipped_ramp_edge(
         verts,
         inds,
@@ -1546,9 +1606,7 @@ fn emit_ramp_wedge(
         Vec4::new(0.0, 0.0, 1.0, 1.0),
     );
 
-    let east_cover = ramp_edge_cover_heights(
-        level, layer_idx, x, y, y_offset, RampEdge::East,
-    );
+    let east_cover = ramp_edge_cover_heights(level, layer_idx, x, y, y_offset, RampEdge::East);
     emit_clipped_ramp_edge(
         verts,
         inds,
@@ -1563,9 +1621,8 @@ fn emit_ramp_wedge(
         Vec4::new(0.0, 0.0, -1.0, 1.0),
     );
 
-    let north_cover = ramp_edge_cover_heights(
-        level, layer_idx, x, y, y_offset, RampEdge::RowPositive,
-    );
+    let north_cover =
+        ramp_edge_cover_heights(level, layer_idx, x, y, y_offset, RampEdge::RowPositive);
     emit_clipped_ramp_edge(
         verts,
         inds,
@@ -1580,9 +1637,8 @@ fn emit_ramp_wedge(
         Vec4::new(1.0, 0.0, 0.0, 1.0),
     );
 
-    let south_cover = ramp_edge_cover_heights(
-        level, layer_idx, x, y, y_offset, RampEdge::RowNegative,
-    );
+    let south_cover =
+        ramp_edge_cover_heights(level, layer_idx, x, y, y_offset, RampEdge::RowNegative);
     emit_clipped_ramp_edge(
         verts,
         inds,
@@ -1832,40 +1888,58 @@ mod tests {
         assert_eq!(verts.len(), 24);
 
         // Bottom face (y=0, normal=-Y)
-        let bottom: Vec<_> = verts.chunks_exact(4).filter(|q| q[0].normal == -Vec3::Y).collect();
+        let bottom: Vec<_> = verts
+            .chunks_exact(4)
+            .filter(|q| q[0].normal == -Vec3::Y)
+            .collect();
         assert_eq!(bottom.len(), 1);
         assert_quad_winding_matches_normal(bottom[0]);
 
         // Top face (y=WALL_HEIGHT, normal=+Y)
-        let top: Vec<_> = verts.chunks_exact(4).filter(|q| q[0].normal == Vec3::Y).collect();
+        let top: Vec<_> = verts
+            .chunks_exact(4)
+            .filter(|q| q[0].normal == Vec3::Y)
+            .collect();
         assert_eq!(top.len(), 1);
         assert_quad_winding_matches_normal(top[0]);
 
         // North face (z=-2, normal=-Z)
-        let north: Vec<_> = verts.chunks_exact(4).filter(|q| {
-            quad_all(q, |v| (v.position.z + 2.0).abs() <= 1e-4) && q[0].normal == -Vec3::Z
-        }).collect();
+        let north: Vec<_> = verts
+            .chunks_exact(4)
+            .filter(|q| {
+                quad_all(q, |v| (v.position.z + 2.0).abs() <= 1e-4) && q[0].normal == -Vec3::Z
+            })
+            .collect();
         assert_eq!(north.len(), 1);
         assert_quad_winding_matches_normal(north[0]);
 
         // South face (z=-1, normal=+Z)
-        let south: Vec<_> = verts.chunks_exact(4).filter(|q| {
-            quad_all(q, |v| (v.position.z + 1.0).abs() <= 1e-4) && q[0].normal == Vec3::Z
-        }).collect();
+        let south: Vec<_> = verts
+            .chunks_exact(4)
+            .filter(|q| {
+                quad_all(q, |v| (v.position.z + 1.0).abs() <= 1e-4) && q[0].normal == Vec3::Z
+            })
+            .collect();
         assert_eq!(south.len(), 1);
         assert_quad_winding_matches_normal(south[0]);
 
         // East face (x=2, normal=+X)
-        let east: Vec<_> = verts.chunks_exact(4).filter(|q| {
-            quad_all(q, |v| (v.position.x - 2.0).abs() <= 1e-4) && q[0].normal == Vec3::X
-        }).collect();
+        let east: Vec<_> = verts
+            .chunks_exact(4)
+            .filter(|q| {
+                quad_all(q, |v| (v.position.x - 2.0).abs() <= 1e-4) && q[0].normal == Vec3::X
+            })
+            .collect();
         assert_eq!(east.len(), 1);
         assert_quad_winding_matches_normal(east[0]);
 
         // West face (x=1, normal=-X)
-        let west: Vec<_> = verts.chunks_exact(4).filter(|q| {
-            quad_all(q, |v| (v.position.x - 1.0).abs() <= 1e-4) && q[0].normal == -Vec3::X
-        }).collect();
+        let west: Vec<_> = verts
+            .chunks_exact(4)
+            .filter(|q| {
+                quad_all(q, |v| (v.position.x - 1.0).abs() <= 1e-4) && q[0].normal == -Vec3::X
+            })
+            .collect();
         assert_eq!(west.len(), 1);
         assert_quad_winding_matches_normal(west[0]);
     }
@@ -1879,18 +1953,28 @@ mod tests {
         let mut inds = Vec::new();
         let empty_openings = BTreeSet::new();
         for tile_coord in [(0, 0), (1, 0)] {
-            emit_tile_geometry(&level, 0, tile_coord.0, tile_coord.1, &empty_openings, &mut wall_verts, &mut wall_inds, &mut verts, &mut inds);
+            emit_tile_geometry(
+                &level,
+                0,
+                tile_coord.0,
+                tile_coord.1,
+                &empty_openings,
+                &mut wall_verts,
+                &mut wall_inds,
+                &mut verts,
+                &mut inds,
+            );
         }
 
         assert!(!verts.iter().any(|vertex| {
             (vertex.position.x - 1.0).abs() <= 1e-4 && vertex.normal.x.abs() > 0.999
         }));
-        assert!(verts.iter().any(|vertex| {
-            (vertex.position.x - 2.0).abs() <= 1e-4 && vertex.normal == Vec3::X
-        }));
-        assert!(verts.iter().any(|vertex| {
-            vertex.position.z.abs() <= 1e-4 && vertex.normal == Vec3::Z
-        }));
+        assert!(verts
+            .iter()
+            .any(|vertex| { (vertex.position.x - 2.0).abs() <= 1e-4 && vertex.normal == Vec3::X }));
+        assert!(verts
+            .iter()
+            .any(|vertex| { vertex.position.z.abs() <= 1e-4 && vertex.normal == Vec3::Z }));
         assert!(verts.iter().any(|vertex| vertex.normal == -Vec3::Y));
     }
 
@@ -1977,27 +2061,29 @@ mod tests {
 
         let east_half = verts
             .iter()
-            .filter(|vertex| {
-                (vertex.position.x - 1.0).abs() <= 1e-4 && vertex.normal == Vec3::X
-            })
+            .filter(|vertex| (vertex.position.x - 1.0).abs() <= 1e-4 && vertex.normal == Vec3::X)
             .count();
         let west_half = verts
             .iter()
-            .filter(|vertex| {
-                (vertex.position.x - 1.0).abs() <= 1e-4 && vertex.normal == -Vec3::X
-            })
+            .filter(|vertex| (vertex.position.x - 1.0).abs() <= 1e-4 && vertex.normal == -Vec3::X)
             .count();
-        assert_eq!(east_half, 3, "left ramp must emit only its exposed triangle");
-        assert_eq!(west_half, 3, "right ramp must emit only its exposed triangle");
+        assert_eq!(
+            east_half, 3,
+            "left ramp must emit only its exposed triangle"
+        );
+        assert_eq!(
+            west_half, 3,
+            "right ramp must emit only its exposed triangle"
+        );
     }
 
     #[test]
     fn ramp_wedge_face_is_hidden_by_adjacent_wall() {
         let level = parsed_level(2, 1, vec![Tile::RampEast(1), Tile::Wall]);
         let verts = emit_floor_tile(&level, 0, 0, 0);
-        assert!(!verts.iter().any(|vertex| {
-            (vertex.position.x - 1.0).abs() <= 1e-4 && vertex.normal == Vec3::X
-        }));
+        assert!(!verts
+            .iter()
+            .any(|vertex| { (vertex.position.x - 1.0).abs() <= 1e-4 && vertex.normal == Vec3::X }));
     }
 
     #[test]
@@ -2023,11 +2109,7 @@ mod tests {
 
     #[test]
     fn ramp_wedge_bottom_culled_by_wall_below() {
-        let level = parsed_level_layers(
-            1,
-            1,
-            vec![vec![Tile::Wall], vec![Tile::RampEast(0)]],
-        );
+        let level = parsed_level_layers(1, 1, vec![vec![Tile::Wall], vec![Tile::RampEast(0)]]);
         let mut wall_verts = Vec::new();
         let mut wall_inds = Vec::new();
         let mut verts = Vec::new();
@@ -2051,11 +2133,7 @@ mod tests {
 
     #[test]
     fn ramp_wedge_bottom_exposed_when_void_below() {
-        let level = parsed_level_layers(
-            1,
-            1,
-            vec![vec![Tile::Void], vec![Tile::RampNorth(0)]],
-        );
+        let level = parsed_level_layers(1, 1, vec![vec![Tile::Void], vec![Tile::RampNorth(0)]]);
         let mut wall_verts = Vec::new();
         let mut wall_inds = Vec::new();
         let mut verts = Vec::new();
@@ -2122,11 +2200,7 @@ mod tests {
 
     #[test]
     fn upper_floor_slab_underside_closes_lower_walkable_layer() {
-        let level = parsed_level_layers(
-            1,
-            1,
-            vec![vec![Tile::Floor], vec![Tile::Floor]],
-        );
+        let level = parsed_level_layers(1, 1, vec![vec![Tile::Floor], vec![Tile::Floor]]);
 
         assert!(emit_structure_tile(&level, 0, 0, 0).is_empty());
         let upper_floor = emit_floor_tile(&level, 1, 0, 0);
@@ -2153,7 +2227,11 @@ mod tests {
         let level = parsed_level(1, 1, vec![Tile::Floor]);
         let ceiling = emit_structure_tile(&level, 0, 0, 0);
 
-        assert_eq!(ceiling.len(), 24, "isolated closure must emit all six faces");
+        assert_eq!(
+            ceiling.len(),
+            24,
+            "isolated closure must emit all six faces"
+        );
         let underside = ceiling
             .chunks_exact(4)
             .find(|quad| quad[0].normal == -Vec3::Y)
@@ -2357,11 +2435,21 @@ mod tests {
     #[test]
     fn isolated_wall_all_six_faces_exposed() {
         // Single wall on layer 0 with no neighbors: all 6 faces visible.
-        let level = parsed_level(3, 3, vec![
-            Tile::Void, Tile::Void, Tile::Void,
-            Tile::Void, Tile::Wall, Tile::Void,
-            Tile::Void, Tile::Void, Tile::Void,
-        ]);
+        let level = parsed_level(
+            3,
+            3,
+            vec![
+                Tile::Void,
+                Tile::Void,
+                Tile::Void,
+                Tile::Void,
+                Tile::Wall,
+                Tile::Void,
+                Tile::Void,
+                Tile::Void,
+                Tile::Void,
+            ],
+        );
         let verts = emit_structure_tile(&level, 0, 1, 1);
         // 6 faces * 4 vertices = 24 vertices.
         assert_eq!(verts.len(), 24);
@@ -2378,38 +2466,30 @@ mod tests {
     #[test]
     fn wall_box_bottom_face_culled_by_wall_below() {
         // Layer 1 wall with Wall directly below: bottom face hidden.
-        let level = parsed_level_layers(
-            1,
-            1,
-            vec![vec![Tile::Wall], vec![Tile::Wall]],
-        );
+        let level = parsed_level_layers(1, 1, vec![vec![Tile::Wall], vec![Tile::Wall]]);
         let verts = emit_structure_tile(&level, 1, 0, 0);
         // 5 faces (no bottom): 20 vertices.
         assert_eq!(verts.len(), 20);
-        assert!(!verts.chunks_exact(4).any(|q| q[0].normal == -Vec3::Y),
-            "bottom face must be culled when Wall tile is below");
+        assert!(
+            !verts.chunks_exact(4).any(|q| q[0].normal == -Vec3::Y),
+            "bottom face must be culled when Wall tile is below"
+        );
     }
 
     #[test]
     fn wall_box_bottom_face_exposed_when_floor_below() {
         // Layer 1 wall with Floor below: bottom face visible.
-        let level = parsed_level_layers(
-            1,
-            1,
-            vec![vec![Tile::Floor], vec![Tile::Wall]],
-        );
+        let level = parsed_level_layers(1, 1, vec![vec![Tile::Floor], vec![Tile::Wall]]);
         let verts = emit_structure_tile(&level, 1, 0, 0);
-        assert!(verts.chunks_exact(4).any(|q| q[0].normal == -Vec3::Y),
-            "bottom face must be visible when Floor is below");
+        assert!(
+            verts.chunks_exact(4).any(|q| q[0].normal == -Vec3::Y),
+            "bottom face must be visible when Floor is below"
+        );
     }
 
     #[test]
     fn wall_box_top_face_closes_full_height_under_non_wall_layer() {
-        let level = parsed_level_layers(
-            1,
-            1,
-            vec![vec![Tile::Wall], vec![Tile::Floor]],
-        );
+        let level = parsed_level_layers(1, 1, vec![vec![Tile::Wall], vec![Tile::Floor]]);
         let verts = emit_structure_tile(&level, 0, 0, 0);
         let top = verts
             .chunks_exact(4)
@@ -2435,10 +2515,14 @@ mod tests {
         // Layer 1 wall: below is Wall on layer 0 → bottom HIDDEN. Above is Wall on layer 2 → top HIDDEN.
         // So only 4 lateral faces = 16 vertices.
         assert_eq!(verts.len(), 16);
-        assert!(!verts.chunks_exact(4).any(|q| q[0].normal == Vec3::Y),
-            "top face must be culled when Wall tile is above");
-        assert!(!verts.chunks_exact(4).any(|q| q[0].normal == -Vec3::Y),
-            "bottom face must be culled when Wall tile is below");
+        assert!(
+            !verts.chunks_exact(4).any(|q| q[0].normal == Vec3::Y),
+            "top face must be culled when Wall tile is above"
+        );
+        assert!(
+            !verts.chunks_exact(4).any(|q| q[0].normal == -Vec3::Y),
+            "bottom face must be culled when Wall tile is below"
+        );
     }
 
     #[test]
@@ -2451,13 +2535,17 @@ mod tests {
 
         // Left wall: 5 faces (east culled) = 20 vertices.
         assert_eq!(left.len(), 20);
-        assert!(!left.chunks_exact(4).any(|q| q[0].normal == Vec3::X),
-            "east face of left wall must be culled by adjacent Wall");
+        assert!(
+            !left.chunks_exact(4).any(|q| q[0].normal == Vec3::X),
+            "east face of left wall must be culled by adjacent Wall"
+        );
 
         // Right wall: 5 faces (west culled) = 20 vertices.
         assert_eq!(right.len(), 20);
-        assert!(!right.chunks_exact(4).any(|q| q[0].normal == -Vec3::X),
-            "west face of right wall must be culled by adjacent Wall");
+        assert!(
+            !right.chunks_exact(4).any(|q| q[0].normal == -Vec3::X),
+            "west face of right wall must be culled by adjacent Wall"
+        );
     }
 
     #[test]
@@ -2466,23 +2554,39 @@ mod tests {
         let level = parsed_level(2, 1, vec![Tile::Wall, Tile::Void]);
         let verts = emit_structure_tile(&level, 0, 0, 0);
         // East face toward Void must be present.
-        assert!(verts.chunks_exact(4).any(|q| q[0].normal == Vec3::X),
-            "east face toward same-layer Void must remain visible");
+        assert!(
+            verts.chunks_exact(4).any(|q| q[0].normal == Vec3::X),
+            "east face toward same-layer Void must remain visible"
+        );
     }
 
     #[test]
     fn wall_box_border_wall_outward_faces_at_edge() {
         // Wall at (0,0) in 3x3: west and south faces border level edge.
-        let level = parsed_level(3, 3, vec![
-            Tile::Wall, Tile::Floor, Tile::Floor,
-            Tile::Floor, Tile::Floor, Tile::Floor,
-            Tile::Floor, Tile::Floor, Tile::Floor,
-        ]);
+        let level = parsed_level(
+            3,
+            3,
+            vec![
+                Tile::Wall,
+                Tile::Floor,
+                Tile::Floor,
+                Tile::Floor,
+                Tile::Floor,
+                Tile::Floor,
+                Tile::Floor,
+                Tile::Floor,
+                Tile::Floor,
+            ],
+        );
         let verts = emit_structure_tile(&level, 0, 0, 0);
-        assert!(verts.chunks_exact(4).any(|q| q[0].normal == -Vec3::X),
-            "west border face must be visible");
-        assert!(verts.chunks_exact(4).any(|q| q[0].normal == Vec3::Z),
-            "south border face must be visible");
+        assert!(
+            verts.chunks_exact(4).any(|q| q[0].normal == -Vec3::X),
+            "west border face must be visible"
+        );
+        assert!(
+            verts.chunks_exact(4).any(|q| q[0].normal == Vec3::Z),
+            "south border face must be visible"
+        );
     }
 
     #[test]
@@ -2512,15 +2616,18 @@ mod tests {
                     Tile::Wall,
                     Tile::Floor,
                 ],
-                vec![Tile::Void, Tile::Void, Tile::Void, Tile::Void, Tile::Floor, Tile::Void],
+                vec![
+                    Tile::Void,
+                    Tile::Void,
+                    Tile::Void,
+                    Tile::Void,
+                    Tile::Floor,
+                    Tile::Void,
+                ],
             ],
         );
         assert!(inferred_ramp_ceiling_openings(&malformed).is_empty());
-        let generic_void = parsed_level_layers(
-            1,
-            1,
-            vec![vec![Tile::Floor], vec![Tile::Void]],
-        );
+        let generic_void = parsed_level_layers(1, 1, vec![vec![Tile::Floor], vec![Tile::Void]]);
         assert!(inferred_ramp_ceiling_openings(&generic_void).is_empty());
         // Floor tile with Void above: ceiling closure emitted.
         let verts = emit_structure_tile(&generic_void, 0, 0, 0);

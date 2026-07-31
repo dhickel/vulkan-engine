@@ -9,7 +9,7 @@
 
 use glam::{Mat4, Vec3};
 use renderer::{
-    object::{ObjectKind, selection::Selection},
+    object::{selection::Selection, ObjectKind},
     Aabb, EditorCamera, EditorProjection, MeshBoundsEntry, PointLight, Scene, SceneBounds,
 };
 
@@ -26,7 +26,11 @@ fn selection_workflow_with_scene_ids() {
         .set_transform(node_a, Mat4::from_translation(Vec3::new(0.0, 0.0, -3.0)))
         .expect("set transform");
     scene
-        .add_mesh_with_bounds(node_a, renderer::MeshHandle::new(1, 0), SceneBounds::Known(cube_aabb()))
+        .add_mesh_with_bounds(
+            node_a,
+            renderer::MeshHandle::new(1, 0),
+            SceneBounds::Known(cube_aabb()),
+        )
         .expect("mesh");
 
     let node_b = scene.create_node_default(None).expect("node b");
@@ -34,7 +38,11 @@ fn selection_workflow_with_scene_ids() {
         .set_transform(node_b, Mat4::from_translation(Vec3::new(5.0, 0.0, -3.0)))
         .expect("set transform");
     scene
-        .add_mesh_with_bounds(node_b, renderer::MeshHandle::new(2, 0), SceneBounds::Known(cube_aabb()))
+        .add_mesh_with_bounds(
+            node_b,
+            renderer::MeshHandle::new(2, 0),
+            SceneBounds::Known(cube_aabb()),
+        )
         .expect("mesh");
 
     let id_a = scene.object_id(node_a).unwrap();
@@ -322,9 +330,7 @@ fn editor_camera_screen_to_ray_center_looks_at_target() {
     cam.orbit_mut().theta = 0.0;
     cam.orbit_mut().phi = std::f32::consts::FRAC_PI_4;
 
-    let ray = cam
-        .screen_to_ray((400.0, 300.0), (800, 600))
-        .expect("ray");
+    let ray = cam.screen_to_ray((400.0, 300.0), (800, 600)).expect("ray");
 
     let to_target = (Vec3::ZERO - ray.origin).normalize();
     let dot = ray.direction.dot(to_target);

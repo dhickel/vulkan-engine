@@ -42,7 +42,10 @@ pub enum SurfaceClass {
 impl SurfaceClass {
     /// Whether this surface class contributes to rendering.
     pub fn is_visible(self) -> bool {
-        !matches!(self, SurfaceClass::NoDraw | SurfaceClass::Clip | SurfaceClass::Trigger | SurfaceClass::Skip)
+        !matches!(
+            self,
+            SurfaceClass::NoDraw | SurfaceClass::Clip | SurfaceClass::Trigger | SurfaceClass::Skip
+        )
     }
 
     /// Whether this surface class generates a collider.
@@ -73,9 +76,10 @@ impl SurfaceClass {
             SurfaceClass::AlphaMask => crate::geometry::RenderClass::AlphaMask,
             SurfaceClass::Sky => crate::geometry::RenderClass::Sky,
             SurfaceClass::Liquid => crate::geometry::RenderClass::Liquid,
-            SurfaceClass::NoDraw | SurfaceClass::Clip | SurfaceClass::Trigger | SurfaceClass::Skip => {
-                crate::geometry::RenderClass::Hidden
-            }
+            SurfaceClass::NoDraw
+            | SurfaceClass::Clip
+            | SurfaceClass::Trigger
+            | SurfaceClass::Skip => crate::geometry::RenderClass::Hidden,
         }
     }
 }
@@ -173,7 +177,10 @@ pub enum AnimationCycleType {
 /// Detect and build an animation cycle for a texture name.
 ///
 /// Returns None if the texture name does not indicate animation.
-pub fn detect_animation(texture_name: &str, available_textures: &[String]) -> Option<AnimatedTexture> {
+pub fn detect_animation(
+    texture_name: &str,
+    available_textures: &[String],
+) -> Option<AnimatedTexture> {
     // Quake convention: `+<N><name>` for sequential, `+<a|b><name>` for alternate
     if !texture_name.starts_with('+') || texture_name.len() < 3 {
         return None;
@@ -236,22 +243,15 @@ pub fn detect_animation(texture_name: &str, available_textures: &[String]) -> Op
 }
 
 /// Compute the current frame index for an animation cycle given engine time.
-pub fn animation_frame_index(
-    cycle: &AnimatedTexture,
-    engine_time_ticks: f32,
-) -> usize {
+pub fn animation_frame_index(cycle: &AnimatedTexture, engine_time_ticks: f32) -> usize {
     let frame_count = cycle.frames.len();
     if frame_count == 0 {
         return 0;
     }
     let ticks = engine_time_ticks.max(0.0);
     match cycle.cycle_type {
-        AnimationCycleType::Sequential => {
-            (ticks / cycle.frame_duration) as usize % frame_count
-        }
-        AnimationCycleType::Alternate => {
-            (ticks / cycle.frame_duration) as usize % 2
-        }
+        AnimationCycleType::Sequential => (ticks / cycle.frame_duration) as usize % frame_count,
+        AnimationCycleType::Alternate => (ticks / cycle.frame_duration) as usize % 2,
     }
 }
 
@@ -439,10 +439,7 @@ mod tests {
 
     #[test]
     fn detect_alternate_animation() {
-        let available = vec![
-            "+awall".to_string(),
-            "+bwall".to_string(),
-        ];
+        let available = vec!["+awall".to_string(), "+bwall".to_string()];
         let anim = detect_animation("+awall", &available).unwrap();
         assert_eq!(anim.frames.len(), 2);
         assert_eq!(anim.cycle_type, AnimationCycleType::Alternate);

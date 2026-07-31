@@ -171,10 +171,9 @@ impl TelemetryRecorder {
 
     /// Write a single campaign record as one JSON line.
     pub fn record(&mut self, record: &CampaignRecord) -> Result<(), String> {
-        let line = serde_json::to_string(record)
-            .map_err(|e| format!("JSON serialization failed: {e}"))?;
-        writeln!(self.writer, "{line}")
-            .map_err(|e| format!("write failed: {e}"))?;
+        let line =
+            serde_json::to_string(record).map_err(|e| format!("JSON serialization failed: {e}"))?;
+        writeln!(self.writer, "{line}").map_err(|e| format!("write failed: {e}"))?;
         self.writer
             .flush()
             .map_err(|e| format!("flush failed: {e}"))?;
