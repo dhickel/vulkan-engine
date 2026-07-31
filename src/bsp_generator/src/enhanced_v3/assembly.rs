@@ -315,10 +315,17 @@ impl Assembly {
                         id: brush_id.clone(),
                     });
                 }
-                if !self
+                let interface = self
                     .interfaces
                     .iter()
-                    .any(|iface| iface.id == *interface_id)
+                    .find(|iface| iface.id == *interface_id)
+                    .ok_or_else(|| V3Error::MissingInterface {
+                        interface_id: interface_id.clone(),
+                        brush_a: brush.id.clone(),
+                        brush_b: brush_id.clone(),
+                    })?;
+                if !((interface.brush_a == brush.id && interface.brush_b == *brush_id)
+                    || (interface.brush_b == brush.id && interface.brush_a == *brush_id))
                 {
                     return Err(V3Error::MissingInterface {
                         interface_id: interface_id.clone(),
@@ -326,9 +333,53 @@ impl Assembly {
                         brush_b: brush_id.clone(),
                     });
                 }
+                self.validate_positive_support_contact(
+                    brush,
+                    self.find_brush(brush_id)
+                        .ok_or_else(|| V3Error::UnknownBrush {
+                            id: brush_id.clone(),
+                        })?,
+                )?;
                 self.support_edges
                     .push((brush.id.clone(), brush_id.clone()));
             }
+        }
+        Ok(())
+    }
+
+    fn validate_positive_support_contact(
+        &self,
+        child: &AssemblyBrush,
+        parent: &AssemblyBrush,
+    ) -> Result<(), V3Error> {
+        if !matches!(
+            exact_intersection_volume(&child.brush, &parent.brush)?,
+            IntersectionResult::ZeroVolumeContact(_)
+        ) {
+            return Err(V3Error::AssemblyValidation {
+                detail: format!(
+                    "support {} -> {} does not contact at zero volume",
+                    child.id, parent.id
+                ),
+            });
+        }
+        let (child_min, child_max) = child.brush.aabb()?;
+        let (parent_min, parent_max) = parent.brush.aabb()?;
+        let overlaps = [
+            child_min.0 < parent_max.0 && child_max.0 > parent_min.0,
+            child_min.1 < parent_max.1 && child_max.1 > parent_min.1,
+            child_min.2 < parent_max.2 && child_max.2 > parent_min.2,
+        ]
+        .into_iter()
+        .filter(|overlap| *overlap)
+        .count();
+        if overlaps < 2 {
+            return Err(V3Error::AssemblyValidation {
+                detail: format!(
+                    "support {} -> {} has no positive-area face contact",
+                    child.id, parent.id
+                ),
+            });
         }
         Ok(())
     }

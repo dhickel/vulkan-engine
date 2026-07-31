@@ -492,6 +492,26 @@ pub fn build_topology(
                 qualifier: "primary".into(),
             },
         });
+        for (kind, face, direction) in [
+            (SupportSurfaceKind::Ceiling, "ceiling", "down"),
+            (SupportSurfaceKind::Wall, "wall", "north"),
+            (SupportSurfaceKind::Wall, "wall", "south"),
+            (SupportSurfaceKind::Wall, "wall", "west"),
+            (SupportSurfaceKind::Wall, "wall", "east"),
+        ] {
+            surfaces.push(CommittedSurface {
+                id: alloc.next_surface()?,
+                room_id: fp.room_id,
+                kind,
+                owner: SurfaceOwner {
+                    parent_kind: "room".into(),
+                    parent_id: fp.room_id.raw(),
+                    face: face.into(),
+                    direction: direction.into(),
+                    qualifier: "primary".into(),
+                },
+            });
+        }
     }
 
     // ── Split footprints by layer ─────────────────────────────────────
@@ -1428,7 +1448,7 @@ mod tests {
             build_topology_for(super::super::config::V3Preset::Sparse, 0, 2048);
         let n = config.preset.min_rooms() as usize;
         assert_eq!(topology.rooms.len(), n);
-        assert_eq!(topology.surfaces.len(), n);
+        assert_eq!(topology.surfaces.len(), n * 6);
         assert!(!topology.portals.is_empty());
         assert!(!topology.routes.is_empty());
         assert_eq!(topology.transitions.len(), 1);

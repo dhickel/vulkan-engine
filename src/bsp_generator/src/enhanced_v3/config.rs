@@ -114,8 +114,42 @@ impl V3Preset {
     pub fn minimum_families(self) -> u32 {
         match self {
             Self::Sparse => 1,
-            Self::Moderate => 2,
-            Self::Rich => 3,
+            Self::Moderate => 3,
+            Self::Rich => 6,
+        }
+    }
+
+    /// Minimum number of grounded feature assemblies required.
+    pub fn minimum_assemblies(self) -> u32 {
+        match self {
+            Self::Sparse => 1,
+            Self::Moderate => 3,
+            Self::Rich => 6,
+        }
+    }
+
+    /// Minimum number of feature brushes required.
+    pub fn minimum_feature_brushes(self) -> u32 {
+        match self {
+            Self::Sparse => 2,
+            Self::Moderate => 6,
+            Self::Rich => 12,
+        }
+    }
+
+    /// Required grammar families for this preset (in canonical order).
+    pub fn required_families(self) -> &'static [&'static str] {
+        match self {
+            Self::Sparse => &["portal-chamber"],
+            Self::Moderate => &["portal-chamber", "buttressed-hall", "column-grove"],
+            Self::Rich => &[
+                "portal-chamber",
+                "buttressed-hall",
+                "column-grove",
+                "fractured-vault",
+                "terraced-shrine",
+                "monolithic-chamber",
+            ],
         }
     }
 

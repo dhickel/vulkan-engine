@@ -21,15 +21,14 @@
 use super::assembly::{
     self, Assembly, AssemblyBrush, BrushRole, Interface, ProtectedVolume, Support,
 };
-#[allow(unused_imports)]
-use super::config::V3Preset;
 use super::config::{V3Config, CONSTRUCTION_QUANTUM, HEADROOM, ROUTE_WIDTH};
 use super::emission;
 use super::error::V3Error;
 use super::footprint::build_footprints;
 use super::geometry::{CanonicalPlane, ConvexBrush, FaceRole};
 use super::ids::{
-    CommittedPortal, CommittedRoom, CommittedTopology, QuantumVolume, RoomId, V3IdAllocator,
+    CommittedPortal, CommittedRoom, CommittedTopology, PlanOutcome, QuantumVolume, RoomId,
+    V3IdAllocator,
 };
 use super::intent::plan_composition;
 use super::metadata::EnhancedV3Metadata;
@@ -75,22 +74,27 @@ pub fn run_pipeline(config: &V3Config) -> Result<V3PipelineOutput, V3Error> {
     // 3. Compute reservation volumes
     let (spawn_volume, light_volumes) = compute_reservations(&topology)?;
 
-    // 4. Build reservation set
+    // 4. Reserve every point-entity clearance volume before feature planning.
     let mut protected_reservations = ReservationSet::new();
     protected_reservations.add(Reservation::new("spawn", "spawn_point", spawn_volume))?;
-    for (i, vol) in light_volumes.iter().enumerate() {
-        protected_reservations.add(Reservation::new(format!("light_{i:04}"), "light", *vol))?;
+    for (index, volume) in light_volumes.iter().copied().enumerate() {
+        protected_reservations.add(Reservation::new(
+            format!("light_{index:04}"),
+            "light",
+            volume,
+        ))?;
     }
 
-    // 5. Build assembly from topology
-    let (assembly, spawn_origin, light_origins) =
-        build_assembly_from_topology(&topology, &spawn_volume, &protected_reservations, seed)?;
+    // 5. Plan composition (grammar families + feature instances)
+    let plan = plan_composition(seed, config, &topology, &spawn_volume, &light_volumes)?;
 
-    // 6. Plan composition (grammar families)
-    let plan = plan_composition(
-        super::ids::CompositionId(0),
-        config.preset.tag(),
-        topology.rooms.len() as u32,
+    // 6. Build assembly from topology (with feature brushes from plan)
+    let (assembly, spawn_origin, light_origins) = build_assembly_from_topology(
+        &topology,
+        &plan,
+        &spawn_volume,
+        &protected_reservations,
+        seed,
     )?;
 
     // 7. Compute actual face/entity/brush counts from the assembly
@@ -100,7 +104,23 @@ pub fn run_pipeline(config: &V3Config) -> Result<V3PipelineOutput, V3Error> {
         .iter()
         .map(|b| b.brush.faces.len() as u32)
         .sum();
-    let actual_entities: u32 = 1 + light_origins.len() as u32; // worldspawn + spawn + lights
+    let actual_entities: u32 = 2 + light_origins.len() as u32; // worldspawn + spawn + lights
+    if actual_faces > config.preset.face_budget() || actual_faces >= super::config::FACE_BUDGET {
+        return Err(V3Error::CompositionInvariant {
+            detail: format!(
+                "{} actual faces {actual_faces} exceed preset/M2 budget",
+                config.preset.tag()
+            ),
+        });
+    }
+    if plan.estimated_total_faces < actual_faces {
+        return Err(V3Error::CompositionInvariant {
+            detail: format!(
+                "face estimate {} is below actual emitted faces {actual_faces}",
+                plan.estimated_total_faces
+            ),
+        });
+    }
 
     // 8. Emit canonical .map text
     let map_text = emission::emit_map_text(&assembly, spawn_origin, &light_origins)?;
@@ -1656,9 +1676,199 @@ fn build_contact_interfaces(mut bounds: Vec<BrushBounds>) -> Vec<Interface> {
     interfaces
 }
 
-/// Build a validated assembly from the committed topology.
+fn has_positive_face_contact(left: &ConvexBrush, right: &ConvexBrush) -> Result<bool, V3Error> {
+    let (left_min, left_max) = left.aabb()?;
+    let (right_min, right_max) = right.aabb()?;
+    let overlaps = [
+        left_min.0 < right_max.0 && left_max.0 > right_min.0,
+        left_min.1 < right_max.1 && left_max.1 > right_min.1,
+        left_min.2 < right_max.2 && left_max.2 > right_min.2,
+    ]
+    .into_iter()
+    .filter(|overlap| *overlap)
+    .count();
+    Ok(overlaps >= 2)
+}
+
+/// Return the exact coincident face pair used by a feature support interface.
+fn matching_contact_faces(
+    child: &ConvexBrush,
+    parent: &ConvexBrush,
+) -> Result<(FaceRole, FaceRole), V3Error> {
+    for child_face in &child.faces {
+        for parent_face in &parent.faces {
+            let same = child_face.plane.is_coincident_with(&parent_face.plane)?;
+            let opposite = CanonicalPlane::new(
+                parent_face
+                    .plane
+                    .nx
+                    .checked_neg()
+                    .ok_or(V3Error::ArithmeticOverflow {
+                        operation: "support face normal negation",
+                    })?,
+                parent_face
+                    .plane
+                    .ny
+                    .checked_neg()
+                    .ok_or(V3Error::ArithmeticOverflow {
+                        operation: "support face normal negation",
+                    })?,
+                parent_face
+                    .plane
+                    .nz
+                    .checked_neg()
+                    .ok_or(V3Error::ArithmeticOverflow {
+                        operation: "support face normal negation",
+                    })?,
+                parent_face
+                    .plane
+                    .d
+                    .checked_neg()
+                    .ok_or(V3Error::ArithmeticOverflow {
+                        operation: "support face offset negation",
+                    })?,
+            )
+            .and_then(|opposite| child_face.plane.is_coincident_with(&opposite))?;
+            if same || opposite {
+                return Ok((child_face.role, parent_face.role));
+            }
+        }
+    }
+    Err(V3Error::CompositionInvariant {
+        detail: "declared support brushes do not share a contact face".into(),
+    })
+}
+
+/// Build feature brushes and their interfaces from the composition plan.
+fn build_feature_brushes(
+    plan: &PlanOutcome,
+    topology: &CommittedTopology,
+    structural_brushes: &[AssemblyBrush],
+) -> Result<(Vec<AssemblyBrush>, Vec<Interface>), V3Error> {
+    let mut brushes: Vec<AssemblyBrush> = Vec::new();
+    let mut interfaces: Vec<Interface> = Vec::new();
+
+    for inst in &plan.instances {
+        let _room = topology
+            .room(inst.room_id)
+            .ok_or_else(|| V3Error::TopologyInvariant {
+                detail: format!("feature instance references unknown room {}", inst.room_id),
+            })?;
+
+        let x = (i128::from(inst.volume.x0), i128::from(inst.volume.x1));
+        let y = (i128::from(inst.volume.y0), i128::from(inst.volume.y1));
+        let z = (i128::from(inst.volume.z0), i128::from(inst.volume.z1));
+        let fid = format!("feature/{:04}", inst.id.0);
+
+        // Determine brush role from tags.
+        let role = if inst.tags.contains("pillar") || inst.tags.contains("twisted") {
+            BrushRole::Column
+        } else if inst.tags.contains("buttress") {
+            BrushRole::Buttress
+        } else if inst.tags.contains("terrace") {
+            BrushRole::FloorSlab
+        } else {
+            BrushRole::Feature
+        };
+        let brush = ConvexBrush::make_box(x, y, z)?;
+
+        // Every support edge names the actual contacted structural or feature
+        // brush. World roots are limited to structural shell brushes.
+        let (parent_brush_id, parent_brush) = match inst.support.as_ref() {
+            Some(super::ids::SupportRelation::SupportedBy(parent_id)) => {
+                let parent_id = format!("feature/{:04}", parent_id.0);
+                let parent = brushes
+                    .iter()
+                    .find(|brush| brush.id == parent_id)
+                    .ok_or_else(|| V3Error::CompositionInvariant {
+                        detail: format!(
+                            "feature {} references unavailable parent {parent_id}",
+                            inst.id
+                        ),
+                    })?;
+                (parent_id, parent)
+            }
+            Some(relation) => {
+                let (surface_id, expected_kind) =
+                    relation
+                        .support_surface()
+                        .ok_or_else(|| V3Error::CompositionInvariant {
+                            detail: format!("feature {} has no root support", inst.id),
+                        })?;
+                let surface =
+                    topology
+                        .surface(surface_id)
+                        .ok_or_else(|| V3Error::CompositionInvariant {
+                            detail: format!(
+                                "feature {} references unknown surface {surface_id}",
+                                inst.id
+                            ),
+                        })?;
+                if surface.room_id != inst.room_id || surface.kind != expected_kind {
+                    return Err(V3Error::CompositionInvariant {
+                        detail: format!(
+                            "feature {} support surface is not owned by its room",
+                            inst.id
+                        ),
+                    });
+                }
+                let room_prefix = inst.room_id.stable_key();
+                let prefix = match expected_kind {
+                    super::ids::SupportSurfaceKind::Floor => format!("{room_prefix}/floor"),
+                    super::ids::SupportSurfaceKind::Ceiling => format!("{room_prefix}/ceiling"),
+                    super::ids::SupportSurfaceKind::Wall => {
+                        format!("{room_prefix}/wall_{}", surface.owner.direction)
+                    }
+                };
+                let prefix_with_separator = format!("{prefix}/");
+                let parent = structural_brushes
+                    .iter()
+                    .find(|candidate| {
+                        (candidate.id == prefix || candidate.id.starts_with(&prefix_with_separator))
+                            && has_positive_face_contact(&brush, &candidate.brush).unwrap_or(false)
+                            && matching_contact_faces(&brush, &candidate.brush).is_ok()
+                    })
+                    .ok_or_else(|| V3Error::CompositionInvariant {
+                        detail: format!(
+                            "feature {} has no emitted structural support {prefix}",
+                            inst.id
+                        ),
+                    })?;
+                (parent.id.clone(), parent)
+            }
+            None => {
+                return Err(V3Error::CompositionInvariant {
+                    detail: format!("feature {} has no support relation", inst.id),
+                });
+            }
+        };
+        let (child_face, parent_face) = matching_contact_faces(&brush, &parent_brush.brush)?;
+        let iface_id = format!("support/feature/{:04}", inst.id.0);
+        interfaces.push(Interface::new(
+            iface_id.clone(),
+            fid.clone(),
+            parent_brush_id.clone(),
+            child_face,
+            parent_face,
+        ));
+        brushes.push(AssemblyBrush::new(
+            fid,
+            role,
+            brush,
+            Support::SupportedBy {
+                brush_id: parent_brush_id,
+                interface_id: iface_id,
+            },
+        ));
+    }
+
+    Ok((brushes, interfaces))
+}
+
+/// Build a validated assembly from the committed topology and composition plan.
 fn build_assembly_from_topology(
     topology: &CommittedTopology,
+    plan: &PlanOutcome,
     spawn_volume: &QuantumVolume,
     reservations: &ReservationSet,
     _seed: V3Seed,
@@ -1851,6 +2061,29 @@ fn build_assembly_from_topology(
             });
         }
     }
+    // Materialize feature brushes from the composition plan
+    let (feature_brushes, feature_interfaces) = build_feature_brushes(plan, topology, &brushes)?;
+    for fb in feature_brushes {
+        // Check feature brush does not intrude into any protected volume
+        let fb_aabb = fb.brush.aabb()?;
+        for pv in &protected_volumes {
+            let pv_aabb = pv.brush.aabb()?;
+            if fb_aabb.0 .0 < pv_aabb.1 .0
+                && fb_aabb.1 .0 > pv_aabb.0 .0
+                && fb_aabb.0 .1 < pv_aabb.1 .1
+                && fb_aabb.1 .1 > pv_aabb.0 .1
+                && fb_aabb.0 .2 < pv_aabb.1 .2
+                && fb_aabb.1 .2 > pv_aabb.0 .2
+            {
+                return Err(V3Error::ProtectedVolumeIntrusion {
+                    brush_id: fb.id.clone(),
+                    protected_id: pv.id.clone(),
+                });
+            }
+        }
+        brushes.push(fb);
+    }
+
     brushes.sort_by(|left, right| left.id.cmp(&right.id));
     // Derive interfaces from actual ConvexBrush face geometry. Cache exact
     // AABBs so disjoint brush pairs never enter the coincident-plane scan;
@@ -1906,6 +2139,9 @@ fn build_assembly_from_topology(
             }
         }
     }
+    // Merge feature interfaces
+    all_interfaces.extend(feature_interfaces);
+
     let assembly = Assembly::new(brushes, all_interfaces, protected_volumes)?;
 
     // Spawn origin shares the reservation's XY center and uses a
@@ -1935,31 +2171,35 @@ fn build_assembly_from_topology(
 
 #[cfg(test)]
 mod tests {
+    use super::super::config::V3Preset;
     use super::*;
 
-    fn sparse_topology_and_assembly() -> (CommittedTopology, Assembly) {
+    fn sparse_topology_and_assembly() -> (CommittedTopology, Assembly, PlanOutcome) {
         let config = V3Config::nominal_sparse();
         let seed = V3Seed::new(config.seed);
         let mut alloc = V3IdAllocator::new();
         let (footprints, layout) = build_footprints(&config, seed, &mut alloc).unwrap();
         let topology = build_topology(&config, &footprints, &layout, seed, &mut alloc).unwrap();
         let (spawn_volume, light_volumes) = compute_reservations(&topology).unwrap();
+        let plan =
+            plan_composition(seed, &config, &topology, &spawn_volume, &light_volumes).unwrap();
         let mut reservations = ReservationSet::new();
         reservations
             .add(Reservation::new("spawn", "spawn_point", spawn_volume))
             .unwrap();
-        for (index, volume) in light_volumes.into_iter().enumerate() {
+        for (index, volume) in light_volumes.iter().enumerate() {
             reservations
                 .add(Reservation::new(
                     format!("light_{index:04}"),
                     "light",
-                    volume,
+                    *volume,
                 ))
                 .unwrap();
         }
         let (assembly, _, _) =
-            build_assembly_from_topology(&topology, &spawn_volume, &reservations, seed).unwrap();
-        (topology, assembly)
+            build_assembly_from_topology(&topology, &plan, &spawn_volume, &reservations, seed)
+                .unwrap();
+        (topology, assembly, plan)
     }
 
     fn point_is_inside_brush(brush: &AssemblyBrush, point: (i128, i128, i128)) -> bool {
@@ -1992,7 +2232,7 @@ mod tests {
 
     #[test]
     fn transition_emits_twelve_supported_treads_and_clear_approaches() {
-        let (topology, assembly) = sparse_topology_and_assembly();
+        let (topology, assembly, _plan) = sparse_topology_and_assembly();
         let transition = topology.transitions.first().unwrap();
         let lower = topology.room(transition.lower_room).unwrap();
         let upper = topology.room(transition.upper_room).unwrap();
@@ -2182,7 +2422,7 @@ mod tests {
 
     #[test]
     fn topology_portals_split_walls_and_routes_build_corridor_shells() {
-        let (topology, assembly) = sparse_topology_and_assembly();
+        let (topology, assembly, _plan) = sparse_topology_and_assembly();
         let portal = &topology.portals[0];
         let route = &topology.routes[0];
 
@@ -2254,7 +2494,7 @@ mod tests {
 
     #[test]
     fn cardinal_portals_are_full_depth_pointed_omissions_without_opening_brushes() {
-        let (topology, assembly) = sparse_topology_and_assembly();
+        let (topology, assembly, _plan) = sparse_topology_and_assembly();
         assert!(assembly
             .brushes
             .iter()
@@ -2327,7 +2567,7 @@ mod tests {
 
     #[test]
     fn chamfered_rooms_emit_sealed_diagonal_slabs_and_walls() {
-        let (topology, assembly) = sparse_topology_and_assembly();
+        let (topology, assembly, _plan) = sparse_topology_and_assembly();
         let room = topology
             .rooms
             .iter()

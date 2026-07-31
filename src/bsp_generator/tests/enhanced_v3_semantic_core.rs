@@ -483,21 +483,39 @@ fn reservation_set_allows_disjoint() {
 
 #[test]
 fn composition_plan_minimum_families_per_preset() {
-    let sparse = plan_composition(ids::CompositionId(0), "sparse", 12).unwrap();
-    assert!(sparse.grammar_families.len() >= 1);
+    // These tests use the full pipeline via run_pipeline
+    use bsp_generator::enhanced_v3::{run_pipeline, V3Config, V3Preset};
 
-    let moderate = plan_composition(ids::CompositionId(0), "moderate", 20).unwrap();
-    assert!(moderate.grammar_families.len() >= 2);
+    let sparse = run_pipeline(&V3Config::new(42, V3Preset::Sparse, 2048).unwrap()).unwrap();
+    assert_eq!(sparse.metadata.grammar_families(), ["portal-chamber"]);
 
-    let rich = plan_composition(ids::CompositionId(0), "rich", 28).unwrap();
-    assert!(rich.grammar_families.len() >= 3);
+    let moderate = run_pipeline(&V3Config::new(42, V3Preset::Moderate, 2048).unwrap()).unwrap();
+    assert_eq!(
+        moderate.metadata.grammar_families(),
+        ["buttressed-hall", "column-grove", "portal-chamber"]
+    );
+
+    let rich = run_pipeline(&V3Config::new(42, V3Preset::Rich, 2048).unwrap()).unwrap();
+    assert_eq!(
+        rich.metadata.grammar_families(),
+        [
+            "buttressed-hall",
+            "column-grove",
+            "fractured-vault",
+            "monolithic-chamber",
+            "portal-chamber",
+            "terraced-shrine",
+        ]
+    );
 }
 
 #[test]
 fn composition_plan_within_face_budget() {
-    let outcome = plan_composition(ids::CompositionId(0), "rich", 28).unwrap();
-    assert!(outcome.estimated_total_faces < 10000);
-    assert!(outcome.estimated_total_entities < 300);
+    use bsp_generator::enhanced_v3::{run_pipeline, V3Config, V3Preset};
+
+    let outcome = run_pipeline(&V3Config::new(42, V3Preset::Rich, 2048).unwrap()).unwrap();
+    assert!(outcome.metadata.estimated_faces() < 10000);
+    assert!(outcome.metadata.estimated_entities() < 300);
 }
 
 // ── End-to-end generation tests ────────────────────────────────────────────

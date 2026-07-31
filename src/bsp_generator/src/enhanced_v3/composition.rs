@@ -102,6 +102,45 @@ impl CompositionPlan {
     }
 }
 
+// ── Preset family requirements ─────────────────────────────────────────────
+
+/// Map a preset tag to the ordered list of required family tags.
+pub fn required_families_for_preset(preset: &str) -> &'static [&'static str] {
+    match preset {
+        "sparse" => &["portal-chamber"],
+        "moderate" => &["portal-chamber", "buttressed-hall", "column-grove"],
+        "rich" => &[
+            "portal-chamber",
+            "buttressed-hall",
+            "column-grove",
+            "fractured-vault",
+            "terraced-shrine",
+            "monolithic-chamber",
+        ],
+        _ => &[],
+    }
+}
+
+/// Minimum number of grounded assemblies for a preset.
+pub fn minimum_assemblies_for_preset(preset: &str) -> u32 {
+    match preset {
+        "sparse" => 1,
+        "moderate" => 3,
+        "rich" => 6,
+        _ => 0,
+    }
+}
+
+/// Minimum number of feature brushes for a preset.
+pub fn minimum_feature_brushes_for_preset(preset: &str) -> u32 {
+    match preset {
+        "sparse" => 2,
+        "moderate" => 6,
+        "rich" => 12,
+        _ => 0,
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -144,5 +183,28 @@ mod tests {
         assert_eq!(plan.grammars.len(), 3);
         assert!(plan.total_face_budget() > 0);
         assert!(plan.total_face_budget() <= 600);
+    }
+
+    #[test]
+    fn sparse_requires_one_family() {
+        assert_eq!(required_families_for_preset("sparse"), &["portal-chamber"]);
+    }
+
+    #[test]
+    fn moderate_requires_three_families() {
+        let f = required_families_for_preset("moderate");
+        assert_eq!(f.len(), 3);
+        assert!(f.contains(&"portal-chamber"));
+        assert!(f.contains(&"buttressed-hall"));
+        assert!(f.contains(&"column-grove"));
+    }
+
+    #[test]
+    fn rich_requires_all_six_families() {
+        let f = required_families_for_preset("rich");
+        assert_eq!(f.len(), 6);
+        for family in GrammarDescriptor::ALL {
+            assert!(f.contains(&family.family_tag()));
+        }
     }
 }
