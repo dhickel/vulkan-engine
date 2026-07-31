@@ -13,6 +13,8 @@
 //! - Support graph must be acyclic; every dependent reaches a world surface.
 //! - Never depends on production code, BSP, renderer, or runtime.
 
+#![allow(dead_code)] // Shared proof APIs are exercised by different integration targets.
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::geometry::{self, ConvexBrush, GeometryError, Point3, Rational};
@@ -54,6 +56,11 @@ pub enum AssemblyError {
     UnsupportedBrush {
         id: String,
     },
+    NonPositiveSupportContact {
+        brush_id: String,
+        support_id: String,
+        area_squared: Rational,
+    },
     ProtectedVolumeMutated {
         id: String,
     },
@@ -65,6 +72,10 @@ pub enum AssemblyError {
         aperture_id: String,
         wall_face: String,
         detail: String,
+    },
+    ApertureObstructed {
+        aperture_id: String,
+        brush_id: String,
     },
     InsufficientThroatDepth {
         aperture_id: String,
@@ -134,6 +145,14 @@ impl std::fmt::Display for AssemblyError {
             Self::UnsupportedBrush { id } => {
                 write!(f, "unsupported brush {id} does not reach world")
             }
+            Self::NonPositiveSupportContact {
+                brush_id,
+                support_id,
+                area_squared,
+            } => write!(
+                f,
+                "support {support_id} for {brush_id} has non-positive area² {area_squared}"
+            ),
             Self::ProtectedVolumeMutated { id } => write!(f, "protected volume {id} was mutated"),
             Self::ProtectedVolumeIntrusion {
                 brush_id,
@@ -154,6 +173,13 @@ impl std::fmt::Display for AssemblyError {
                     "aperture {aperture_id} incomplete on {wall_face}: {detail}"
                 )
             }
+            Self::ApertureObstructed {
+                aperture_id,
+                brush_id,
+            } => write!(
+                f,
+                "aperture {aperture_id} is obstructed through its throat by {brush_id}"
+            ),
             Self::InsufficientThroatDepth { aperture_id, depth } => {
                 write!(
                     f,
@@ -239,7 +265,11 @@ impl Interface {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Aperture {
     pub id: String,
+    /// One partition piece used to establish wall orientation.
     pub wall_brush_id: String,
+    /// Canonically sorted pieces whose disjoint union must equal the wall
+    /// shell with the aperture prism removed.
+    pub partition_brush_ids: Vec<String>,
     pub wall_face: geometry::FaceRole,
     pub aperture_bounds: ApertureBounds,
     pub throat_depth: Rational,
@@ -406,39 +436,11 @@ fn exact_intersection_volume(
         return Ok(IntersectionResult::Disjoint);
     }
 
-    // Compute vertices from the combined half-space system directly.
-    let mut vertices: BTreeSet<Point3> = BTreeSet::new();
-    let n = all_faces.len();
-    for i in 0..n {
-        for j in (i + 1)..n {
-            for k in (j + 1)..n {
-                if let Some(pt) = geometry::intersect_three_planes(
-                    &all_faces[i].plane,
-                    &all_faces[j].plane,
-                    &all_faces[k].plane,
-                )? {
-                    let mut valid = true;
-                    for face in &all_faces {
-                        let num = face.plane.nx * pt.x.num * pt.y.den * pt.z.den
-                            + face.plane.ny * pt.y.num * pt.x.den * pt.z.den
-                            + face.plane.nz * pt.z.num * pt.x.den * pt.y.den
-                            - face.plane.d * pt.x.den * pt.y.den * pt.z.den;
-                        if num < 0 {
-                            valid = false;
-                            break;
-                        }
-                    }
-                    if valid {
-                        vertices.insert(pt);
-                    }
-                }
-            }
-        }
-    }
+    let vertices = geometry::half_space_vertices(&all_faces)?;
 
     if vertices.len() >= 4 {
         let refs: Vec<&Point3> = vertices.iter().collect();
-        if !all_coplanar(&refs) {
+        if !all_coplanar(&refs)? {
             Ok(IntersectionResult::PositiveVolume)
         } else {
             Ok(IntersectionResult::ZeroVolumeContact(
@@ -455,58 +457,85 @@ fn exact_intersection_volume(
 }
 
 /// Check if all points are coplanar (lie on the same plane).
-fn all_coplanar(pts: &[&Point3]) -> bool {
+fn all_coplanar(pts: &[&Point3]) -> Result<bool, AssemblyError> {
     if pts.len() <= 3 {
-        return true;
+        return Ok(true);
     }
-    for i in 3..pts.len() {
-        let det = tetrahedron_det_4(pts[0], pts[1], pts[2], pts[i]);
-        if det != Rational::ZERO {
-            return false;
+    let p0 = pts[0];
+    let Some(p1) = pts.iter().copied().find(|point| **point != *p0) else {
+        return Ok(true);
+    };
+    let base = p1.checked_sub(*p0)?;
+    let mut non_collinear = None;
+    for point in pts.iter().copied() {
+        let direction = point.checked_sub(*p0)?;
+        let cross = base.cross(&direction)?;
+        if cross.x != Rational::ZERO || cross.y != Rational::ZERO || cross.z != Rational::ZERO {
+            non_collinear = Some(point);
+            break;
         }
     }
-    true
+    let Some(p2) = non_collinear else {
+        return Ok(true);
+    };
+    for point in pts.iter().copied() {
+        if tetrahedron_det_4(p0, p1, p2, point)? != Rational::ZERO {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// 3×3 determinant of vectors from p0 (p1-p0, p2-p0, p3-p0).
-fn tetrahedron_det_4(p0: &Point3, p1: &Point3, p2: &Point3, p3: &Point3) -> Rational {
-    let a11 = p1.x.checked_sub(p0.x).unwrap_or(Rational::ZERO);
-    let a12 = p1.y.checked_sub(p0.y).unwrap_or(Rational::ZERO);
-    let a13 = p1.z.checked_sub(p0.z).unwrap_or(Rational::ZERO);
-    let a21 = p2.x.checked_sub(p0.x).unwrap_or(Rational::ZERO);
-    let a22 = p2.y.checked_sub(p0.y).unwrap_or(Rational::ZERO);
-    let a23 = p2.z.checked_sub(p0.z).unwrap_or(Rational::ZERO);
-    let a31 = p3.x.checked_sub(p0.x).unwrap_or(Rational::ZERO);
-    let a32 = p3.y.checked_sub(p0.y).unwrap_or(Rational::ZERO);
-    let a33 = p3.z.checked_sub(p0.z).unwrap_or(Rational::ZERO);
+fn tetrahedron_det_4(
+    p0: &Point3,
+    p1: &Point3,
+    p2: &Point3,
+    p3: &Point3,
+) -> Result<Rational, AssemblyError> {
+    let a11 = p1.x.checked_sub(p0.x)?;
+    let a12 = p1.y.checked_sub(p0.y)?;
+    let a13 = p1.z.checked_sub(p0.z)?;
+    let a21 = p2.x.checked_sub(p0.x)?;
+    let a22 = p2.y.checked_sub(p0.y)?;
+    let a23 = p2.z.checked_sub(p0.z)?;
+    let a31 = p3.x.checked_sub(p0.x)?;
+    let a32 = p3.y.checked_sub(p0.y)?;
+    let a33 = p3.z.checked_sub(p0.z)?;
 
-    let t1 = a11.checked_mul(
-        a22.checked_mul(a33)
-            .unwrap_or(Rational::ZERO)
-            .checked_sub(a23.checked_mul(a32).unwrap_or(Rational::ZERO))
-            .unwrap_or(Rational::ZERO),
-    );
-    let t2 = a12.checked_mul(
-        a21.checked_mul(a33)
-            .unwrap_or(Rational::ZERO)
-            .checked_sub(a23.checked_mul(a31).unwrap_or(Rational::ZERO))
-            .unwrap_or(Rational::ZERO),
-    );
-    let t3 = a13.checked_mul(
-        a21.checked_mul(a32)
-            .unwrap_or(Rational::ZERO)
-            .checked_sub(a22.checked_mul(a31).unwrap_or(Rational::ZERO))
-            .unwrap_or(Rational::ZERO),
-    );
+    let t1 = a11.checked_mul(a22.checked_mul(a33)?.checked_sub(a23.checked_mul(a32)?)?)?;
+    let t2 = a12.checked_mul(a21.checked_mul(a33)?.checked_sub(a23.checked_mul(a31)?)?)?;
+    let t3 = a13.checked_mul(a21.checked_mul(a32)?.checked_sub(a22.checked_mul(a31)?)?)?;
+    Ok(t1.checked_sub(t2)?.checked_add(t3)?)
+}
 
-    match (t1, t2, t3) {
-        (Ok(v1), Ok(v2), Ok(v3)) => v1
-            .checked_sub(v2)
-            .unwrap_or(Rational::ZERO)
-            .checked_add(v3)
-            .unwrap_or(Rational::ZERO),
-        _ => Rational::ZERO,
-    }
+fn checked_normal_dot(
+    a: &geometry::CanonicalPlane,
+    b: &geometry::CanonicalPlane,
+) -> Result<i128, AssemblyError> {
+    a.nx.checked_mul(b.nx)
+        .ok_or(GeometryError::ArithmeticOverflow {
+            operation: "normal dot x",
+        })?
+        .checked_add(
+            a.ny.checked_mul(b.ny)
+                .ok_or(GeometryError::ArithmeticOverflow {
+                    operation: "normal dot y",
+                })?,
+        )
+        .ok_or(GeometryError::ArithmeticOverflow {
+            operation: "normal dot xy sum",
+        })?
+        .checked_add(
+            a.nz.checked_mul(b.nz)
+                .ok_or(GeometryError::ArithmeticOverflow {
+                    operation: "normal dot z",
+                })?,
+        )
+        .ok_or(GeometryError::ArithmeticOverflow {
+            operation: "normal dot sum",
+        })
+        .map_err(AssemblyError::Geometry)
 }
 
 /// Measure the wall thickness for a specific face of a brush.
@@ -514,37 +543,92 @@ fn wall_thickness_for_face(
     brush: &ConvexBrush,
     face_role: geometry::FaceRole,
 ) -> Result<Rational, AssemblyError> {
-    let target_face = brush.faces.iter().find(|f| f.role == face_role);
-    let target_face = match target_face {
-        Some(f) => f,
-        None => return Ok(Rational::ZERO),
+    let Some(target_face) = brush.faces.iter().find(|face| face.role == face_role) else {
+        return Ok(Rational::ZERO);
     };
 
-    let opposing = brush.faces.iter().find(|f| {
-        f.plane.is_parallel_to(&target_face.plane)
-            && f.plane.nx * target_face.plane.nx
-                + f.plane.ny * target_face.plane.ny
-                + f.plane.nz * target_face.plane.nz
-                < 0
-    });
-
+    let mut opposing = None;
+    for face in &brush.faces {
+        if face.plane.is_parallel_to(&target_face.plane)?
+            && checked_normal_dot(&face.plane, &target_face.plane)? < 0
+        {
+            opposing = Some(face);
+            break;
+        }
+    }
     let Some(opposing) = opposing else {
         return Ok(Rational::ZERO);
     };
 
-    let (d_target, d_opposing) = if target_face.plane.nx * opposing.plane.nx
-        + target_face.plane.ny * opposing.plane.ny
-        + target_face.plane.nz * opposing.plane.nz
-        > 0
-    {
-        return Ok(Rational::ZERO);
-    } else {
-        (target_face.plane.d, -opposing.plane.d)
-    };
+    let target_normal = [
+        target_face.plane.nx,
+        target_face.plane.ny,
+        target_face.plane.nz,
+    ];
+    let opposing_normal = [opposing.plane.nx, opposing.plane.ny, opposing.plane.nz];
+    let axis = target_normal
+        .iter()
+        .position(|component| *component != 0)
+        .ok_or(GeometryError::UnapprovedNormal {
+            nx: 0,
+            ny: 0,
+            nz: 0,
+        })?;
+    Rational::new(target_face.plane.d, target_normal[axis])?
+        .checked_sub(Rational::new(opposing.plane.d, opposing_normal[axis])?)?
+        .checked_abs()
+        .map_err(AssemblyError::Geometry)
+}
 
-    let gap = (d_opposing - d_target).abs();
-    let norm = target_face.plane.nx.abs() + target_face.plane.ny.abs() + target_face.plane.nz.abs();
-    Rational::new(gap as i128, norm as i128).map_err(AssemblyError::Geometry)
+#[derive(Clone, Copy)]
+struct ExactBounds3 {
+    min: [Rational; 3],
+    max: [Rational; 3],
+}
+
+fn exact_brush_bounds(brush: &ConvexBrush) -> Result<ExactBounds3, AssemblyError> {
+    let vertices = brush.compute_vertices()?;
+    let Some(first) = vertices.first() else {
+        return Err(GeometryError::EmptyIntersection.into());
+    };
+    let mut bounds = ExactBounds3 {
+        min: [first.x, first.y, first.z],
+        max: [first.x, first.y, first.z],
+    };
+    for vertex in &vertices[1..] {
+        let coordinates = [vertex.x, vertex.y, vertex.z];
+        for axis in 0..3 {
+            bounds.min[axis] = bounds.min[axis].min(coordinates[axis]);
+            bounds.max[axis] = bounds.max[axis].max(coordinates[axis]);
+        }
+    }
+    Ok(bounds)
+}
+
+fn validated_volume(brush: &ConvexBrush) -> Result<Rational, AssemblyError> {
+    brush.volume.ok_or_else(|| {
+        AssemblyError::Geometry(GeometryError::MalformedRole {
+            detail: "assembly brush has no validated volume".into(),
+        })
+    })
+}
+
+fn contact_area_squared(
+    a: &ConvexBrush,
+    b: &ConvexBrush,
+    plane: &geometry::CanonicalPlane,
+) -> Result<Rational, AssemblyError> {
+    let mut faces = Vec::with_capacity(a.faces.len() + b.faces.len());
+    faces.extend(a.faces.iter().cloned());
+    faces.extend(b.faces.iter().cloned());
+    let vertices = geometry::half_space_vertices(&faces)?;
+    let mut coplanar = Vec::new();
+    for vertex in vertices {
+        if plane.signed_distance_rational(&vertex)? == Rational::ZERO {
+            coplanar.push(vertex);
+        }
+    }
+    geometry::polygon_area_squared(&coplanar, plane).map_err(AssemblyError::Geometry)
 }
 
 // ── Assembly impl ─────────────────────────────────────────────────────────
@@ -578,6 +662,7 @@ impl Assembly {
         self.check_protected_volume_intrusion()?;
         self.check_pairwise_intersections()?;
         self.validate_interfaces()?;
+        self.validate_support_contacts()?;
         self.build_support_graph()?;
         self.validate_support_graph()?;
         self.validate_apertures()?;
@@ -705,7 +790,7 @@ impl Assembly {
                     brush_b: iface.brush_b.clone(),
                 })?;
 
-            if !face_a.plane.is_coincident_with(&face_b.plane) {
+            if !face_a.plane.is_coincident_with(&face_b.plane)? {
                 return Err(AssemblyError::InterfaceNotCoplanar {
                     interface_id: iface.id.clone(),
                     detail: format!(
@@ -713,6 +798,93 @@ impl Assembly {
                         face_a.plane, iface.brush_a, face_b.plane, iface.brush_b
                     ),
                 });
+            }
+            if checked_normal_dot(&face_a.plane, &face_b.plane)? >= 0 {
+                return Err(AssemblyError::InterfacePlaneMismatch {
+                    interface_id: iface.id.clone(),
+                    plane_a: face_a.plane.describe(),
+                    plane_b: face_b.plane.describe(),
+                });
+            }
+
+            let area_squared = contact_area_squared(&brush_a.brush, &brush_b.brush, &face_a.plane)?;
+            if area_squared <= Rational::ZERO {
+                return Err(AssemblyError::NonPositiveSupportContact {
+                    brush_id: iface.brush_a.clone(),
+                    support_id: iface.id.clone(),
+                    area_squared,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_support_contacts(&self) -> Result<(), AssemblyError> {
+        for brush in &self.brushes {
+            match &brush.support {
+                Support::World { surface } => {
+                    let area_squared = brush.brush.face_area_squared(*surface)?;
+                    if area_squared <= Rational::ZERO {
+                        return Err(AssemblyError::NonPositiveSupportContact {
+                            brush_id: brush.id.clone(),
+                            support_id: format!("world:{}", surface.tag()),
+                            area_squared,
+                        });
+                    }
+                }
+                Support::SupportedBy {
+                    brush_id,
+                    interface_id,
+                } => {
+                    let interface = self
+                        .interfaces
+                        .iter()
+                        .find(|interface| interface.id == *interface_id)
+                        .ok_or_else(|| AssemblyError::MissingInterface {
+                            interface_id: interface_id.clone(),
+                            brush_a: brush.id.clone(),
+                            brush_b: brush_id.clone(),
+                        })?;
+                    let connects_declared_support = (interface.brush_a == brush.id
+                        && interface.brush_b == *brush_id)
+                        || (interface.brush_b == brush.id && interface.brush_a == *brush_id);
+                    if !connects_declared_support {
+                        return Err(AssemblyError::MissingInterface {
+                            interface_id: interface_id.clone(),
+                            brush_a: brush.id.clone(),
+                            brush_b: brush_id.clone(),
+                        });
+                    }
+
+                    let parent =
+                        self.find_brush(brush_id)
+                            .ok_or_else(|| AssemblyError::UnknownBrush {
+                                id: brush_id.clone(),
+                            })?;
+                    let (child_role, child_plane) = if interface.brush_a == brush.id {
+                        (interface.face_role_a, &brush.brush)
+                    } else {
+                        (interface.face_role_b, &brush.brush)
+                    };
+                    let face = child_plane
+                        .faces
+                        .iter()
+                        .find(|face| face.role == child_role)
+                        .ok_or_else(|| AssemblyError::MissingInterface {
+                            interface_id: interface_id.clone(),
+                            brush_a: brush.id.clone(),
+                            brush_b: brush_id.clone(),
+                        })?;
+                    let area_squared =
+                        contact_area_squared(&brush.brush, &parent.brush, &face.plane)?;
+                    if area_squared <= Rational::ZERO {
+                        return Err(AssemblyError::NonPositiveSupportContact {
+                            brush_id: brush.id.clone(),
+                            support_id: interface_id.clone(),
+                            area_squared,
+                        });
+                    }
+                }
             }
         }
         Ok(())
@@ -859,12 +1031,16 @@ impl Assembly {
 
     fn validate_apertures(&self) -> Result<(), AssemblyError> {
         for aperture in &self.apertures {
+            let incomplete = |detail: String| AssemblyError::ApertureIncomplete {
+                aperture_id: aperture.id.clone(),
+                wall_face: aperture.wall_face.tag().into(),
+                detail,
+            };
             let wall = self.find_brush(&aperture.wall_brush_id).ok_or_else(|| {
                 AssemblyError::UnknownBrush {
                     id: aperture.wall_brush_id.clone(),
                 }
             })?;
-
             if !matches!(wall.role, BrushRole::WallShell | BrushRole::PortalThroat) {
                 return Err(AssemblyError::InvalidBrush {
                     id: wall.id.clone(),
@@ -876,6 +1052,134 @@ impl Assembly {
                     },
                 });
             }
+            if aperture.throat_depth <= Rational::ZERO {
+                return Err(incomplete("throat depth must be positive".into()));
+            }
+            if aperture.partition_brush_ids.is_empty()
+                || !aperture
+                    .partition_brush_ids
+                    .iter()
+                    .any(|id| id == &aperture.wall_brush_id)
+            {
+                return Err(incomplete(
+                    "partition must be non-empty and contain the anchor brush".into(),
+                ));
+            }
+            if aperture
+                .partition_brush_ids
+                .windows(2)
+                .any(|ids| ids[0] >= ids[1])
+            {
+                return Err(incomplete(
+                    "partition brush IDs must be sorted and unique".into(),
+                ));
+            }
+
+            let (wall_d, u_min, u_max, v_min, v_max) = match &aperture.aperture_bounds {
+                ApertureBounds::Rectangular {
+                    wall_d,
+                    u_min,
+                    u_max,
+                    v_min,
+                    v_max,
+                } => (*wall_d, *u_min, *u_max, *v_min, *v_max),
+                ApertureBounds::PointedArch {
+                    wall_d,
+                    u_center,
+                    u_half_width,
+                    v_base,
+                    v_apex,
+                    arch_rise,
+                } => {
+                    if *u_half_width <= 0 || *arch_rise <= 0 {
+                        return Err(incomplete(
+                            "pointed arch width and rise must be positive".into(),
+                        ));
+                    }
+                    let height =
+                        v_apex
+                            .checked_sub(*v_base)
+                            .ok_or(GeometryError::ArithmeticOverflow {
+                                operation: "pointed aperture height",
+                            })?;
+                    if *arch_rise > height {
+                        return Err(incomplete(
+                            "pointed arch rise exceeds aperture height".into(),
+                        ));
+                    }
+                    let left = u_center.checked_sub(*u_half_width).ok_or(
+                        GeometryError::ArithmeticOverflow {
+                            operation: "pointed aperture left bound",
+                        },
+                    )?;
+                    let right = u_center.checked_add(*u_half_width).ok_or(
+                        GeometryError::ArithmeticOverflow {
+                            operation: "pointed aperture right bound",
+                        },
+                    )?;
+                    // The complete bounding envelope is proven clear. This is
+                    // conservative for the decorative pointed profile and gives
+                    // a continuous full-height traversal throat.
+                    (*wall_d, left, right, *v_base, *v_apex)
+                }
+            };
+            if u_min >= u_max || v_min >= v_max {
+                return Err(incomplete(format!(
+                    "invalid aperture envelope u=[{u_min},{u_max}], v=[{v_min},{v_max}]"
+                )));
+            }
+
+            let wall_coordinate = Rational::from_int(wall_d);
+            let (depth_axis, tangent_axis, depth_min, depth_max) = match aperture.wall_face {
+                geometry::FaceRole::EastWall | geometry::FaceRole::NorthWall => (
+                    if aperture.wall_face == geometry::FaceRole::EastWall {
+                        0
+                    } else {
+                        1
+                    },
+                    if aperture.wall_face == geometry::FaceRole::EastWall {
+                        1
+                    } else {
+                        0
+                    },
+                    wall_coordinate.checked_sub(aperture.throat_depth)?,
+                    wall_coordinate,
+                ),
+                geometry::FaceRole::WestWall | geometry::FaceRole::SouthWall => (
+                    if aperture.wall_face == geometry::FaceRole::WestWall {
+                        0
+                    } else {
+                        1
+                    },
+                    if aperture.wall_face == geometry::FaceRole::WestWall {
+                        1
+                    } else {
+                        0
+                    },
+                    wall_coordinate,
+                    wall_coordinate.checked_add(aperture.throat_depth)?,
+                ),
+                _ => {
+                    return Err(incomplete(
+                        "aperture face must be a cardinal vertical wall".into(),
+                    ));
+                }
+            };
+
+            let wall_face = wall
+                .brush
+                .faces
+                .iter()
+                .find(|face| face.role == aperture.wall_face)
+                .ok_or_else(|| incomplete("anchor lacks the declared wall face".into()))?;
+            let normal_component =
+                [wall_face.plane.nx, wall_face.plane.ny, wall_face.plane.nz][depth_axis];
+            let actual_wall_coordinate = Rational::new(wall_face.plane.d, normal_component)?;
+            if actual_wall_coordinate != wall_coordinate {
+                return Err(incomplete(format!(
+                    "recorded wall coordinate {wall_coordinate} != actual {actual_wall_coordinate}"
+                )));
+            }
 
             let wall_thickness = wall_thickness_for_face(&wall.brush, aperture.wall_face)?;
             if wall_thickness < aperture.throat_depth {
@@ -885,50 +1189,91 @@ impl Assembly {
                 });
             }
 
-            match &aperture.aperture_bounds {
-                ApertureBounds::Rectangular {
-                    u_min,
-                    u_max,
-                    v_min,
-                    v_max,
-                    ..
-                } => {
-                    if u_min >= u_max {
-                        return Err(AssemblyError::ApertureIncomplete {
-                            aperture_id: aperture.id.clone(),
-                            wall_face: aperture.wall_face.tag().into(),
-                            detail: format!("invalid u range: [{u_min}, {u_max}]"),
-                        });
-                    }
-                    if v_min >= v_max {
-                        return Err(AssemblyError::ApertureIncomplete {
-                            aperture_id: aperture.id.clone(),
-                            wall_face: aperture.wall_face.tag().into(),
-                            detail: format!("invalid v range: [{v_min}, {v_max}]"),
-                        });
+            let mut prism_ranges = [(Rational::ZERO, Rational::ZERO); 3];
+            prism_ranges[depth_axis] = (depth_min, depth_max);
+            prism_ranges[tangent_axis] = (Rational::from_int(u_min), Rational::from_int(u_max));
+            prism_ranges[2] = (Rational::from_int(v_min), Rational::from_int(v_max));
+            let aperture_prism =
+                ConvexBrush::make_rational_box(prism_ranges[0], prism_ranges[1], prism_ranges[2])?;
+
+            let mut partitions = Vec::with_capacity(aperture.partition_brush_ids.len());
+            let mut shell_bounds = ExactBounds3 {
+                min: [prism_ranges[0].0, prism_ranges[1].0, prism_ranges[2].0],
+                max: [prism_ranges[0].1, prism_ranges[1].1, prism_ranges[2].1],
+            };
+            for id in &aperture.partition_brush_ids {
+                let partition = self
+                    .find_brush(id)
+                    .ok_or_else(|| AssemblyError::UnknownBrush { id: id.clone() })?;
+                if !matches!(
+                    partition.role,
+                    BrushRole::WallShell | BrushRole::PortalThroat
+                ) {
+                    return Err(incomplete(format!(
+                        "partition brush {id} has role {}",
+                        partition.role
+                    )));
+                }
+                let bounds = exact_brush_bounds(&partition.brush)?;
+                if bounds.min[depth_axis] != depth_min || bounds.max[depth_axis] != depth_max {
+                    return Err(incomplete(format!(
+                        "partition brush {id} does not span the complete wall depth"
+                    )));
+                }
+                for axis in [tangent_axis, 2] {
+                    shell_bounds.min[axis] = shell_bounds.min[axis].min(bounds.min[axis]);
+                    shell_bounds.max[axis] = shell_bounds.max[axis].max(bounds.max[axis]);
+                }
+                partitions.push(partition);
+            }
+            shell_bounds.min[depth_axis] = depth_min;
+            shell_bounds.max[depth_axis] = depth_max;
+            let shell = ConvexBrush::make_rational_box(
+                (shell_bounds.min[0], shell_bounds.max[0]),
+                (shell_bounds.min[1], shell_bounds.max[1]),
+                (shell_bounds.min[2], shell_bounds.max[2]),
+            )?;
+
+            for partition in &partitions {
+                for vertex in partition.brush.compute_vertices()? {
+                    for face in &shell.faces {
+                        if !face.plane.contains_point_rational(&vertex)? {
+                            return Err(incomplete(format!(
+                                "partition brush {} extends outside the wall shell",
+                                partition.id
+                            )));
+                        }
                     }
                 }
-                ApertureBounds::PointedArch {
-                    v_base,
-                    v_apex,
-                    u_half_width,
-                    ..
-                } => {
-                    if *v_base >= *v_apex {
-                        return Err(AssemblyError::ApertureIncomplete {
-                            aperture_id: aperture.id.clone(),
-                            wall_face: aperture.wall_face.tag().into(),
-                            detail: format!("invalid v range: [{v_base}, {v_apex}]"),
-                        });
-                    }
-                    if *u_half_width <= 0 {
-                        return Err(AssemblyError::ApertureIncomplete {
-                            aperture_id: aperture.id.clone(),
-                            wall_face: aperture.wall_face.tag().into(),
-                            detail: "zero or negative half-width".into(),
-                        });
-                    }
+            }
+
+            // Full-depth exclusion applies to every assembly brush, not only
+            // the declared wall partition. Any positive-volume occupation of
+            // the recorded throat fails closed.
+            for brush in &self.brushes {
+                if matches!(
+                    exact_intersection_volume(&brush.brush, &aperture_prism)?,
+                    IntersectionResult::PositiveVolume
+                ) {
+                    return Err(AssemblyError::ApertureObstructed {
+                        aperture_id: aperture.id.clone(),
+                        brush_id: brush.id.clone(),
+                    });
                 }
+            }
+
+            // Pairwise assembly validation already proves disjoint partition
+            // interiors. Containment plus exact volume equality therefore
+            // proves that their union is precisely shell minus aperture prism.
+            let mut covered_volume = validated_volume(&aperture_prism)?;
+            for partition in partitions {
+                covered_volume = covered_volume.checked_add(validated_volume(&partition.brush)?)?;
+            }
+            let shell_volume = validated_volume(&shell)?;
+            if covered_volume != shell_volume {
+                return Err(incomplete(format!(
+                    "partition volume {covered_volume} plus aperture does not cover shell volume {shell_volume}"
+                )));
             }
         }
         Ok(())
@@ -1073,9 +1418,23 @@ mod tests {
         ];
         let refs: Vec<&Point3> = pts.iter().collect();
         assert!(
-            all_coplanar(&refs),
+            all_coplanar(&refs).unwrap(),
             "four coplanar points should be coplanar"
         );
+    }
+
+    #[test]
+    fn determinant_arithmetic_failure_is_not_converted_to_zero() {
+        let p0 = Point3::from_ints(0, 0, 0);
+        let p1 = Point3::from_ints(i128::MAX, 0, 0);
+        let p2 = Point3::from_ints(0, i128::MAX, 0);
+        let p3 = Point3::from_ints(0, 0, i128::MAX);
+        assert!(matches!(
+            tetrahedron_det_4(&p0, &p1, &p2, &p3),
+            Err(AssemblyError::Geometry(
+                GeometryError::ArithmeticOverflow { .. }
+            ))
+        ));
     }
 
     fn make_box_brush(x0: i128, y0: i128, z0: i128, x1: i128, y1: i128, z1: i128) -> ConvexBrush {
@@ -1118,6 +1477,50 @@ mod tests {
                 surface: geometry::FaceRole::Floor,
             },
         )
+    }
+
+    fn aperture_partition() -> (Vec<AssemblyBrush>, Vec<Interface>, Vec<String>) {
+        let brushes = vec![
+            wall_shell("wall_bottom", 0, 16, 0, 16, 48, 16),
+            wall_shell("wall_left", 0, 0, 0, 16, 16, 128),
+            wall_shell("wall_right", 0, 48, 0, 16, 64, 128),
+            wall_shell("wall_top", 0, 16, 96, 16, 48, 128),
+        ];
+        let interfaces = vec![
+            Interface::new(
+                "wall_if_bl",
+                "wall_bottom",
+                "wall_left",
+                geometry::FaceRole::SouthWall,
+                geometry::FaceRole::NorthWall,
+            ),
+            Interface::new(
+                "wall_if_br",
+                "wall_bottom",
+                "wall_right",
+                geometry::FaceRole::NorthWall,
+                geometry::FaceRole::SouthWall,
+            ),
+            Interface::new(
+                "wall_if_lt",
+                "wall_left",
+                "wall_top",
+                geometry::FaceRole::NorthWall,
+                geometry::FaceRole::SouthWall,
+            ),
+            Interface::new(
+                "wall_if_rt",
+                "wall_right",
+                "wall_top",
+                geometry::FaceRole::SouthWall,
+                geometry::FaceRole::NorthWall,
+            ),
+        ];
+        let ids = ["wall_bottom", "wall_left", "wall_right", "wall_top"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        (brushes, interfaces, ids)
     }
 
     // ── Assembly ordering ──────────────────────────────────────────────
@@ -1322,7 +1725,7 @@ mod tests {
         let b3 = AssemblyBrush::new(
             "top",
             BrushRole::Feature,
-            make_box_brush(32, 32, 0, 48, 48, 80),
+            make_box_brush(32, 20, 0, 48, 28, 80),
             Support::SupportedBy {
                 brush_id: "mid".into(),
                 interface_id: "iface_02".into(),
@@ -1359,10 +1762,11 @@ mod tests {
 
     #[test]
     fn valid_aperture_passes() {
-        let wall = wall_shell("wall", 0, 0, 0, 16, 64, 128);
+        let (brushes, interfaces, partition_brush_ids) = aperture_partition();
         let aperture = Aperture {
             id: "apt_01".into(),
-            wall_brush_id: "wall".into(),
+            wall_brush_id: "wall_left".into(),
+            partition_brush_ids,
             wall_face: geometry::FaceRole::EastWall,
             aperture_bounds: ApertureBounds::Rectangular {
                 wall_d: 16,
@@ -1373,7 +1777,7 @@ mod tests {
             },
             throat_depth: Rational::from_int(16),
         };
-        assert!(Assembly::new(vec![wall], vec![], vec![aperture], vec![]).is_ok());
+        assert!(Assembly::new(brushes, interfaces, vec![aperture], vec![]).is_ok());
     }
 
     #[test]
@@ -1382,6 +1786,7 @@ mod tests {
         let aperture = Aperture {
             id: "apt_01".into(),
             wall_brush_id: "floor_slab".into(),
+            partition_brush_ids: vec!["floor_slab".into()],
             wall_face: geometry::FaceRole::Floor,
             aperture_bounds: ApertureBounds::Rectangular {
                 wall_d: 0,

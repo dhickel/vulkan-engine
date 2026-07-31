@@ -26,6 +26,8 @@
 //! cargo check -p bsp_generator --tests
 //! ```
 
+#![allow(dead_code)] // Proof support modules are shared across integration targets.
+
 mod enhanced_v3_proof;
 
 use enhanced_v3_proof::assembly::{
@@ -74,6 +76,51 @@ fn floor_slab(
             surface: FaceRole::Floor,
         },
     )
+}
+
+fn aperture_wall_partition(prefix: &str) -> (Vec<AssemblyBrush>, Vec<Interface>, Vec<String>) {
+    let bottom = format!("{prefix}_bottom");
+    let left = format!("{prefix}_left");
+    let right = format!("{prefix}_right");
+    let top = format!("{prefix}_top");
+    let brushes = vec![
+        wall(&bottom, 0, 16, 0, 16, 48, 16),
+        wall(&left, 0, 0, 0, 16, 16, 128),
+        wall(&right, 0, 48, 0, 16, 64, 128),
+        wall(&top, 0, 16, 96, 16, 48, 128),
+    ];
+    let interfaces = vec![
+        Interface::new(
+            format!("{prefix}_if_bl"),
+            &bottom,
+            &left,
+            FaceRole::SouthWall,
+            FaceRole::NorthWall,
+        ),
+        Interface::new(
+            format!("{prefix}_if_br"),
+            &bottom,
+            &right,
+            FaceRole::NorthWall,
+            FaceRole::SouthWall,
+        ),
+        Interface::new(
+            format!("{prefix}_if_lt"),
+            &left,
+            &top,
+            FaceRole::NorthWall,
+            FaceRole::SouthWall,
+        ),
+        Interface::new(
+            format!("{prefix}_if_rt"),
+            &right,
+            &top,
+            FaceRole::SouthWall,
+            FaceRole::NorthWall,
+        ),
+    ];
+    let ids = vec![bottom, left, right, top];
+    (brushes, interfaces, ids)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -129,6 +176,24 @@ mod subphase_a {
         let a = Rational::from_int(1);
         let zero = Rational::from_int(0);
         assert!(a.checked_div(zero).is_err());
+    }
+
+    #[test]
+    fn rational_ordering_avoids_cross_product_overflow() {
+        let max_minus_one = i128::MAX.checked_sub(1).unwrap();
+        let above_one = Rational::new(i128::MAX, max_minus_one).unwrap();
+        let below_one = Rational::new(max_minus_one, i128::MAX).unwrap();
+        assert!(above_one > Rational::ONE);
+        assert!(below_one < Rational::ONE);
+        assert!(above_one > below_one);
+    }
+
+    #[test]
+    fn rational_minimum_negation_fails_closed() {
+        assert!(matches!(
+            Rational::ZERO.checked_sub(Rational::from_int(i128::MIN)),
+            Err(GeometryError::ArithmeticOverflow { .. })
+        ));
     }
 
     // ── A.2 Normal classification ─────────────────────────────────────
@@ -253,22 +318,36 @@ mod subphase_a {
         ));
     }
 
+    #[test]
+    fn plane_construction_and_containment_overflow_are_typed() {
+        assert!(matches!(
+            CanonicalPlane::from_triple((i128::MIN, 0, 0), (i128::MAX, 0, 0), (0, 1, 0),),
+            Err(GeometryError::ArithmeticOverflow { .. })
+        ));
+
+        let huge = CanonicalPlane::new(i128::MAX, 0, 0, 1).unwrap();
+        assert!(matches!(
+            huge.contains_point(i128::MAX, 0, 0),
+            Err(GeometryError::ArithmeticOverflow { .. })
+        ));
+    }
+
     // ── A.4 Half-space test ────────────────────────────────────────────
 
     #[test]
     fn half_space_contains_interior_points() {
         let p = CanonicalPlane::new(1, 0, 0, 10).unwrap(); // x >= 10
-        assert!(p.contains_point(10, 0, 0));
-        assert!(p.contains_point(20, 5, 7));
-        assert!(!p.contains_point(9, 0, 0));
+        assert!(p.contains_point(10, 0, 0).unwrap());
+        assert!(p.contains_point(20, 5, 7).unwrap());
+        assert!(!p.contains_point(9, 0, 0).unwrap());
     }
 
     #[test]
     fn diagonal_half_space() {
         let p = CanonicalPlane::new(1, 1, 0, 20).unwrap(); // x + y >= 20
-        assert!(p.contains_point(10, 10, 0));
-        assert!(p.contains_point(20, 0, 0));
-        assert!(!p.contains_point(5, 5, 0));
+        assert!(p.contains_point(10, 10, 0).unwrap());
+        assert!(p.contains_point(20, 0, 0).unwrap());
+        assert!(!p.contains_point(5, 5, 0).unwrap());
     }
 
     // ── A.5 Parallel and coincident detection ──────────────────────────
@@ -277,22 +356,22 @@ mod subphase_a {
     fn parallel_planes_detected() {
         let a = CanonicalPlane::new(1, 0, 0, 0).unwrap();
         let b = CanonicalPlane::new(3, 0, 0, 5).unwrap();
-        assert!(a.is_parallel_to(&b));
+        assert!(a.is_parallel_to(&b).unwrap());
     }
 
     #[test]
     fn coincident_planes_detected() {
         let a = CanonicalPlane::new(1, 0, 0, 16).unwrap();
         let b = CanonicalPlane::new(2, 0, 0, 32).unwrap();
-        assert!(a.is_coincident_with(&b));
+        assert!(a.is_coincident_with(&b).unwrap());
     }
 
     #[test]
     fn parallel_not_coincident() {
         let a = CanonicalPlane::new(1, 0, 0, 10).unwrap();
         let b = CanonicalPlane::new(1, 0, 0, 20).unwrap();
-        assert!(a.is_parallel_to(&b));
-        assert!(!a.is_coincident_with(&b));
+        assert!(a.is_parallel_to(&b).unwrap());
+        assert!(!a.is_coincident_with(&b).unwrap());
     }
 
     #[test]
@@ -302,7 +381,7 @@ mod subphase_a {
         let a = CanonicalPlane::new(1, 0, 0, 10).unwrap();
         let b = CanonicalPlane::new(-1, 0, 0, -10).unwrap();
         // They represent the same surface (x=10), so is_coincident_with returns true
-        assert!(a.is_coincident_with(&b));
+        assert!(a.is_coincident_with(&b).unwrap());
         // But they have different normals
         assert_ne!(a.nx, b.nx);
     }
@@ -372,12 +451,23 @@ mod subphase_b {
         assert_eq!(pt.z, Rational::from_int(5));
     }
 
+    #[test]
+    fn determinant_overflow_is_typed() {
+        let p1 = CanonicalPlane::new(i128::MAX, 0, 0, 1).unwrap();
+        let p2 = CanonicalPlane::new(0, i128::MAX, 0, 1).unwrap();
+        let p3 = CanonicalPlane::new(0, 0, i128::MAX, 1).unwrap();
+        assert!(matches!(
+            geometry::intersect_three_planes(&p1, &p2, &p3),
+            Err(GeometryError::ArithmeticOverflow { .. })
+        ));
+    }
+
     // ── B.2 Box validation ─────────────────────────────────────────────
 
     #[test]
     fn box_volume_is_correct() {
         let brush = box_brush(0, 0, 0, 64, 64, 128);
-        assert_eq!(brush.volume(), Rational::from_int(64 * 64 * 128));
+        assert_eq!(brush.volume(), Rational::from_int(524_288));
     }
 
     #[test]
@@ -451,6 +541,37 @@ mod subphase_b {
         ));
     }
 
+    #[test]
+    fn recession_feasibility_rejects_sign_complete_unbounded_strip() {
+        // Every coordinate appears with both signs, but r=(1,1,0) is a
+        // non-zero recession direction. Component-sign inference accepts this
+        // system incorrectly; exact normalized feasibility rejects it.
+        let faces = vec![
+            geometry::BrushFace::new(CanonicalPlane::new(1, 0, 0, 0).unwrap()).unwrap(),
+            geometry::BrushFace::new(CanonicalPlane::new(0, 1, 0, 0).unwrap()).unwrap(),
+            geometry::BrushFace::new(CanonicalPlane::new(-1, 1, 0, -16).unwrap()).unwrap(),
+            geometry::BrushFace::new(CanonicalPlane::new(1, -1, 0, -16).unwrap()).unwrap(),
+            geometry::BrushFace::new(CanonicalPlane::new(0, 0, 1, 0).unwrap()).unwrap(),
+            geometry::BrushFace::new(CanonicalPlane::new(0, 0, -1, -16).unwrap()).unwrap(),
+        ];
+        assert!(geometry::recession_normalization_feasible(&faces, 0, 1).unwrap());
+        let mut brush = ConvexBrush::new(faces).unwrap();
+        assert_eq!(brush.validate_and_cache(), Err(GeometryError::Unbounded));
+    }
+
+    #[test]
+    fn bounded_box_makes_all_six_recession_normalizations_infeasible() {
+        let brush = box_brush(0, 0, 0, 64, 64, 128);
+        for axis in 0..3 {
+            for sign in [-1, 1] {
+                assert!(
+                    !geometry::recession_normalization_feasible(&brush.faces, axis, sign).unwrap(),
+                    "axis={axis}, sign={sign} unexpectedly feasible"
+                );
+            }
+        }
+    }
+
     // ── B.4 Full-dimensional interior witness ──────────────────────────
 
     #[test]
@@ -458,12 +579,9 @@ mod subphase_b {
         let brush = box_brush(0, 0, 0, 64, 64, 128);
         let w = brush.interior_witness();
         for face in &brush.faces {
-            let sd = face.plane.nx * w.x.num * w.y.den * w.z.den
-                + face.plane.ny * w.y.num * w.x.den * w.z.den
-                + face.plane.nz * w.z.num * w.x.den * w.y.den
-                - face.plane.d * w.x.den * w.y.den * w.z.den;
+            let signed_distance = face.plane.signed_distance_rational(w).unwrap();
             assert!(
-                sd > 0,
+                signed_distance > Rational::ZERO,
                 "interior witness should be strictly inside face {}",
                 face.plane
             );
@@ -763,11 +881,13 @@ mod subphase_c {
     #[test]
     fn intersection_proof_positive_volume_detected() {
         // b1 [0,20] and b2 [10,30] overlap in [10,20]
-        let b1 = box_brush(0, 0, 0, 20, 64, 128);
-        let b2 = box_brush(10, 0, 0, 30, 64, 128);
+        let b1 = wall("b1", 0, 0, 0, 20, 64, 128);
+        let b2 = wall("b2", 10, 0, 0, 30, 64, 128);
 
-        // Manual check: the intersection is [10,20]×[0,64]×[0,128] which has positive volume
-        // This is tested via the Assembly which catches PositiveVolumeOverlap
+        assert!(matches!(
+            Assembly::new(vec![b1, b2], vec![], vec![], vec![]),
+            Err(assembly::AssemblyError::PositiveVolumeOverlap { .. })
+        ));
     }
 
     // ── C.6 Canonical result ordering ──────────────────────────────────
@@ -879,10 +999,11 @@ mod subphase_d {
 
     #[test]
     fn valid_rectangular_aperture() {
-        let w = wall("wall", 0, 0, 0, 16, 64, 128);
+        let (brushes, interfaces, partition_brush_ids) = aperture_wall_partition("wall");
         let aperture = Aperture {
             id: "apt".into(),
-            wall_brush_id: "wall".into(),
+            wall_brush_id: "wall_left".into(),
+            partition_brush_ids,
             wall_face: FaceRole::EastWall,
             aperture_bounds: ApertureBounds::Rectangular {
                 wall_d: 16,
@@ -893,7 +1014,7 @@ mod subphase_d {
             },
             throat_depth: Rational::from_int(16),
         };
-        assert!(Assembly::new(vec![w], vec![], vec![aperture], vec![]).is_ok());
+        assert!(Assembly::new(brushes, interfaces, vec![aperture], vec![]).is_ok());
     }
 
     #[test]
@@ -902,6 +1023,7 @@ mod subphase_d {
         let aperture = Aperture {
             id: "apt".into(),
             wall_brush_id: "fl".into(),
+            partition_brush_ids: vec!["fl".into()],
             wall_face: FaceRole::Floor,
             aperture_bounds: ApertureBounds::Rectangular {
                 wall_d: 0,
@@ -921,6 +1043,7 @@ mod subphase_d {
         let aperture = Aperture {
             id: "apt".into(),
             wall_brush_id: "wall".into(),
+            partition_brush_ids: vec!["wall".into()],
             wall_face: FaceRole::EastWall,
             aperture_bounds: ApertureBounds::Rectangular {
                 wall_d: 16,
@@ -936,10 +1059,11 @@ mod subphase_d {
 
     #[test]
     fn pointed_arch_aperture() {
-        let w = wall("wall", 0, 0, 0, 16, 64, 128);
+        let (brushes, interfaces, partition_brush_ids) = aperture_wall_partition("wall");
         let aperture = Aperture {
             id: "apt".into(),
-            wall_brush_id: "wall".into(),
+            wall_brush_id: "wall_left".into(),
+            partition_brush_ids,
             wall_face: FaceRole::EastWall,
             aperture_bounds: ApertureBounds::PointedArch {
                 wall_d: 16,
@@ -951,7 +1075,67 @@ mod subphase_d {
             },
             throat_depth: Rational::from_int(16),
         };
-        assert!(Assembly::new(vec![w], vec![], vec![aperture], vec![]).is_ok());
+        assert!(Assembly::new(brushes, interfaces, vec![aperture], vec![]).is_ok());
+    }
+
+    #[test]
+    fn aperture_rejects_brush_anywhere_in_full_depth_prism() {
+        let (mut brushes, interfaces, partition_brush_ids) = aperture_wall_partition("wall");
+        brushes.push(AssemblyBrush::new(
+            "obstruction",
+            BrushRole::Feature,
+            box_brush(4, 24, 32, 12, 40, 80),
+            Support::World {
+                surface: FaceRole::Floor,
+            },
+        ));
+        brushes.sort();
+        let aperture = Aperture {
+            id: "apt".into(),
+            wall_brush_id: "wall_left".into(),
+            partition_brush_ids,
+            wall_face: FaceRole::EastWall,
+            aperture_bounds: ApertureBounds::Rectangular {
+                wall_d: 16,
+                u_min: 16,
+                u_max: 48,
+                v_min: 16,
+                v_max: 96,
+            },
+            throat_depth: Rational::from_int(16),
+        };
+        assert!(matches!(
+            Assembly::new(brushes, interfaces, vec![aperture], vec![]),
+            Err(assembly::AssemblyError::ApertureObstructed { .. })
+        ));
+    }
+
+    #[test]
+    fn aperture_rejects_incomplete_wall_partition() {
+        let (mut brushes, mut interfaces, mut partition_brush_ids) =
+            aperture_wall_partition("wall");
+        brushes.retain(|brush| brush.id != "wall_top");
+        interfaces
+            .retain(|interface| interface.brush_a != "wall_top" && interface.brush_b != "wall_top");
+        partition_brush_ids.retain(|id| id != "wall_top");
+        let aperture = Aperture {
+            id: "apt".into(),
+            wall_brush_id: "wall_left".into(),
+            partition_brush_ids,
+            wall_face: FaceRole::EastWall,
+            aperture_bounds: ApertureBounds::Rectangular {
+                wall_d: 16,
+                u_min: 16,
+                u_max: 48,
+                v_min: 16,
+                v_max: 96,
+            },
+            throat_depth: Rational::from_int(16),
+        };
+        assert!(matches!(
+            Assembly::new(brushes, interfaces, vec![aperture], vec![]),
+            Err(assembly::AssemblyError::ApertureIncomplete { .. })
+        ));
     }
 
     // ── D.3 Support: positive-area geometric contact ───────────────────
@@ -987,6 +1171,31 @@ mod subphase_d {
         assert_eq!(assembly.support_edges.len(), 1);
         assert_eq!(assembly.support_edges[0].0, "pillar");
         assert_eq!(assembly.support_edges[0].1, "base");
+    }
+
+    #[test]
+    fn edge_only_support_contact_is_rejected() {
+        let base = wall("base", 0, 0, 0, 16, 16, 64);
+        let child = AssemblyBrush::new(
+            "child",
+            BrushRole::Feature,
+            box_brush(16, 16, 0, 32, 32, 64),
+            Support::SupportedBy {
+                brush_id: "base".into(),
+                interface_id: "if_edge".into(),
+            },
+        );
+        let interface = Interface::new(
+            "if_edge",
+            "child",
+            "base",
+            FaceRole::WestWall,
+            FaceRole::EastWall,
+        );
+        assert!(matches!(
+            Assembly::new(vec![base, child], vec![interface], vec![], vec![]),
+            Err(assembly::AssemblyError::NonPositiveSupportContact { .. })
+        ));
     }
 
     // ── D.4 Support graph: acyclic ─────────────────────────────────────
@@ -1051,7 +1260,7 @@ mod subphase_d {
         let top = AssemblyBrush::new(
             "top",
             BrushRole::Feature,
-            box_brush(32, 32, 0, 48, 48, 80),
+            box_brush(32, 20, 0, 48, 28, 80),
             Support::SupportedBy {
                 brush_id: "mid".into(),
                 interface_id: "if_top".into(),
@@ -1262,11 +1471,11 @@ mod subphase_d {
 
     #[test]
     fn golden_portal_piece() {
-        // Portal throat: wall with an aperture
-        let wall_brush = wall("portal_wall", 0, 0, 0, 16, 64, 128);
+        let (brushes, interfaces, partition_brush_ids) = aperture_wall_partition("portal_wall");
         let aperture = Aperture {
             id: "portal_apt".into(),
-            wall_brush_id: "portal_wall".into(),
+            wall_brush_id: "portal_wall_left".into(),
+            partition_brush_ids,
             wall_face: FaceRole::EastWall,
             aperture_bounds: ApertureBounds::Rectangular {
                 wall_d: 16,
@@ -1278,7 +1487,7 @@ mod subphase_d {
             throat_depth: Rational::from_int(16),
         };
 
-        let assembly = Assembly::new(vec![wall_brush], vec![], vec![aperture], vec![]).unwrap();
+        let assembly = Assembly::new(brushes, interfaces, vec![aperture], vec![]).unwrap();
         assert!(assembly.validated);
     }
 
@@ -1417,7 +1626,7 @@ mod subphase_d {
     fn malformed_overflow_handled_gracefully() {
         // Near-max i128 values should produce an error, not panic
         let r = Rational::new(i128::MAX, 1).unwrap();
-        let big = Rational::new(i128::MAX - 1, 1).unwrap();
+        let big = Rational::new(i128::MAX.checked_sub(1).unwrap(), 1).unwrap();
         let result = r.checked_add(big);
         assert!(result.is_err());
     }
@@ -1491,6 +1700,7 @@ mod subphase_d {
         let aperture = Aperture {
             id: "bad_apt".into(),
             wall_brush_id: "wall".into(),
+            partition_brush_ids: vec!["wall".into()],
             wall_face: FaceRole::EastWall,
             aperture_bounds: ApertureBounds::Rectangular {
                 wall_d: 16,
@@ -1512,6 +1722,7 @@ mod subphase_d {
         let aperture = Aperture {
             id: "bad_throat".into(),
             wall_brush_id: "wall".into(),
+            partition_brush_ids: vec!["wall".into()],
             wall_face: FaceRole::EastWall,
             aperture_bounds: ApertureBounds::Rectangular {
                 wall_d: 16,

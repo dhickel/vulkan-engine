@@ -15,6 +15,8 @@
 //! - AABB used only for broad-phase rejection — never proves validity.
 //! - Never depends on floating-point arithmetic, production code, BSP, renderer, or runtime.
 
+#![allow(dead_code)] // Shared proof APIs are exercised by different integration targets.
+
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt;
@@ -157,17 +159,14 @@ impl NormalClass {
 
 /// Classify a raw integer normal into [`NormalClass`].
 pub fn classify_normal(nx: i128, ny: i128, nz: i128) -> NormalClass {
-    // Reduce first
-    let g = gcd3(nx.abs(), ny.abs(), nz.abs());
+    let (ax, ay, az) = (nx.unsigned_abs(), ny.unsigned_abs(), nz.unsigned_abs());
+    let g = gcd3_u128(ax, ay, az);
     if g == 0 {
         return NormalClass::Unapproved;
     }
-    let (ax, ay, az) = (nx.abs() / g, ny.abs() / g, nz.abs() / g);
-    match (ax, ay, az) {
-        (0, 0, _) if az != 0 => NormalClass::Cardinal,
-        (0, a, 0) if a != 0 => NormalClass::Cardinal,
-        (a, 0, 0) if a != 0 => NormalClass::Cardinal,
-        (a, b, 0) if a == 1 && b == 1 => NormalClass::Diagonal45,
+    match (ax / g, ay / g, az / g) {
+        (0, 0, 1) | (0, 1, 0) | (1, 0, 0) => NormalClass::Cardinal,
+        (1, 1, 0) => NormalClass::Diagonal45,
         _ => NormalClass::Unapproved,
     }
 }
@@ -192,12 +191,17 @@ impl Rational {
         if den == 0 {
             return Err(GeometryError::ZeroDenominator);
         }
-        let g = gcd(num, den);
-        let mut n = num / g;
-        let mut d = den / g;
+
+        let g = gcd_u128(num.unsigned_abs(), den.unsigned_abs());
+        let mut n = checked_divide_by_unsigned_gcd(num, g, "rational numerator reduction")?;
+        let mut d = checked_divide_by_unsigned_gcd(den, g, "rational denominator reduction")?;
         if d < 0 {
-            n = -n;
-            d = -d;
+            n = n.checked_neg().ok_or(GeometryError::ArithmeticOverflow {
+                operation: "rational numerator sign normalization",
+            })?;
+            d = d.checked_neg().ok_or(GeometryError::ArithmeticOverflow {
+                operation: "rational denominator sign normalization",
+            })?;
         }
         Ok(Self { num: n, den: d })
     }
@@ -213,12 +217,17 @@ impl Rational {
     /// One.
     pub const ONE: Self = Self { num: 1, den: 1 };
 
-    /// Negation.
-    pub fn neg(self) -> Self {
-        Self {
-            num: -self.num,
+    /// Checked negation.
+    pub fn checked_neg(self) -> Result<Self, GeometryError> {
+        Ok(Self {
+            num: self
+                .num
+                .checked_neg()
+                .ok_or(GeometryError::ArithmeticOverflow {
+                    operation: "rational negation",
+                })?,
             den: self.den,
-        }
+        })
     }
 
     /// Checked addition.
@@ -246,7 +255,7 @@ impl Rational {
 
     /// Checked subtraction.
     pub fn checked_sub(self, other: Self) -> Result<Self, GeometryError> {
-        self.checked_add(other.neg())
+        self.checked_add(other.checked_neg()?)
     }
 
     /// Checked multiplication.
@@ -291,12 +300,17 @@ impl Rational {
         self.den == 1
     }
 
-    /// Absolute value.
-    pub fn abs(self) -> Self {
-        Self {
-            num: self.num.abs(),
+    /// Checked absolute value.
+    pub fn checked_abs(self) -> Result<Self, GeometryError> {
+        Ok(Self {
+            num: self
+                .num
+                .checked_abs()
+                .ok_or(GeometryError::ArithmeticOverflow {
+                    operation: "rational absolute value",
+                })?,
             den: self.den,
-        }
+        })
     }
 
     /// Sign: -1, 0, or 1.
@@ -330,10 +344,9 @@ impl PartialOrd for Rational {
 
 impl Ord for Rational {
     fn cmp(&self, other: &Self) -> Ordering {
-        // a/b vs c/d  →  a*d vs c*b
-        let left = self.num * other.den;
-        let right = other.num * self.den;
-        left.cmp(&right)
+        // Continued-fraction comparison avoids the overflowing cross-products
+        // used by the usual `a*d` versus `c*b` implementation.
+        compare_rationals_without_multiplication(*self, *other)
     }
 }
 
@@ -452,48 +465,122 @@ impl Vector3 {
     }
 }
 
-// ── GCD utilities ─────────────────────────────────────────────────────────
+// ── Checked integer utilities ─────────────────────────────────────────────
 
-/// Greatest common divisor of two i128 values (non-negative result).
-fn gcd(a: i128, b: i128) -> i128 {
-    let mut a = a.abs();
-    let mut b = b.abs();
+fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
     while b != 0 {
-        let t = b;
-        b = a % b;
-        a = t;
+        (a, b) = (b, a % b);
     }
     a
 }
 
-/// GCD of three i128 values.
-fn gcd3(a: i128, b: i128, c: i128) -> i128 {
-    gcd(gcd(a, b), c)
+fn gcd3_u128(a: u128, b: u128, c: u128) -> u128 {
+    gcd_u128(gcd_u128(a, b), c)
 }
 
-/// GCD of four i128 values, always positive.
-fn signed_gcd4(a: i128, b: i128, c: i128, d: i128) -> i128 {
-    let g = gcd(gcd3(a, b, c), d);
-    if g == 0 {
-        return 1;
-    }
-    g
+fn gcd4_u128(a: i128, b: i128, c: i128, d: i128) -> u128 {
+    gcd_u128(
+        gcd3_u128(a.unsigned_abs(), b.unsigned_abs(), c.unsigned_abs()),
+        d.unsigned_abs(),
+    )
 }
 
-/// Signed GCD of three i128 values.
-fn signed_gcd3(a: i128, b: i128, c: i128) -> i128 {
-    let g = gcd3(a, b, c);
-    if g == 0 {
-        return 1;
+fn checked_divide_by_unsigned_gcd(
+    value: i128,
+    divisor: u128,
+    operation: &'static str,
+) -> Result<i128, GeometryError> {
+    if divisor == 0 {
+        return Err(GeometryError::ArithmeticOverflow { operation });
     }
-    let sign = if a != 0 {
-        a.signum()
-    } else if b != 0 {
-        b.signum()
-    } else {
-        c.signum()
-    };
-    g * sign
+    if divisor == (1_u128 << 127) {
+        return match value {
+            i128::MIN => Ok(-1),
+            0 => Ok(0),
+            _ => Err(GeometryError::ArithmeticOverflow { operation }),
+        };
+    }
+    let divisor =
+        i128::try_from(divisor).map_err(|_| GeometryError::ArithmeticOverflow { operation })?;
+    value
+        .checked_div(divisor)
+        .ok_or(GeometryError::ArithmeticOverflow { operation })
+}
+
+fn compare_rationals_without_multiplication(left: Rational, right: Rational) -> Ordering {
+    let left_integer = left.num.div_euclid(left.den);
+    let right_integer = right.num.div_euclid(right.den);
+    match left_integer.cmp(&right_integer) {
+        Ordering::Equal => compare_nonnegative_fractions(
+            left.num.rem_euclid(left.den),
+            left.den,
+            right.num.rem_euclid(right.den),
+            right.den,
+        ),
+        ordering => ordering,
+    }
+}
+
+fn compare_nonnegative_fractions(
+    mut left_num: i128,
+    mut left_den: i128,
+    mut right_num: i128,
+    mut right_den: i128,
+) -> Ordering {
+    let mut reversed = false;
+    loop {
+        let left_integer = left_num / left_den;
+        let right_integer = right_num / right_den;
+        if left_integer != right_integer {
+            let ordering = left_integer.cmp(&right_integer);
+            return if reversed {
+                ordering.reverse()
+            } else {
+                ordering
+            };
+        }
+
+        let left_remainder = left_num % left_den;
+        let right_remainder = right_num % right_den;
+        let ordering = match (left_remainder == 0, right_remainder == 0) {
+            (true, true) => return Ordering::Equal,
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            (false, false) => {
+                (left_num, left_den) = (left_den, left_remainder);
+                (right_num, right_den) = (right_den, right_remainder);
+                reversed = !reversed;
+                continue;
+            }
+        };
+        return if reversed {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+    }
+}
+
+fn checked_i128_dot3(
+    left: (i128, i128, i128),
+    right: (i128, i128, i128),
+    operation: &'static str,
+) -> Result<i128, GeometryError> {
+    left.0
+        .checked_mul(right.0)
+        .ok_or(GeometryError::ArithmeticOverflow { operation })?
+        .checked_add(
+            left.1
+                .checked_mul(right.1)
+                .ok_or(GeometryError::ArithmeticOverflow { operation })?,
+        )
+        .ok_or(GeometryError::ArithmeticOverflow { operation })?
+        .checked_add(
+            left.2
+                .checked_mul(right.2)
+                .ok_or(GeometryError::ArithmeticOverflow { operation })?,
+        )
+        .ok_or(GeometryError::ArithmeticOverflow { operation })
 }
 
 // ── Canonical reduced plane ───────────────────────────────────────────────
@@ -524,12 +611,12 @@ impl CanonicalPlane {
         if nx == 0 && ny == 0 && nz == 0 {
             return Err(GeometryError::UnapprovedNormal { nx, ny, nz });
         }
-        let g = signed_gcd4(nx, ny, nz, d);
+        let g = gcd4_u128(nx, ny, nz, d);
         let plane = Self {
-            nx: nx / g,
-            ny: ny / g,
-            nz: nz / g,
-            d: d / g,
+            nx: checked_divide_by_unsigned_gcd(nx, g, "plane nx reduction")?,
+            ny: checked_divide_by_unsigned_gcd(ny, g, "plane ny reduction")?,
+            nz: checked_divide_by_unsigned_gcd(nz, g, "plane nz reduction")?,
+            d: checked_divide_by_unsigned_gcd(d, g, "plane offset reduction")?,
         };
         // Classify — must be approved
         let cls = classify_normal(plane.nx, plane.ny, plane.nz);
@@ -559,18 +646,63 @@ impl CanonicalPlane {
             return Err(GeometryError::CoincidentPoints { p0, p1, p2 });
         }
 
-        let v1 = (p1.0 - p0.0, p1.1 - p0.1, p1.2 - p0.2);
-        let v2 = (p2.0 - p0.0, p2.1 - p0.1, p2.2 - p0.2);
+        let v1 = (
+            p1.0.checked_sub(p0.0),
+            p1.1.checked_sub(p0.1),
+            p1.2.checked_sub(p0.2),
+        );
+        let v2 = (
+            p2.0.checked_sub(p0.0),
+            p2.1.checked_sub(p0.1),
+            p2.2.checked_sub(p0.2),
+        );
+        let v1 = (
+            v1.0.ok_or(GeometryError::ArithmeticOverflow {
+                operation: "plane point subtraction",
+            })?,
+            v1.1.ok_or(GeometryError::ArithmeticOverflow {
+                operation: "plane point subtraction",
+            })?,
+            v1.2.ok_or(GeometryError::ArithmeticOverflow {
+                operation: "plane point subtraction",
+            })?,
+        );
+        let v2 = (
+            v2.0.ok_or(GeometryError::ArithmeticOverflow {
+                operation: "plane point subtraction",
+            })?,
+            v2.1.ok_or(GeometryError::ArithmeticOverflow {
+                operation: "plane point subtraction",
+            })?,
+            v2.2.ok_or(GeometryError::ArithmeticOverflow {
+                operation: "plane point subtraction",
+            })?,
+        );
 
-        let nx = v1.1 * v2.2 - v1.2 * v2.1;
-        let ny = v1.2 * v2.0 - v1.0 * v2.2;
-        let nz = v1.0 * v2.1 - v1.1 * v2.0;
+        let nx =
+            v1.1.checked_mul(v2.2)
+                .and_then(|lhs| v1.2.checked_mul(v2.1).and_then(|rhs| lhs.checked_sub(rhs)))
+                .ok_or(GeometryError::ArithmeticOverflow {
+                    operation: "plane cross product x",
+                })?;
+        let ny =
+            v1.2.checked_mul(v2.0)
+                .and_then(|lhs| v1.0.checked_mul(v2.2).and_then(|rhs| lhs.checked_sub(rhs)))
+                .ok_or(GeometryError::ArithmeticOverflow {
+                    operation: "plane cross product y",
+                })?;
+        let nz =
+            v1.0.checked_mul(v2.1)
+                .and_then(|lhs| v1.1.checked_mul(v2.0).and_then(|rhs| lhs.checked_sub(rhs)))
+                .ok_or(GeometryError::ArithmeticOverflow {
+                    operation: "plane cross product z",
+                })?;
 
         if nx == 0 && ny == 0 && nz == 0 {
             return Err(GeometryError::CollinearPoints { p0, p1, p2 });
         }
 
-        let d = nx * p0.0 + ny * p0.1 + nz * p0.2;
+        let d = checked_i128_dot3((nx, ny, nz), p0, "plane offset dot product")?;
 
         Self::new(nx, ny, nz, d)
     }
@@ -581,33 +713,35 @@ impl CanonicalPlane {
     /// - Positive: strictly inside the half-space (n·x > d)
     /// - Zero: on the plane
     /// - Negative: outside the half-space
-    pub fn signed_distance(&self, x: i128, y: i128, z: i128) -> i128 {
-        self.nx * x + self.ny * y + self.nz * z - self.d
+    pub fn signed_distance(&self, x: i128, y: i128, z: i128) -> Result<i128, GeometryError> {
+        checked_i128_dot3(
+            (self.nx, self.ny, self.nz),
+            (x, y, z),
+            "plane signed-distance dot product",
+        )?
+        .checked_sub(self.d)
+        .ok_or(GeometryError::ArithmeticOverflow {
+            operation: "plane signed-distance subtraction",
+        })
     }
 
     /// Test whether a point satisfies the half-space constraint `n·x >= d`.
-    pub fn contains_point(&self, x: i128, y: i128, z: i128) -> bool {
-        self.signed_distance(x, y, z) >= 0
+    pub fn contains_point(&self, x: i128, y: i128, z: i128) -> Result<bool, GeometryError> {
+        Ok(self.signed_distance(x, y, z)? >= 0)
     }
 
     /// Test whether a rational point satisfies the half-space constraint.
     pub fn contains_point_rational(&self, p: &Point3) -> Result<bool, GeometryError> {
-        // n·p >= d
-        // n·(num/den) >= d
-        // For each coordinate: nx * px.num / px.den
-        // Multiply through by common denominator = product of all den.
-        // Simpler: compute n·p as rational and compare to d.
-        let nx_r = Rational::from_int(self.nx);
-        let ny_r = Rational::from_int(self.ny);
-        let nz_r = Rational::from_int(self.nz);
-        let d_r = Rational::from_int(self.d);
+        Ok(self.signed_distance_rational(p)? >= Rational::ZERO)
+    }
 
-        let dot = nx_r
+    /// Evaluate `n·p - d` exactly for a rational point.
+    pub fn signed_distance_rational(&self, p: &Point3) -> Result<Rational, GeometryError> {
+        Rational::from_int(self.nx)
             .checked_mul(p.x)?
-            .checked_add(ny_r.checked_mul(p.y)?)?
-            .checked_add(nz_r.checked_mul(p.z)?)?;
-
-        Ok(dot >= d_r)
+            .checked_add(Rational::from_int(self.ny).checked_mul(p.y)?)?
+            .checked_add(Rational::from_int(self.nz).checked_mul(p.z)?)?
+            .checked_sub(Rational::from_int(self.d))
     }
 
     /// The normal class.
@@ -624,28 +758,52 @@ impl CanonicalPlane {
     }
 
     /// Whether this plane is parallel to another (normals are scalar multiples).
-    pub fn is_parallel_to(&self, other: &Self) -> bool {
-        // Cross product of normals is zero
-        self.ny * other.nz - self.nz * other.ny == 0
-            && self.nz * other.nx - self.nx * other.nz == 0
-            && self.nx * other.ny - self.ny * other.nx == 0
+    pub fn is_parallel_to(&self, other: &Self) -> Result<bool, GeometryError> {
+        let cross_component = |a: i128,
+                               b: i128,
+                               c: i128,
+                               d: i128,
+                               operation: &'static str|
+         -> Result<i128, GeometryError> {
+            a.checked_mul(b)
+                .and_then(|lhs| c.checked_mul(d).and_then(|rhs| lhs.checked_sub(rhs)))
+                .ok_or(GeometryError::ArithmeticOverflow { operation })
+        };
+        Ok(cross_component(
+            self.ny,
+            other.nz,
+            self.nz,
+            other.ny,
+            "parallel normal cross x",
+        )? == 0
+            && cross_component(
+                self.nz,
+                other.nx,
+                self.nx,
+                other.nz,
+                "parallel normal cross y",
+            )? == 0
+            && cross_component(
+                self.nx,
+                other.ny,
+                self.ny,
+                other.nx,
+                "parallel normal cross z",
+            )? == 0)
     }
 
     /// Whether this plane is coincident with another (represents the same
     /// geometric surface, regardless of normal direction).
-    pub fn is_coincident_with(&self, other: &Self) -> bool {
+    pub fn is_coincident_with(&self, other: &Self) -> Result<bool, GeometryError> {
         self.is_same_surface_as(other)
     }
 
     /// Whether this plane and another represent the same geometric surface.
     /// Accepts both same-direction and opposite-direction normals.
-    pub fn is_same_surface_as(&self, other: &Self) -> bool {
-        if !self.is_parallel_to(other) {
-            return false;
+    pub fn is_same_surface_as(&self, other: &Self) -> Result<bool, GeometryError> {
+        if !self.is_parallel_to(other)? {
+            return Ok(false);
         }
-        // Two parallel planes are the same surface if there exists k such that
-        // n_self = k * n_other and d_self = k * d_other.
-        // Compute k = sn / on from the first non-zero component.
         let (sn, on) = if self.nx != 0 {
             (self.nx, other.nx)
         } else if self.ny != 0 {
@@ -653,8 +811,19 @@ impl CanonicalPlane {
         } else {
             (self.nz, other.nz)
         };
-        // d_self * on == d_other * sn  (cross-multiplied)
-        self.d * on == other.d * sn
+        let left = self
+            .d
+            .checked_mul(on)
+            .ok_or(GeometryError::ArithmeticOverflow {
+                operation: "coincident plane comparison left",
+            })?;
+        let right = other
+            .d
+            .checked_mul(sn)
+            .ok_or(GeometryError::ArithmeticOverflow {
+                operation: "coincident plane comparison right",
+            })?;
+        Ok(left == right)
     }
 }
 
@@ -817,24 +986,16 @@ impl ConvexBrush {
             for j in (i + 1)..faces.len() {
                 let a = &faces[i].plane;
                 let b = &faces[j].plane;
-                if a.is_coincident_with(b) {
+                if a.is_coincident_with(b)? {
                     return Err(GeometryError::DuplicatePlane {
                         existing: a.describe(),
                         duplicate: b.describe(),
                     });
                 }
-                if a.is_parallel_to(b) {
-                    // Check if they're opposing (normals in opposite directions)
-                    // Two parallel planes are opposing if their normals point
-                    // opposite ways AND the half-spaces face away from each other
-                    let dot = a.nx * b.nx + a.ny * b.ny + a.nz * b.nz;
-                    if dot < 0 {
-                        // Opposing: the half-spaces might still be compatible
-                        // if a·d_b >= d_a or similar, but we flag this as a
-                        // potential error to check during validation.
-                        // For now, allow but log.
-                    }
-                }
+                // Parallel opposite-facing planes are the normal way a bounded
+                // brush closes. Compatibility is proven by exact feasibility
+                // during validation rather than inferred from a raw dot product.
+                let _ = a.is_parallel_to(b)?;
             }
         }
 
@@ -866,11 +1027,41 @@ impl ConvexBrush {
 
         let planes = vec![
             CanonicalPlane::new(1, 0, 0, x_range.0)?,
-            CanonicalPlane::new(-1, 0, 0, -x_range.1)?,
+            CanonicalPlane::new(
+                -1,
+                0,
+                0,
+                x_range
+                    .1
+                    .checked_neg()
+                    .ok_or(GeometryError::ArithmeticOverflow {
+                        operation: "box maximum x negation",
+                    })?,
+            )?,
             CanonicalPlane::new(0, 1, 0, y_range.0)?,
-            CanonicalPlane::new(0, -1, 0, -y_range.1)?,
+            CanonicalPlane::new(
+                0,
+                -1,
+                0,
+                y_range
+                    .1
+                    .checked_neg()
+                    .ok_or(GeometryError::ArithmeticOverflow {
+                        operation: "box maximum y negation",
+                    })?,
+            )?,
             CanonicalPlane::new(0, 0, 1, z_range.0)?,
-            CanonicalPlane::new(0, 0, -1, -z_range.1)?,
+            CanonicalPlane::new(
+                0,
+                0,
+                -1,
+                z_range
+                    .1
+                    .checked_neg()
+                    .ok_or(GeometryError::ArithmeticOverflow {
+                        operation: "box maximum z negation",
+                    })?,
+            )?,
         ];
 
         let faces: Vec<BrushFace> = planes
@@ -878,6 +1069,52 @@ impl ConvexBrush {
             .map(BrushFace::new)
             .collect::<Result<_, _>>()?;
 
+        let mut brush = Self::new(faces)?;
+        brush.validate_and_cache()?;
+        Ok(brush)
+    }
+
+    /// Build an axis-aligned box whose bounds may be rational.
+    pub fn make_rational_box(
+        x_range: (Rational, Rational),
+        y_range: (Rational, Rational),
+        z_range: (Rational, Rational),
+    ) -> Result<Self, GeometryError> {
+        fn lower_plane(axis: usize, bound: Rational) -> Result<CanonicalPlane, GeometryError> {
+            let mut normal = [0_i128; 3];
+            normal[axis] = bound.den;
+            CanonicalPlane::new(normal[0], normal[1], normal[2], bound.num)
+        }
+
+        fn upper_plane(axis: usize, bound: Rational) -> Result<CanonicalPlane, GeometryError> {
+            let mut normal = [0_i128; 3];
+            normal[axis] = bound
+                .den
+                .checked_neg()
+                .ok_or(GeometryError::ArithmeticOverflow {
+                    operation: "rational box upper normal negation",
+                })?;
+            let offset = bound
+                .num
+                .checked_neg()
+                .ok_or(GeometryError::ArithmeticOverflow {
+                    operation: "rational box upper offset negation",
+                })?;
+            CanonicalPlane::new(normal[0], normal[1], normal[2], offset)
+        }
+
+        let planes = vec![
+            lower_plane(0, x_range.0)?,
+            upper_plane(0, x_range.1)?,
+            lower_plane(1, y_range.0)?,
+            upper_plane(1, y_range.1)?,
+            lower_plane(2, z_range.0)?,
+            upper_plane(2, z_range.1)?,
+        ];
+        let faces = planes
+            .into_iter()
+            .map(BrushFace::new)
+            .collect::<Result<Vec<_>, _>>()?;
         let mut brush = Self::new(faces)?;
         brush.validate_and_cache()?;
         Ok(brush)
@@ -903,18 +1140,64 @@ impl ConvexBrush {
                 // toward the solid interior: n = (-sx, -sy, 0).
                 let cx = if sx > 0 { x_range.1 } else { x_range.0 };
                 let cy = if sy > 0 { y_range.1 } else { y_range.0 };
-                let d = -sx * cx - sy * cy + chamfer_size;
-                planes.push(CanonicalPlane::new(-sx, -sy, 0, d)?);
+                let neg_sx = sx.checked_neg().ok_or(GeometryError::ArithmeticOverflow {
+                    operation: "chamfer x sign negation",
+                })?;
+                let neg_sy = sy.checked_neg().ok_or(GeometryError::ArithmeticOverflow {
+                    operation: "chamfer y sign negation",
+                })?;
+                let d = neg_sx
+                    .checked_mul(cx)
+                    .and_then(|value| {
+                        neg_sy
+                            .checked_mul(cy)
+                            .and_then(|term| value.checked_add(term))
+                    })
+                    .and_then(|value| value.checked_add(chamfer_size))
+                    .ok_or(GeometryError::ArithmeticOverflow {
+                        operation: "chamfer plane offset",
+                    })?;
+                planes.push(CanonicalPlane::new(neg_sx, neg_sy, 0, d)?);
             }
         }
 
         // Cardinal planes (same convention as make_box)
         planes.push(CanonicalPlane::new(1, 0, 0, x_range.0)?);
-        planes.push(CanonicalPlane::new(-1, 0, 0, -x_range.1)?);
+        planes.push(CanonicalPlane::new(
+            -1,
+            0,
+            0,
+            x_range
+                .1
+                .checked_neg()
+                .ok_or(GeometryError::ArithmeticOverflow {
+                    operation: "chamfered box maximum x negation",
+                })?,
+        )?);
         planes.push(CanonicalPlane::new(0, 1, 0, y_range.0)?);
-        planes.push(CanonicalPlane::new(0, -1, 0, -y_range.1)?);
+        planes.push(CanonicalPlane::new(
+            0,
+            -1,
+            0,
+            y_range
+                .1
+                .checked_neg()
+                .ok_or(GeometryError::ArithmeticOverflow {
+                    operation: "chamfered box maximum y negation",
+                })?,
+        )?);
         planes.push(CanonicalPlane::new(0, 0, 1, z_range.0)?);
-        planes.push(CanonicalPlane::new(0, 0, -1, -z_range.1)?);
+        planes.push(CanonicalPlane::new(
+            0,
+            0,
+            -1,
+            z_range
+                .1
+                .checked_neg()
+                .ok_or(GeometryError::ArithmeticOverflow {
+                    operation: "chamfered box maximum z negation",
+                })?,
+        )?);
 
         let faces: Vec<BrushFace> = planes
             .into_iter()
@@ -931,50 +1214,7 @@ impl ConvexBrush {
     ///
     /// Each vertex is a rational point.
     pub fn compute_vertices(&self) -> Result<Vec<Point3>, GeometryError> {
-        let mut vertices = BTreeSet::new();
-        let n = self.faces.len();
-
-        for i in 0..n {
-            for j in (i + 1)..n {
-                for k in (j + 1)..n {
-                    if let Some(vertex) = intersect_three_planes(
-                        &self.faces[i].plane,
-                        &self.faces[j].plane,
-                        &self.faces[k].plane,
-                    )? {
-                        // Check that this vertex satisfies all half-spaces
-                        let mut valid = true;
-                        for (idx, face) in self.faces.iter().enumerate() {
-                            if !face.plane.contains_point_rational(&vertex)? {
-                                valid = false;
-                                break;
-                            }
-                            // For the three defining planes, check the point
-                            // is exactly on the plane (not just >=)
-                            if idx == i || idx == j || idx == k {
-                                // Use signed distance test
-                                let num = face.plane.nx
-                                    * vertex.x.num
-                                    * vertex.y.den
-                                    * vertex.z.den
-                                    + face.plane.ny * vertex.y.num * vertex.x.den * vertex.z.den
-                                    + face.plane.nz * vertex.z.num * vertex.x.den * vertex.y.den
-                                    - face.plane.d * vertex.x.den * vertex.y.den * vertex.z.den;
-                                if num != 0 {
-                                    valid = false;
-                                    break;
-                                }
-                            }
-                        }
-                        if valid {
-                            vertices.insert(vertex);
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(vertices.into_iter().collect())
+        half_space_vertices(&self.faces)
     }
 
     /// Validate that the half-space intersection is:
@@ -984,15 +1224,11 @@ impl ConvexBrush {
     ///
     /// Caches the interior witness and volume on success.
     pub fn validate_and_cache(&mut self) -> Result<(), GeometryError> {
-        // First: check boundedness from face normals (requires no vertices)
-        let has_pos_x = self.faces.iter().any(|f| f.plane.nx > 0);
-        let has_neg_x = self.faces.iter().any(|f| f.plane.nx < 0);
-        let has_pos_y = self.faces.iter().any(|f| f.plane.ny > 0);
-        let has_neg_y = self.faces.iter().any(|f| f.plane.ny < 0);
-        let has_pos_z = self.faces.iter().any(|f| f.plane.nz > 0);
-        let has_neg_z = self.faces.iter().any(|f| f.plane.nz < 0);
-
-        if !(has_pos_x && has_neg_x && has_pos_y && has_neg_y && has_pos_z && has_neg_z) {
+        // A polyhedron is bounded exactly when its recession cone
+        // `{r | n·r >= 0 for every face normal n}` is trivial. Every non-zero
+        // rational direction can be scaled to one of the six normalizations
+        // `r_axis = ±1`; all six systems therefore must be infeasible.
+        if !recession_cone_is_trivial(&self.faces)? {
             return Err(GeometryError::Unbounded);
         }
 
@@ -1005,7 +1241,11 @@ impl ConvexBrush {
         // Find a strict interior witness: centroid of all vertices
         // For a convex polyhedron, the centroid of vertices is strictly
         // inside (since it's a convex combination).
-        let n_verts = Rational::from_int(vertices.len() as i128);
+        let n_verts = Rational::from_int(i128::try_from(vertices.len()).map_err(|_| {
+            GeometryError::ArithmeticOverflow {
+                operation: "vertex count conversion",
+            }
+        })?);
         let mut cx = Rational::ZERO;
         let mut cy = Rational::ZERO;
         let mut cz = Rational::ZERO;
@@ -1022,43 +1262,22 @@ impl ConvexBrush {
             z: cz.checked_div(n_verts)?,
         };
 
-        // Verify boundedness FIRST (before interior witness, since
-        // unbounded polyhedra have all vertices on boundary faces).
-        let has_pos_x = self.faces.iter().any(|f| f.plane.nx > 0);
-        let has_neg_x = self.faces.iter().any(|f| f.plane.nx < 0);
-        let has_pos_y = self.faces.iter().any(|f| f.plane.ny > 0);
-        let has_neg_y = self.faces.iter().any(|f| f.plane.ny < 0);
-        let has_pos_z = self.faces.iter().any(|f| f.plane.nz > 0);
-        let has_neg_z = self.faces.iter().any(|f| f.plane.nz < 0);
-
-        if !(has_pos_x && has_neg_x && has_pos_y && has_neg_y && has_pos_z && has_neg_z) {
-            return Err(GeometryError::Unbounded);
-        }
-
-        // Verify centroid is strictly inside every half-space
+        // Verify centroid is strictly inside every half-space.
         for face in &self.faces {
-            let num = face.plane.nx * centroid.x.num * centroid.y.den * centroid.z.den
-                + face.plane.ny * centroid.y.num * centroid.x.den * centroid.z.den
-                + face.plane.nz * centroid.z.num * centroid.x.den * centroid.y.den
-                - face.plane.d * centroid.x.den * centroid.y.den * centroid.z.den;
-            if num <= 0 {
+            if face.plane.signed_distance_rational(&centroid)? <= Rational::ZERO {
                 return Err(GeometryError::EmptyIntersection);
             }
         }
 
-        // Check each face is active (at least 3 coplanar vertices on it)
+        // Check each face is active (at least three coplanar vertices on it).
         for face in &self.faces {
-            let on_plane: Vec<&Point3> = vertices
-                .iter()
-                .filter(|v| {
-                    let num = face.plane.nx * v.x.num * v.y.den * v.z.den
-                        + face.plane.ny * v.y.num * v.x.den * v.z.den
-                        + face.plane.nz * v.z.num * v.x.den * v.y.den
-                        - face.plane.d * v.x.den * v.y.den * v.z.den;
-                    num == 0
-                })
-                .collect();
-            if on_plane.len() < 3 {
+            let mut on_plane = 0_usize;
+            for vertex in &vertices {
+                if face.plane.signed_distance_rational(vertex)? == Rational::ZERO {
+                    on_plane += 1;
+                }
+            }
+            if on_plane < 3 {
                 return Err(GeometryError::InactivePlane {
                     plane: face.plane.describe(),
                 });
@@ -1213,6 +1432,26 @@ impl ConvexBrush {
         Ok(())
     }
 
+    /// Exact squared area of the requested face. Squared area remains
+    /// rational even for 45-degree faces whose unsquared area is irrational.
+    pub fn face_area_squared(&self, role: FaceRole) -> Result<Rational, GeometryError> {
+        let face = self
+            .faces
+            .iter()
+            .find(|face| face.role == role)
+            .ok_or_else(|| GeometryError::MalformedRole {
+                detail: format!("brush has no {role} face"),
+            })?;
+        let vertices = self.compute_vertices()?;
+        let mut coplanar = Vec::new();
+        for vertex in vertices {
+            if face.plane.signed_distance_rational(&vertex)? == Rational::ZERO {
+                coplanar.push(vertex);
+            }
+        }
+        polygon_area_squared(&coplanar, &face.plane)
+    }
+
     /// The axis-aligned bounding box as integer coordinates (for broad-phase
     /// rejection only — never for validity proofs).
     pub fn aabb(&self) -> Result<((i128, i128, i128), (i128, i128, i128)), GeometryError> {
@@ -1249,13 +1488,283 @@ impl ConvexBrush {
             min_x = min_x.min(vx);
             min_y = min_y.min(vy);
             min_z = min_z.min(vz);
-            max_x = max_x.max(vx + if v.x.den == 1 && v.x.num == vx { 0 } else { 1 });
-            max_y = max_y.max(vy + if v.y.den == 1 && v.y.num == vy { 0 } else { 1 });
-            max_z = max_z.max(vz + if v.z.den == 1 && v.z.num == vz { 0 } else { 1 });
+            let ceil_x = vx
+                .checked_add(i128::from(v.x.den != 1 || v.x.num != vx))
+                .ok_or(GeometryError::ArithmeticOverflow {
+                    operation: "aabb x ceiling",
+                })?;
+            let ceil_y = vy
+                .checked_add(i128::from(v.y.den != 1 || v.y.num != vy))
+                .ok_or(GeometryError::ArithmeticOverflow {
+                    operation: "aabb y ceiling",
+                })?;
+            let ceil_z = vz
+                .checked_add(i128::from(v.z.den != 1 || v.z.num != vz))
+                .ok_or(GeometryError::ArithmeticOverflow {
+                    operation: "aabb z ceiling",
+                })?;
+            max_x = max_x.max(ceil_x);
+            max_y = max_y.max(ceil_y);
+            max_z = max_z.max(ceil_z);
         }
 
         Ok(((min_x, min_y, min_z), (max_x, max_y, max_z)))
     }
+}
+
+/// Compute every exact vertex of a (possibly lower-dimensional) half-space
+/// intersection. Arithmetic failures are propagated rather than reclassified
+/// as an absent vertex.
+pub fn half_space_vertices(faces: &[BrushFace]) -> Result<Vec<Point3>, GeometryError> {
+    let mut vertices = BTreeSet::new();
+    for i in 0..faces.len() {
+        for j in (i + 1)..faces.len() {
+            for k in (j + 1)..faces.len() {
+                let Some(vertex) =
+                    intersect_three_planes(&faces[i].plane, &faces[j].plane, &faces[k].plane)?
+                else {
+                    continue;
+                };
+                if faces
+                    .iter()
+                    .map(|face| face.plane.contains_point_rational(&vertex))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .all(|contained| contained)
+                {
+                    vertices.insert(vertex);
+                }
+            }
+        }
+    }
+    Ok(vertices.into_iter().collect())
+}
+
+#[derive(Clone)]
+struct LinearInequality {
+    coefficients: Vec<Rational>,
+    rhs: Rational,
+}
+
+/// Return whether the recession system is feasible under one coordinate
+/// normalization `r_axis = sign`, where `sign` must be `-1` or `1`.
+pub fn recession_normalization_feasible(
+    faces: &[BrushFace],
+    axis: usize,
+    sign: i128,
+) -> Result<bool, GeometryError> {
+    if axis >= 3 || !matches!(sign, -1 | 1) {
+        return Err(GeometryError::MalformedRole {
+            detail: format!("invalid recession normalization axis={axis}, sign={sign}"),
+        });
+    }
+
+    let mut inequalities = Vec::with_capacity(faces.len());
+    for face in faces {
+        let normal = [face.plane.nx, face.plane.ny, face.plane.nz];
+        let fixed = Rational::from_int(normal[axis])
+            .checked_mul(Rational::from_int(sign))?
+            .checked_neg()?;
+        let coefficients = (0..3)
+            .filter(|candidate| *candidate != axis)
+            .map(|candidate| Rational::from_int(normal[candidate]))
+            .collect();
+        inequalities.push(LinearInequality {
+            coefficients,
+            rhs: fixed,
+        });
+    }
+    fourier_motzkin_feasible(inequalities, 2)
+}
+
+/// Prove that the recession cone consists only of the zero vector.
+pub fn recession_cone_is_trivial(faces: &[BrushFace]) -> Result<bool, GeometryError> {
+    for axis in 0..3 {
+        for sign in [-1, 1] {
+            if recession_normalization_feasible(faces, axis, sign)? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn fourier_motzkin_feasible(
+    mut inequalities: Vec<LinearInequality>,
+    mut variable_count: usize,
+) -> Result<bool, GeometryError> {
+    while variable_count > 0 {
+        let mut positive = Vec::new();
+        let mut negative = Vec::new();
+        let mut eliminated = Vec::new();
+
+        for inequality in inequalities {
+            match inequality.coefficients[0].cmp(&Rational::ZERO) {
+                Ordering::Greater => positive.push(inequality),
+                Ordering::Less => negative.push(inequality),
+                Ordering::Equal => eliminated.push(LinearInequality {
+                    coefficients: inequality.coefficients[1..].to_vec(),
+                    rhs: inequality.rhs,
+                }),
+            }
+        }
+
+        for lower in &positive {
+            for upper in &negative {
+                let lower_scale = upper.coefficients[0].checked_neg()?;
+                let upper_scale = lower.coefficients[0];
+                let mut coefficients = Vec::with_capacity(variable_count - 1);
+                for index in 1..variable_count {
+                    coefficients.push(
+                        lower.coefficients[index]
+                            .checked_mul(lower_scale)?
+                            .checked_add(upper.coefficients[index].checked_mul(upper_scale)?)?,
+                    );
+                }
+                eliminated.push(LinearInequality {
+                    coefficients,
+                    rhs: lower
+                        .rhs
+                        .checked_mul(lower_scale)?
+                        .checked_add(upper.rhs.checked_mul(upper_scale)?)?,
+                });
+            }
+        }
+
+        inequalities = eliminated;
+        variable_count -= 1;
+    }
+
+    Ok(inequalities
+        .into_iter()
+        .all(|inequality| inequality.rhs <= Rational::ZERO))
+}
+
+/// Exact squared area of a coplanar polygon. The squared representation
+/// avoids irrational square roots for 45-degree faces while retaining an
+/// exact, positive-area proof.
+pub fn polygon_area_squared(
+    vertices: &[Point3],
+    plane: &CanonicalPlane,
+) -> Result<Rational, GeometryError> {
+    let ordered = convex_polygon_vertices(vertices, plane)?;
+    if ordered.len() < 3 {
+        return Ok(Rational::ZERO);
+    }
+
+    let mut area_x_twice = Rational::ZERO;
+    let mut area_y_twice = Rational::ZERO;
+    let mut area_z_twice = Rational::ZERO;
+    for index in 0..ordered.len() {
+        let current = ordered[index];
+        let next = ordered[(index + 1) % ordered.len()];
+        area_x_twice = area_x_twice.checked_add(
+            current
+                .y
+                .checked_mul(next.z)?
+                .checked_sub(current.z.checked_mul(next.y)?)?,
+        )?;
+        area_y_twice = area_y_twice.checked_add(
+            current
+                .z
+                .checked_mul(next.x)?
+                .checked_sub(current.x.checked_mul(next.z)?)?,
+        )?;
+        area_z_twice = area_z_twice.checked_add(
+            current
+                .x
+                .checked_mul(next.y)?
+                .checked_sub(current.y.checked_mul(next.x)?)?,
+        )?;
+    }
+
+    area_x_twice
+        .checked_square()?
+        .checked_add(area_y_twice.checked_square()?)?
+        .checked_add(area_z_twice.checked_square()?)?
+        .checked_div(Rational::from_int(4))
+}
+
+fn convex_polygon_vertices(
+    vertices: &[Point3],
+    plane: &CanonicalPlane,
+) -> Result<Vec<Point3>, GeometryError> {
+    let dominant_axis = {
+        let components = [
+            plane.nx.unsigned_abs(),
+            plane.ny.unsigned_abs(),
+            plane.nz.unsigned_abs(),
+        ];
+        if components[2] >= components[0] && components[2] >= components[1] {
+            2
+        } else if components[1] >= components[0] {
+            1
+        } else {
+            0
+        }
+    };
+    let project = |point: Point3| match dominant_axis {
+        2 => (point.x, point.y),
+        1 => (point.x, point.z),
+        _ => (point.y, point.z),
+    };
+
+    let mut points: Vec<(Rational, Rational, Point3)> = vertices
+        .iter()
+        .copied()
+        .map(|point| {
+            let (u, v) = project(point);
+            (u, v, point)
+        })
+        .collect();
+    points.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    points.dedup();
+    if points.len() <= 2 {
+        return Ok(points.into_iter().map(|(_, _, point)| point).collect());
+    }
+
+    fn turn(
+        origin: &(Rational, Rational, Point3),
+        a: &(Rational, Rational, Point3),
+        b: &(Rational, Rational, Point3),
+    ) -> Result<Rational, GeometryError> {
+        a.0.checked_sub(origin.0)?
+            .checked_mul(b.1.checked_sub(origin.1)?)?
+            .checked_sub(
+                a.1.checked_sub(origin.1)?
+                    .checked_mul(b.0.checked_sub(origin.0)?)?,
+            )
+    }
+
+    let mut lower = Vec::new();
+    for point in &points {
+        while lower.len() >= 2
+            && turn(&lower[lower.len() - 2], &lower[lower.len() - 1], point)? <= Rational::ZERO
+        {
+            lower.pop();
+        }
+        lower.push(*point);
+    }
+
+    let mut upper = Vec::new();
+    for point in points.iter().rev() {
+        while upper.len() >= 2
+            && turn(&upper[upper.len() - 2], &upper[upper.len() - 1], point)? <= Rational::ZERO
+        {
+            upper.pop();
+        }
+        upper.push(*point);
+    }
+
+    lower.pop();
+    upper.pop();
+    lower.extend(upper);
+    Ok(lower.into_iter().map(|(_, _, point)| point).collect())
 }
 
 // ── Triple-plane intersection (Cramer's rule) ─────────────────────────────
@@ -1276,17 +1785,17 @@ pub fn intersect_three_planes(
 
     let det = det3(
         p1.nx, p1.ny, p1.nz, p2.nx, p2.ny, p2.nz, p3.nx, p3.ny, p3.nz,
-    );
+    )?;
     if det == 0 {
         return Ok(None);
     }
 
     // det_x = det of M with column 0 replaced by d_vec
-    let det_x = det3(p1.d, p1.ny, p1.nz, p2.d, p2.ny, p2.nz, p3.d, p3.ny, p3.nz);
+    let det_x = det3(p1.d, p1.ny, p1.nz, p2.d, p2.ny, p2.nz, p3.d, p3.ny, p3.nz)?;
     // det_y = det of M with column 1 replaced by d_vec
-    let det_y = det3(p1.nx, p1.d, p1.nz, p2.nx, p2.d, p2.nz, p3.nx, p3.d, p3.nz);
+    let det_y = det3(p1.nx, p1.d, p1.nz, p2.nx, p2.d, p2.nz, p3.nx, p3.d, p3.nz)?;
     // det_z = det of M with column 2 replaced by d_vec
-    let det_z = det3(p1.nx, p1.ny, p1.d, p2.nx, p2.ny, p2.d, p3.nx, p3.ny, p3.d);
+    let det_z = det3(p1.nx, p1.ny, p1.d, p2.nx, p2.ny, p2.d, p3.nx, p3.ny, p3.d)?;
 
     let x = Rational::new(det_x, det)?;
     let y = Rational::new(det_y, det)?;
@@ -1306,8 +1815,37 @@ fn det3(
     a31: i128,
     a32: i128,
     a33: i128,
-) -> i128 {
-    a11 * (a22 * a33 - a23 * a32) - a12 * (a21 * a33 - a23 * a31) + a13 * (a21 * a32 - a22 * a31)
+) -> Result<i128, GeometryError> {
+    let minor_1 = a22
+        .checked_mul(a33)
+        .and_then(|lhs| a23.checked_mul(a32).and_then(|rhs| lhs.checked_sub(rhs)))
+        .ok_or(GeometryError::ArithmeticOverflow {
+            operation: "determinant first minor",
+        })?;
+    let minor_2 = a21
+        .checked_mul(a33)
+        .and_then(|lhs| a23.checked_mul(a31).and_then(|rhs| lhs.checked_sub(rhs)))
+        .ok_or(GeometryError::ArithmeticOverflow {
+            operation: "determinant second minor",
+        })?;
+    let minor_3 = a21
+        .checked_mul(a32)
+        .and_then(|lhs| a22.checked_mul(a31).and_then(|rhs| lhs.checked_sub(rhs)))
+        .ok_or(GeometryError::ArithmeticOverflow {
+            operation: "determinant third minor",
+        })?;
+    a11.checked_mul(minor_1)
+        .and_then(|first| {
+            a12.checked_mul(minor_2)
+                .and_then(|second| first.checked_sub(second))
+        })
+        .and_then(|partial| {
+            a13.checked_mul(minor_3)
+                .and_then(|third| partial.checked_add(third))
+        })
+        .ok_or(GeometryError::ArithmeticOverflow {
+            operation: "determinant expansion",
+        })
 }
 
 // ── Volume computation ────────────────────────────────────────────────────
@@ -1327,24 +1865,18 @@ fn compute_volume(
     let mut total_volume = Rational::ZERO;
 
     for face in faces {
-        // Gather vertices on this face
-        let face_verts: Vec<&Point3> = vertices
-            .iter()
-            .filter(|v| {
-                let num = face.plane.nx * v.x.num * v.y.den * v.z.den
-                    + face.plane.ny * v.y.num * v.x.den * v.z.den
-                    + face.plane.nz * v.z.num * v.x.den * v.y.den
-                    - face.plane.d * v.x.den * v.y.den * v.z.den;
-                num == 0
-            })
-            .collect();
+        let mut face_verts = Vec::new();
+        for vertex in vertices {
+            if face.plane.signed_distance_rational(vertex)? == Rational::ZERO {
+                face_verts.push(*vertex);
+            }
+        }
 
         if face_verts.len() < 3 {
             continue;
         }
 
-        // Sort vertices around the face centroid
-        let sorted = sort_face_vertices_ccw(&face_verts, &face.plane)?;
+        let sorted = convex_polygon_vertices(&face_verts, &face.plane)?;
 
         // Triangulate and sum absolute tetrahedron volumes
         let v0 = sorted[0];
@@ -1352,13 +1884,11 @@ fn compute_volume(
             let v1 = sorted[i];
             let v2 = sorted[i + 1];
 
-            let tet_volume = tetrahedron_volume(interior, v0, v1, v2)?;
-            // Take absolute value to guarantee positive contribution
-            // regardless of winding direction
+            let tet_volume = tetrahedron_volume(interior, &v0, &v1, &v2)?;
             let abs_vol = if tet_volume.num >= 0 {
                 tet_volume
             } else {
-                tet_volume.neg()
+                tet_volume.checked_neg()?
             };
             total_volume = total_volume.checked_add(abs_vol)?;
         }
@@ -1400,107 +1930,6 @@ fn tetrahedron_volume(
     // Volume = det / 6
     let six = Rational::from_int(6);
     det.checked_div(six)
-}
-
-/// Sort face vertices in CCW order around the face plane.
-///
-/// Projects vertices onto the local 2D plane coordinate system, computes
-/// the angle around the centroid, and sorts.
-fn sort_face_vertices_ccw<'a>(
-    verts: &[&'a Point3],
-    _plane: &CanonicalPlane,
-) -> Result<Vec<&'a Point3>, GeometryError> {
-    if verts.len() <= 3 {
-        return Ok(verts.to_vec());
-    }
-
-    // Compute centroid of face vertices
-    let n = Rational::from_int(verts.len() as i128);
-    let mut cx = Rational::ZERO;
-    let mut cy = Rational::ZERO;
-    let mut cz = Rational::ZERO;
-    for v in verts {
-        cx = cx.checked_add(v.x)?;
-        cy = cy.checked_add(v.y)?;
-        cz = cz.checked_add(v.z)?;
-    }
-    let centroid = Point3 {
-        x: cx.checked_div(n)?,
-        y: cy.checked_div(n)?,
-        z: cz.checked_div(n)?,
-    };
-
-    // Choose two orthogonal basis vectors in the plane
-    // For the sorting we just need consistent angular ordering.
-    // We can project onto the dominant 2 axes (choose two axes where
-    // the plane normal has smallest component).
-    let (u_axis, v_axis): (fn(&Point3) -> Rational, fn(&Point3) -> Rational) = {
-        let nx = _plane.nx.abs();
-        let ny = _plane.ny.abs();
-        let nz = _plane.nz.abs();
-        if nz >= nx && nz >= ny {
-            // Project onto XY
-            (|p: &Point3| p.x, |p: &Point3| p.y)
-        } else if ny >= nx {
-            // Project onto XZ
-            (|p: &Point3| p.x, |p: &Point3| p.z)
-        } else {
-            // Project onto YZ
-            (|p: &Point3| p.y, |p: &Point3| p.z)
-        }
-    };
-
-    // Compute angles
-    let mut indexed: Vec<(Rational, Rational, &Point3)> = verts
-        .iter()
-        .map(|&v| {
-            let du = u_axis(v)
-                .checked_sub(u_axis(&centroid))
-                .unwrap_or(Rational::ZERO);
-            let dv = v_axis(v)
-                .checked_sub(v_axis(&centroid))
-                .unwrap_or(Rational::ZERO);
-            (du, dv, v)
-        })
-        .collect();
-
-    // Sort by atan2(dv, du) using cross-product comparison
-    indexed.sort_by(|(u1, v1, _), (u2, v2, _)| {
-        // Compare quadrants first, then cross-product
-        let q1 = quadrant(*u1, *v1);
-        let q2 = quadrant(*u2, *v2);
-        match q1.cmp(&q2) {
-            Ordering::Equal => {
-                // Cross product: u1*v2 - v1*u2 > 0 → counter-clockwise
-                let cp = u1
-                    .checked_mul(*v2)
-                    .and_then(|a| v1.checked_mul(*u2).and_then(|b| a.checked_sub(b)));
-                match cp {
-                    Ok(cp) if cp > Rational::ZERO => Ordering::Less,
-                    Ok(cp) if cp < Rational::ZERO => Ordering::Greater,
-                    _ => Ordering::Equal,
-                }
-            }
-            o => o,
-        }
-    });
-
-    Ok(indexed.into_iter().map(|(_, _, v)| v).collect())
-}
-
-/// Return the quadrant index for (x, y).
-fn quadrant(x: Rational, y: Rational) -> u8 {
-    if x >= Rational::ZERO {
-        if y >= Rational::ZERO {
-            0
-        } else {
-            3
-        }
-    } else if y >= Rational::ZERO {
-        1
-    } else {
-        2
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -1602,24 +2031,24 @@ mod tests {
     fn plane_half_space() {
         // x >= 10
         let p = CanonicalPlane::new(1, 0, 0, 10).unwrap();
-        assert!(p.contains_point(10, 0, 0));
-        assert!(p.contains_point(11, 5, 3));
-        assert!(!p.contains_point(9, 0, 0));
+        assert!(p.contains_point(10, 0, 0).unwrap());
+        assert!(p.contains_point(11, 5, 3).unwrap());
+        assert!(!p.contains_point(9, 0, 0).unwrap());
     }
 
     #[test]
     fn coincident_planes_detected() {
         let a = CanonicalPlane::new(1, 0, 0, 10).unwrap();
         let b = CanonicalPlane::new(2, 0, 0, 20).unwrap(); // same after reduction
-        assert!(a.is_coincident_with(&b));
+        assert!(a.is_coincident_with(&b).unwrap());
     }
 
     #[test]
     fn parallel_not_coincident() {
         let a = CanonicalPlane::new(1, 0, 0, 10).unwrap();
         let b = CanonicalPlane::new(1, 0, 0, 20).unwrap();
-        assert!(a.is_parallel_to(&b));
-        assert!(!a.is_coincident_with(&b));
+        assert!(a.is_parallel_to(&b).unwrap());
+        assert!(!a.is_coincident_with(&b).unwrap());
     }
 
     // ── Subphase B: convex brush proof ─────────────────────────────────
@@ -1697,13 +2126,11 @@ mod tests {
         for face in &brush.faces {
             let count = verts
                 .iter()
-                .filter(|v| {
-                    let num = face.plane.nx * v.x.num * v.y.den * v.z.den
-                        + face.plane.ny * v.y.num * v.x.den * v.z.den
-                        + face.plane.nz * v.z.num * v.x.den * v.y.den
-                        - face.plane.d * v.x.den * v.y.den * v.z.den;
-                    num == 0
-                })
+                .map(|vertex| face.plane.signed_distance_rational(vertex))
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .into_iter()
+                .filter(|distance| *distance == Rational::ZERO)
                 .count();
             assert!(
                 count >= 3,
