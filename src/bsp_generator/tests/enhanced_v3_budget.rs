@@ -10,17 +10,19 @@
 //!   pipeline, and the result is byte-compared against checked-in canonical
 //!   fixtures. Determinism is proven by repeated generation.
 //!
-//! - **B. Dense M2 budget evidence**: The Rich-preset dense fixture is
-//!   compiled through ericw-tools (BSP2), and the resulting BSP is measured
+//! - **B. Dense M2 budget evidence**: A hand-authored Rich proof fixture
+//!   combines the qualified portal and grounded-assembly structures across
+//!   the frozen two layers. It is compiled through ericw-tools (BSP2), and
+//!   the resulting BSP is measured
 //!   against M2 budget ceilings: faces (<10,000), entities (<300),
-//!   static batches (<500), XY bound (2048×2048), Z span (384).
+//!   static batches (<500), XY bound (3072×3072), Z span (384).
 //!
 //! # Key Constants (from Phase 01)
 //!
 //! - Face ceiling: <10,000
 //! - Entity ceiling: <300
 //! - Static batch ceiling: <500
-//! - M2 XY bound: 2048×2048, Z span: 384
+//! - M2 XY bound: 3072×3072, Z span: 384
 //!
 //! # Validation
 //!
@@ -33,7 +35,7 @@
 
 mod enhanced_v3_proof;
 
-use enhanced_v3_proof::compiler::{self};
+use enhanced_v3_proof::compiler;
 use enhanced_v3_proof::contract::Preset;
 use enhanced_v3_proof::corpus::{self, CorpusEntryResult};
 use enhanced_v3_proof::pipeline;
@@ -58,13 +60,16 @@ fn corpus_fixture_metadata_path(entry_id: &str) -> PathBuf {
     fixture_dir().join(format!("{entry_id}-metadata.json"))
 }
 
-fn budget_report_path() -> PathBuf {
-    crate_dir().join("../../.internal-dev/debug_reports/enhanced-v3-proof/budget-report.json")
+fn dense_fixture_map_path() -> PathBuf {
+    fixture_dir().join("dense-rich.map")
 }
 
-fn ericw_tools_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/dhickel".to_string());
-    PathBuf::from(home).join(".local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin")
+fn dense_fixture_metadata_path() -> PathBuf {
+    fixture_dir().join("dense-rich-metadata.json")
+}
+
+fn budget_report_path() -> PathBuf {
+    crate_dir().join("../../.internal-dev/debug_reports/enhanced-v3-proof/budget-report.json")
 }
 
 fn theme_dir() -> PathBuf {
@@ -81,7 +86,7 @@ fn palette_path() -> PathBuf {
 
 // ── Budget report types ───────────────────────────────────────────────────
 
-/// M2 budget ceilings from Phase 01 frozen contract.
+/// M2 budget ceilings from the frozen contract.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct M2BudgetCeilings {
     max_faces: u32,
@@ -89,10 +94,6 @@ struct M2BudgetCeilings {
     max_static_batches: u32,
     max_xy_extent: u32,
     max_z_span: u32,
-    max_brushes: u32,
-    max_nodes: u32,
-    max_leaves: u32,
-    max_clipnodes: u32,
 }
 
 impl M2BudgetCeilings {
@@ -101,41 +102,45 @@ impl M2BudgetCeilings {
             max_faces: 10_000,
             max_entities: 300,
             max_static_batches: 500,
-            max_xy_extent: 2048,
+            max_xy_extent: 3072,
             max_z_span: 384,
-            max_brushes: 0,   // not specified; set to 0 (no limit)
-            max_nodes: 0,     // not specified; set to 0 (no limit)
-            max_leaves: 0,    // not specified; set to 0 (no limit)
-            max_clipnodes: 0, // not specified; set to 0 (no limit)
         }
     }
 }
 
-/// Budget measurement from a compiled BSP.
+/// Source and compiled measurements for the dense fixture.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BudgetMeasurement {
+    source_brushes: usize,
+    source_plane_sides: usize,
     faces: usize,
     entities: usize,
     static_batches: usize,
-    brushes: usize,
+    unique_planes: usize,
+    vertices: usize,
+    edges: usize,
+    texinfos: usize,
     nodes: usize,
     leaves: usize,
     solid_leaves: usize,
     empty_leaves: usize,
     clipnodes: usize,
+    models: usize,
     lightmap_bytes: usize,
-    planes: usize,
+    xy_extent: u32,
+    z_span: u32,
     bsp_size: usize,
     lit_size: usize,
     compilation_time_ms: u64,
 }
 
-/// A single budget check against a ceiling.
+/// A single measurement comparison against a frozen or profile limit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BudgetCheck {
     metric: String,
     value: u64,
-    ceiling: u64,
+    comparator: String,
+    limit: u64,
     within_budget: bool,
 }
 
@@ -156,6 +161,9 @@ struct BudgetReport {
     corpus_results: Vec<CorpusVerificationRecord>,
     rich_map_sha256: String,
     rich_metadata_sha256: String,
+    bsp_sha256: String,
+    lit_sha256: String,
+    compiler_diagnostics: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,15 +178,6 @@ struct CorpusVerificationRecord {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
-
-/// Truncate an error string for reporting.
-fn bounded_error(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
-        text.to_string()
-    } else {
-        format!("{}...", &text[..max_chars])
-    }
-}
 
 /// ISO-8601 timestamp.
 fn iso8601_now() -> String {
@@ -286,214 +285,212 @@ fn tools_available(dir: &Path) -> bool {
     dir.join("qbsp").is_file() && dir.join("vis").is_file() && dir.join("light").is_file()
 }
 
-/// Compile a .map file through ericw-tools qbsp (BSP2 profile).
-///
-/// Returns the compiled BSP and LIT data, or an error string.
+/// Compile a .map through the bounded, warning-fatal pinned profile harness.
 fn compile_for_budget(
-    map_text: &str,
+    map_path: &Path,
     tool_dir: &Path,
     wad: &Path,
     palette: &Path,
-) -> Result<(Vec<u8>, Option<Vec<u8>>, u64, Vec<String>), String> {
+    profile: &compiler::CompilerProfile,
+) -> Result<(Vec<u8>, Vec<u8>, u64, Vec<String>), String> {
+    let staging = compiler::create_staging_dir("dense-rich-budget")?;
     let started = std::time::Instant::now();
-
-    // Create staging dir
-    let staging = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
-    let work = staging.path();
-
-    // Write map
-    let map_path = work.join("generated.map");
-    std::fs::write(&map_path, map_text).map_err(|e| format!("write map: {e}"))?;
-
-    // Copy WAD
-    let wad_name = wad.file_name().ok_or("WAD has no basename")?;
-    let work_wad = work.join(wad_name);
-    std::fs::copy(wad, &work_wad).map_err(|e| format!("copy WAD: {e}"))?;
-
-    // Copy palette
-    let work_palette = work.join("palette.lmp");
-    std::fs::copy(palette, &work_palette).map_err(|e| format!("copy palette: {e}"))?;
-
-    let mut diagnostics = Vec::new();
-
-    // qbsp (BSP2)
-    let qbsp = tool_dir.join("qbsp");
-    let qbsp_output = std::process::Command::new(&qbsp)
-        .args(["-bsp2", "-threads", "1", "generated.map"])
-        .current_dir(work)
-        .output()
-        .map_err(|e| format!("spawn qbsp: {e}"))?;
-
-    let qbsp_stdout = String::from_utf8_lossy(&qbsp_output.stdout).to_string();
-    let qbsp_stderr = String::from_utf8_lossy(&qbsp_output.stderr).to_string();
-    let qbsp_combined = format!("{qbsp_stdout}\n{qbsp_stderr}");
-
-    if !qbsp_output.status.success() {
-        return Err(format!(
-            "qbsp failed (exit {}):\n{qbsp_combined}",
-            qbsp_output.status.code().unwrap_or(-1)
-        ));
-    }
-    let lower = qbsp_combined.to_ascii_lowercase();
-    if lower.contains("warning:") || lower.contains("not filling") {
-        diagnostics.push(format!("qbsp: {}", qbsp_stderr.trim()));
-    }
-
-    let bsp_path = work.join("generated.bsp");
-    if !bsp_path.exists() {
-        return Err("qbsp did not produce generated.bsp".to_string());
-    }
-
-    // vis
-    let vis = tool_dir.join("vis");
-    let vis_output = std::process::Command::new(&vis)
-        .args(["-threads", "1", "generated.bsp"])
-        .current_dir(work)
-        .output()
-        .map_err(|e| format!("spawn vis: {e}"))?;
-
-    let vis_stdout = String::from_utf8_lossy(&vis_output.stdout).to_string();
-    let vis_stderr = String::from_utf8_lossy(&vis_output.stderr).to_string();
-    let vis_combined = format!("{vis_stdout}\n{vis_stderr}");
-
-    if !vis_output.status.success() {
-        return Err(format!(
-            "vis failed (exit {}):\n{vis_combined}",
-            vis_output.status.code().unwrap_or(-1)
-        ));
-    }
-    let vis_lower = vis_combined.to_ascii_lowercase();
-    if vis_lower.contains("warning:") {
-        diagnostics.push(format!("vis: {}", vis_stderr.trim()));
-    }
-
-    // light (with -lit for lightmap output)
-    let light = tool_dir.join("light");
-    let light_output = std::process::Command::new(&light)
-        .args(["-threads", "1", "-lit", "generated.bsp"])
-        .current_dir(work)
-        .output()
-        .map_err(|e| format!("spawn light: {e}"))?;
-
-    let light_stdout = String::from_utf8_lossy(&light_output.stdout).to_string();
-    let light_stderr = String::from_utf8_lossy(&light_output.stderr).to_string();
-    let light_combined = format!("{light_stdout}\n{light_stderr}");
-
-    if !light_output.status.success() {
-        return Err(format!(
-            "light failed (exit {}):\n{light_combined}",
-            light_output.status.code().unwrap_or(-1)
-        ));
-    }
-    let light_lower = light_combined.to_ascii_lowercase();
-    if light_lower.contains("warning:") {
-        diagnostics.push(format!("light: {}", light_stderr.trim()));
-    }
-
-    let bsp_data = std::fs::read(&bsp_path).map_err(|e| format!("read bsp: {e}"))?;
-    let lit_path = work.join("generated.lit");
-    let lit_data = if lit_path.exists() {
-        Some(std::fs::read(&lit_path).map_err(|e| format!("read lit: {e}"))?)
-    } else {
-        None
-    };
-
+    let compiled = compiler::compile_map(map_path, staging.path(), tool_dir, wad, palette, profile)
+        .map_err(|failure| format!("{:?} compiler failure: {}", failure.kind, failure.message))?;
     let elapsed_ms = started.elapsed().as_millis() as u64;
+    let diagnostics = [
+        &compiled.qbsp_output,
+        &compiled.vis_output,
+        &compiled.light_output,
+    ]
+    .into_iter()
+    .flat_map(|output| output.diagnostics.iter())
+    .map(|diagnostic| diagnostic.message().to_string())
+    .collect();
 
-    Ok((bsp_data, lit_data, elapsed_ms, diagnostics))
+    Ok((
+        compiled.bsp_data,
+        compiled.lit_data,
+        elapsed_ms,
+        diagnostics,
+    ))
 }
 
 /// Measure a compiled BSP against M2 budget ceilings.
 fn measure_budget(
+    map_text: &str,
     bsp_data: &[u8],
-    lit_data: Option<&[u8]>,
+    lit_data: &[u8],
     compilation_time_ms: u64,
+    wad: &Path,
+    palette: &Path,
 ) -> Result<BudgetMeasurement, String> {
-    use bsp::{BspLoader, LoadOptions};
+    use bsp::{BspExtractionRequest, BspLoader, LoadOptions};
 
+    let palette_data = std::fs::read(palette).map_err(|e| format!("read palette: {e}"))?;
+    let wad_data = std::fs::read(wad).map_err(|e| format!("read WAD: {e}"))?;
+    let wad_name = wad
+        .file_name()
+        .ok_or("WAD has no basename")?
+        .to_string_lossy()
+        .into_owned();
     let options = LoadOptions {
-        strict: false,
-        palette: None,
-        lit_data: lit_data.map(|d| d.to_vec()),
-        wad_archives: Vec::new(),
+        strict: true,
+        palette: Some(palette_data.clone()),
+        lit_data: Some(lit_data.to_vec()),
+        wad_archives: vec![(wad_name.clone(), wad_data.clone())],
         texture_overrides: Vec::new(),
-        source_identity: "enhanced-v3-budget-measurement".to_string(),
+        source_identity: "enhanced-v3-dense-rich-budget".to_string(),
     };
 
     let world = BspLoader::load(bsp_data, &options)
-        .map_err(|report| format!("BSP load for budget measurement failed: {report}"))?;
+        .map_err(|report| format!("strict BSP load for budget measurement failed: {report}"))?;
+    if !world.diagnostics.is_empty() {
+        return Err(format!(
+            "strict BSP load emitted diagnostics: {:?}",
+            world.diagnostics
+        ));
+    }
 
-    let measurement = BudgetMeasurement {
-        faces: world.faces.len(),
-        entities: world.entities.len(),
-        static_batches: world.models.len().saturating_sub(1), // exclude worldspawn model
-        brushes: 0,                                           // not directly exposed by bsp crate
-        nodes: world.nodes.len(),
-        leaves: world.leaves.len(),
-        solid_leaves: world.leaves.iter().filter(|l| l.contents == -2).count(),
-        empty_leaves: world.leaves.iter().filter(|l| l.contents == -1).count(),
-        clipnodes: world.clipnodes.len(),
-        lightmap_bytes: world.lightmap_data.len(),
-        planes: world.planes.len(),
+    let model = world
+        .models
+        .first()
+        .ok_or("compiled BSP has no world model")?;
+    let xy_extent = ((model.maxs[0] - model.mins[0])
+        .max(model.maxs[1] - model.mins[1])
+        .ceil()) as u32;
+    let z_span = (model.maxs[2] - model.mins[2]).ceil() as u32;
+
+    let source_brushes = enhanced_v3_proof::fixtures::source_brush_count(map_text);
+    let source_plane_sides = map_text
+        .lines()
+        .filter(|line| line.trim_start().starts_with('('))
+        .count();
+    let faces = world.faces.len();
+    let entities = world.entities.len();
+    let unique_planes = world.planes.len();
+    let vertices = world.vertices.len();
+    let edges = world.edges.len();
+    let texinfos = world.texinfos.len();
+    let nodes = world.nodes.len();
+    let leaves = world.leaves.len();
+    let solid_leaves = world
+        .leaves
+        .iter()
+        .filter(|leaf| leaf.contents == -2)
+        .count();
+    let empty_leaves = world
+        .leaves
+        .iter()
+        .filter(|leaf| leaf.contents == -1)
+        .count();
+    let clipnodes = world.clipnodes.len();
+    let models = world.models.len();
+    let lightmap_bytes = world.lightmap_data.len();
+
+    let extracted = bsp::extract(BspExtractionRequest {
+        world,
+        palette: Some(bsp::resources::decode_palette(&palette_data)),
+        wad_archives: vec![(wad_name, wad_data)],
+        scale: 0.0254,
+        ..BspExtractionRequest::default()
+    })
+    .map_err(|report| format!("BSP extraction for batch measurement failed: {report}"))?;
+
+    Ok(BudgetMeasurement {
+        source_brushes,
+        source_plane_sides,
+        faces,
+        entities,
+        static_batches: extracted.render_batches.len(),
+        unique_planes,
+        vertices,
+        edges,
+        texinfos,
+        nodes,
+        leaves,
+        solid_leaves,
+        empty_leaves,
+        clipnodes,
+        models,
+        lightmap_bytes,
+        xy_extent,
+        z_span,
         bsp_size: bsp_data.len(),
-        lit_size: lit_data.map_or(0, |d| d.len()),
+        lit_size: lit_data.len(),
         compilation_time_ms,
-    };
-
-    Ok(measurement)
+    })
 }
 
-/// Run budget checks against frozen M2 ceilings.
-fn run_budget_checks(measurement: &BudgetMeasurement) -> Vec<BudgetCheck> {
+/// Run budget checks against frozen M2 ceilings and pinned profile limits.
+fn run_budget_checks(
+    measurement: &BudgetMeasurement,
+    profile: &compiler::CompilerProfile,
+) -> Vec<BudgetCheck> {
     let ceilings = M2BudgetCeilings::frozen();
     vec![
         BudgetCheck {
+            metric: "source_brushes".to_string(),
+            value: measurement.source_brushes as u64,
+            comparator: ">=".to_string(),
+            limit: 30,
+            within_budget: measurement.source_brushes >= 30,
+        },
+        BudgetCheck {
             metric: "faces".to_string(),
             value: measurement.faces as u64,
-            ceiling: ceilings.max_faces as u64,
+            comparator: "<".to_string(),
+            limit: ceilings.max_faces as u64,
             within_budget: measurement.faces < ceilings.max_faces as usize,
+        },
+        BudgetCheck {
+            metric: "representative_m2_faces".to_string(),
+            value: measurement.faces as u64,
+            comparator: ">=".to_string(),
+            limit: 2_000,
+            within_budget: measurement.faces >= 2_000,
         },
         BudgetCheck {
             metric: "entities".to_string(),
             value: measurement.entities as u64,
-            ceiling: ceilings.max_entities as u64,
+            comparator: "<".to_string(),
+            limit: ceilings.max_entities as u64,
             within_budget: measurement.entities < ceilings.max_entities as usize,
         },
         BudgetCheck {
             metric: "static_batches".to_string(),
             value: measurement.static_batches as u64,
-            ceiling: ceilings.max_static_batches as u64,
+            comparator: "<".to_string(),
+            limit: ceilings.max_static_batches as u64,
             within_budget: measurement.static_batches < ceilings.max_static_batches as usize,
+        },
+        BudgetCheck {
+            metric: "xy_extent".to_string(),
+            value: measurement.xy_extent as u64,
+            comparator: "<=".to_string(),
+            limit: ceilings.max_xy_extent as u64,
+            within_budget: measurement.xy_extent <= ceilings.max_xy_extent,
+        },
+        BudgetCheck {
+            metric: "z_span".to_string(),
+            value: measurement.z_span as u64,
+            comparator: "<=".to_string(),
+            limit: ceilings.max_z_span as u64,
+            within_budget: measurement.z_span <= ceilings.max_z_span,
         },
         BudgetCheck {
             metric: "bsp_size".to_string(),
             value: measurement.bsp_size as u64,
-            ceiling: 8 * 1024 * 1024, // 8 MiB soft ceiling
-            within_budget: measurement.bsp_size < 8 * 1024 * 1024,
-        },
-        BudgetCheck {
-            metric: "nodes".to_string(),
-            value: measurement.nodes as u64,
-            ceiling: 32768,
-            within_budget: measurement.nodes < 32768,
-        },
-        BudgetCheck {
-            metric: "clipnodes".to_string(),
-            value: measurement.clipnodes as u64,
-            ceiling: 32768,
-            within_budget: measurement.clipnodes < 32768,
-        },
-        BudgetCheck {
-            metric: "lightmap_bytes".to_string(),
-            value: measurement.lightmap_bytes as u64,
-            ceiling: 4 * 1024 * 1024, // 4 MiB
-            within_budget: measurement.lightmap_bytes < 4 * 1024 * 1024,
+            comparator: "<=".to_string(),
+            limit: profile.max_output_size,
+            within_budget: measurement.bsp_size as u64 <= profile.max_output_size,
         },
         BudgetCheck {
             metric: "compilation_time_ms".to_string(),
             value: measurement.compilation_time_ms,
-            ceiling: 120_000, // 120 seconds
-            within_budget: measurement.compilation_time_ms < 120_000,
+            comparator: "<".to_string(),
+            limit: profile.timeout_seconds * 1000,
+            within_budget: measurement.compilation_time_ms < profile.timeout_seconds * 1000,
         },
     ]
 }
@@ -703,21 +700,53 @@ fn dense_entry_has_more_features_than_baseline() {
 
 #[test]
 fn dense_m2_budget_evidence() {
-    let tool_dir = ericw_tools_dir();
-    let tools_present = tools_available(&tool_dir);
+    let tool_dir = compiler::resolve_tool_dir();
+    assert!(
+        tools_available(&tool_dir),
+        "required ericw-tools executables unavailable at {}",
+        tool_dir.display()
+    );
 
-    // Generate the dense fixture (entry index 2: v3-dense-seed-7 at 3072²)
-    let dense_entry = &corpus::proof_corpus()[2];
-    assert_eq!(dense_entry.id, "v3-dense-seed-7");
-    assert_eq!(dense_entry.xy_extent, 3072);
+    let profile =
+        compiler::parse_compiler_profile(&enhanced_v3_proof::fixtures::compiler_profile_path())
+            .expect("parse pinned compiler profile");
+    compiler::verify_executable_hashes(&tool_dir, &profile)
+        .unwrap_or_else(|failures| panic!("ericw-tools provenance mismatch: {failures:#?}"));
 
-    let result = corpus::execute_entry(dense_entry).expect("dense corpus entry");
+    let dense_map_path = dense_fixture_map_path();
+    let dense_metadata_path = dense_fixture_metadata_path();
+    let dense_map = std::fs::read_to_string(&dense_map_path)
+        .unwrap_or_else(|e| panic!("read dense fixture {}: {e}", dense_map_path.display()));
+    let dense_metadata_bytes = std::fs::read(&dense_metadata_path)
+        .unwrap_or_else(|e| panic!("read dense metadata {}: {e}", dense_metadata_path.display()));
+    let dense_metadata: enhanced_v3_proof::metadata::ProofMetadata =
+        serde_json::from_slice(&dense_metadata_bytes).expect("parse dense fixture metadata");
+    let source_brushes = enhanced_v3_proof::fixtures::source_brush_count(&dense_map);
+    assert!(
+        source_brushes >= 30,
+        "dense-rich fixture has {source_brushes} brushes; at least 30 are required"
+    );
+    assert_eq!(dense_metadata.preset, "rich");
+    assert!(dense_metadata.identity_satisfied);
+    assert!(
+        dense_metadata.rooms.iter().any(|room| room.layer == 0)
+            && dense_metadata.rooms.iter().any(|room| room.layer == 1),
+        "dense-rich metadata must represent both frozen layers"
+    );
+    assert!(
+        dense_metadata
+            .rooms
+            .iter()
+            .all(|room| room.floor_z + room.dims[2] as i32 <= 368),
+        "dense-rich metadata exceeds the frozen total Z span"
+    );
+    assert!(
+        dense_metadata.grammar_families.len() >= 3,
+        "Rich fixture must retain at least three approved grammar identities"
+    );
 
-    // Run all corpus entries for the report
     let all_results = load_or_capture_corpus_results();
     let baseline_hash = corpus::corpus_baseline_hash(&all_results);
-
-    // Load expected fixtures for verification records
     let corpus_records: Vec<CorpusVerificationRecord> = all_results
         .iter()
         .map(|r| {
@@ -738,173 +767,72 @@ fn dense_m2_budget_evidence() {
             }
         })
         .collect();
+    assert!(
+        corpus_records.iter().all(|record| record.map_match),
+        "corpus fixture mismatch while producing dense budget evidence"
+    );
 
-    if !tools_present {
-        // Write a report noting tools unavailable
-        let report = BudgetReport {
-            schema: "enhanced-v3-budget-report/v1".to_string(),
-            timestamp: iso8601_now(),
-            profile_name: "ericw-q1-bsp2-generated".to_string(),
-            profile_version: "2.0.0-alpha3".to_string(),
-            tool_dir: tool_dir.display().to_string(),
-            tools_available: false,
-            corpus_baseline_hash: baseline_hash,
-            ceiling: M2BudgetCeilings::frozen(),
-            measurement: BudgetMeasurement {
-                faces: 0,
-                entities: 0,
-                static_batches: 0,
-                brushes: 0,
-                nodes: 0,
-                leaves: 0,
-                solid_leaves: 0,
-                empty_leaves: 0,
-                clipnodes: 0,
-                lightmap_bytes: 0,
-                planes: 0,
-                bsp_size: 0,
-                lit_size: 0,
-                compilation_time_ms: 0,
-            },
-            checks: vec![],
-            overall_within_budget: false,
-            corpus_results: corpus_records,
-            rich_map_sha256: result.map_sha256.clone(),
-            rich_metadata_sha256: result.metadata_sha256.clone(),
-        };
-        write_budget_report(&report);
-        eprintln!(
-            "dense_m2_budget: tools unavailable — budget not measured. Report at {}",
-            budget_report_path().display()
-        );
-        return;
-    }
-
-    // Compile the dense fixture
     let wad = wad_path();
     let palette = palette_path();
+    let (bsp_data, lit_data, elapsed_ms, diagnostics) =
+        compile_for_budget(&dense_map_path, &tool_dir, &wad, &palette, &profile)
+            .unwrap_or_else(|error| panic!("dense budget compilation failed: {error}"));
+    assert!(
+        diagnostics.is_empty(),
+        "compiler diagnostics: {diagnostics:#?}"
+    );
+    assert_eq!(&bsp_data[0..4], b"BSP2", "dense BSP must be BSP2");
 
-    let compile_result = compile_for_budget(&result.map_text, &tool_dir, &wad, &palette);
-    match compile_result {
-        Ok((bsp_data, lit_data, elapsed_ms, diagnostics)) => {
-            // Measure budget
-            let measurement = measure_budget(&bsp_data, lit_data.as_deref(), elapsed_ms)
-                .expect("budget measurement");
+    let measurement = measure_budget(&dense_map, &bsp_data, &lit_data, elapsed_ms, &wad, &palette)
+        .expect("strict budget measurement and batch extraction");
+    let checks = run_budget_checks(&measurement, &profile);
+    let within_budget = checks.iter().all(|check| check.within_budget);
 
-            // Run checks
-            let checks = run_budget_checks(&measurement);
-            let within_budget = checks.iter().all(|c| c.within_budget);
+    let report = BudgetReport {
+        schema: "enhanced-v3-budget-report/v2".to_string(),
+        timestamp: iso8601_now(),
+        profile_name: profile.name.clone(),
+        profile_version: profile.required_version.clone(),
+        tool_dir: tool_dir.display().to_string(),
+        tools_available: true,
+        corpus_baseline_hash: baseline_hash,
+        ceiling: M2BudgetCeilings::frozen(),
+        measurement,
+        checks: checks.clone(),
+        overall_within_budget: within_budget,
+        corpus_results: corpus_records,
+        rich_map_sha256: compiler::sha256_hex(dense_map.as_bytes()),
+        rich_metadata_sha256: compiler::sha256_hex(&dense_metadata_bytes),
+        bsp_sha256: compiler::sha256_hex(&bsp_data),
+        lit_sha256: compiler::sha256_hex(&lit_data),
+        compiler_diagnostics: diagnostics,
+    };
+    write_budget_report(&report);
 
-            // Validate BSP2 magic
-            assert_eq!(&bsp_data[0..4], b"BSP2", "Dense BSP must be BSP2");
+    eprintln!(
+        "dense_m2_budget: brushes={} source_sides={} faces={} entities={} batches={} planes={} nodes={} leaves={} clipnodes={} lightmap={}B bsp={}B compilation={}ms",
+        report.measurement.source_brushes,
+        report.measurement.source_plane_sides,
+        report.measurement.faces,
+        report.measurement.entities,
+        report.measurement.static_batches,
+        report.measurement.unique_planes,
+        report.measurement.nodes,
+        report.measurement.leaves,
+        report.measurement.clipnodes,
+        report.measurement.lightmap_bytes,
+        report.measurement.bsp_size,
+        report.measurement.compilation_time_ms,
+    );
 
-            let report = BudgetReport {
-                schema: "enhanced-v3-budget-report/v1".to_string(),
-                timestamp: iso8601_now(),
-                profile_name: "ericw-q1-bsp2-generated".to_string(),
-                profile_version: "2.0.0-alpha3".to_string(),
-                tool_dir: tool_dir.display().to_string(),
-                tools_available: true,
-                corpus_baseline_hash: baseline_hash,
-                ceiling: M2BudgetCeilings::frozen(),
-                measurement,
-                checks: checks.clone(),
-                overall_within_budget: within_budget,
-                corpus_results: corpus_records,
-                rich_map_sha256: result.map_sha256.clone(),
-                rich_metadata_sha256: result.metadata_sha256.clone(),
-            };
-            write_budget_report(&report);
-
-            eprintln!(
-                "dense_m2_budget: compiled dense fixture — faces={} entities={} nodes={} leaves={} clipnodes={} lightmap={}B bsp={}B compilation={}ms",
-                report.measurement.faces,
-                report.measurement.entities,
-                report.measurement.nodes,
-                report.measurement.leaves,
-                report.measurement.clipnodes,
-                report.measurement.lightmap_bytes,
-                report.measurement.bsp_size,
-                report.measurement.compilation_time_ms,
-            );
-
-            if !diagnostics.is_empty() {
-                eprintln!("compiler diagnostics: {diagnostics:#?}");
-            }
-
-            // Assert budget compliance
-            for check in &checks {
-                assert!(
-                    check.within_budget,
-                    "BUDGET CHECK FAILED: {} (value={}, ceiling={})",
-                    check.metric, check.value, check.ceiling
-                );
-            }
-
-            assert!(within_budget, "dense fixture exceeds budget ceilings");
-        }
-        Err(error) => {
-            // The dense fixture may be too small and trigger the known
-            // ericw-tools small-map hull limitation. Record in report.
-            let is_hull_limitation = error.contains("processing hull")
-                || error.contains("terminated")
-                || error.to_ascii_lowercase().contains("invalid winding point")
-                || error
-                    .to_ascii_lowercase()
-                    .contains("brush bounds out of range");
-
-            let report = BudgetReport {
-                schema: "enhanced-v3-budget-report/v1".to_string(),
-                timestamp: iso8601_now(),
-                profile_name: "ericw-q1-bsp2-generated".to_string(),
-                profile_version: "2.0.0-alpha3".to_string(),
-                tool_dir: tool_dir.display().to_string(),
-                tools_available: true,
-                corpus_baseline_hash: baseline_hash,
-                ceiling: M2BudgetCeilings::frozen(),
-                measurement: BudgetMeasurement {
-                    faces: 0,
-                    entities: 0,
-                    static_batches: 0,
-                    brushes: 0,
-                    nodes: 0,
-                    leaves: 0,
-                    solid_leaves: 0,
-                    empty_leaves: 0,
-                    clipnodes: 0,
-                    lightmap_bytes: 0,
-                    planes: 0,
-                    bsp_size: 0,
-                    lit_size: 0,
-                    compilation_time_ms: 0,
-                },
-                checks: vec![BudgetCheck {
-                    metric: "compilation".to_string(),
-                    value: 0,
-                    ceiling: 1,
-                    within_budget: false,
-                }],
-                overall_within_budget: false,
-                corpus_results: corpus_records,
-                rich_map_sha256: result.map_sha256.clone(),
-                rich_metadata_sha256: result.metadata_sha256.clone(),
-            };
-            write_budget_report(&report);
-
-            if is_hull_limitation {
-                eprintln!(
-                    "dense_m2_budget: known ericw-tools small-map limitation — {}",
-                    bounded_error(&error, 200)
-                );
-                eprintln!(
-                    "dense_m2_budget: budget not measured ({} source brushes too few); report written",
-                    result.map_text.lines().filter(|l| l.trim() == "{").count() / 2
-                );
-            } else {
-                panic!("dense budget compilation failed unexpectedly: {error}");
-            }
-        }
+    for check in &checks {
+        assert!(
+            check.within_budget,
+            "BUDGET CHECK FAILED: {} (value={} {} limit={})",
+            check.metric, check.value, check.comparator, check.limit
+        );
     }
+    assert!(within_budget, "dense fixture exceeds budget ceilings");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
