@@ -69,6 +69,7 @@ fn run(args: Vec<String>) -> CliResult<String> {
         "add-asset" => add_asset_cmd(rest),
         "pack" => pack_cmd(rest),
         "enhanced-dungeon" => enhanced_dungeon_cmd(rest),
+        "enhanced-dungeon-v3" => enhanced_dungeon_v3_cmd(rest),
         "-h" | "--help" | "help" => Ok(cli::global_help()),
         other => Err(CliError::Usage(format!(
             "unknown command '{other}'\n\n{}",
@@ -875,6 +876,74 @@ fn enhanced_dungeon_cmd(args: &[String]) -> CliResult<String> {
         cleanup_staging(&staging);
     }
     result
+}
+
+// ---------------------------------------------------------------------------
+// enhanced-dungeon-v3 — generate, compile, and publish an Enhanced V3 dungeon
+// ---------------------------------------------------------------------------
+
+fn enhanced_dungeon_v3_cmd(args: &[String]) -> CliResult<String> {
+    let parsed = cli::parse_command(
+        "enhanced-dungeon-v3",
+        cli::enhanced_dungeon_v3_schema(),
+        args,
+    );
+    let parsed = parsed.into_result().map_err(CliError::Usage)?;
+
+    let seed_str = require_option("--seed", &parsed)?;
+    let seed: u64 = seed_str
+        .parse()
+        .map_err(|_| CliError::Usage(format!("invalid --seed value: '{seed_str}'")))?;
+
+    let preset_tag = parsed
+        .singleton_value("--preset")
+        .unwrap_or("moderate")
+        .to_string();
+    let preset = bsp_generator::enhanced_v3::V3Preset::from_tag(&preset_tag).ok_or_else(|| {
+        CliError::Usage(format!(
+            "unknown --preset '{preset_tag}'; valid: sparse, moderate, rich"
+        ))
+    })?;
+
+    let out_dir = PathBuf::from(require_option("--out", &parsed)?);
+    let tool_path = parsed
+        .singleton_value("--tool-path")
+        .map(PathBuf::from)
+        .or_else(default_ericw_tools_dir);
+    let name = parsed
+        .singleton_value("--name")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "enhanced_v3_dungeon".to_string());
+    let xy_extent: u32 = parsed
+        .singleton_value("--extent")
+        .map(|s| {
+            s.parse()
+                .map_err(|_| CliError::Usage(format!("invalid --extent: '{s}'")))
+        })
+        .unwrap_or(Ok(2048))?;
+    let profile_override = parsed.singleton_value("--profile");
+
+    let result = engine_pack::enhanced_dungeon_v3::build_v3_package(
+        seed,
+        preset,
+        xy_extent,
+        &out_dir,
+        tool_path.as_deref(),
+        &name,
+        profile_override,
+    )
+    .map_err(|err| {
+        CliError::Validation(ValidationError::single(ValidationDiagnostic::new(
+            "enhanced-dungeon-v3",
+            ValidationArea::Project,
+            format!("{err}"),
+        )))
+    })?;
+
+    Ok(match result {
+        engine_pack::enhanced_dungeon_v3::BuildV3Result::Published { message, .. } => message,
+        engine_pack::enhanced_dungeon_v3::BuildV3Result::Unchanged { message, .. } => message,
+    })
 }
 
 /// Validate an existing destination directory as a complete canonical closure.

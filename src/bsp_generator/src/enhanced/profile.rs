@@ -68,6 +68,8 @@ pub enum GenerationProfile {
     LegacyV1,
     /// Enhanced v2 — two-layer M2 dungeons with stairs, themes, and variance.
     EnhancedV2,
+    /// Enhanced v3 — semantic-core pipeline with exact i128 geometry.
+    EnhancedV3,
 }
 
 impl GenerationProfile {
@@ -76,6 +78,7 @@ impl GenerationProfile {
         match self {
             Self::LegacyV1 => "legacy-v1",
             Self::EnhancedV2 => "enhanced-v2",
+            Self::EnhancedV3 => "m3",
         }
     }
 
@@ -84,6 +87,7 @@ impl GenerationProfile {
         match tag {
             "legacy-v1" => Some(Self::LegacyV1),
             "enhanced-v2" => Some(Self::EnhancedV2),
+            "m3" => Some(Self::EnhancedV3),
             _ => None,
         }
     }
@@ -101,6 +105,11 @@ pub enum GenerationRequest {
         seed: u64,
         config: super::config::EnhancedConfig,
     },
+    /// Enhanced v3 request.
+    EnhancedV3 {
+        seed: u64,
+        config: crate::enhanced_v3::config::V3Config,
+    },
 }
 
 impl GenerationRequest {
@@ -109,6 +118,7 @@ impl GenerationRequest {
         match self {
             Self::LegacyV1 { .. } => GenerationProfile::LegacyV1,
             Self::EnhancedV2 { .. } => GenerationProfile::EnhancedV2,
+            Self::EnhancedV3 { .. } => GenerationProfile::EnhancedV3,
         }
     }
 
@@ -117,6 +127,7 @@ impl GenerationRequest {
         match self {
             Self::LegacyV1 { seed, .. } => *seed,
             Self::EnhancedV2 { seed, .. } => *seed,
+            Self::EnhancedV3 { seed, .. } => *seed,
         }
     }
 }
@@ -127,11 +138,30 @@ mod tests {
 
     #[test]
     fn profile_tags_roundtrip() {
-        for p in [GenerationProfile::LegacyV1, GenerationProfile::EnhancedV2] {
+        for p in [
+            GenerationProfile::LegacyV1,
+            GenerationProfile::EnhancedV2,
+            GenerationProfile::EnhancedV3,
+        ] {
             let tag = p.tag();
             let back = GenerationProfile::from_tag(tag).unwrap();
             assert_eq!(p, back);
         }
+    }
+
+    #[test]
+    fn m3_tag_is_recognized() {
+        assert_eq!(
+            GenerationProfile::from_tag("m3"),
+            Some(GenerationProfile::EnhancedV3)
+        );
+        assert_eq!(GenerationProfile::EnhancedV3.tag(), "m3");
+    }
+
+    #[test]
+    fn v3_and_enhanced_v3_are_unrecognized() {
+        assert_eq!(GenerationProfile::from_tag("enhanced-v3"), None);
+        assert_eq!(GenerationProfile::from_tag("v3"), None);
     }
 
     #[test]

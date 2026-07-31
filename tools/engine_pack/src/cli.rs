@@ -275,6 +275,82 @@ pub fn enhanced_dungeon_schema() -> &'static [CliOption] {
     ]
 }
 
+/// Schema for `enhanced-dungeon-v3 --seed <u64> --preset <sparse|moderate|rich> --out <dir> [--extent <n>] [--tool-path <dir>] [--name <name>]`
+pub fn enhanced_dungeon_v3_schema() -> &'static [CliOption] {
+    &[
+        CliOption {
+            name: "--seed",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Master seed for deterministic generation",
+            value_placeholder: Some("<u64>"),
+        },
+        CliOption {
+            name: "--preset",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Density preset: sparse, moderate, or rich (default: moderate)",
+            value_placeholder: Some("<preset>"),
+        },
+        CliOption {
+            name: "--extent",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "XY extent per axis (1024, 2048, 3072; default: 2048)",
+            value_placeholder: Some("<n>"),
+        },
+        CliOption {
+            name: "--out",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Output directory for published artifact set",
+            value_placeholder: Some("<dir>"),
+        },
+        CliOption {
+            name: "--tool-path",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Directory containing qbsp, vis, light executables",
+            value_placeholder: Some("<dir>"),
+        },
+        CliOption {
+            name: "--name",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Base name for output files (default: 'enhanced_v3_dungeon')",
+            value_placeholder: Some("<name>"),
+        },
+        CliOption {
+            name: "--profile",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Compiler profile TOML (default: bundled ericw-q1-bsp2-generated)",
+            value_placeholder: Some("<profile.toml>"),
+        },
+    ]
+}
+
 /// Schema for `pack <engine.project.toml> --out <dir>`
 pub fn pack_schema() -> &'static [CliOption] {
     &[CliOption {
@@ -384,7 +460,7 @@ pub struct CommandSchema {
     pub options: &'static [CliOption],
 }
 
-pub fn command_schemas() -> [CommandSchema; 12] {
+pub fn command_schemas() -> [CommandSchema; 13] {
     [
         CommandSchema {
             name: "validate-package",
@@ -451,6 +527,12 @@ pub fn command_schemas() -> [CommandSchema; 12] {
             usage: "engine_pack pack <engine.project.toml> --out <dir>",
             description: "Validate and publish a project package into a new output directory.",
             options: pack_schema(),
+        },
+        CommandSchema {
+            name: "enhanced-dungeon-v3",
+            usage: "engine_pack enhanced-dungeon-v3 --seed <u64> --preset <preset> --out <dir> [--extent <n>] [--tool-path <dir>] [--name <name>]",
+            description: "Generate, compile, and publish an Enhanced V3 dungeon.",
+            options: enhanced_dungeon_v3_schema(),
         },
         CommandSchema {
             name: "enhanced-dungeon",
@@ -566,6 +648,7 @@ mod tests {
             "add-asset",
             "pack",
             "enhanced-dungeon",
+            "enhanced-dungeon-v3",
         ] {
             assert!(help.contains(cmd), "help missing command: {cmd}");
         }

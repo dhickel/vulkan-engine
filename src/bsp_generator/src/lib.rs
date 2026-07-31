@@ -39,6 +39,7 @@
 pub mod config;
 pub mod emission;
 pub mod enhanced;
+pub mod enhanced_v3;
 pub mod error;
 pub mod geometry;
 pub mod intent;
@@ -75,6 +76,32 @@ pub use topology::build_topology;
 // ── Enhanced v2 public API ────────────────────────────────────────────────
 
 pub use enhanced::pipeline::{generate_enhanced, EnhancedMetadata};
+
+// ── Enhanced v3 public API ────────────────────────────────────────────────
+
+pub use enhanced_v3::config::{V3Config, V3Preset};
+pub use enhanced_v3::error::V3Error;
+pub use enhanced_v3::generate_v3;
+pub use enhanced_v3::metadata::EnhancedV3Metadata;
+pub use enhanced_v3::pipeline::{run_pipeline, V3PipelineOutput};
+
+/// Generate a canonical `.map` string and metadata from an Enhanced V3
+/// configuration.
+///
+/// This is a convenience wrapper around [`enhanced_v3::run_pipeline`].
+///
+/// # Determinism
+///
+/// Two calls with identical `config` produce byte-identical `.map` output
+/// and field-identical metadata.
+///
+/// # Errors
+///
+/// Returns [`V3Error`] if any stage of the pipeline fails.
+pub fn generate_enhanced_v3(config: &V3Config) -> Result<(String, EnhancedV3Metadata), V3Error> {
+    let output = run_pipeline(config)?;
+    Ok((output.map_text, output.metadata))
+}
 
 // ── Generation metadata ───────────────────────────────────────────────────
 

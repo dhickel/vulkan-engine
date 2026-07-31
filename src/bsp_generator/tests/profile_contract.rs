@@ -7,7 +7,11 @@ use bsp_generator::enhanced::seed::{tags, EnhancedSeed};
 
 #[test]
 fn profile_tags_roundtrip() {
-    for p in [GenerationProfile::LegacyV1, GenerationProfile::EnhancedV2] {
+    for p in [
+        GenerationProfile::LegacyV1,
+        GenerationProfile::EnhancedV2,
+        GenerationProfile::EnhancedV3,
+    ] {
         let tag = p.tag();
         let back = GenerationProfile::from_tag(tag).unwrap();
         assert_eq!(p, back);
