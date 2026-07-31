@@ -1,0 +1,92 @@
+{
+  "schema": "enhanced-v3-contract-corpus-matrix/v1",
+  "frozen_at": "2026-07-31T02:45:00Z",
+  "reconciliation_source": "DECISION-20260731-02",
+  "description": "Frozen v3 corpus matrix with 12 declared (seed, preset, extent) tuples and the deterministic 2,304-cell permitted-outcome policy. No v3 map, metadata, BSP, LIT, or package payload output hash is frozen here.",
+  "budget_ceilings": {
+    "max_faces": 10000,
+    "max_entities": 300,
+    "max_static_batches": 500,
+    "max_xy_extent": 3072,
+    "max_z_span": 384
+  },
+  "presets": {
+    "sparse": {
+      "minimum_families": 1,
+      "minimum_assemblies": 1,
+      "minimum_features": 2
+    },
+    "moderate": {
+      "minimum_families": 2,
+      "minimum_assemblies": 2,
+      "minimum_features": 4
+    },
+    "rich": {
+      "minimum_families": 3,
+      "minimum_assemblies": 4,
+      "minimum_features": 8
+    }
+  },
+  "valid_extents": [1024, 2048, 3072],
+  "corpus_entries": [
+    {"id": "v3-sparse-1024-s0",   "preset": "sparse",   "seed": 0,  "xy_extent": 1024, "witnesses": ["portal_chamber", "grounded_assembly", "pointed_arch", "chamfered_footprint"]},
+    {"id": "v3-sparse-2048-s1",   "preset": "sparse",   "seed": 1,  "xy_extent": 2048, "witnesses": ["portal_chamber", "grounded_assembly", "pointed_arch", "chamfered_footprint"]},
+    {"id": "v3-sparse-3072-s2",   "preset": "sparse",   "seed": 2,  "xy_extent": 3072, "witnesses": ["portal_chamber", "grounded_assembly", "pointed_arch", "chamfered_footprint"]},
+    {"id": "v3-sparse-2048-s42",  "preset": "sparse",   "seed": 42, "xy_extent": 2048, "witnesses": ["portal_chamber", "grounded_assembly", "pointed_arch", "chamfered_footprint"]},
+    {"id": "v3-moderate-1024-s10","preset": "moderate", "seed": 10, "xy_extent": 1024, "witnesses": ["portal_chamber", "grounded_assembly", "pointed_arch", "chamfered_footprint", "buttressed_hall"]},
+    {"id": "v3-moderate-2048-s11","preset": "moderate", "seed": 11, "xy_extent": 2048, "witnesses": ["portal_chamber", "grounded_assembly", "pointed_arch", "chamfered_footprint", "buttressed_hall"]},
+    {"id": "v3-moderate-3072-s12","preset": "moderate", "seed": 12, "xy_extent": 3072, "witnesses": ["portal_chamber", "grounded_assembly", "pointed_arch", "chamfered_footprint", "buttressed_hall"]},
+    {"id": "v3-moderate-2048-s43","preset": "moderate", "seed": 43, "xy_extent": 2048, "witnesses": ["portal_chamber", "grounded_assembly", "pointed_arch", "chamfered_footprint", "buttressed_hall"]},
+    {"id": "v3-rich-1024-s20",   "preset": "rich",     "seed": 20, "xy_extent": 1024, "witnesses": ["portal_chamber", "grounded_assembly", "pointed_arch", "chamfered_footprint", "buttressed_hall", "column_grove"]},
+    {"id": "v3-rich-2048-s21",   "preset": "rich",     "seed": 21, "xy_extent": 2048, "witnesses": ["portal_chamber", "grounded_assembly", "pointed_arch", "chamfered_footprint", "buttressed_hall", "column_grove", "fractured_vault"]},
+    {"id": "v3-rich-3072-s22",   "preset": "rich",     "seed": 22, "xy_extent": 3072, "witnesses": ["portal_chamber", "grounded_assembly", "pointed_arch", "chamfered_footprint", "buttressed_hall", "column_grove", "fractured_vault", "terraced_shrine"]},
+    {"id": "v3-rich-3072-s7",    "preset": "rich",     "seed": 7,  "xy_extent": 3072, "witnesses": ["portal_chamber", "grounded_assembly", "pointed_arch", "chamfered_footprint", "buttressed_hall", "column_grove", "fractured_vault", "terraced_shrine", "monolithic_chamber"]}
+  ],
+  "cell_policy": {
+    "description": "Exhaustive 2,304-cell permitted-outcome policy. The oracle expands this deterministically into exactly 2,304 cells. Each cell specifies either permitted success classification or its exact permitted typed error.",
+    "total_cells": 2304,
+    "axes": [
+      {
+        "name": "preset",
+        "values": ["sparse", "moderate", "rich"],
+        "count": 3
+      },
+      {
+        "name": "xy_extent",
+        "values": ["1024", "2048", "3072"],
+        "count": 3
+      },
+      {
+        "name": "seed",
+        "range": [0, 255],
+        "count": 256
+      }
+    ],
+    "expansion_rule": "cartesian_product_ordered",
+    "cell_ordering": "preset_major_then_extent_then_seed",
+    "permitted_outcomes": {
+      "success": {
+        "classification": "accepted",
+        "requirements": ["valid_map_output", "identity_satisfied", "preset_minima_met", "within_budget"]
+      },
+      "typed_errors": [
+        "ConfigOutOfRange",
+        "InvariantViolation",
+        "ArithmeticOverflow",
+        "ResourceConflict",
+        "MinimumIdentityFailure",
+        "SupportGraphCycle",
+        "RejectionStreamExhausted"
+      ],
+      "forbidden_outcomes": [
+        "panic",
+        "hang",
+        "reseed",
+        "fallback_profile",
+        "hidden_extent",
+        "density_relabeling",
+        "downgraded_success"
+      ]
+    }
+  }
+}
