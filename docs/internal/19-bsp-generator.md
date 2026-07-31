@@ -490,3 +490,42 @@ from Legacy v1's `"dungeon-gen/v1"`. Same seed values produce different output.
 - [Dungeon Generation Specification](../../.internal-dev/specifications/bsp-dungeon-generation.md) — frozen contract
 - [Evidence Matrix](../../.internal-dev/plans/bsp-dungeon-contract-evidence/evidence-matrix.md) — evidence campaign
 - [BSP Runtime and Lifetime](18-bsp-runtime-and-lifetime.md) — downstream BSP pipeline
+
+## 16. Enhanced v3 Proof (Private — 2026-07-31)
+
+### 16.1 Status
+
+A private, test-only proof package demonstrated the architectural feasibility of cardinal/45°
+chamfered-octagonal geometry, pointed-arch portal apertures, grounded assemblies, and dense
+M2-budget compositions. The proof is **not a production profile** — no `GenerationProfile`
+variant, public export, or production code was changed.
+
+### 16.2 Evidence
+
+| claim | fixture | key result |
+|-------|---------|------------|
+| 45° diagonal walls | `convex-45-shell.map` | Warning-free compile; thickness 32/√2 ≈ 22.63; spatial witnesses pass |
+| Pointed-arch portals | `pointed-portal.map` | Full-depth shell omission; 100% throat witnesses non-solid |
+| Grounded assemblies | `grounded-assembly.map` | Acyclic support graph; coplanar contact; atomic dependent removal |
+| Segmented-arch portals | `segmented-portal.map` | Focused-only; throat witnesses pass |
+| M2 budget compliance | `dense-rich.map` | 2,404 faces, 6 entities, 4 batches — well within ceilings |
+| v1/v2 compatibility | 24-entry corpus | All byte-identical to baseline; theme assets unchanged |
+| Live GPU startup | `bsp_beta` | Swapchain acquired; 21,574 frames; 0 panics/errors |
+
+### 16.3 Known Gaps
+
+- **ericw-tools small-map segfault**: `qbsp` crashes on maps < ~5 brushes. Focused fixtures
+  use 73–75 brushes to avoid this. The integrated thin slice (2 brushes) provides source-level
+  proof only.
+- **Semantic pipeline density**: The private proof pipeline cannot yet emit compiler-safe
+  structural density at generation time; the dense Rich fixture is hand-authored.
+- **Deferred capabilities**: Diagonal portals, concave rooms, accessible upper features,
+  segmented-arch integration, additional room families, and other deferred capabilities
+  remain excluded from the proof boundary per the G-12 contract.
+
+### 16.4 Reference
+
+- Decision package: `.internal-dev/plans/enhanced-v3-proof/decision-package.md`
+- Evidence matrix: `.internal-dev/plans/enhanced-v3-proof/evidence-matrix.md`
+- Specification: `.internal-dev/specifications/bsp-dungeon-generation.md` §19
+- Knowledge: `.internal-dev/knowledge/bsp-enhanced-v3-proof.md`
