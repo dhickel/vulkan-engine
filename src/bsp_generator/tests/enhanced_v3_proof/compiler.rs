@@ -1,18 +1,7 @@
 //! Bounded, profile-driven ericw-tools compiler execution harness.
 //!
-//! # Design contract
-//!
-//! - Parse `ericw-q1-bsp2-generated-profile.toml` with strict validation.
-//! - Resolve tool paths from `~/.local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin/`.
-//! - Hash executables before use; verify versions.
-//! - Fresh staging directory per fixture; clear env; record normalized env identity.
-//! - Unix process groups; concurrent stdout/stderr drain; output ceiling enforcement.
-//! - Stage sequence: qbsp → vis → light; check each stage before proceeding.
-//! - Classify diagnostics: warnings, missing miptex, skipped fill, leaks, pointfile artifacts.
-//! - Validate stage products: BSP2 magic, LIT QLIT v1, RGB payload relation.
-//! - Any warning, leak, skipped fill, missing texture, or nonzero exit = FAIL.
-//! - Missing tools = NOT_RUN (blocks PASS).
-//! - Only owner-authorized tool paths.
+//! Compiler qualification is fail-closed: stages run in order, every warning
+//! is fatal, and no synthetic BSP data is accepted by this module.
 
 #![allow(dead_code)]
 
@@ -22,12 +11,14 @@ use std::collections::BTreeMap;
 use std::env;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 // ── Profile contract ──────────────────────────────────────────────────────
 
-/// Parsed ericw-tools compiler profile.
 #[derive(Debug, Clone)]
 pub struct CompilerProfile {
     pub name: String,
@@ -44,169 +35,132 @@ pub struct CompilerProfile {
     pub expected_hashes: BTreeMap<String, String>,
 }
 
-/// Parse the ericw-tools profile from the TOML file at the given path.
 pub fn parse_compiler_profile(path: &Path) -> Result<CompilerProfile, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read profile {}: {e}", path.display()))?;
-
     let table: toml::Table =
         toml::from_str(&text).map_err(|e| format!("invalid TOML in profile: {e}"))?;
 
-    let name = table
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or("profile missing 'name'")?
-        .to_string();
-    let compiler_identity = table
-        .get("compiler_identity")
-        .and_then(|v| v.as_str())
-        .ok_or("profile missing 'compiler_identity'")?
-        .to_string();
-    let required_version = table
-        .get("required_version")
-        .and_then(|v| v.as_str())
-        .ok_or("profile missing 'required_version'")?
-        .to_string();
+    let string = |key: &str| {
+        table
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("profile missing '{key}'"))
+    };
+    let integer = |key: &str| {
+        table
+            .get(key)
+            .and_then(|value| value.as_integer())
+            .ok_or_else(|| format!("profile missing '{key}'"))
+    };
 
-    let qbsp_executable = table
-        .get("qbsp_executable")
-        .and_then(|v| v.as_str())
-        .ok_or("profile missing 'qbsp_executable'")?
-        .to_string();
-    let vis_executable = table
-        .get("vis_executable")
-        .and_then(|v| v.as_str())
-        .ok_or("profile missing 'vis_executable'")?
-        .to_string();
-    let light_executable = table
-        .get("light_executable")
-        .and_then(|v| v.as_str())
-        .ok_or("profile missing 'light_executable'")?
-        .to_string();
-
-    let default_qbsp_args = parse_string_array(&table, "default_qbsp_args")?;
-    let default_vis_args = parse_string_array(&table, "default_vis_args")?;
-    let default_light_args = parse_string_array(&table, "default_light_args")?;
-
-    let timeout_seconds = table
-        .get("timeout_seconds")
-        .and_then(|v| v.as_integer())
-        .ok_or("profile missing 'timeout_seconds'")? as u64;
-    let max_output_size = table
-        .get("max_output_size")
-        .and_then(|v| v.as_integer())
-        .ok_or("profile missing 'max_output_size'")? as u64;
-
-    let expected_hashes = parse_expected_hashes(&table)?;
+    let timeout_seconds = u64::try_from(integer("timeout_seconds")?)
+        .map_err(|_| "profile 'timeout_seconds' must be non-negative".to_string())?;
+    let max_output_size = u64::try_from(integer("max_output_size")?)
+        .map_err(|_| "profile 'max_output_size' must be non-negative".to_string())?;
+    if timeout_seconds == 0 || max_output_size == 0 {
+        return Err("profile timeout and output ceiling must be positive".to_string());
+    }
 
     Ok(CompilerProfile {
-        name,
-        compiler_identity,
-        required_version,
-        qbsp_executable,
-        vis_executable,
-        light_executable,
-        default_qbsp_args,
-        default_vis_args,
-        default_light_args,
+        name: string("name")?,
+        compiler_identity: string("compiler_identity")?,
+        required_version: string("required_version")?,
+        qbsp_executable: string("qbsp_executable")?,
+        vis_executable: string("vis_executable")?,
+        light_executable: string("light_executable")?,
+        default_qbsp_args: parse_string_array(&table, "default_qbsp_args")?,
+        default_vis_args: parse_string_array(&table, "default_vis_args")?,
+        default_light_args: parse_string_array(&table, "default_light_args")?,
         timeout_seconds,
         max_output_size,
-        expected_hashes,
+        expected_hashes: parse_expected_hashes(&table)?,
     })
 }
 
 fn parse_string_array(table: &toml::Table, key: &str) -> Result<Vec<String>, String> {
-    let arr = table
+    table
         .get(key)
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| format!("profile missing '{key}' array"))?;
-    let mut out = Vec::with_capacity(arr.len());
-    for val in arr {
-        let s = val
-            .as_str()
-            .ok_or_else(|| format!("'{key}' element is not a string"))?;
-        out.push(s.to_string());
-    }
-    Ok(out)
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| format!("profile missing '{key}' array"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("'{key}' element is not a string"))
+        })
+        .collect()
 }
 
 fn parse_expected_hashes(table: &toml::Table) -> Result<BTreeMap<String, String>, String> {
-    let hashes_table = table
+    let hashes = table
         .get("expected_hashes")
-        .and_then(|v| v.as_table())
+        .and_then(|value| value.as_table())
         .ok_or("profile missing '[expected_hashes]'")?;
-    let mut map = BTreeMap::new();
-    for (k, v) in hashes_table {
-        let hash = v
-            .as_str()
-            .ok_or_else(|| format!("expected_hashes.{} is not a string", k))?;
-        map.insert(k.clone(), hash.to_string());
-    }
-    Ok(map)
+    hashes
+        .iter()
+        .map(|(key, value)| {
+            let hash = value
+                .as_str()
+                .ok_or_else(|| format!("expected_hashes.{key} is not a string"))?;
+            if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(format!("expected_hashes.{key} is not a SHA-256 hex value"));
+            }
+            Ok((key.clone(), hash.to_ascii_lowercase()))
+        })
+        .collect()
 }
 
-// ── Tool path resolution ──────────────────────────────────────────────────
+// ── Tool resolution and provenance ────────────────────────────────────────
 
-/// Default ericw-tools installation directory.
 pub fn default_tool_dir() -> PathBuf {
     let home = env::var("HOME").unwrap_or_else(|_| "/home/dhickel".to_string());
     PathBuf::from(home).join(".local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin")
 }
 
-/// Resolve the tool directory from env var or default.
 pub fn resolve_tool_dir() -> PathBuf {
     env::var("ERICW_TOOLS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| default_tool_dir())
 }
 
-/// Check if all three tools exist at the given directory.
 pub fn tools_available(dir: &Path) -> bool {
     dir.join("qbsp").is_file() && dir.join("vis").is_file() && dir.join("light").is_file()
 }
 
-/// Compute SHA-256 of a file.
 pub fn sha256_file(path: &Path) -> Result<String, String> {
-    let data =
-        std::fs::read(path).map_err(|e| format!("read {path}: {e}", path = path.display()))?;
+    let data = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     Ok(sha256_hex(&data))
 }
 
-/// Verify executable hashes against the profile.
 pub fn verify_executable_hashes(
     tool_dir: &Path,
     profile: &CompilerProfile,
 ) -> Result<(), Vec<String>> {
-    let mut failures = Vec::new();
-
     let checks = [
         (&profile.qbsp_executable, "qbsp_sha256"),
         (&profile.vis_executable, "vis_sha256"),
         (&profile.light_executable, "light_sha256"),
     ];
-
-    for (exe_name, hash_key) in &checks {
-        let exe_path = tool_dir.join(exe_name);
-        if !exe_path.is_file() {
-            failures.push(format!("executable missing: {}", exe_path.display()));
-            continue;
-        }
-        let actual = match sha256_file(&exe_path) {
-            Ok(h) => h,
-            Err(e) => {
-                failures.push(format!("cannot hash {}: {e}", exe_path.display()));
-                continue;
+    let failures: Vec<_> = checks
+        .into_iter()
+        .filter_map(|(executable, hash_key)| {
+            let path = tool_dir.join(executable);
+            let expected = match profile.expected_hashes.get(hash_key) {
+                Some(expected) => expected,
+                None => return Some(format!("profile missing expected hash '{hash_key}'")),
+            };
+            match sha256_file(&path) {
+                Ok(actual) if &actual == expected => None,
+                Ok(actual) => Some(format!(
+                    "hash mismatch for {executable}: expected {expected}, got {actual}"
+                )),
+                Err(error) => Some(error),
             }
-        };
-        if let Some(expected) = profile.expected_hashes.get(*hash_key) {
-            if actual != *expected {
-                failures.push(format!(
-                    "hash mismatch for {exe_name}: expected {expected}, got {actual}"
-                ));
-            }
-        }
-    }
-
+        })
+        .collect();
     if failures.is_empty() {
         Ok(())
     } else {
@@ -214,9 +168,6 @@ pub fn verify_executable_hashes(
     }
 }
 
-// ── Normalized environment identity ───────────────────────────────────────
-
-/// Record a normalized environment identity for the compiler run.
 #[derive(Debug, Clone)]
 pub struct EnvIdentity {
     pub home: String,
@@ -227,7 +178,7 @@ pub struct EnvIdentity {
 
 impl EnvIdentity {
     pub fn record(tool_dir: &Path) -> Self {
-        EnvIdentity {
+        Self {
             home: env::var("HOME").unwrap_or_default(),
             path: env::var("PATH").unwrap_or_default(),
             lang: env::var("LANG").unwrap_or_default(),
@@ -236,135 +187,87 @@ impl EnvIdentity {
     }
 }
 
-// ── Compiler diagnostics ──────────────────────────────────────────────────
+// ── Diagnostics ───────────────────────────────────────────────────────────
 
-/// Classified diagnostic from a compiler stage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompilerDiagnostic {
-    /// Fatal: a leak was detected (map not sealed).
+    Warning { stage: String, message: String },
     Leak { stage: String, message: String },
-    /// Fatal: a referenced texture could not be found.
-    MissingMiptex { stage: String, texture: String },
-    /// Fatal: light filling was skipped.
+    MissingMiptex { stage: String, message: String },
     SkippedFill { stage: String, message: String },
-    /// Informational: a brush has no visible rendering sides but contributes to collision.
-    NoVisibleSides { stage: String, message: String },
-    /// Informational: brush bounds are numerically large.
-    BoundsOutOfRange { stage: String, message: String },
-    /// Informational: world extent warning.
-    WorldExtent { stage: String, message: String },
-    /// Other informational message.
-    Info { stage: String, message: String },
+    Pointfile { stage: String, message: String },
 }
 
 impl CompilerDiagnostic {
-    /// Whether this diagnostic is fatal (should fail the compilation).
+    /// Every classified ericw-tools diagnostic is fatal at this boundary.
     pub fn is_fatal(&self) -> bool {
-        matches!(
-            self,
-            CompilerDiagnostic::Leak { .. }
-                | CompilerDiagnostic::MissingMiptex { .. }
-                | CompilerDiagnostic::SkippedFill { .. }
-        )
+        true
     }
 
-    pub fn stage(&self) -> &str {
+    pub fn message(&self) -> &str {
         match self {
-            CompilerDiagnostic::Leak { stage, .. }
-            | CompilerDiagnostic::MissingMiptex { stage, .. }
-            | CompilerDiagnostic::SkippedFill { stage, .. }
-            | CompilerDiagnostic::NoVisibleSides { stage, .. }
-            | CompilerDiagnostic::BoundsOutOfRange { stage, .. }
-            | CompilerDiagnostic::WorldExtent { stage, .. }
-            | CompilerDiagnostic::Info { stage, .. } => stage.as_str(),
+            Self::Warning { message, .. }
+            | Self::Leak { message, .. }
+            | Self::MissingMiptex { message, .. }
+            | Self::SkippedFill { message, .. }
+            | Self::Pointfile { message, .. } => message,
         }
     }
 }
 
-/// Classify diagnostics from compiler stdout/stderr.
+/// Classify all prohibited compiler diagnostics case-insensitively.
 ///
-/// Only leaks, missing textures, and skipped fills are considered fatal.
-/// Informational messages (no visible sides, bounds out of range, worldextent)
-/// are tracked but not treated as errors.
+/// There is deliberately no warning exception list: every `WARNING:` line is
+/// a hard compiler qualification failure.
 pub fn classify_diagnostics(stage: &str, stdout: &str, stderr: &str) -> Vec<CompilerDiagnostic> {
-    let combined = format!("{stdout}\n{stderr}");
-    let lower = combined.to_ascii_lowercase();
-    let mut diags = Vec::new();
-
-    // Leaks (fatal)
-    if lower.contains("leaked") {
-        for line in combined.lines() {
-            let ll = line.to_ascii_lowercase();
-            if ll.contains("leaked") || ll.contains("leak") {
-                diags.push(CompilerDiagnostic::Leak {
-                    stage: stage.to_string(),
-                    message: line.to_string(),
-                });
-            }
+    let mut diagnostics = Vec::new();
+    for line in stdout.lines().chain(stderr.lines()) {
+        let lower = line.to_ascii_lowercase();
+        let diagnostic = if lower.contains("warning") && !lower.contains("0 warning") {
+            Some(CompilerDiagnostic::Warning {
+                stage: stage.to_string(),
+                message: line.to_string(),
+            })
+        } else if lower.contains("leaked") || lower.contains("leak detected") {
+            Some(CompilerDiagnostic::Leak {
+                stage: stage.to_string(),
+                message: line.to_string(),
+            })
+        } else if lower.contains("missing miptex")
+            || lower.contains("missing texture")
+            || lower.contains("unable to find texture")
+            || lower.contains("could not load texture")
+            || lower.contains("couldn't load texture")
+        {
+            Some(CompilerDiagnostic::MissingMiptex {
+                stage: stage.to_string(),
+                message: line.to_string(),
+            })
+        } else if lower.contains("no entities in empty space")
+            || lower.contains("no filling performed")
+            || (lower.contains("skipped") && lower.contains("fill"))
+        {
+            Some(CompilerDiagnostic::SkippedFill {
+                stage: stage.to_string(),
+                message: line.to_string(),
+            })
+        } else if lower.contains("pointfile") || lower.contains(".pts") {
+            Some(CompilerDiagnostic::Pointfile {
+                stage: stage.to_string(),
+                message: line.to_string(),
+            })
+        } else {
+            None
+        };
+        if let Some(diagnostic) = diagnostic {
+            diagnostics.push(diagnostic);
         }
     }
-
-    // Missing miptex (fatal)
-    if (lower.contains("missing") && lower.contains("texture")) || lower.contains("couldn't load") {
-        diags.push(CompilerDiagnostic::MissingMiptex {
-            stage: stage.to_string(),
-            texture: "unknown".to_string(),
-        });
-    }
-
-    // Skipped fill (fatal)
-    if lower.contains("no filling") || (lower.contains("skipped") && lower.contains("fill")) {
-        diags.push(CompilerDiagnostic::SkippedFill {
-            stage: stage.to_string(),
-            message: "fill skipped".to_string(),
-        });
-    }
-
-    // No visible sides (informational)
-    if lower.contains("no visible sides") {
-        for line in combined.lines() {
-            let ll = line.to_ascii_lowercase();
-            if ll.contains("no visible sides") {
-                diags.push(CompilerDiagnostic::NoVisibleSides {
-                    stage: stage.to_string(),
-                    message: line.to_string(),
-                });
-            }
-        }
-    }
-
-    // Brush bounds out of range (informational)
-    if lower.contains("brush bounds out of range") {
-        for line in combined.lines() {
-            let ll = line.to_ascii_lowercase();
-            if ll.contains("brush bounds out of range") {
-                diags.push(CompilerDiagnostic::BoundsOutOfRange {
-                    stage: stage.to_string(),
-                    message: line.to_string(),
-                });
-            }
-        }
-    }
-
-    // World extent (informational)
-    if lower.contains("worldextent") {
-        for line in combined.lines() {
-            let ll = line.to_ascii_lowercase();
-            if ll.contains("worldextent") {
-                diags.push(CompilerDiagnostic::WorldExtent {
-                    stage: stage.to_string(),
-                    message: line.to_string(),
-                });
-            }
-        }
-    }
-
-    diags
+    diagnostics
 }
 
-// ── Stage output ──────────────────────────────────────────────────────────
+// ── Bounded stage runner ──────────────────────────────────────────────────
 
-/// Output from a single compiler stage.
 #[derive(Debug, Clone)]
 pub struct StageOutput {
     pub stage: String,
@@ -375,21 +278,103 @@ pub struct StageOutput {
     pub diagnostics: Vec<CompilerDiagnostic>,
 }
 
-/// Compiled artifacts from the full pipeline.
-#[derive(Debug, Clone)]
-pub struct CompiledArtifacts {
-    pub bsp_data: Vec<u8>,
-    pub bsp_sha256: String,
-    pub lit_data: Option<Vec<u8>>,
-    pub lit_sha256: Option<String>,
-    pub qbsp_output: StageOutput,
-    pub vis_output: StageOutput,
-    pub light_output: StageOutput,
+struct CapturedStream {
+    bytes: Vec<u8>,
 }
 
-// ── Stage execution ───────────────────────────────────────────────────────
+fn drain_stream(
+    mut stream: impl Read,
+    combined_bytes: Arc<AtomicU64>,
+    combined_limit: u64,
+    exceeded: Arc<AtomicBool>,
+    reader_failed: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+) -> std::io::Result<CapturedStream> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = match stream.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error) => {
+                reader_failed.store(true, Ordering::Release);
+                done.store(true, Ordering::Release);
+                return Err(error);
+            }
+        };
+        if count == 0 {
+            done.store(true, Ordering::Release);
+            return Ok(CapturedStream { bytes });
+        }
 
-/// Run a single compiler stage with bounded execution.
+        if exceeded.load(Ordering::Acquire) {
+            continue;
+        }
+        let reservation =
+            combined_bytes.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current
+                    .checked_add(count as u64)
+                    .filter(|next| *next <= combined_limit)
+            });
+        if reservation.is_ok() {
+            bytes.extend_from_slice(&buffer[..count]);
+        } else {
+            exceeded.store(true, Ordering::Release);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn configure_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: `setpgid` is async-signal-safe and this closure performs no
+    // allocation or lock acquisition between fork and exec.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_process_group(_command: &mut Command) {}
+
+fn terminate_process_group(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let process_group = -(child.id() as i32);
+        // SAFETY: a negative PID targets the process group created by
+        // `setpgid(0, 0)` in the child immediately before exec.
+        unsafe {
+            libc::kill(process_group, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+fn join_reader(
+    reader: thread::JoinHandle<std::io::Result<CapturedStream>>,
+    stage: &str,
+    stream: &str,
+) -> Result<CapturedStream, String> {
+    reader
+        .join()
+        .map_err(|_| format!("{stage}: {stream} reader panicked"))?
+        .map_err(|error| format!("{stage}: failed to drain {stream}: {error}"))
+}
+
+/// Run one tool directly in its own Unix process group.
+///
+/// Stdout and stderr are drained concurrently. Their retained bytes share one
+/// combined ceiling, and timeout/overflow/reader failure kills the entire
+/// process group before both drain threads are joined.
 pub fn run_stage(
     tool_dir: &Path,
     exe_name: &str,
@@ -399,137 +384,267 @@ pub fn run_stage(
     timeout: Duration,
     max_output: u64,
 ) -> Result<StageOutput, String> {
-    let exe_path = tool_dir.join(exe_name);
-    if !exe_path.is_file() {
-        return Err(format!("tool not found: {}", exe_path.display()));
+    let executable = tool_dir.join(exe_name);
+    if !executable.is_file() {
+        return Err(format!("tool not found: {}", executable.display()));
     }
 
-    let start = Instant::now();
-
-    let mut cmd = Command::new(&exe_path);
-    cmd.args(args).current_dir(work_dir);
-
-    // Minimal clean env: only PATH and HOME
-    cmd.env_clear();
+    let mut command = Command::new(&executable);
+    command
+        .args(args)
+        .current_dir(work_dir)
+        .env_clear()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if let Some(path) = env::var_os("PATH") {
-        cmd.env("PATH", path);
+        command.env("PATH", path);
     }
     if let Some(home) = env::var_os("HOME") {
-        cmd.env("HOME", home);
+        command.env("HOME", home);
     }
+    configure_process_group(&mut command);
 
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-
-    let mut child = cmd
+    let started = Instant::now();
+    let mut child = command
         .spawn()
-        .map_err(|e| format!("failed to spawn {stage_name}: {e}"))?;
+        .map_err(|error| format!("failed to spawn {stage_name}: {error}"))?;
+    let stdout = child.stdout.take().ok_or("cannot capture stdout")?;
+    let stderr = child.stderr.take().ok_or("cannot capture stderr")?;
 
-    // Read stdout/stderr with timeout
-    let mut stdout_bytes = Vec::new();
-    let mut stderr_bytes = Vec::new();
+    let combined_bytes = Arc::new(AtomicU64::new(0));
+    let exceeded = Arc::new(AtomicBool::new(false));
+    let reader_failed = Arc::new(AtomicBool::new(false));
+    let stdout_done = Arc::new(AtomicBool::new(false));
+    let stderr_done = Arc::new(AtomicBool::new(false));
 
-    let mut child_stdout = child.stdout.take().ok_or("cannot capture stdout")?;
-    let mut child_stderr = child.stderr.take().ok_or("cannot capture stderr")?;
+    let stdout_reader = {
+        let combined_bytes = Arc::clone(&combined_bytes);
+        let exceeded = Arc::clone(&exceeded);
+        let reader_failed = Arc::clone(&reader_failed);
+        let done = Arc::clone(&stdout_done);
+        thread::spawn(move || {
+            drain_stream(
+                stdout,
+                combined_bytes,
+                max_output,
+                exceeded,
+                reader_failed,
+                done,
+            )
+        })
+    };
+    let stderr_reader = {
+        let combined_bytes = Arc::clone(&combined_bytes);
+        let exceeded = Arc::clone(&exceeded);
+        let reader_failed = Arc::clone(&reader_failed);
+        let done = Arc::clone(&stderr_done);
+        thread::spawn(move || {
+            drain_stream(
+                stderr,
+                combined_bytes,
+                max_output,
+                exceeded,
+                reader_failed,
+                done,
+            )
+        })
+    };
 
-    let mut stdout_buf = [0u8; 4096];
-    let mut stderr_buf = [0u8; 4096];
-
-    loop {
-        let status = child.try_wait().map_err(|e| format!("wait: {e}"))?;
-
-        if status.is_some() {
-            // Process exited, drain remaining
-            loop {
-                match child_stdout.read(&mut stdout_buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if stdout_bytes.len() + n > max_output as usize {
-                            let _ = child.kill();
-                            return Err(format!("{stage_name}: stdout exceeded output ceiling"));
-                        }
-                        stdout_bytes.extend_from_slice(&stdout_buf[..n]);
-                    }
-                    Err(_) => break,
-                }
-            }
-            loop {
-                match child_stderr.read(&mut stderr_buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if stderr_bytes.len() + n > max_output as usize {
-                            let _ = child.kill();
-                            return Err(format!("{stage_name}: stderr exceeded output ceiling"));
-                        }
-                        stderr_bytes.extend_from_slice(&stderr_buf[..n]);
-                    }
-                    Err(_) => break,
-                }
-            }
-            break;
+    let status: Result<ExitStatus, String> = loop {
+        if exceeded.load(Ordering::Acquire) {
+            break Err(format!(
+                "{stage_name}: combined stdout/stderr exceeded output ceiling of {max_output} bytes"
+            ));
         }
-
-        // Non-blocking read
-        match child_stdout.read(&mut stdout_buf) {
-            Ok(0) => {}
-            Ok(n) => {
-                if stdout_bytes.len() + n > max_output as usize {
-                    let _ = child.kill();
-                    return Err(format!("{stage_name}: stdout exceeded output ceiling"));
-                }
-                stdout_bytes.extend_from_slice(&stdout_buf[..n]);
+        if reader_failed.load(Ordering::Acquire) {
+            break Err(format!("{stage_name}: stdout/stderr reader failure"));
+        }
+        match child.try_wait() {
+            Ok(Some(status))
+                if stdout_done.load(Ordering::Acquire) && stderr_done.load(Ordering::Acquire) =>
+            {
+                break Ok(status);
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(_) => {}
+            Ok(_) => {}
+            Err(error) => break Err(format!("{stage_name}: failed to poll child: {error}")),
         }
-
-        match child_stderr.read(&mut stderr_buf) {
-            Ok(0) => {}
-            Ok(n) => {
-                if stderr_bytes.len() + n > max_output as usize {
-                    let _ = child.kill();
-                    return Err(format!("{stage_name}: stderr exceeded output ceiling"));
-                }
-                stderr_bytes.extend_from_slice(&stderr_buf[..n]);
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(_) => {}
+        if started.elapsed() >= timeout {
+            break Err(format!("{stage_name}: timeout after {timeout:?}"));
         }
+        thread::sleep(Duration::from_millis(5));
+    };
 
-        if start.elapsed() > timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!("{stage_name}: timeout after {:?}", timeout));
+    let status = match status {
+        Ok(status) => status,
+        Err(error) => {
+            terminate_process_group(&mut child);
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(error);
         }
+    };
 
-        std::thread::sleep(Duration::from_millis(10));
-    }
-
-    let elapsed = start.elapsed();
-    let exit_code = child
-        .wait()
-        .map_err(|e| format!("wait: {e}"))?
-        .code()
-        .unwrap_or(-1);
-
-    let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
-    let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
-
-    let diagnostics = classify_diagnostics(stage_name, &stdout, &stderr);
+    let stdout = join_reader(stdout_reader, stage_name, "stdout")?;
+    let stderr = join_reader(stderr_reader, stage_name, "stderr")?;
+    let stdout = String::from_utf8_lossy(&stdout.bytes).into_owned();
+    let stderr = String::from_utf8_lossy(&stderr.bytes).into_owned();
 
     Ok(StageOutput {
         stage: stage_name.to_string(),
+        diagnostics: classify_diagnostics(stage_name, &stdout, &stderr),
         stdout,
         stderr,
-        exit_code,
-        elapsed,
-        diagnostics,
+        exit_code: status.code().unwrap_or(-1),
+        elapsed: started.elapsed(),
     })
 }
 
-// ── Full pipeline ─────────────────────────────────────────────────────────
+// ── Full compiler pipeline ────────────────────────────────────────────────
 
-/// Run the full qbsp → vis → light pipeline and return compiled artifacts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompileFailureKind {
+    Runner,
+    NonZeroExit,
+    Diagnostic,
+    MissingProduct,
+    InvalidProduct,
+    LeakArtifact,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompileFailure {
+    pub kind: CompileFailureKind,
+    pub message: String,
+    pub stage_outputs: Vec<StageOutput>,
+}
+
+impl std::fmt::Display for CompileFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CompiledArtifacts {
+    pub bsp_data: Vec<u8>,
+    pub bsp_sha256: String,
+    pub lit_data: Vec<u8>,
+    pub lit_sha256: String,
+    pub qbsp_output: StageOutput,
+    pub vis_output: StageOutput,
+    pub light_output: StageOutput,
+}
+
+fn failure(
+    kind: CompileFailureKind,
+    message: impl Into<String>,
+    stage_outputs: &[StageOutput],
+) -> CompileFailure {
+    CompileFailure {
+        kind,
+        message: message.into(),
+        stage_outputs: stage_outputs.to_vec(),
+    }
+}
+
+fn run_required_stage(
+    tool_dir: &Path,
+    executable: &str,
+    args: &[String],
+    work_dir: &Path,
+    stage: &str,
+    profile: &CompilerProfile,
+    completed: &[StageOutput],
+) -> Result<StageOutput, CompileFailure> {
+    let output = run_stage(
+        tool_dir,
+        executable,
+        args,
+        work_dir,
+        stage,
+        Duration::from_secs(profile.timeout_seconds),
+        profile.max_output_size,
+    )
+    .map_err(|message| failure(CompileFailureKind::Runner, message, completed))?;
+
+    let mut outputs = completed.to_vec();
+    outputs.push(output.clone());
+    if output.exit_code != 0 {
+        return Err(failure(
+            CompileFailureKind::NonZeroExit,
+            format!(
+                "{stage} failed (exit {}):\nstdout:\n{}\nstderr:\n{}",
+                output.exit_code, output.stdout, output.stderr
+            ),
+            &outputs,
+        ));
+    }
+    if !output.diagnostics.is_empty() {
+        return Err(failure(
+            CompileFailureKind::Diagnostic,
+            format!(
+                "{stage} emitted prohibited diagnostics: {:?}",
+                output.diagnostics
+            ),
+            &outputs,
+        ));
+    }
+    Ok(output)
+}
+
+fn read_regular_product(
+    path: &Path,
+    max_size: u64,
+    completed: &[StageOutput],
+) -> Result<Vec<u8>, CompileFailure> {
+    let metadata = path.metadata().map_err(|error| {
+        failure(
+            CompileFailureKind::MissingProduct,
+            format!("missing compiler product {}: {error}", path.display()),
+            completed,
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(failure(
+            CompileFailureKind::MissingProduct,
+            format!("compiler product is not a regular file: {}", path.display()),
+            completed,
+        ));
+    }
+    if metadata.len() > max_size {
+        return Err(failure(
+            CompileFailureKind::InvalidProduct,
+            format!(
+                "compiler product {} exceeds {} byte ceiling",
+                path.display(),
+                max_size
+            ),
+            completed,
+        ));
+    }
+    std::fs::read(path).map_err(|error| {
+        failure(
+            CompileFailureKind::MissingProduct,
+            format!("read compiler product {}: {error}", path.display()),
+            completed,
+        )
+    })
+}
+
+fn reject_leak_artifacts(work_dir: &Path, completed: &[StageOutput]) -> Result<(), CompileFailure> {
+    for name in ["generated.pts", "generated.leak.prt"] {
+        let path = work_dir.join(name);
+        if path.exists() {
+            return Err(failure(
+                CompileFailureKind::LeakArtifact,
+                format!("qbsp produced leak artifact {}", path.display()),
+                completed,
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn compile_map(
     map_path: &Path,
     work_dir: &Path,
@@ -537,229 +652,163 @@ pub fn compile_map(
     wad_path: &Path,
     palette_path: &Path,
     profile: &CompilerProfile,
-) -> Result<CompiledArtifacts, String> {
-    // Copy assets to staging directory
-    let work_map = work_dir.join("generated.map");
-    if map_path != work_map {
-        std::fs::copy(map_path, &work_map).map_err(|e| format!("copy map to staging: {e}"))?;
-    }
+) -> Result<CompiledArtifacts, CompileFailure> {
+    let copy_error = |what: &str, error| {
+        failure(
+            CompileFailureKind::MissingProduct,
+            format!("stage {what}: {error}"),
+            &[],
+        )
+    };
+    std::fs::copy(map_path, work_dir.join("generated.map"))
+        .map_err(|error| copy_error("map", error))?;
+    let wad_name = wad_path.file_name().ok_or_else(|| {
+        failure(
+            CompileFailureKind::MissingProduct,
+            "WAD path has no basename",
+            &[],
+        )
+    })?;
+    std::fs::copy(wad_path, work_dir.join(wad_name)).map_err(|error| copy_error("WAD", error))?;
+    std::fs::copy(palette_path, work_dir.join("palette.lmp"))
+        .map_err(|error| copy_error("palette", error))?;
 
-    // Copy WAD with its expected basename
-    let wad_basename = wad_path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "wad.wad".to_string());
-    let work_wad = work_dir.join(&wad_basename);
-    std::fs::copy(wad_path, &work_wad).map_err(|e| format!("copy WAD to staging: {e}"))?;
-
-    // Copy palette
-    let work_palette = work_dir.join("palette.lmp");
-    std::fs::copy(palette_path, &work_palette)
-        .map_err(|e| format!("copy palette to staging: {e}"))?;
-
-    let timeout = Duration::from_secs(profile.timeout_seconds);
-    let max_output = profile.max_output_size;
-
-    // Stage 1: qbsp
-    let qbsp_args = build_args(&profile.default_qbsp_args, &["generated.map"]);
-    let qbsp_output = run_stage(
+    let mut completed = Vec::new();
+    let qbsp_args = build_args(&profile.default_qbsp_args, "generated.map");
+    let qbsp = run_required_stage(
         tool_dir,
         &profile.qbsp_executable,
         &qbsp_args,
         work_dir,
         "qbsp",
-        timeout,
-        max_output,
+        profile,
+        &completed,
     )?;
-
-    // Check for fatal diagnostics or non-zero exit
-    let qbsp_fatal_diags: Vec<_> = qbsp_output
-        .diagnostics
-        .iter()
-        .filter(|d| d.is_fatal())
-        .collect();
-    if qbsp_output.exit_code != 0 {
-        return Err(format!(
-            "qbsp failed (exit {}):\nstdout:\n{}\nstderr:\n{}",
-            qbsp_output.exit_code, qbsp_output.stdout, qbsp_output.stderr
-        ));
-    }
-    if !qbsp_fatal_diags.is_empty() {
-        return Err(format!(
-            "qbsp reported fatal diagnostics: {:?}",
-            qbsp_fatal_diags
-        ));
-    }
-
+    completed.push(qbsp.clone());
+    reject_leak_artifacts(work_dir, &completed)?;
     let bsp_path = work_dir.join("generated.bsp");
-    if !bsp_path.exists() {
-        return Err("qbsp did not produce generated.bsp".to_string());
-    }
+    let qbsp_product = read_regular_product(&bsp_path, profile.max_output_size, &completed)?;
+    validate_bsp2(&qbsp_product)
+        .map_err(|message| failure(CompileFailureKind::InvalidProduct, message, &completed))?;
 
-    // Stage 2: vis
-    let vis_args = build_args(&profile.default_vis_args, &["generated.bsp"]);
-    let vis_output = run_stage(
+    let vis_args = build_args(&profile.default_vis_args, "generated.bsp");
+    let vis = run_required_stage(
         tool_dir,
         &profile.vis_executable,
         &vis_args,
         work_dir,
         "vis",
-        timeout,
-        max_output,
+        profile,
+        &completed,
     )?;
+    completed.push(vis.clone());
+    let vis_product = read_regular_product(&bsp_path, profile.max_output_size, &completed)?;
+    validate_bsp2(&vis_product)
+        .map_err(|message| failure(CompileFailureKind::InvalidProduct, message, &completed))?;
 
-    // Check for fatal diagnostics or non-zero exit
-    let vis_fatal_diags: Vec<_> = vis_output
-        .diagnostics
-        .iter()
-        .filter(|d| d.is_fatal())
-        .collect();
-    if vis_output.exit_code != 0 {
-        return Err(format!(
-            "vis failed (exit {}):\nstdout:\n{}\nstderr:\n{}",
-            vis_output.exit_code, vis_output.stdout, vis_output.stderr
-        ));
-    }
-    if !vis_fatal_diags.is_empty() {
-        return Err(format!(
-            "vis reported fatal diagnostics: {:?}",
-            vis_fatal_diags
-        ));
-    }
-
-    // Stage 3: light
-    let light_args = build_args(&profile.default_light_args, &["generated.bsp"]);
-    let light_output = run_stage(
+    let light_args = build_args(&profile.default_light_args, "generated.bsp");
+    let light = run_required_stage(
         tool_dir,
         &profile.light_executable,
         &light_args,
         work_dir,
         "light",
-        timeout,
-        max_output,
+        profile,
+        &completed,
     )?;
+    completed.push(light.clone());
 
-    // Check for fatal diagnostics or non-zero exit
-    let light_fatal_diags: Vec<_> = light_output
-        .diagnostics
-        .iter()
-        .filter(|d| d.is_fatal())
-        .collect();
-    if light_output.exit_code != 0 {
-        return Err(format!(
-            "light failed (exit {}):\nstdout:\n{}\nstderr:\n{}",
-            light_output.exit_code, light_output.stdout, light_output.stderr
-        ));
-    }
-    if !light_fatal_diags.is_empty() {
-        return Err(format!(
-            "light reported fatal diagnostics: {:?}",
-            light_fatal_diags
-        ));
-    }
-
-    // Validate stage products
-    let bsp_data = std::fs::read(&bsp_path).map_err(|e| format!("read generated.bsp: {e}"))?;
-    validate_bsp2(&bsp_data)?;
-
-    let lit_path = work_dir.join("generated.lit");
-    let lit_data = if lit_path.exists() {
-        let lit = std::fs::read(&lit_path).map_err(|e| format!("read generated.lit: {e}"))?;
-        validate_lit(&lit)?;
-        Some(lit)
-    } else {
-        None
-    };
-
-    let bsp_sha256 = sha256_hex(&bsp_data);
-    let lit_sha256 = lit_data.as_ref().map(|d| sha256_hex(d));
+    let bsp_data = read_regular_product(&bsp_path, profile.max_output_size, &completed)?;
+    validate_bsp2(&bsp_data)
+        .map_err(|message| failure(CompileFailureKind::InvalidProduct, message, &completed))?;
+    let lit_data = read_regular_product(
+        &work_dir.join("generated.lit"),
+        profile.max_output_size,
+        &completed,
+    )?;
+    validate_lit(&lit_data)
+        .map_err(|message| failure(CompileFailureKind::InvalidProduct, message, &completed))?;
+    validate_lit_payload(&bsp_data, &lit_data)
+        .map_err(|message| failure(CompileFailureKind::InvalidProduct, message, &completed))?;
 
     Ok(CompiledArtifacts {
+        bsp_sha256: sha256_hex(&bsp_data),
+        lit_sha256: sha256_hex(&lit_data),
         bsp_data,
-        bsp_sha256,
         lit_data,
-        lit_sha256,
-        qbsp_output,
-        vis_output,
-        light_output,
+        qbsp_output: qbsp,
+        vis_output: vis,
+        light_output: light,
     })
 }
 
-/// Build argument vector: profile defaults + positional args.
-fn build_args(defaults: &[String], positional: &[&str]) -> Vec<String> {
-    let mut args: Vec<String> = defaults.to_vec();
-    for p in positional {
-        args.push(p.to_string());
-    }
-    args
+fn build_args(defaults: &[String], input: &str) -> Vec<String> {
+    defaults
+        .iter()
+        .cloned()
+        .chain(std::iter::once(input.to_string()))
+        .collect()
 }
 
-/// Validate BSP2 magic bytes.
 fn validate_bsp2(data: &[u8]) -> Result<(), String> {
-    if data.len() < 4 {
-        return Err("BSP file too small for magic check".to_string());
+    match data.get(..4) {
+        Some(b"BSP2") => Ok(()),
+        Some(magic) => Err(format!("BSP magic mismatch: expected BSP2, got {magic:?}")),
+        None => Err("BSP file too small for magic check".to_string()),
     }
-    if &data[0..4] != b"BSP2" {
-        return Err(format!(
-            "BSP magic mismatch: expected BSP2, got {:?}",
-            &data[0..4]
-        ));
-    }
-    Ok(())
 }
 
-/// Validate LIT QLIT v1 header.
 fn validate_lit(data: &[u8]) -> Result<(), String> {
     if data.len() < 8 {
-        return Err("LIT file too small for header".to_string());
+        return Err("LIT file too small for QLIT v1 header".to_string());
     }
-    if &data[0..4] != b"QLIT" {
-        return Err(format!(
-            "LIT magic mismatch: expected QLIT, got {:?}",
-            &data[0..4]
-        ));
+    if data.get(..4) != Some(b"QLIT") {
+        return Err("LIT magic mismatch: expected QLIT".to_string());
     }
-    let version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+    let version = u32::from_le_bytes(data[4..8].try_into().expect("slice length checked"));
     if version != 1 {
         return Err(format!("LIT version {version} not supported (expected 1)"));
     }
+    if data.len() == 8 {
+        return Err("LIT file has no RGB payload".to_string());
+    }
     Ok(())
 }
 
-/// SHA-256 hex string.
+fn validate_lit_payload(bsp: &[u8], lit: &[u8]) -> Result<(), String> {
+    const LIGHTMAP_LUMP: usize = 8;
+    const LUMP_TABLE_START: usize = 4;
+    const LUMP_ENTRY_SIZE: usize = 8;
+    let length_offset = LUMP_TABLE_START + LIGHTMAP_LUMP * LUMP_ENTRY_SIZE + 4;
+    let length_bytes = bsp
+        .get(length_offset..length_offset + 4)
+        .ok_or("BSP header too small for lightmap lump")?;
+    let lightmap_len = u32::from_le_bytes(length_bytes.try_into().expect("slice length checked"));
+    let expected = usize::try_from(lightmap_len)
+        .ok()
+        .and_then(|length| length.checked_mul(3))
+        .ok_or("BSP lightmap length overflow")?;
+    let actual = lit.len() - 8;
+    if actual != expected {
+        return Err(format!(
+            "LIT RGB payload is {actual} bytes; expected {expected} for {lightmap_len} BSP luxels"
+        ));
+    }
+    Ok(())
+}
+
 pub fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     format!("{:x}", hasher.finalize())
 }
 
-// ── Staging helpers ───────────────────────────────────────────────────────
-
-/// Create a unique temporary staging directory.
 pub fn create_staging_dir(label: &str) -> Result<tempfile::TempDir, String> {
-    tempfile::tempdir().map_err(|e| format!("create staging dir for {label}: {e}"))
+    tempfile::Builder::new()
+        .prefix(&format!("enhanced-v3-{label}-"))
+        .tempdir()
+        .map_err(|error| format!("create staging dir for {label}: {error}"))
 }
-
-/// Copy fixture assets (WAD + palette) to staging directory.
-pub fn copy_assets_to_staging(
-    work_dir: &Path,
-    wad_path: &Path,
-    palette_path: &Path,
-) -> Result<(), String> {
-    let wad_basename = wad_path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "wad.wad".to_string());
-    let work_wad = work_dir.join(&wad_basename);
-    std::fs::copy(wad_path, &work_wad).map_err(|e| format!("copy WAD: {e}"))?;
-
-    let work_palette = work_dir.join("palette.lmp");
-    std::fs::copy(palette_path, &work_palette).map_err(|e| format!("copy palette: {e}"))?;
-
-    Ok(())
-}
-
-// ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -767,76 +816,49 @@ mod tests {
 
     #[test]
     fn profile_parse_valid() {
-        let profile_path =
-            crate_dir().join("../../tools/bsp_authoring/ericw-q1-bsp2-generated-profile.toml");
-        if !profile_path.exists() {
-            eprintln!("profile not found, skipping test");
-            return;
-        }
-        let profile = parse_compiler_profile(&profile_path).unwrap();
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/bsp_authoring/ericw-q1-bsp2-generated-profile.toml");
+        let profile = parse_compiler_profile(&path).unwrap();
         assert_eq!(profile.name, "ericw-q1-bsp2-generated");
         assert_eq!(profile.required_version, "2.0.0-alpha3");
-        assert_eq!(profile.timeout_seconds, 300);
-        assert_eq!(profile.max_output_size, 134217728);
-        assert!(profile.expected_hashes.contains_key("qbsp_sha256"));
-        assert!(profile.expected_hashes.contains_key("vis_sha256"));
-        assert!(profile.expected_hashes.contains_key("light_sha256"));
+        assert_eq!(profile.default_qbsp_args, ["-bsp2", "-threads", "1"]);
     }
 
     #[test]
-    fn sha256_deterministic() {
-        let a = sha256_hex(b"hello");
-        let b = sha256_hex(b"hello");
-        assert_eq!(a, b);
-        assert_eq!(a.len(), 64);
+    fn every_warning_is_fatal() {
+        let diagnostics = classify_diagnostics("qbsp", "WARNING: brush bounds out of range", "");
+        assert_eq!(diagnostics.len(), 1);
+        assert!(matches!(diagnostics[0], CompilerDiagnostic::Warning { .. }));
+        assert!(diagnostics.iter().all(CompilerDiagnostic::is_fatal));
     }
 
     #[test]
-    fn classify_warning() {
-        let diags = classify_diagnostics("qbsp", "Warning: something", "");
-        // General warnings containing 'warning' word but not matching specific patterns
-        // may not produce diagnostics. This is OK — the classify function targets
-        // specific known patterns.
-        eprintln!("diagnostics from generic warning: {:?}", diags);
-        // Just verify it doesn't crash
+    fn zero_warnings_summary_is_not_a_warning() {
+        assert!(classify_diagnostics("qbsp", "Completed with 0 warnings.", "").is_empty());
     }
 
     #[test]
-    fn classify_leak() {
-        let diags = classify_diagnostics("qbsp", "Entity 0 leaked\n", "");
-        assert!(!diags.is_empty());
-        assert!(matches!(diags[0], CompilerDiagnostic::Leak { .. }));
+    fn warning_and_fill_phrases_are_case_insensitive() {
+        for message in [
+            "Warning: generic authoring warning",
+            "NO ENTITIES IN EMPTY SPACE",
+            "No filling performed",
+            "Entity 1 leaked",
+            "Wrote a pointfile",
+        ] {
+            assert!(
+                !classify_diagnostics("qbsp", message, "").is_empty(),
+                "message was not rejected: {message}"
+            );
+        }
     }
 
     #[test]
-    fn validate_bsp2_ok() {
-        let data = b"BSP2\x00\x00...";
-        assert!(validate_bsp2(data).is_ok());
-    }
-
-    #[test]
-    fn validate_bsp2_bad_magic() {
-        let data = b"BSP1\x00\x00...";
-        assert!(validate_bsp2(data).is_err());
-    }
-
-    #[test]
-    fn validate_lit_ok() {
-        let mut data = Vec::new();
-        data.extend_from_slice(b"QLIT");
-        data.extend_from_slice(&1u32.to_le_bytes());
-        assert!(validate_lit(&data).is_ok());
-    }
-
-    #[test]
-    fn validate_lit_bad_version() {
-        let mut data = Vec::new();
-        data.extend_from_slice(b"QLIT");
-        data.extend_from_slice(&2u32.to_le_bytes());
-        assert!(validate_lit(&data).is_err());
-    }
-
-    fn crate_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
+    fn validate_product_headers() {
+        assert!(validate_bsp2(b"BSP2").is_ok());
+        let mut lit = b"QLIT".to_vec();
+        lit.extend_from_slice(&1_u32.to_le_bytes());
+        lit.push(0);
+        assert!(validate_lit(&lit).is_ok());
     }
 }

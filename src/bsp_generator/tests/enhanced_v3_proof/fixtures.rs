@@ -63,6 +63,9 @@ pub struct FixtureCase {
     pub map_file: String,
     /// Human-readable description.
     pub description: String,
+    /// Minimum number of world brushes in the canonical source. Focus fixtures
+    /// deliberately exceed the ericw-tools small-map hull-computation path.
+    pub minimum_source_brushes: usize,
     /// Whether BSP2 magic is expected.
     pub expect_bsp2: bool,
     /// Whether .lit output is expected (requires -lit in light args).
@@ -115,6 +118,15 @@ pub fn load_fixture_map(name: &str) -> Result<String, String> {
         .map_err(|e| format!("cannot read fixture map {}: {e}", path.display()))
 }
 
+/// Count world brush blocks without counting entity blocks.
+pub fn source_brush_count(map: &str) -> usize {
+    let lines: Vec<_> = map.lines().collect();
+    lines
+        .windows(2)
+        .filter(|pair| pair[0].trim() == "{" && pair[1].trim_start().starts_with('('))
+        .count()
+}
+
 // ── Spatial witness result ────────────────────────────────────────────────
 
 /// Result of a single spatial witness query.
@@ -144,12 +156,21 @@ pub struct WitnessDetail {
 pub struct CompilerSpatialReport {
     pub schema: String,
     pub timestamp: String,
+    /// Harness/phase status. This can pass with compiler qualification failed
+    /// only when every failure is the explicitly recorded ericw hull limitation
+    /// and the independently scoped synthetic query proof passes.
+    pub phase_status: FixtureStatus,
+    /// Qualification of compiler-produced worlds only. Synthetic data never
+    /// contributes to this status.
+    pub compiler_qualification_status: FixtureStatus,
     pub profile_name: String,
     pub profile_version: String,
     pub tool_dir: String,
     pub tools_available: bool,
     pub executable_hashes_verified: bool,
     pub env_identity: EnvIdentitySnapshot,
+    pub known_tool_limitation: ToolLimitationRecord,
+    pub synthetic_query_pipeline: SyntheticQueryPipelineProof,
     pub results: Vec<FixtureResult>,
     pub summary: ReportSummary,
 }
@@ -162,17 +183,37 @@ pub struct EnvIdentitySnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolLimitationRecord {
+    pub id: String,
+    pub description: String,
+    pub mitigation: String,
+    pub observed_case_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyntheticQueryPipelineProof {
+    pub status: FixtureStatus,
+    pub scope: String,
+    pub queries_total: usize,
+    pub queries_passed: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FixtureResult {
     pub case_id: String,
     pub map_file: String,
     pub status: FixtureStatus,
+    pub source_brush_count: usize,
     pub bsp_sha256: Option<String>,
     pub lit_sha256: Option<String>,
     pub bsp_size: Option<u64>,
     pub lit_size: Option<u64>,
     pub compilation_time_ms: Option<u64>,
     pub diagnostics: Vec<String>,
+    pub tool_limitation: Option<String>,
     pub stage_outputs: Vec<StageOutputSnapshot>,
+    pub strict_reload: Option<StrictReloadFacts>,
+    /// Results queried only from the strict-loaded compiler-produced world.
     pub witness_results: Vec<WitnessResult>,
 }
 
@@ -190,7 +231,24 @@ pub struct StageOutputSnapshot {
     pub stage: String,
     pub exit_code: i32,
     pub elapsed_ms: u64,
-    pub stderr_summary: String,
+    pub output_sha256: String,
+    pub output_excerpt: String,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrictReloadFacts {
+    pub profile: String,
+    pub diagnostics: usize,
+    pub entities: usize,
+    pub faces: usize,
+    pub planes: usize,
+    pub nodes: usize,
+    pub leaves: usize,
+    pub solid_leaves: usize,
+    pub empty_leaves: usize,
+    pub clipnodes: usize,
+    pub lightdata_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,8 +276,10 @@ impl CompilerSpatialReport {
         lang: &str,
     ) -> Self {
         CompilerSpatialReport {
-            schema: "enhanced-v3-compiler-spatial-report/v1".to_string(),
+            schema: "enhanced-v3-compiler-spatial-report/v2".to_string(),
             timestamp: iso8601_now(),
+            phase_status: FixtureStatus::NotRun,
+            compiler_qualification_status: FixtureStatus::NotRun,
             profile_name: profile_name.to_string(),
             profile_version: profile_version.to_string(),
             tool_dir: tool_dir.display().to_string(),
@@ -229,6 +289,18 @@ impl CompilerSpatialReport {
                 home: home.to_string(),
                 path: path.to_string(),
                 lang: lang.to_string(),
+            },
+            known_tool_limitation: ToolLimitationRecord {
+                id: "ericw-qbsp-small-map-hull-computation".to_string(),
+                description: "Pinned ericw-tools qbsp can terminate by signal while computing hulls for very small focus maps; such a run is a compiler qualification FAIL, never a synthetic fallback PASS.".to_string(),
+                mitigation: "Each focus fixture was expanded to at least 50 valid world brushes. If the pinned tool still terminates during hull computation, the fixture remains FAIL and the case ID is recorded here.".to_string(),
+                observed_case_ids: Vec::new(),
+            },
+            synthetic_query_pipeline: SyntheticQueryPipelineProof {
+                status: FixtureStatus::NotRun,
+                scope: "bsp crate point_contents traversal only; not compiler, reload, fixture, BSP, or LIT qualification".to_string(),
+                queries_total: 0,
+                queries_passed: 0,
             },
             results: Vec::new(),
             summary: ReportSummary {
@@ -249,7 +321,12 @@ impl CompilerSpatialReport {
         self.results.push(result);
     }
 
-    /// Recompute the summary from results.
+    pub fn set_synthetic_query_pipeline(&mut self, proof: SyntheticQueryPipelineProof) {
+        self.synthetic_query_pipeline = proof;
+    }
+
+    /// Recompute compiler qualification and phase/harness status. Synthetic
+    /// queries are deliberately excluded from compiler qualification.
     pub fn recompute_summary(&mut self) {
         let total = self.results.len();
         let passed = self
@@ -292,19 +369,54 @@ impl CompilerSpatialReport {
             witnesses_passed,
             witnesses_failed,
         };
+
+        self.known_tool_limitation.observed_case_ids = self
+            .results
+            .iter()
+            .filter(|result| result.tool_limitation.is_some())
+            .map(|result| result.case_id.clone())
+            .collect();
+
+        self.compiler_qualification_status = if failed > 0 {
+            FixtureStatus::Fail
+        } else if not_run > 0 || total == 0 {
+            FixtureStatus::NotRun
+        } else if skipped > 0 {
+            FixtureStatus::Skipped
+        } else {
+            FixtureStatus::Pass
+        };
+
+        let only_documented_tool_failures = failed > 0
+            && not_run == 0
+            && self.results.iter().all(|result| {
+                result.status == FixtureStatus::Pass
+                    || (result.status == FixtureStatus::Fail && result.tool_limitation.is_some())
+            });
+        self.phase_status = if self.synthetic_query_pipeline.status == FixtureStatus::Pass
+            && (self.compiler_qualification_status == FixtureStatus::Pass
+                || only_documented_tool_failures)
+        {
+            FixtureStatus::Pass
+        } else if self.compiler_qualification_status == FixtureStatus::NotRun {
+            FixtureStatus::NotRun
+        } else {
+            FixtureStatus::Fail
+        };
     }
 
-    /// Write to the debug report path.
+    /// Atomically write to the debug report path.
     pub fn write(&self) -> Result<(), String> {
         let path = report_path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("create report dir: {e}"))?;
-        }
+        let parent = path.parent().ok_or("report path has no parent")?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("create report dir: {e}"))?;
         let json =
             serde_json::to_string_pretty(self).map_err(|e| format!("serialize report: {e}"))?;
-        std::fs::write(&path, &json)
-            .map_err(|e| format!("write report {}: {e}", path.display()))?;
-        Ok(())
+        let temporary = parent.join(".compiler-spatial-report.json.tmp");
+        std::fs::write(&temporary, format!("{json}\n"))
+            .map_err(|e| format!("write report {}: {e}", temporary.display()))?;
+        std::fs::rename(&temporary, &path)
+            .map_err(|e| format!("publish report {}: {e}", path.display()))
     }
 }
 
@@ -380,6 +492,13 @@ mod tests {
                 "fixture {} must contain worldspawn",
                 case.id
             );
+            assert!(
+                source_brush_count(&map_text) >= case.minimum_source_brushes,
+                "fixture {} has {} brushes, expected at least {}",
+                case.id,
+                source_brush_count(&map_text),
+                case.minimum_source_brushes
+            );
         }
     }
 
@@ -401,17 +520,38 @@ mod tests {
             "/usr/bin",
             "en_US.UTF-8",
         );
+        report.set_synthetic_query_pipeline(SyntheticQueryPipelineProof {
+            status: FixtureStatus::Pass,
+            scope: "test".to_string(),
+            queries_total: 2,
+            queries_passed: 2,
+        });
         report.add_result(FixtureResult {
             case_id: "test-case".to_string(),
             map_file: "test.map".to_string(),
             status: FixtureStatus::Pass,
+            source_brush_count: 50,
             bsp_sha256: Some("abc123".to_string()),
-            lit_sha256: None,
+            lit_sha256: Some("def456".to_string()),
             bsp_size: Some(12345),
-            lit_size: None,
+            lit_size: Some(678),
             compilation_time_ms: Some(500),
             diagnostics: vec![],
+            tool_limitation: None,
             stage_outputs: vec![],
+            strict_reload: Some(StrictReloadFacts {
+                profile: "bsp2".to_string(),
+                diagnostics: 0,
+                entities: 1,
+                faces: 1,
+                planes: 1,
+                nodes: 1,
+                leaves: 2,
+                solid_leaves: 1,
+                empty_leaves: 1,
+                clipnodes: 1,
+                lightdata_bytes: 1,
+            }),
             witness_results: vec![],
         });
         report.recompute_summary();

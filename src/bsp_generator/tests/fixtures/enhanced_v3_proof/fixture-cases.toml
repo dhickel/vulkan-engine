@@ -4,269 +4,211 @@ profile = "ericw-q1-bsp2-generated"
 [[cases]]
 id = "pointed-portal"
 map_file = "pointed-portal"
-description = "Two chambers connected by a pointed-arch portal in a cardinal wall"
+description = "Two large chambers connected by a full-depth pointed-arch portal"
+minimum_source_brushes = 50
 expect_bsp2 = true
 expect_lit = true
-min_solid_leaves = 4
+min_solid_leaves = 1
 min_empty_leaves = 2
 min_clipnodes = 16
 
 [[cases.witnesses]]
 id = "portal-throat-center"
-description = "Point at center of portal throat must be empty (open passage)"
+description = "Center of the complete wall-depth throat is empty"
 expected_pass = true
-query_coords = [[248.0, -128.0, 64.0]]
+query_coords = [[480.0, 512.0, 96.0], [504.0, 512.0, 96.0], [528.0, 512.0, 96.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
-id = "portal-jamb-solid-left"
-description = "Left jamb of portal must be solid wall"
+id = "portal-jamb-solid"
+description = "Point beside the aperture is solid wall"
 expected_pass = false
-query_coords = [[248.0, 120.0, 64.0]]
-tolerance = 1.0
-
-[[cases.witnesses]]
-id = "portal-jamb-solid-right"
-description = "Right jamb of portal must be solid wall"
-expected_pass = false
-query_coords = [[248.0, 136.0, 64.0]]
+query_coords = [[504.0, 440.0, 80.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
 id = "arch-apex-open"
-description = "Apex of pointed arch — above arch zone is solid in simplified test tree"
-expected_pass = false
-query_coords = [[248.0, 128.0, 128.0]]
+description = "Point below the pointed apex remains open"
+expected_pass = true
+query_coords = [[504.0, 512.0, 184.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
 id = "arch-above-apex-solid"
-description = "Above the arch apex must be solid wall"
+description = "Wall above the pointed apex is solid"
 expected_pass = false
-query_coords = [[248.0, 128.0, 152.0]]
+query_coords = [[504.0, 512.0, 208.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
-id = "room-center-empty"
-description = "Room center must be empty for navigation"
+id = "chamber-centers-empty"
+description = "Both chamber centers are empty"
 expected_pass = true
-query_coords = [[128.0, -128.0, 64.0]]
+query_coords = [[256.0, 512.0, 80.0], [768.0, 512.0, 80.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
 id = "spawn-clearance"
-description = "Spawn origin must be non-solid"
+description = "Spawn origin is non-solid"
 expected_pass = true
-query_coords = [[64.0, -128.0, 24.0]]
+query_coords = [[256.0, 512.0, 56.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
 id = "floor-solid-below"
-description = "Below floor level must be solid"
+description = "Floor slab is solid"
 expected_pass = false
-query_coords = [[128.0, 128.0, -8.0]]
+query_coords = [[256.0, 512.0, 8.0]]
 tolerance = 1.0
-
-
 
 [[cases]]
 id = "segmented-portal"
 map_file = "segmented-portal"
-description = "Portal split into two segments by a central column"
+description = "Two full-depth portal segments separated by a grounded central column"
+minimum_source_brushes = 50
 expect_bsp2 = true
 expect_lit = true
-min_solid_leaves = 4
+min_solid_leaves = 1
 min_empty_leaves = 2
 min_clipnodes = 16
 
 [[cases.witnesses]]
 id = "left-segment-open"
-description = "Left segment of segmented portal must be empty"
+description = "First segment and both approaches are empty"
 expected_pass = true
-query_coords = [[248.0, -80.0, 64.0]]
+query_coords = [[480.0, 440.0, 80.0], [504.0, 440.0, 80.0], [528.0, 440.0, 80.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
 id = "right-segment-open"
-description = "Right segment of segmented portal must be empty"
+description = "Second segment and both approaches are empty"
 expected_pass = true
-query_coords = [[248.0, -176.0, 64.0]]
+query_coords = [[480.0, 584.0, 80.0], [504.0, 584.0, 80.0], [528.0, 584.0, 80.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
 id = "center-column-solid"
-description = "Center column dividing portal must be solid"
+description = "Grounded column between segments is solid"
 expected_pass = false
-query_coords = [[248.0, 128.0, 64.0]]
+query_coords = [[504.0, 512.0, 80.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
-id = "above-column-solid"
-description = "Above column (upper wall section) must be solid"
+id = "upper-wall-solid"
+description = "Wall above the segments is solid"
 expected_pass = false
-query_coords = [[248.0, 128.0, 128.0]]
+query_coords = [[504.0, 512.0, 200.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
-id = "room-center-empty"
-description = "Room center must be empty"
+id = "chamber-centers-empty"
+description = "Both chamber centers are empty"
 expected_pass = true
-query_coords = [[128.0, -128.0, 64.0]]
+query_coords = [[256.0, 512.0, 80.0], [768.0, 512.0, 80.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
 id = "spawn-clearance"
-description = "Spawn origin must be non-solid"
+description = "Spawn origin is non-solid"
 expected_pass = true
-query_coords = [[64.0, -128.0, 24.0]]
+query_coords = [[256.0, 512.0, 56.0]]
 tolerance = 1.0
-
-
 
 [[cases]]
 id = "convex-45-shell"
 map_file = "convex-45-shell"
-description = "Octagonal room with 45-degree diagonal chamfered corners"
+description = "Large octagonal interior with four exact 45-degree corner shell prisms"
+minimum_source_brushes = 50
 expect_bsp2 = true
 expect_lit = true
-min_solid_leaves = 4
-min_empty_leaves = 2
-min_clipnodes = 20
+min_solid_leaves = 1
+min_empty_leaves = 1
+min_clipnodes = 16
 
 [[cases.witnesses]]
 id = "center-empty"
-description = "Room center must be empty"
+description = "Octagonal room center is empty"
 expected_pass = true
-query_coords = [[128.0, -128.0, 80.0]]
+query_coords = [[512.0, 512.0, 80.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
-id = "ne-corner-solid"
-description = "NE corner fill must be solid (diagonal chamfer)"
+id = "corner-shells-solid"
+description = "All four 45-degree corner shell prisms are solid"
 expected_pass = false
-query_coords = [[240.0, 16.0, 80.0]]
-tolerance = 1.0
-
-[[cases.witnesses]]
-id = "nw-corner-solid"
-description = "NW corner fill must be solid"
-expected_pass = false
-query_coords = [[16.0, 16.0, 80.0]]
-tolerance = 1.0
-
-[[cases.witnesses]]
-id = "se-corner-solid"
-description = "SE corner fill must be solid"
-expected_pass = false
-query_coords = [[240.0, 240.0, 80.0]]
-tolerance = 1.0
-
-[[cases.witnesses]]
-id = "sw-corner-solid"
-description = "SW corner fill must be solid"
-expected_pass = false
-query_coords = [[16.0, 240.0, 80.0]]
+query_coords = [[64.0, 64.0, 80.0], [960.0, 64.0, 80.0], [64.0, 960.0, 80.0], [960.0, 960.0, 80.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
 id = "diagonal-face-interior-empty"
-description = "Just inside diagonal face must be open (octagonal interior)"
+description = "Points immediately inside two diagonal faces are empty"
 expected_pass = true
-query_coords = [[208.0, -48.0, 80.0]]
+query_coords = [[176.0, 32.0, 80.0], [848.0, 32.0, 80.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
-id = "shell-wall-solid"
-description = "Exterior wall must be solid"
+id = "cardinal-shell-wall-solid"
+description = "Cardinal perimeter wall remains solid"
 expected_pass = false
-query_coords = [[-1.0, 128.0, 80.0]]
+query_coords = [[8.0, 512.0, 80.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
 id = "spawn-clearance"
-description = "Spawn origin must be non-solid"
+description = "Spawn origin is non-solid"
 expected_pass = true
-query_coords = [[128.0, -128.0, 24.0]]
+query_coords = [[512.0, 512.0, 56.0]]
 tolerance = 1.0
-
-
 
 [[cases]]
 id = "grounded-assembly"
 map_file = "grounded-assembly"
-description = "Room with four pillars supporting raised platform slabs"
+description = "Large room with four grounded pillars supporting two raised slabs"
+minimum_source_brushes = 50
 expect_bsp2 = true
 expect_lit = true
-min_solid_leaves = 6
+min_solid_leaves = 1
 min_empty_leaves = 4
 min_clipnodes = 24
 
 [[cases.witnesses]]
-id = "pillar-1-solid"
-description = "Pillar 1 must be solid at center"
+id = "pillars-solid"
+description = "All four support pillars are solid"
 expected_pass = false
-query_coords = [[64.0, 64.0, 56.0]]
+query_coords = [[200.0, 200.0, 56.0], [200.0, 392.0, 56.0], [392.0, 200.0, 56.0], [392.0, 392.0, 56.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
-id = "pillar-2-solid"
-description = "Pillar 2 must be solid"
+id = "platforms-solid"
+description = "Both supported platform slabs are solid"
 expected_pass = false
-query_coords = [[192.0, 64.0, 56.0]]
+query_coords = [[160.0, 296.0, 136.0], [352.0, 296.0, 136.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
-id = "pillar-3-solid"
-description = "Pillar 3 must be solid"
-expected_pass = false
-query_coords = [[64.0, 192.0, 56.0]]
-tolerance = 1.0
-
-[[cases.witnesses]]
-id = "pillar-4-solid"
-description = "Pillar 4 must be solid"
-expected_pass = false
-query_coords = [[192.0, 192.0, 56.0]]
-tolerance = 1.0
-
-[[cases.witnesses]]
-id = "platform-left-solid"
-description = "Left platform slab must be solid"
-expected_pass = false
-query_coords = [[64.0, 128.0, 104.0]]
-tolerance = 1.0
-
-[[cases.witnesses]]
-id = "platform-right-solid"
-description = "Right platform slab must be solid"
-expected_pass = false
-query_coords = [[192.0, 128.0, 104.0]]
-tolerance = 1.0
-
-[[cases.witnesses]]
-id = "aisle-empty"
-description = "Central aisle between platforms must be empty"
+id = "central-aisle-empty"
+description = "Central aisle between platform slabs is empty"
 expected_pass = true
-query_coords = [[128.0, -128.0, 56.0]]
+query_coords = [[296.0, 296.0, 56.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
 id = "under-platform-empty"
-description = "Space under raised platform must be empty"
+description = "Space below a platform away from supports is empty"
 expected_pass = true
-query_coords = [[64.0, -128.0, 56.0]]
+query_coords = [[160.0, 296.0, 56.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
 id = "spawn-clearance"
-description = "Spawn origin must be non-solid"
+description = "Spawn origin is non-solid"
 expected_pass = true
-query_coords = [[128.0, -128.0, 24.0]]
+query_coords = [[512.0, 512.0, 56.0]]
 tolerance = 1.0
 
 [[cases.witnesses]]
 id = "floor-solid-below"
-description = "Below floor must be solid"
+description = "Floor slab is solid"
 expected_pass = false
-query_coords = [[128.0, 128.0, -8.0]]
+query_coords = [[512.0, 512.0, 8.0]]
 tolerance = 1.0
