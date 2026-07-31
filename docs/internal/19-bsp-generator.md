@@ -529,3 +529,173 @@ variant, public export, or production code was changed.
 - Evidence matrix: `.internal-dev/plans/enhanced-v3-proof/evidence-matrix.md`
 - Specification: `.internal-dev/specifications/bsp-dungeon-generation.md` §19
 - Knowledge: `.internal-dev/knowledge/bsp-enhanced-v3-proof.md`
+
+## 17. Enhanced v3 Production Pipeline
+
+### 17.1 Architecture
+
+The Enhanced v3 profile (`src/bsp_generator/src/enhanced_v3/`) is a structurally
+disjoint pipeline from Legacy v1 and Enhanced v2. It produces M2-only, two-layer
+dungeons with cardinal + 45° chamfered-octagonal rooms, pointed-arch portal
+apertures, grounded assemblies, and Sparse/Moderate/Rich density presets. It
+reuses the CC0 Dungeon v2 theme without modification.
+
+```text
+V3Config  (validates at construction, no separate validate())
+    │
+    │  V3Seed::new(seed)  →  stage_seed("v3-placement")
+    ▼
+build_footprints()  ──► FootprintLayout
+    │
+    │  stage_seed("v3-topology")
+    ▼
+build_topology()  ──► CommittedTopology
+    │
+    │  stage_seed("v3-features")
+    ▼
+plan_composition()  ──► CompositionPlan
+    │
+    │  stage_seed("v3-detail")
+    ▼
+build_assembly()  ──► Assembly
+    │
+    ▼
+emit_map_text()  ──► String  (.map bytes)
+```
+
+### 17.2 Module Map
+
+| module | responsibility | key types |
+|--------|---------------|-----------|
+| `config.rs` | configuration, presets, normal classification, frozen constants | `V3Config`, `V3Preset`, `NormalClass`, `CONSTRUCTION_QUANTUM` |
+| `error.rs` | typed errors (45 variants, 9 categories) | `V3Error` |
+| `rng.rs` | deterministic RNG (domain `"dungeon-gen/v3"`) | `V3Seed`, `V3StageSeed`, `CandidateSelector` |
+| `geometry.rs` | i128 Rational exact geometry | `Point3`, `Rational`, `Vector3`, `CanonicalPlane`, `ConvexBrush`, `FaceRole` |
+| `ids.rs` | typed newtype IDs and committed topology | `RoomId`, `PortalId`, `SurfaceId`, `FeatureId`, `CommittedTopology`, `V3IdAllocator` |
+| `footprint.rs` | cardinal + 45° footprint generation | `Footprint`, `FootprintLayout`, `build_footprints()` |
+| `reservation.rs` | transactional volume reservation | `Reservation`, `ReservationSet`, `build_reservations()` |
+| `topology.rs` | per-layer MST + transition selection | `CommittedRoute`, `CommittedTransition`, `build_topology()`, `compute_reservations()` |
+| `intent.rs` | composition planning with grammar descriptors | `CompositionPlan`, `GrammarDescriptor`, `plan_composition()` |
+| `composition.rs` | composition planning types | `CompositionPlan`, `GrammarDescriptor` |
+| `assembly.rs` | grounded support-graph assembly | `Assembly`, `AssemblyBrush`, `BrushRole`, `Interface`, `ProtectedVolume`, `Support` |
+| `emission.rs` | canonical .map text emission | `emit_map_text()`, `texture_for_role()` |
+| `metadata.rs` | production metadata (22 read-only accessors) | `EnhancedV3Metadata` |
+| `pipeline.rs` | top-level entry point | `run_pipeline()`, `V3PipelineOutput` |
+
+### 17.3 RNG Domain
+
+Enhanced v3 uses domain separator `"dungeon-gen/v3"` — fully independent from
+v1's `"dungeon-gen/v1"` and v2's `"dungeon-gen/v2"`. Same master seed values
+produce cryptographically independent output streams across all three domains.
+
+| tag | stage | stream consumed by |
+|-----|-------|-------------------|
+| `v3-placement` | two-layer room placement with 45° footprint support | `build_footprints()` |
+| `v3-topology` | topology and transition selection | `build_topology()` |
+| `v3-features` | chamfered footprints, pointed arches, grounded assemblies | `plan_composition()` |
+| `v3-detail` | preset-driven feature density, pillar placement | `build_assembly()` |
+
+### 17.4 Geometry Contracts
+
+**Coordinate system:**
+- All authored coordinates use i128 integer arithmetic through the `Rational` type
+- No floating-point in the geometry path
+- Construction quantum: 16 Quake units
+- All coordinates are quantum-aligned (multiples of 16)
+
+**Approved normals:**
+- Cardinal: (±1, 0, 0), (0, ±1, 0), (0, 0, ±1)
+- Diagonal 45° in XY: (±1, ±1, 0) in lowest integer terms
+- All other normals produce `V3Error::UnapprovedNormal`
+
+**ConvexBrush:**
+- Defined as a system of half-space inequalities, not as explicit face lists
+- Each half-space is a `CanonicalPlane` with an approved normal
+- The brush is the intersection of all half-spaces
+- Validated for: non-empty, bounded, positive volume, minimum face area,
+  minimum edge length, and minimum directional thickness
+
+**Footprint generation:**
+- `build_footprints()` generates room footprints from the seed and preset
+- Cardinal footprints use standard axis-aligned rectangles
+- 45° footprints produce chamfered/octagonal shapes by adding diagonal
+  half-spaces to the basic cardinal volume
+- Both layers share a projected XY occupancy grid — no XY overlap
+- Footprints are immutable after construction
+
+**Assembly contract:**
+- Support graph is acyclic (`SupportGraphCycle` error on cycles)
+- Every brush has a transitive support path to a floor surface
+  (`UnsupportedBrush` error on orphan brushes)
+- Contact is coplanar shared-face (zero-volume) between supporting and
+  supported brushes
+- Positive-volume overlap between distinct brushes is prohibited
+  (`PositiveVolumeOverlap` error)
+- Protected volumes (portals, stair wells) cannot be intruded upon
+  (`ProtectedVolumeIntrusion` error)
+
+**Pointed-arch portals:**
+- Full-depth shell omission through the wall — no separate opening brush
+- 64×80 swept clearance at the throat
+- On cardinal walls only — diagonal portals are deferred
+- Aperture ownership: the shell wall's omission IS the portal
+
+### 17.5 Composition Planning
+
+`plan_composition()` selects features from 6 grammar descriptor families:
+
+| family | description |
+|--------|-------------|
+| `PortalChamber` | room with cardinally-aligned pointed-arch portals |
+| `ButtressedHall` | elongated room with buttress-like wall features |
+| `ColumnGrove` | room interior with freestanding pillar clusters |
+| `FracturedVault` | ceiling features with non-planar upper surfaces |
+| `TerracedShrine` | stepped floor elevation changes within a room |
+| `MonolithicChamber` | large open room with minimal interior subdivision |
+
+These are planning descriptors, not fully integrated feature generators.
+Preset `minimum_families` enforces that at least N families are represented.
+
+### 17.6 Preset Details
+
+| parameter | Sparse | Moderate | Rich |
+|-----------|--------|----------|------|
+| `min_rooms` | 12 | 20 | 28 |
+| `target_loops` | 0 | 2 | 4 |
+| `minimum_families` | 1 | 2 | 3 |
+| `face_budget` | 3,000 | 5,000 | 8,000 |
+| typical nominal faces | ~165 | ~230 | ~280 |
+
+### 17.7 Key Differences from Enhanced v2
+
+| aspect | Enhanced v2 | Enhanced v3 |
+|--------|-------------|-------------|
+| domain | `"dungeon-gen/v2"` | `"dungeon-gen/v3"` |
+| geometry arithmetic | i32 / f32 mix | i128 Rational only |
+| approved normals | axis-aligned only | cardinal + 45° diagonal |
+| room shape | rectangular only | chamfered/octagonal + rectangular |
+| portal shape | rectangular (gap in wall) | pointed-arch (full-depth omission) |
+| assemblies | none (brush-per-primitive) | grounded support graph |
+| grammar families | 2 strategies (Uniform/ByZone) | 6 descriptor families |
+| density presets | none (single EnhancedConfig) | Sparse/Moderate/Rich |
+| minimum-identity | none | typed `MinimumIdentityFailure` |
+| config type | `EnhancedConfig` (10 fields) | `V3Config` (3 fields) |
+| stage tags | 6 tags | 4 tags |
+| error type | `EnhancedError` (12 variants) | `V3Error` (45 variants) |
+| theme | cc0_dungeon_v2 | cc0_dungeon_v2 (reused) |
+| entry point | `generate_enhanced(seed, config)` | `generate_v3(&config)` |
+
+### 17.8 Testing
+
+| test file | coverage |
+|-----------|----------|
+| `enhanced_v3_contract_baseline.rs` | 25 frozen contract identity tests: RNG framing, stage tags, preset tags, seed vectors, geometry policy, layers, corpus matrix, serialization, rejection records, v1/v2 compatibility |
+| `enhanced_v3_public_api.rs` | public API surface coverage |
+| `enhanced_v3_generation.rs` | can-generate tests for all presets |
+| `enhanced_v3_semantic_core.rs` | geometry, footprint, topology unit tests |
+| `enhanced_v3_geometry.rs` | ConvexBrush, CanonicalPlane, half-space tests |
+| `enhanced_v3_budget.rs` | M2 budget evidence (faces < 10,000, entities < 300) |
+| `enhanced_v3_compiled_space.rs` | compiled spatial witnesses |
+| `enhanced_v3_compatibility.rs` | v1/v2 baseline byte-identical preservation |
+| `enhanced_v3_integrated.rs` | integrated pipeline tests |
+| `enhanced_v3_qualification.rs` | full qualification suite |

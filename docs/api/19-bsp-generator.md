@@ -610,3 +610,261 @@ pub const SOCKET_CORNER_MARGIN: i32 = 32;
 - [BSP Generator Usage Guide](../guide/19-bsp-generator.md) — how to generate and compile dungeons
 - [BSP Generator Internals](../internal/19-bsp-generator.md) — architecture, algorithms, and pipeline
 - [BSP Beta API](17-bsp-beta.md) — BSP loading and rendering API
+
+## Enhanced v3 API
+
+The Enhanced v3 profile lives in `bsp_generator::enhanced_v3`. It produces M2-only,
+two-layer dungeons with cardinal + 45° geometry, pointed-arch portals, grounded
+assemblies, and Sparse/Moderate/Rich density presets.
+
+### `generate_v3()`
+
+```rust
+pub fn generate_v3(config: &V3Config) -> Result<String, V3Error>
+```
+
+The Enhanced v3 entry point. Runs the full pipeline:
+
+```text
+V3Config → footprints → topology → reservations → assembly → .map text
+```
+
+**Determinism guarantee:** Two calls with identical `V3Config` produce byte-identical
+`.map` output. The Enhanced v3 RNG domain (`"dungeon-gen/v3"`) is independent from
+Legacy v1 and Enhanced v2.
+
+### `run_pipeline()`
+
+```rust
+pub fn run_pipeline(config: &V3Config) -> Result<V3PipelineOutput, V3Error>
+```
+
+Returns the full pipeline output including metadata:
+
+```rust
+pub struct V3PipelineOutput {
+    pub map_text: String,
+    pub metadata: EnhancedV3Metadata,
+}
+```
+
+### `V3Config`
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V3Config {
+    pub seed: u64,
+    pub preset: V3Preset,
+    pub xy_extent: u32,
+}
+```
+
+Validated M2-only two-layer configuration. Validates all fields at construction —
+no separate `validate()` step.
+
+**Constructors:**
+
+| constructor | description |
+|-------------|-------------|
+| `V3Config::new(seed, preset, xy_extent)` | standard validated constructor |
+| `V3Config::nominal_sparse()` | seed 0, Sparse, 2048² |
+| `V3Config::nominal_moderate()` | seed 0, Moderate, 2048² |
+| `V3Config::nominal_rich()` | seed 0, Rich, 3072² |
+
+**Validation rules:**
+- `xy_extent` must be 1024–3072 and a multiple of 16
+- Non-quantum-aligned values produce `V3Error::ConfigNotQuantumAligned`
+- Out-of-range values produce `V3Error::ConfigOutOfRange`
+
+### `V3Preset`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum V3Preset {
+    Sparse,
+    Moderate,
+    Rich,
+}
+```
+
+**Methods:**
+
+| method | Sparse | Moderate | Rich |
+|--------|--------|----------|------|
+| `tag()` | `"sparse"` | `"moderate"` | `"rich"` |
+| `min_rooms()` | 12 | 20 | 28 |
+| `target_loops()` | 0 | 2 | 4 |
+| `minimum_families()` | 1 | 2 | 3 |
+| `face_budget()` | 3,000 | 5,000 | 8,000 |
+
+**Parse from tag:**
+```rust
+V3Preset::from_tag("sparse")    // => Some(V3Preset::Sparse)
+V3Preset::from_tag("dense")     // => None
+```
+
+### `NormalClass`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum NormalClass {
+    Cardinal,     // axis-aligned: ±X, ±Y, ±Z
+    Diagonal45,   // exact 45° in XY: (±1, ±1, 0)
+    Unapproved,   // all other normals produce typed errors
+}
+```
+
+Classify an integer normal vector with `classify_normal(nx, ny, nz)`.
+
+### `V3Error`
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum V3Error {
+    // Configuration errors
+    ConfigOutOfRange { field, value, min, max },
+    ConfigNotQuantumAligned { field, value, quantum },
+    UnknownPreset { tag },
+    // RNG errors
+    ZeroBound,
+    RejectionStreamExhausted,
+    // Geometry errors
+    UnapprovedNormal { nx, ny, nz },
+    CoincidentPoints { p0, p1, p2 },
+    CollinearPoints { p0, p1, p2 },
+    ZeroVolume,
+    EmptyIntersection,
+    Unbounded,
+    DegenerateIntersection,
+    DuplicatePlane { existing, duplicate },
+    InactivePlane { plane },
+    FaceTooSmall { face, area },
+    EdgeTooShort { edge, length },
+    InsufficientThickness { direction, thickness },
+    ArithmeticOverflow { operation },
+    ZeroDenominator,
+    MalformedRole { detail },
+    NotGridAligned { coord, quantum },
+    // Topology errors
+    TopologyInvariant { detail },
+    RoomOutOfBounds { room_id, extent },
+    // Composition errors
+    MinimumIdentityFailure { preset, required, actual },
+    SupportGraphCycle { members },
+    CompositionInvariant { detail },
+    // Assembly errors
+    PositiveVolumeOverlap { brush_a, brush_b },
+    UndeclaredContact { brush_a, brush_b, plane },
+    MissingInterface { interface_id, brush_a, brush_b },
+    UnsupportedBrush { id },
+    ProtectedVolumeIntrusion { brush_id, protected_id },
+    ApertureInvalid { aperture_id, detail },
+    DuplicateBrushId { id },
+    UnknownBrush { id },
+    AssemblyValidation { detail },
+    // Emission errors
+    UnvalidatedAssembly,
+    EmissionInvariant { detail },
+    // Reservation errors
+    ReservationConflict { resource, existing },
+    InvalidReservation { detail },
+}
+```
+
+45 typed variants across 9 categories. Implements `std::error::Error`, `Display`, `Debug`.
+
+### `EnhancedV3Metadata`
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct EnhancedV3Metadata { /* private fields */ }
+```
+
+Read-only accessors:
+
+| accessor | return type | description |
+|----------|-------------|-------------|
+| `seed()` | `u64` | master seed |
+| `preset()` | `&str` | density preset name |
+| `xy_extent()` | `u32` | requested XY extent |
+| `schema_version()` | `&str` | always `"v3"` |
+| `generator()` | `&str` | `"bsp_generator/enhanced_v3"` |
+| `room_count()` | `u32` | total rooms |
+| `lower_room_count()` | `u32` | rooms on lower layer |
+| `upper_room_count()` | `u32` | rooms on upper layer |
+| `portal_count()` | `u32` | committed portals |
+| `transition_count()` | `u32` | stair transitions |
+| `route_count()` | `u32` | committed routes |
+| `grammar_families()` | `&[String]` | families in output |
+| `identity_satisfied()` | `bool` | minimum-identity met |
+| `estimated_faces()` | `u32` | conservative face estimate |
+| `actual_faces()` | `u32` | emitted face count |
+| `estimated_entities()` | `u32` | entity estimate |
+| `actual_entities()` | `u32` | emitted entity count |
+| `actual_brushes()` | `u32` | emitted brush count |
+| `spawn_origin()` | `(i32,i32,i32)` | info_player_start origin |
+| `light_count()` | `u32` | light entities |
+| `bounds()` | `(i32,i32,i32,i32,i32,i32)` | AABB in Quake units |
+| `has_upper_layer()` | `bool` | upper layer present |
+
+### Profile Dispatch
+
+The `GenerationProfile::EnhancedV3` variant is in `bsp_generator::enhanced::profile`:
+
+```rust
+pub enum GenerationProfile {
+    LegacyV1,      // tag: "legacy-v1"
+    EnhancedV2,    // tag: "enhanced-v2"
+    EnhancedV3,    // tag: "m3"
+}
+```
+
+Production dispatch uses the tag `"m3"` — `from_tag("m3")` returns `Some(EnhancedV3)`.
+The proof-only tag `"enhanced-v3"` returns `None`.
+
+### Enhanced v3 Constants
+
+```rust
+// Construction
+pub const CONSTRUCTION_QUANTUM: i32 = 16;
+pub const ROUTE_WIDTH: i32 = 64;
+pub const HEADROOM: i32 = 80;
+pub const WALL_THICKNESS: i32 = 16;
+
+// Two-layer M2 arrangement
+pub const LOWER_FLOOR_Z: i32 = 0;
+pub const UPPER_FLOOR_Z: i32 = 192;
+pub const ROOM_HEIGHT: i32 = 176;
+pub const TOTAL_Z_SPAN: i32 = 368;
+pub const LAYER_COUNT: u32 = 2;
+
+// XY bounds
+pub const XY_MAX: u32 = 3072;
+pub const XY_MIN: u32 = 1024;
+
+// Budget ceilings
+pub const FACE_BUDGET: u32 = 10000;
+pub const ENTITY_BUDGET: u32 = 300;
+pub const MAX_FACES_PER_FEATURE: u32 = 200;
+pub const MAX_ENTITIES_PER_ROOM: u32 = 5;
+```
+
+### Texture Roles
+
+```rust
+pub fn texture_for_role(role: BrushRole) -> &'static str
+```
+
+| BrushRole | WAD texture |
+|-----------|------------|
+| `WallShell` | `"bs_wall"` |
+| `FloorSlab` | `"bs_floor"` |
+| `CeilingSlab` | `"bs_ceil"` |
+| `Column` | `"bs_accent"` |
+| `Feature` | `"bs_accent"` |
+
+## See Also
+
+- [BSP Generator Usage Guide](../guide/19-bsp-generator.md) — how to generate and compile dungeons
+- [BSP Generator Internals](../internal/19-bsp-generator.md) — architecture, algorithms, and pipeline
+- [BSP Beta API](17-bsp-beta.md) — BSP loading and rendering API

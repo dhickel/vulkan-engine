@@ -313,13 +313,127 @@ atomic publication. Albedo remains WAD-backed per the frozen PBR companion namin
 contract (§9 of the dungeon generation specification). This Enhanced-only closure
 rule does not change generic `engine_pack compile-bsp` optional-companion behavior.
 
+## Enhanced v3 Two-Layer Dungeons with Cardinal + 45° Geometry
+
+The `bsp_generator` crate also provides an **Enhanced v3** profile that produces
+M2-only, two-layer dungeons with cardinal (axis-aligned) and exact 45° diagonal
+chamfered-octagonal rooms, pointed-arch portal apertures, grounded assemblies,
+and Sparse/Moderate/Rich density presets. It reuses the CC0 Dungeon v2 theme.
+
+### Key Features
+
+- **Cardinal + 45° geometry**: rooms use axis-aligned and 45° diagonal footprints
+  with chamfered/octagonal shapes
+- **Pointed-arch portals**: full-depth shell omission through walls with 64×80
+  swept clearance at the throat
+- **Grounded assemblies**: acyclic support graph ensuring every feature brush
+  is transitively supported by floor surfaces
+- **Three density presets**: Sparse (≥12 rooms), Moderate (≥20 rooms, 2 loops),
+  Rich (≥28 rooms, 4 loops)
+- **6 grammar families**: PortalChamber, ButtressedHall, ColumnGrove,
+  FracturedVault, TerracedShrine, MonolithicChamber (descriptors for composition
+  planning)
+- **Two-layer M2 arrangement**: lower floor Z=0, upper floor Z=192, 176-unit
+  room height — identical vertical contract to Enhanced v2
+- **Minimum-identity enforcement**: presets require specific minimum grammar
+  family and feature counts; under-resourced configurations produce typed
+  `MinimumIdentityFailure` errors
+- **CC0 Dungeon v2 theme reused**: no new theme assets required
+
+### CLI Usage
+
+```bash
+# Generate an m3 dungeon through the dungeon_gen tool
+dungeon_gen --class m3 --seed 42
+
+# Publish through engine_pack with a preset
+eingine_pack enhanced-dungeon-v3 --seed 42 --preset moderate --out /tmp/pkg
+
+# Explore interactively with the dungeon explorer
+./tools/dungeon_explore.sh --class m3 --seed 42
+```
+
+**Published package layout:**
+
+```text
+dungeon_package/
+├── enhanced_dungeon.map      ← generated .map source
+├── enhanced_dungeon.bsp      ← compiled BSP2
+├── enhanced_dungeon.lit      ← colored light data
+├── palette.lmp               ← CC0 Dungeon v2 palette
+├── cc0_dungeon_v2.wad        ← theme WAD (albedo source)
+├── metadata.json             ← generation evidence
+└── textures/                 ← PBR companions
+    ├── bs_floor_norm.png
+    ├── bs_floor_gloss.png
+    ├── bs_wall_norm.png
+    ├── bs_wall_gloss.png
+    ├── bs_ceil_norm.png
+    ├── bs_ceil_gloss.png
+    ├── conn_floor_norm.png
+    ├── conn_floor_gloss.png
+    ├── conn_wall_norm.png
+    ├── conn_wall_gloss.png
+    ├── conn_ceil_norm.png
+    └── conn_ceil_gloss.png
+```
+
+### Quick Start
+
+```rust
+use bsp_generator::enhanced_v3::{generate_v3, V3Config, V3Preset};
+
+// Nominal Sparse m3 dungeon (12+ rooms, 2048²)
+let config = V3Config::nominal_sparse();
+let map_text = generate_v3(&config)?;
+
+// Custom seed and preset
+let config = V3Config::new(42, V3Preset::Moderate, 2048)?;
+let map_text = generate_v3(&config)?;
+
+// Rich preset (28+ rooms, 4 loops, 3072²)
+let config = V3Config::nominal_rich();
+let map_text = generate_v3(&config)?;
+```
+
+### V3Config Fields
+
+| field | Sparse default | Moderate default | Rich default | range |
+|-------|---------------|-----------------|-------------|-------|
+| `seed` | 0 | 0 | 0 | any `u64` |
+| `preset` | `Sparse` | `Moderate` | `Rich` | one of three variants |
+| `xy_extent` | 2048 | 2048 | 3072 | 1024–3072, multiple of 16 |
+
+### Preset Comparison
+
+| preset | min rooms | target loops | min families | face budget | typical output faces |
+|--------|----------|-------------|-------------|-------------|---------------------|
+| Sparse | 12 | 0 | 1 | 3,000 | ~165–180 |
+| Moderate | 20 | 2 | 2 | 5,000 | ~220–250 |
+| Rich | 28 | 4 | 3 | 8,000 | ~260–288 |
+
+### Deferred Capabilities
+
+The following capabilities are deferred and not available in Enhanced v3 production:
+
+- Diagonal portals (pointed-arch on 45° walls)
+- Concave rooms (T/L/alcove shapes)
+- Accessible upper features (walkable above ground level)
+- Segmented-arch portal integration
+- Additional room families beyond the 6 descriptor families
+- Trim theme role
+- Lattice-slope walls (15°/30°)
+- Third navigation layer
+
 ## Limitations (Beta) and Known Issues
 
 ### Legacy v1 Design Limitations
 
 These limitations apply to the Legacy v1 generator (`bsp_generator::generate`)
 only. The Enhanced v2 profile supports two-layer dungeons with stairs, multiple
-room palettes, and corridor/ceiling/pillar variance.
+room palettes, and corridor/ceiling/pillar variance. The Enhanced v3 profile
+adds cardinal + 45° chamfered geometry, pointed-arch portals, and grounded
+assemblies.
 
 - Single-layer Cartesian only (no ramps, stairs, multi-floor)
 - Axis-aligned rectangular rooms only

@@ -21,7 +21,7 @@ use super::ids::CommittedTopology;
 ///
 /// Contains only approved deterministic semantic data. Compiler, renderer,
 /// package, and runtime evidence belongs in separate evidence artifacts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct EnhancedV3Metadata {
     // ── Configuration identity ─────────────────────────────────────────
     /// The master seed used for this run.
