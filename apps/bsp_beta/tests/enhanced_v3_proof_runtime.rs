@@ -4,13 +4,14 @@
 //! measurements, and live-startup evidence for the Enhanced v3 proof
 //! package. All evidence is stored in `.internal-dev/` artifacts.
 //!
-//! This test is `#[ignore]` by default and requires a live GPU + WSI
-//! environment. In headless/CI environments it produces `NOT_RUN` with
-//! environment evidence.
+//! The published-evidence consistency test runs by default and requires no
+//! GPU. The evidence collector remains `#[ignore]` because it requires a live
+//! GPU + WSI environment.
 //!
 //! # Run
 //!
 //! ```bash
+//! cargo test -p bsp_beta --test enhanced_v3_proof_runtime -- --nocapture
 //! cargo test -p bsp_beta --test enhanced_v3_proof_runtime -- --ignored --nocapture
 //! ```
 //!
@@ -25,7 +26,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ── Frozen paths relative to repo root ────────────────────────────────────
@@ -139,6 +139,103 @@ struct EvidenceRow {
     detail: String,
 }
 
+// ── Published Evidence Validation ─────────────────────────────────────────
+
+#[test]
+fn published_runtime_evidence_is_consistent() {
+    let runtime_report_path = debug_reports_dir().join("runtime-budget-report.json");
+    let manifest_path = captures_dir().join("manifest.json");
+    let live_startup_path = debug_reports_dir().join("live-startup.log");
+
+    let runtime_report = read_json(&runtime_report_path);
+    let manifest = read_json(&manifest_path);
+    let live_startup = std::fs::read_to_string(&live_startup_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", live_startup_path.display()));
+
+    let report_ev072 = runtime_report
+        .pointer("/evidence_summary/EV-072_live_startup")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|summary| summary.split_whitespace().next())
+        .expect("runtime report EV-072 status");
+    let manifest_ev072 = manifest
+        .pointer("/evidence_rows/EV-072/status")
+        .and_then(serde_json::Value::as_str)
+        .expect("manifest EV-072 status");
+
+    assert_eq!(report_ev072, manifest_ev072, "EV-072 status conflict");
+    assert_eq!(manifest_ev072, "PASS", "live-startup evidence regressed");
+    assert!(
+        live_startup.contains("Swapchain: Initializing swapchain"),
+        "live-startup log lacks swapchain acquisition evidence"
+    );
+
+    let live_startup_lower = live_startup.to_ascii_lowercase();
+    for forbidden in [
+        "panic",
+        "segfault",
+        "validation error",
+        "device lost",
+        "error_device_lost",
+    ] {
+        assert!(
+            !live_startup_lower.contains(forbidden),
+            "live-startup log contains forbidden marker: {forbidden}"
+        );
+    }
+    assert!(
+        !live_startup.contains(" ERROR "),
+        "live-startup log contains an engine ERROR line"
+    );
+
+    let observed_frames = live_startup.matches("BSP frame diagnostics").count() as u64;
+    let manifest_frames = manifest
+        .pointer("/evidence_rows/EV-072/frames_rendered")
+        .and_then(serde_json::Value::as_u64)
+        .expect("manifest EV-072 frame count");
+    assert!(observed_frames > 0, "no rendered-frame evidence");
+    assert_eq!(manifest_frames, observed_frames, "stale EV-072 frame count");
+
+    let timing = runtime_report
+        .pointer("/fixtures/dense-rich/runtime/timing_measurement")
+        .expect("dense-rich timing measurement");
+    assert_eq!(
+        timing
+            .pointer("/exit_code")
+            .and_then(serde_json::Value::as_i64),
+        Some(0),
+        "timing process did not exit cleanly"
+    );
+    for metric in [
+        "authorization_and_strict_parse",
+        "extraction",
+        "gpu_upload",
+        "frame_time",
+    ] {
+        let observed_ms = timing
+            .pointer(&format!("/observations/{metric}/observed_ms"))
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or_else(|| panic!("missing runtime timing metric: {metric}"));
+        assert!(
+            observed_ms.is_finite() && observed_ms > 0.0,
+            "invalid runtime timing metric {metric}: {observed_ms}"
+        );
+    }
+    assert!(
+        timing
+            .pointer("/observations/frame_time/sample_count")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|count| count > 0),
+        "frame timing has no samples"
+    );
+}
+
+fn read_json(path: &Path) -> serde_json::Value {
+    let bytes =
+        std::fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    serde_json::from_slice(&bytes)
+        .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
+}
+
 // ── Phase 09 Evidence Collection ──────────────────────────────────────────
 
 #[test]
@@ -236,16 +333,20 @@ fn collect_phase09_runtime_evidence() {
 
         dense_rich.live_startup = Some(LiveStartupEvidence {
             exit_code: None, // killed by timeout
-            timed_out: true,  // 15s timeout reached
+            timed_out: true, // 15s timeout reached
             panic_detected,
             error_log_lines: error_lines,
             swapchain_acquired,
             frames_rendered: Some(frames_rendered),
-            note: "15s timeout-bound live startup; app was actively rendering frames when terminated".to_string(),
+            note:
+                "15s timeout-bound live startup; app was actively rendering frames when terminated"
+                    .to_string(),
         });
     }
 
-    evidence.fixtures.insert("dense-rich".to_string(), dense_rich);
+    evidence
+        .fixtures
+        .insert("dense-rich".to_string(), dense_rich);
 
     // ── Fixture: integrated-portal ────────────────────────────────────
     let integrated_map = fixtures_dir().join("integrated.map");
@@ -282,7 +383,9 @@ fn collect_phase09_runtime_evidence() {
         budget: None,
     };
 
-    evidence.fixtures.insert("integrated-portal".to_string(), integrated);
+    evidence
+        .fixtures
+        .insert("integrated-portal".to_string(), integrated);
 
     // ── Evidence rows ─────────────────────────────────────────────────
     evidence.evidence_rows.insert(
@@ -329,10 +432,7 @@ fn collect_phase09_runtime_evidence() {
         EvidenceRow {
             status: "PASS".to_string(),
             claim: "Runtime budget measurements recorded".to_string(),
-            detail: format!(
-                "Runtime budget report at {}",
-                runtime_report.display()
-            ),
+            detail: format!("Runtime budget report at {}", runtime_report.display()),
         },
     );
 
@@ -344,10 +444,7 @@ fn collect_phase09_runtime_evidence() {
     let evidence_path = debug_reports_dir().join("phase-09-evidence.json");
     std::fs::write(&evidence_path, &evidence_json).expect("write evidence");
 
-    println!(
-        "Phase 09 evidence written to {}",
-        evidence_path.display()
-    );
+    println!("Phase 09 evidence written to {}", evidence_path.display());
     println!("Evidence summary:");
     for (row_id, row) in &evidence.evidence_rows {
         println!("  {}: {} — {}", row_id, row.status, row.claim);
