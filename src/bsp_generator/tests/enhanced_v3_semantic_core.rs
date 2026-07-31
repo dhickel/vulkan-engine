@@ -515,7 +515,9 @@ fn phase_02_pipeline_matrix_is_total_and_structurally_counted() {
                 let topology =
                     build_topology(&config, &footprints, &layout, V3Seed::new(seed), &mut alloc)
                         .unwrap();
-                let output = run_pipeline(&config).unwrap();
+                let output = run_pipeline(&config).unwrap_or_else(|error| {
+                    panic!("pipeline failed for {preset:?} seed={seed} extent={extent}: {error}")
+                });
                 let metadata = &output.metadata;
 
                 assert_eq!(metadata.room_count(), preset.min_rooms());
@@ -525,6 +527,13 @@ fn phase_02_pipeline_matrix_is_total_and_structurally_counted() {
                 );
                 assert_eq!(metadata.portal_count(), metadata.route_count());
                 assert_eq!(metadata.transition_count(), 1);
+                assert!(
+                    metadata.actual_faces() <= preset.face_budget(),
+                    "{preset:?} seed={seed} extent={extent} emitted {} faces above preset budget {}",
+                    metadata.actual_faces(),
+                    preset.face_budget(),
+                );
+                assert!(metadata.face_budget_satisfied());
                 assert_eq!(topology.routes.len() as u32, metadata.route_count());
                 assert_eq!(topology.portals.len() as u32, metadata.portal_count());
                 assert_eq!(

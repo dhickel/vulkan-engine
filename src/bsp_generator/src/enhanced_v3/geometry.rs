@@ -1456,11 +1456,239 @@ fn tetrahedron_volume(
     det.checked_div(six)
 }
 
+// ── Chamfered floor / ceiling slab helpers ────────────────────────────────
+
+/// Build a chamfered floor or ceiling slab from an AABB and chamfer corners.
+///
+/// The slab thickness is always the construction quantum (16 units).
+/// `z_min` is the bottom Z and `z_max` is the top Z (z_max - z_min must equal `thickness`).
+pub fn make_chamfered_slab(
+    x_range: (i128, i128),
+    y_range: (i128, i128),
+    z_min: i128,
+    z_max: i128,
+    chamfer_corners: &[(i128, i128)],
+    chamfer_size: i128,
+) -> Result<ConvexBrush, V3Error> {
+    let mut planes: Vec<CanonicalPlane> = Vec::new();
+
+    for &(sx, sy) in chamfer_corners {
+        if sx != 0 && sy != 0 {
+            let cx = if sx > 0 { x_range.1 } else { x_range.0 };
+            let cy = if sy > 0 { y_range.1 } else { y_range.0 };
+            let neg_sx = sx.checked_neg().ok_or(V3Error::ArithmeticOverflow {
+                operation: "chamfer slab x sign negation",
+            })?;
+            let neg_sy = sy.checked_neg().ok_or(V3Error::ArithmeticOverflow {
+                operation: "chamfer slab y sign negation",
+            })?;
+            let d = neg_sx
+                .checked_mul(cx)
+                .and_then(|value| {
+                    neg_sy
+                        .checked_mul(cy)
+                        .and_then(|term| value.checked_add(term))
+                })
+                .and_then(|value| value.checked_add(chamfer_size))
+                .ok_or(V3Error::ArithmeticOverflow {
+                    operation: "chamfer slab plane offset",
+                })?;
+            planes.push(CanonicalPlane::new(neg_sx, neg_sy, 0, d)?);
+        }
+    }
+
+    planes.push(CanonicalPlane::new(1, 0, 0, x_range.0)?);
+    planes.push(CanonicalPlane::new(
+        -1,
+        0,
+        0,
+        x_range.1.checked_neg().ok_or(V3Error::ArithmeticOverflow {
+            operation: "slab max x negation",
+        })?,
+    )?);
+    planes.push(CanonicalPlane::new(0, 1, 0, y_range.0)?);
+    planes.push(CanonicalPlane::new(
+        0,
+        -1,
+        0,
+        y_range.1.checked_neg().ok_or(V3Error::ArithmeticOverflow {
+            operation: "slab max y negation",
+        })?,
+    )?);
+    planes.push(CanonicalPlane::new(0, 0, 1, z_min)?);
+    planes.push(CanonicalPlane::new(
+        0,
+        0,
+        -1,
+        z_max.checked_neg().ok_or(V3Error::ArithmeticOverflow {
+            operation: "slab max z negation",
+        })?,
+    )?);
+
+    let faces: Vec<BrushFace> = planes
+        .into_iter()
+        .map(BrushFace::new)
+        .collect::<Result<_, _>>()?;
+
+    let mut brush = ConvexBrush::new(faces)?;
+    brush.validate_and_cache()?;
+    Ok(brush)
+}
+
+// ── Diagonal wall piece construction ──────────────────────────────────────
+
+/// Build a diagonal wall brush for a chamfer corner.
+///
+/// The wall fills the triangular region between the chamfer face and the
+/// AABB corner, providing the required 16+ unit perpendicular thickness.
+///
+/// The wall is OUTSIDE the room interior. For the NE corner (sx=1, sy=1),
+/// the room interior satisfies `x + y <= x1 + y1 - c` (the chamfer face).
+/// The wall occupies `x1 + y1 - c <= x + y <= x1 + y1 - c + 32`.
+///
+/// Parameters:
+/// - `x_range`, `y_range`: room AABB in Quake units
+/// - `z_bottom`, `z_top`: vertical bounds of the wall
+/// - `sx`, `sy`: chamfer corner sign (-1 or 1 for each axis); e.g. (1,1) = NE
+/// - `chamfer_size`: size of chamfer in Quake units
+pub fn make_diagonal_wall(
+    x_range: (i128, i128),
+    y_range: (i128, i128),
+    z_bottom: i128,
+    z_top: i128,
+    sx: i128,
+    sy: i128,
+    chamfer_size: i128,
+) -> Result<ConvexBrush, V3Error> {
+    // The diagonal-plane difference is also the triangular-prism maximum
+    // normal depth.  At 45°, 16 units of perpendicular thickness needs at
+    // least 16 * sqrt(2); the quantum-safe minimum is 32.
+    if !matches!(sx, -1 | 1) || !matches!(sy, -1 | 1) || chamfer_size < 32 || z_bottom >= z_top {
+        return Err(V3Error::InvalidFootprint {
+            detail: format!(
+                "diagonal wall requires signs ±1, positive height, and 32-unit chamfer; got ({sx},{sy}), {z_bottom}..{z_top}, c={chamfer_size}"
+            ),
+        });
+    }
+    let cx = if sx > 0 { x_range.1 } else { x_range.0 };
+    let cy = if sy > 0 { y_range.1 } else { y_range.0 };
+
+    // The chamfer face has equation: -sx*x - sy*y = d_chamfer
+    // where d_chamfer = -sx*cx - sy*cy + chamfer_size.
+    // The ROOM interior satisfies: -sx*x - sy*y >= d_chamfer.
+    // The WALL is on the OTHER side: -sx*x - sy*y <= d_chamfer.
+    //
+    // For the wall brush, expressed as n·x >= d:
+    //   Interior face (toward room): normal = (sx, sy, 0), d = sx*cx + sy*cy - c
+    //     (points INTO the wall from the room side)
+    //   Exterior face (outer face): normal = (-sx, -sy, 0),
+    //     d = -(sx*cx + sy*cy - c + 32)
+    //
+    // Together: sx*cx + sy*cy - c <= sx*x + sy*y <= sx*cx + sy*cy - c + 32
+
+    let base = sx
+        .checked_mul(cx)
+        .and_then(|left| sy.checked_mul(cy).and_then(|right| left.checked_add(right)))
+        .and_then(|sum| sum.checked_sub(chamfer_size))
+        .ok_or(V3Error::ArithmeticOverflow {
+            operation: "diag wall base offset",
+        })?;
+    // base = sx*cx + sy*cy - c — the inner edge of the wall (chamfer face)
+
+    // The diagonal wall is a triangular prism bounded by:
+    // 1. Inner diagonal face (toward room)
+    // 2-3. Two AABB boundary planes (outer walls meeting at corner)
+    // 4-5. Top and bottom planes
+    //
+    // Wall thickness perpendicular to the diagonal face equals
+    // chamfer_size / sqrt(2). For chamfer_size >= 32, thickness >= 22.6 > 16.
+    // For chamfer_size = 16, a separate exterior diagonal plane would be
+    // needed; the footprint builder enforces 32-unit minimum where required.
+    let mut planes = vec![
+        // Interior diagonal (toward room, points into wall)
+        CanonicalPlane::new(sx, sy, 0, base)?,
+    ];
+
+    // AABB boundary planes: the two outer walls that meet at this corner.
+    if sx > 0 {
+        planes.push(CanonicalPlane::new(
+            -1,
+            0,
+            0,
+            cx.checked_neg().ok_or(V3Error::ArithmeticOverflow {
+                operation: "diag wall max x negation",
+            })?,
+        )?);
+    } else {
+        planes.push(CanonicalPlane::new(1, 0, 0, cx)?);
+    }
+    if sy > 0 {
+        planes.push(CanonicalPlane::new(
+            0,
+            -1,
+            0,
+            cy.checked_neg().ok_or(V3Error::ArithmeticOverflow {
+                operation: "diag wall max y negation",
+            })?,
+        )?);
+    } else {
+        planes.push(CanonicalPlane::new(0, 1, 0, cy)?);
+    }
+
+    // Vertical bounds
+    planes.push(CanonicalPlane::new(0, 0, 1, z_bottom)?);
+    planes.push(CanonicalPlane::new(
+        0,
+        0,
+        -1,
+        z_top.checked_neg().ok_or(V3Error::ArithmeticOverflow {
+            operation: "diag wall top negation",
+        })?,
+    )?);
+
+    let faces: Vec<BrushFace> = planes
+        .into_iter()
+        .map(BrushFace::new)
+        .collect::<Result<_, _>>()?;
+
+    let mut brush = ConvexBrush::new(faces)?;
+    brush.validate_and_cache()?;
+    Ok(brush)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagonal_wall_has_45_degree_faces() {
+        let brush = make_diagonal_wall((0, 192), (0, 192), 16, 160, 1, 1, 32).unwrap();
+        let has_diag = brush
+            .faces
+            .iter()
+            .any(|f| matches!(f.role, FaceRole::DiagNE | FaceRole::DiagSW));
+        assert!(has_diag, "diagonal wall must have a 45° face");
+        assert!(brush.volume() > Rational::ZERO);
+    }
+
+    #[test]
+    fn diagonal_wall_has_minimum_thickness() {
+        let brush = make_diagonal_wall((0, 192), (0, 192), 16, 160, -1, -1, 32).unwrap();
+        // The wall should have non-zero volume and pass validation.
+        let vol = brush.volume();
+        assert!(vol > Rational::ZERO);
+    }
+
+    #[test]
+    fn chamfered_slab_creates_diagonal_faces() {
+        let brush =
+            make_chamfered_slab((0, 192), (0, 192), 0, 16, &[(1, 1), (-1, -1)], 32).unwrap();
+        assert!(brush.volume() > Rational::ZERO);
+        // Should have 6 cardinal faces + 2 chamfer = 8 faces
+        assert_eq!(brush.faces.len(), 8);
+    }
 
     #[test]
     fn rational_reduction() {

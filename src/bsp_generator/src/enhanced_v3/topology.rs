@@ -99,6 +99,25 @@ fn cardinal_wall_span(footprint: &Footprint, direction: Dir) -> Option<(i32, i32
     span.filter(|(lo, hi)| lo < hi)
 }
 
+/// Return the emitted cardinal wall span after intact AABB corners are handed
+/// to their 16-unit corner posts. Chamfered endpoints already terminate on a
+/// diagonal wall and therefore are not trimmed a second time.
+fn cardinal_wall_usable_span(footprint: &Footprint, direction: Dir) -> Option<(i32, i32)> {
+    let (mut lo, mut hi) = cardinal_wall_span(footprint, direction)?;
+    let outer = match direction {
+        Dir::East | Dir::West => (footprint.aabb.1, footprint.aabb.3),
+        Dir::North | Dir::South => (footprint.aabb.0, footprint.aabb.2),
+    };
+    let q = CONSTRUCTION_QUANTUM;
+    if lo == outer.0 {
+        lo += q;
+    }
+    if hi == outer.1 {
+        hi -= q;
+    }
+    (lo < hi).then_some((lo, hi))
+}
+
 /// Select a centered, quantum-aligned 64-unit aperture span from an available
 /// common cardinal-wall interval.
 fn centered_route_span(lo: i32, hi: i32) -> Option<(i32, i32)> {
@@ -120,16 +139,67 @@ fn centered_route_span(lo: i32, hi: i32) -> Option<(i32, i32)> {
     }
 }
 
-/// Compute the exact 64-unit cross-axis span shared by the two real cardinal
-/// wall interiors. The result is both the route clear span and the aperture
-/// span at both endpoints.
+/// Compute the exact 64-unit cross-axis span shared by the emitted cardinal
+/// wall pieces. This keeps the full core and pointed surround out of corner
+/// posts without unnecessarily discarding chamfer-shortened wall endpoints.
 fn cross_overlap(source: &Footprint, target: &Footprint, source_dir: Dir) -> Option<(i32, i32)> {
-    let source_span = cardinal_wall_span(source, source_dir)?;
-    let target_span = cardinal_wall_span(target, source_dir.opposite())?;
+    let source_span = cardinal_wall_usable_span(source, source_dir)?;
+    let target_span = cardinal_wall_usable_span(target, source_dir.opposite())?;
     centered_route_span(
         source_span.0.max(target_span.0),
         source_span.1.min(target_span.1),
     )
+}
+
+/// Select a 64-unit transition core with one full shell quantum available on
+/// either side at both host walls. A route only owns its clear span; a sealed
+/// stair owns the complete 96-unit outside width.
+fn transition_cross_span(
+    source: &Footprint,
+    target: &Footprint,
+    source_dir: Dir,
+) -> Option<(i32, i32)> {
+    let source_span = cardinal_wall_span(source, source_dir)?;
+    let target_span = cardinal_wall_span(target, source_dir.opposite())?;
+    let q = CONSTRUCTION_QUANTUM;
+    centered_route_span(
+        source_span.0.max(target_span.0) + q,
+        source_span.1.min(target_span.1) - q,
+    )
+}
+
+fn rects_overlap(left: (i32, i32, i32, i32), right: (i32, i32, i32, i32)) -> bool {
+    left.0 < right.2 && left.2 > right.0 && left.1 < right.3 && left.3 > right.1
+}
+
+/// Return the actual emitted route shell in the gap between its endpoint room
+/// walls. Endpoint extensions inside the rooms are excluded because the room
+/// shell owns those interfaces.
+fn route_gap_shells(route: &CommittedRoute, footprints: &[Footprint]) -> Vec<(i32, i32, i32, i32)> {
+    let Some(source) = footprints.iter().find(|fp| fp.room_id == route.source_room) else {
+        return Vec::new();
+    };
+    let Some(target) = footprints.iter().find(|fp| fp.room_id == route.target_room) else {
+        return Vec::new();
+    };
+    let q = CONSTRUCTION_QUANTUM;
+    route
+        .envelopes
+        .iter()
+        .filter_map(|&(x0, y0, x1, y1)| {
+            if source.aabb.2 <= target.aabb.0 {
+                Some((source.aabb.2, y0 - q, target.aabb.0, y1 + q))
+            } else if target.aabb.2 <= source.aabb.0 {
+                Some((target.aabb.2, y0 - q, source.aabb.0, y1 + q))
+            } else if source.aabb.3 <= target.aabb.1 {
+                Some((x0 - q, source.aabb.3, x1 + q, target.aabb.1))
+            } else if target.aabb.3 <= source.aabb.1 {
+                Some((x0 - q, target.aabb.3, x1 + q, source.aabb.1))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Test whether the straight corridor between source and target intersects
@@ -358,12 +428,55 @@ pub fn build_topology(
         let depth = (y1 - y0) as u32;
         let height = config::ROOM_HEIGHT as u32;
 
+        let is_chamfered = fp.vertices.len() > 4;
+        let chamfer_corners: Vec<(i32, i32)> = if is_chamfered {
+            // Recover chamfer corners from the convex hull by comparing
+            // footprint vertices against the AABB corners.
+            let corners = [(-1, -1), (1, -1), (1, 1), (-1, 1)];
+            corners
+                .into_iter()
+                .filter(|&(sx, sy)| {
+                    let cx = if sx > 0 { x1 } else { x0 };
+                    let cy = if sy > 0 { y1 } else { y0 };
+                    // An AABB corner is chamfered if it is NOT a vertex of the footprint.
+                    !fp.vertices.iter().any(|&(vx, vy)| vx == cx && vy == cy)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // Chamfer size: for chamfered rooms, the distance from the AABB corner
+        // to the first chamfer vertex along the edge. This is the same for all
+        // chamfers in one room (from the quad layout).
+        let chamfer_size = if is_chamfered {
+            // Find a diagonal edge and measure its projection.
+            let mut found = 0i32;
+            for idx in 0..fp.vertices.len() {
+                let a = fp.vertices[idx];
+                let b = fp.vertices[(idx + 1) % fp.vertices.len()];
+                let dx = (b.0 - a.0).unsigned_abs() as i32;
+                let dy = (b.1 - a.1).unsigned_abs() as i32;
+                if dx == dy && dx > 0 {
+                    // This is a diagonal edge. Chamfer size is the X (or Y) projection.
+                    found = dx;
+                    break;
+                }
+            }
+            found
+        } else {
+            0
+        };
+
         rooms.push(CommittedRoom {
             id: fp.room_id,
             layer: fp.layer,
             shell: (x0, y0, x1, y1),
             floor_z: fp.floor_z,
             dims: (width, depth, height),
+            footprint_vertices: fp.vertices.clone(),
+            chamfer_corners,
+            chamfer_size,
+            is_chamfered,
         });
 
         let floor_id = alloc.next_surface()?;
@@ -624,7 +737,14 @@ pub fn build_topology(
     // deterministic room selection from committed room data.
     validate_spawn_host(footprints)?;
 
-    let transition = build_transition(footprints, &rooms, &lower_indices, &upper_indices, seed)?;
+    let transition = build_transition(
+        footprints,
+        &rooms,
+        &routes,
+        &lower_indices,
+        &upper_indices,
+        seed,
+    )?;
     let transitions = vec![transition];
 
     // ── Assemble ─────────────────────────────────────────────────────
@@ -653,9 +773,14 @@ pub fn build_topology(
 
 // ── Transition construction ────────────────────────────────────────────────
 
+const STAIR_STEPS: i32 = 12;
+const LOWER_APPROACH_QUANTA: i32 = 4;
+const UPPER_APPROACH_QUANTA: i32 = 1;
+
 fn build_transition(
     footprints: &[Footprint],
     rooms: &[CommittedRoom],
+    routes: &[CommittedRoute],
     lower_indices: &[usize],
     upper_indices: &[usize],
     seed: V3Seed,
@@ -682,16 +807,44 @@ fn build_transition(
                 continue;
             }
             // Transition approaches use the lower south and upper north
-            // cardinal wall interiors. AABB overlap alone could land in a
-            // chamfer cutout, so reserve an actual 64-unit host span.
-            let Some(x_span) = cross_overlap(lower, upper, Dir::South) else {
+            // cardinal wall interiors. Reserve the 64-unit swept core only
+            // where both real polygon edges also retain 16-unit shell margins.
+            let Some(x_span) = transition_cross_span(lower, upper, Dir::South) else {
                 continue;
             };
-            // A positive gap is required between the real host walls. The
-            // placement grid reserves at least one quantum for this envelope.
-            if upper.aabb.1 - lower.aabb.3 < q {
+            // A supported 64-unit lower approach clears the pointed portal
+            // before the exact 192-unit run begins. Retain one final quantum
+            // for the supported upper approach at the crest.
+            let required_gap = (LOWER_APPROACH_QUANTA + STAIR_STEPS + UPPER_APPROACH_QUANTA) * q;
+            if upper.aabb.1 - lower.aabb.3 < required_gap {
                 continue;
             }
+            let stair_start = lower.aabb.3 + LOWER_APPROACH_QUANTA * q;
+            let stair_end = stair_start + STAIR_STEPS * q;
+            let shell_rect = (x_span.0 - q, lower.aabb.3, x_span.1 + q, upper.aabb.1);
+
+            // The physical shell and every 80-unit clearance column span both
+            // elevations. They may enter only their two host rooms at the
+            // authored boundary interfaces, never an unrelated room on either
+            // layer.
+            if footprints.iter().any(|fp| {
+                fp.room_id != lower.room_id
+                    && fp.room_id != upper.room_id
+                    && rects_overlap(shell_rect, fp.aabb)
+            }) {
+                continue;
+            }
+            // Same-layer corridors are also physical shells. Check their
+            // emitted gap bounds rather than their endpoint-biased envelopes.
+            if routes.iter().any(|route| {
+                route_gap_shells(route, footprints)
+                    .into_iter()
+                    .any(|route_shell| rects_overlap(shell_rect, route_shell))
+            }) {
+                continue;
+            }
+
+            debug_assert_eq!(stair_end - stair_start, STAIR_STEPS * q);
             let key = format!(
                 "transition/{:04}/{:04}",
                 lower.room_id.raw(),
@@ -752,29 +905,77 @@ fn build_transition(
         });
     }
 
-    // Lower landing: inside the lower room, at its south wall (y3, max Y).
-    let lower_landing_y1 = (lower.aabb.3 / q) * q;
-    let lower_landing = (pv_x0, lower_landing_y1 - 2 * q, pv_x1, lower_landing_y1);
-
-    // Upper landing: inside the upper room, at its north wall (y1, min Y).
-    let upper_landing = (
+    let lower_approach = (
         pv_x0,
-        (upper.aabb.1 / q) * q,
+        lower.aabb.3,
         pv_x1,
-        (upper.aabb.1 / q) * q + 2 * q,
+        lower.aabb.3 + LOWER_APPROACH_QUANTA * q,
     );
+    let stair_start = lower_approach.3;
+    let stair_end = stair_start + STAIR_STEPS * q;
+    let tread_run = (pv_x0, stair_start, pv_x1, stair_end);
+    let upper_approach = (pv_x0, stair_end, pv_x1, upper.aabb.1);
+
+    // The lower landing remains on the host room floor. The upper landing
+    // continues through the wall aperture onto the supported upper room floor.
+    let lower_landing = (pv_x0, lower.aabb.3 - 2 * q, pv_x1, lower.aabb.3);
+    let upper_landing = (pv_x0, upper.aabb.1, pv_x1, upper.aabb.1 + 2 * q);
+
+    let tread_boxes: Vec<_> = (0..STAIR_STEPS)
+        .map(|step| {
+            let y0 = stair_start + step * q;
+            (
+                pv_x0,
+                y0,
+                config::LOWER_FLOOR_Z,
+                pv_x1,
+                y0 + q,
+                config::LOWER_FLOOR_Z + (step + 1) * q,
+            )
+        })
+        .collect();
+
+    let mut headroom_volumes = Vec::with_capacity(STAIR_STEPS as usize + 3);
+    headroom_volumes.push((
+        lower_landing.0,
+        lower_landing.1,
+        config::LOWER_FLOOR_Z + q,
+        lower_landing.2,
+        lower_landing.3,
+        config::LOWER_FLOOR_Z + q + HEADROOM,
+    ));
+    headroom_volumes.push((
+        lower_approach.0,
+        lower_approach.1,
+        config::LOWER_FLOOR_Z + q,
+        lower_approach.2,
+        lower_approach.3,
+        config::LOWER_FLOOR_Z + q + HEADROOM,
+    ));
+    for &(_, y0, _, _, y1, tread_top) in &tread_boxes {
+        headroom_volumes.push((pv_x0, y0, tread_top, pv_x1, y1, tread_top + HEADROOM));
+    }
+    headroom_volumes.push((
+        upper_approach.0,
+        upper_approach.1,
+        config::UPPER_FLOOR_Z + q,
+        upper_approach.2,
+        upper_landing.3,
+        config::UPPER_FLOOR_Z + q + HEADROOM,
+    ));
 
     Ok(CommittedTransition {
         id: 0,
         lower_room: rooms[chosen.lower_idx].id,
         upper_room: rooms[chosen.upper_idx].id,
         protected_volume: (pv_x0, pv_y0, pv_z0, pv_x1, pv_y1, pv_z1),
+        lower_approach,
+        tread_run,
+        tread_boxes,
+        upper_approach,
         lower_landing,
         upper_landing,
-        // This is a structural reservation for later stair emission, not an
-        // emitted stair claim. Recording it gives both landing approaches a
-        // bounded, aligned headroom witness in the committed topology.
-        headroom_volumes: vec![(pv_x0, pv_y0, pv_z0, pv_x1, pv_y1, pv_z1)],
+        headroom_volumes,
     })
 }
 
@@ -1092,11 +1293,86 @@ mod tests {
             assert_eq!(coordinate % CONSTRUCTION_QUANTUM, 0);
         }
         assert!(y0 >= lower.aabb.3 && y1 <= upper.aabb.1);
-        assert!(transition
-            .headroom_volumes
+        let q = CONSTRUCTION_QUANTUM;
+        assert_eq!(
+            transition.lower_approach,
+            (x0, y0, x1, y0 + LOWER_APPROACH_QUANTA * q)
+        );
+        assert_eq!(transition.tread_run.0, x0);
+        assert_eq!(transition.tread_run.2, x1);
+        assert_eq!(transition.tread_run.1, transition.lower_approach.3);
+        assert_eq!(
+            transition.tread_run.3 - transition.tread_run.1,
+            STAIR_STEPS * q
+        );
+        assert_eq!(
+            transition.upper_approach,
+            (x0, transition.tread_run.3, x1, y1)
+        );
+        assert_eq!(transition.tread_boxes.len(), STAIR_STEPS as usize);
+        assert_eq!(transition.headroom_volumes.len(), 15);
+        let lower_clearance = transition.headroom_volumes[0];
+        assert_eq!(
+            lower_clearance,
+            (
+                transition.lower_landing.0,
+                transition.lower_landing.1,
+                config::LOWER_FLOOR_Z + q,
+                transition.lower_landing.2,
+                transition.lower_landing.3,
+                config::LOWER_FLOOR_Z + q + HEADROOM,
+            )
+        );
+        assert_eq!(
+            transition.headroom_volumes[1],
+            (
+                transition.lower_approach.0,
+                transition.lower_approach.1,
+                config::LOWER_FLOOR_Z + q,
+                transition.lower_approach.2,
+                transition.lower_approach.3,
+                config::LOWER_FLOOR_Z + q + HEADROOM,
+            )
+        );
+        for (step, (tread, volume)) in transition
+            .tread_boxes
             .iter()
-            .all(|volume| *volume == transition.protected_volume));
-        assert!(!transition.headroom_volumes.is_empty());
+            .zip(&transition.headroom_volumes[2..14])
+            .enumerate()
+        {
+            let step = step as i32;
+            let expected_tread = (
+                x0,
+                transition.tread_run.1 + step * q,
+                config::LOWER_FLOOR_Z,
+                x1,
+                transition.tread_run.1 + (step + 1) * q,
+                config::LOWER_FLOOR_Z + (step + 1) * q,
+            );
+            assert_eq!(*tread, expected_tread);
+            assert_eq!(
+                *volume,
+                (
+                    tread.0,
+                    tread.1,
+                    tread.5,
+                    tread.3,
+                    tread.4,
+                    tread.5 + HEADROOM,
+                )
+            );
+        }
+        assert_eq!(
+            transition.headroom_volumes[14],
+            (
+                transition.upper_approach.0,
+                transition.upper_approach.1,
+                config::UPPER_FLOOR_Z + q,
+                transition.upper_approach.2,
+                transition.upper_landing.3,
+                config::UPPER_FLOOR_Z + q + HEADROOM,
+            )
+        );
         let (llx0, lly0, llx1, lly1) = transition.lower_landing;
         let (ulx0, uly0, ulx1, uly1) = transition.upper_landing;
         assert!(

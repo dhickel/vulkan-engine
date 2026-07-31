@@ -194,18 +194,27 @@ impl Assembly {
     }
 
     fn check_pairwise_intersections(&self) -> Result<(), V3Error> {
+        // Computing an exact brush AABB requires enumerating every triple-plane
+        // vertex.  Cache that exact broad-phase result once per brush; repeating
+        // it for every pair turned a semantically small Rich map into O(n²)
+        // vertex enumerations.  The cache rejects only strictly disjoint boxes,
+        // so coplanar contacts still reach the exact intersection test.
+        let aabbs: Vec<_> = self
+            .brushes
+            .iter()
+            .map(|brush| {
+                brush.brush.aabb().map_err(|e| V3Error::AssemblyValidation {
+                    detail: format!("invalid brush {}: {e}", brush.id),
+                })
+            })
+            .collect::<Result<_, _>>()?;
+
         for i in 0..self.brushes.len() {
             for j in (i + 1)..self.brushes.len() {
                 let a = &self.brushes[i];
                 let b = &self.brushes[j];
-
-                // Broad-phase AABB rejection
-                let aabb_a = a.brush.aabb().map_err(|e| V3Error::AssemblyValidation {
-                    detail: format!("invalid brush {}: {e}", a.id),
-                })?;
-                let aabb_b = b.brush.aabb().map_err(|e| V3Error::AssemblyValidation {
-                    detail: format!("invalid brush {}: {e}", b.id),
-                })?;
+                let aabb_a = aabbs[i];
+                let aabb_b = aabbs[j];
 
                 if aabb_a.0 .0 > aabb_b.1 .0
                     || aabb_b.0 .0 > aabb_a.1 .0
@@ -416,8 +425,33 @@ impl Assembly {
     }
 
     fn check_protected_volume_intrusion(&self) -> Result<(), V3Error> {
-        for brush in &self.brushes {
-            for pv in &self.protected_volumes {
+        let brush_aabbs = self
+            .brushes
+            .iter()
+            .map(|brush| brush.brush.aabb())
+            .collect::<Result<Vec<_>, _>>()?;
+        let protected_aabbs = self
+            .protected_volumes
+            .iter()
+            .map(|volume| volume.brush.aabb())
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (brush_index, brush) in self.brushes.iter().enumerate() {
+            let brush_aabb = brush_aabbs[brush_index];
+            for (protected_index, pv) in self.protected_volumes.iter().enumerate() {
+                let protected_aabb = protected_aabbs[protected_index];
+                // Protected-volume validation rejects positive volume only;
+                // plane contact is permitted. Equality therefore proves that
+                // an axis has no positive overlap and can skip the exact test.
+                if brush_aabb.1 .0 <= protected_aabb.0 .0
+                    || protected_aabb.1 .0 <= brush_aabb.0 .0
+                    || brush_aabb.1 .1 <= protected_aabb.0 .1
+                    || protected_aabb.1 .1 <= brush_aabb.0 .1
+                    || brush_aabb.1 .2 <= protected_aabb.0 .2
+                    || protected_aabb.1 .2 <= brush_aabb.0 .2
+                {
+                    continue;
+                }
                 if matches!(
                     exact_intersection_volume(&brush.brush, &pv.brush)?,
                     IntersectionResult::PositiveVolume

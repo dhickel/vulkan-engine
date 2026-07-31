@@ -274,23 +274,33 @@ pub fn build_footprints(
     let q = CONSTRUCTION_QUANTUM;
     let target = config.preset.min_rooms() as usize;
     let extent_q = extent / q;
-    let (columns, rows) = placement_grid(target);
+    let lower_target = (target + 1) / 2;
+    let upper_target = target - lower_target;
+    let layer_target = lower_target.max(upper_target);
+    let (columns, layer_rows) = placement_grid(layer_target);
+
+    // The stair is a real 12×16-unit structure, not a graph-only edge. Keep
+    // the projected room bands apart by a 256-unit structural lane: 64 units
+    // are reserved for the lower approach before the exact 192-unit run. Slot
+    // slack supplies the upper crest approach. Any odd remainder stays above
+    // the upper band.
+    const TRANSITION_LANE_Q: i32 = 16;
+    let room_band_q = (extent_q - TRANSITION_LANE_Q) / 2;
+    let upper_band_origin_q = room_band_q + TRANSITION_LANE_Q;
     let slot_width_q = extent_q / columns;
-    let slot_depth_q = extent_q / rows;
+    let slot_depth_q = room_band_q / layer_rows;
 
     // A full rectangular slot is reserved for each room, rather than only the
     // cells whose centers are inside a chamfered polygon. This deliberately
     // leaves no occupancy holes at clipped corners and makes overlap proof a
     // simple interval proof independent of a hash-table traversal.
-    if slot_width_q < MIN_SPAN_Q || slot_depth_q < MIN_SPAN_Q {
+    if slot_width_q < MIN_SPAN_Q + 1 || slot_depth_q < MIN_SPAN_Q + 1 {
         return Err(V3Error::InvalidFootprint {
             detail: format!(
-                "extent {extent} cannot reserve {target} rooms with minimum span {MIN_OUTER_SPAN}"
+                "extent {extent} cannot reserve {target} rooms plus a 256-unit transition lane"
             ),
         });
     }
-
-    let lower_target = (target + 1) / 2;
 
     // ── Pass 1: compute per-room dimensions from seed ──────────────
     struct RoomDim {
@@ -315,13 +325,18 @@ pub fn build_footprints(
         let [u0, u1, _u2, u3] = seed
             .candidate_seed(rng::tags::PLACEMENT, key.as_bytes())
             .u64s();
-        let column = (room_index % columns as usize) as i32;
-        let row = (room_index / columns as usize) as i32;
-        // Leave a quantum on both sides of each fixed slot origin. The
-        // resulting two-quantum slot slack guarantees a positive route gap
-        // between adjacent columns and rows.
+        let layer_index = if layer == 0 {
+            room_index
+        } else {
+            room_index - lower_target
+        };
+        let column = (layer_index % columns as usize) as i32;
+        let row = (layer_index / columns as usize) as i32;
+        // Horizontal slots retain two quanta of slack. The tight Rich/1024
+        // vertical band retains one full quantum, which is sufficient for a
+        // positive route gap while preserving the frozen 112-unit minimum.
         let max_width_q = (slot_width_q - 2).min(MAX_SPAN_Q);
-        let max_depth_q = (slot_depth_q - 2).min(MAX_SPAN_Q);
+        let max_depth_q = (slot_depth_q - 1).min(MAX_SPAN_Q);
         let primary_max_width_q = max_width_q;
         let w_q = if room_index == 0 {
             seeded_even_span(u0, primary_max_width_q)
@@ -329,7 +344,7 @@ pub fn build_footprints(
             MIN_SPAN_Q + (u0 % (max_width_q - MIN_SPAN_Q + 1) as u64) as i32
         };
         let d_q = if room_index == 0 {
-            MIN_SPAN_Q + 1
+            (MIN_SPAN_Q + 1).min(max_depth_q)
         } else {
             MIN_SPAN_Q + (u1 % (max_depth_q - MIN_SPAN_Q + 1) as u64) as i32
         };
@@ -386,26 +401,29 @@ pub fn build_footprints(
         let y_offset_q = row_offsets[&row];
 
         let x0 = (column * slot_width_q + x_offset_q) * q;
-        let y0 = (row * slot_depth_q + y_offset_q) * q;
+        let layer_origin_q = if layer == 0 { 0 } else { upper_band_origin_q };
+        let y0 = (layer_origin_q + row * slot_depth_q + y_offset_q) * q;
         let shell = (x0, y0, x0 + w_q * q, y0 + d_q * q);
 
-        // At least two thirds of room indices are chamfered. A 16-unit
-        // chamfer always fits the minimum 112-unit room. A 32-unit chamfer
-        // is permitted only when it still leaves a
-        // 64-unit cardinal wall segment on every affected side. Smaller
-        // rooms use the 16-unit chamfer so topology can always own a real
-        // 64×80 cardinal aperture rather than an AABB-only endpoint.
-        let chamfer_q = if (u3 >> 8) & 1 == 0 && w_q >= 8 && d_q >= 8 {
-            2
-        } else {
-            1
-        };
-        let chamfer_size = chamfer_q * q;
+        // A diagonal shell needs a 32-unit diagonal-plane offset: its
+        // perpendicular thickness is 32 / sqrt(2), safely above the frozen
+        // 16-unit minimum.  A 16-unit chamfer is only 11.31 units thick and
+        // is therefore never committed.  Retain rectangles where the room
+        // cannot also retain a 64-unit cardinal portal edge after chamfering.
+        let chamfer_size = 2 * q;
         let room_index = d.room_index;
         let vertices = if room_index % 3 == 0 {
             rect_vertices(shell)
         } else {
-            let pattern = CHAMFER_PATTERNS[(u3 >> 16) as usize % CHAMFER_PATTERNS.len()];
+            // A 112-unit side still retains an 80-unit cardinal edge with one
+            // 32-unit chamfer. Restrict tight slots to one-corner patterns so
+            // every wall remains eligible for a real 64-unit portal.
+            let patterns = if w_q < 8 || d_q < 8 {
+                &CHAMFER_PATTERNS[..4]
+            } else {
+                CHAMFER_PATTERNS
+            };
+            let pattern = patterns[(u3 >> 16) as usize % patterns.len()];
             chamfered_vertices(shell, pattern, chamfer_size)?
         };
         validate_edges(&vertices)?;
@@ -556,15 +574,11 @@ fn seeded_even_span(random: u64, maximum: i32) -> i32 {
     first + 2 * (random % count as u64) as i32
 }
 
-/// Return a compact near-square grid that reserves one full slot per room.
-fn placement_grid(target: usize) -> (i32, i32) {
-    let mut columns = 1usize;
-    while columns * columns < target {
-        columns += 1;
-    }
-    let columns = columns as i32;
-    let rows = (target as i32 + columns - 1) / columns;
-    (columns, rows)
+/// Return a compact per-layer grid while leaving room for the stair band.
+fn placement_grid(layer_target: usize) -> (i32, i32) {
+    let rows = if layer_target <= 10 { 2usize } else { 3usize };
+    let columns = layer_target.div_ceil(rows);
+    (columns as i32, rows as i32)
 }
 
 fn aabbs_overlap(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {

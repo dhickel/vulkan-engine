@@ -86,9 +86,10 @@ pub fn plan_composition(
         rejected: Vec::new(),
         support_edges: Vec::new(),
         identity_satisfied,
-        // Conservative face estimate: each room ≈ 8 brushes (floor/ceiling + split walls),
-        // each route ≈ 6 brushes (floor/ceiling/walls/caps), × 6 faces each.
-        estimated_total_faces: ((room_count * 8) + (route_count * 8)) * 6 + 72,
+        // Conservative face estimate: room shells with chamfers and arch
+        // surrounds average ~14 brushes each; routes + transition add more.
+        // Each brush has ~6 faces on average.
+        estimated_total_faces: ((room_count * 14) + (route_count * 12) + 24) * 6 + 120,
         estimated_total_entities: 1 + room_count + room_count, // spawn + light per room + other
     })
 }

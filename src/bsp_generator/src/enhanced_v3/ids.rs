@@ -336,6 +336,14 @@ pub struct CommittedRoom {
     pub floor_z: i32,
     /// Room dimensions: (width, depth, height) in Quake units.
     pub dims: (u32, u32, u32),
+    /// CCW footprint polygon vertices (quantum-aligned).
+    pub footprint_vertices: Vec<(i32, i32)>,
+    /// Chamfer corner patterns present in this room.
+    pub chamfer_corners: Vec<(i32, i32)>,
+    /// Chamfer size in Quake units (0 if rectangular).
+    pub chamfer_size: i32,
+    /// Whether this room has 45° diagonal wall faces.
+    pub is_chamfered: bool,
 }
 
 /// A portal opening between rooms.
@@ -374,11 +382,19 @@ pub struct CommittedTransition {
     pub upper_room: RoomId,
     /// Protected 3-D volume.
     pub protected_volume: (i32, i32, i32, i32, i32, i32),
+    /// Supported lower connector outside the lower wall.
+    pub lower_approach: (i32, i32, i32, i32),
+    /// Exact 192-unit projected tread run.
+    pub tread_run: (i32, i32, i32, i32),
+    /// Authoritative positive-volume tread/riser columns in ascent order.
+    pub tread_boxes: Vec<(i32, i32, i32, i32, i32, i32)>,
+    /// Supported upper connector to the upper wall.
+    pub upper_approach: (i32, i32, i32, i32),
     /// Lower landing: (x0, y0, x1, y1).
     pub lower_landing: (i32, i32, i32, i32),
     /// Upper landing: (x0, y0, x1, y1).
     pub upper_landing: (i32, i32, i32, i32),
-    /// Headroom volumes.
+    /// Exact clear volumes over both approaches, every tread, and the crest.
     pub headroom_volumes: Vec<(i32, i32, i32, i32, i32, i32)>,
 }
 

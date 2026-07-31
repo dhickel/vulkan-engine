@@ -18,12 +18,11 @@ mod compiler_support;
 
 use bsp_generator::enhanced_v3::*;
 use compiler_support::{
-    compile_map, load_compiler_profile, resolve_tool_dir, sha256_hex, theme_paths, tools_available,
-    verify_executable_hashes, CompileFailureKind, CompiledArtifacts,
+    compile_map, load_compiler_profile, resolve_tool_dir, theme_paths, tools_available,
+    verify_executable_hashes, CompiledArtifacts,
 };
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
 
 // ── Helper: write map and compile ─────────────────────────────────────────
 
@@ -42,15 +41,8 @@ fn generate_and_compile(
     fs::write(&src_map_path, &output.map_text).map_err(|e| format!("write map: {e}"))?;
 
     let (wad_path, palette_path) = theme_paths();
-    let mut profile = load_compiler_profile()?;
+    let profile = load_compiler_profile()?;
     let tool_dir = resolve_tool_dir();
-
-    // Add -noskip to suppress the ericw-tools qbsp warning about missing
-    // skip texture (cc0_dungeon_v2.wad does not include a skip texture).
-    // This is a standard Quake mapping practice.
-    if !profile.default_qbsp_args.contains(&"-noskip".to_string()) {
-        profile.default_qbsp_args.push("-noskip".to_string());
-    }
 
     let compiled = compile_map(
         &src_map_path,
@@ -73,6 +65,143 @@ fn generate_and_compile(
     })?;
 
     Ok((output, compiled))
+}
+
+fn build_production_topology(config: &V3Config) -> CommittedTopology {
+    let seed = V3Seed::new(config.seed);
+    let mut alloc = V3IdAllocator::new();
+    let (footprints, layout) = build_footprints(config, seed, &mut alloc).unwrap();
+    build_topology(config, &footprints, &layout, seed, &mut alloc).unwrap()
+}
+
+fn strict_reload(compiled: &CompiledArtifacts, identity: &str) -> bsp::BspWorld {
+    let (wad_path, palette_path) = theme_paths();
+    let options = bsp::LoadOptions {
+        strict: true,
+        palette: Some(fs::read(&palette_path).expect("read palette")),
+        lit_data: Some(compiled.lit_data.clone()),
+        wad_archives: vec![(
+            "cc0_dungeon_v2.wad".to_string(),
+            fs::read(&wad_path).expect("read WAD"),
+        )],
+        texture_overrides: Vec::new(),
+        source_identity: identity.to_string(),
+    };
+    let world = bsp::BspLoader::load(&compiled.bsp_data, &options).expect("strict BSP reload");
+    assert_eq!(world.profile, bsp::profile::BspProfile::Bsp2);
+    assert!(
+        world.diagnostics.is_empty(),
+        "strict reload emitted diagnostics: {:?}",
+        world.diagnostics
+    );
+    world
+}
+
+fn point_contents_quake(world: &bsp::BspWorld, point: (i32, i32, i32)) -> bsp::PointContents {
+    let transform = bsp::QuakeToEngine::default();
+    bsp::point_contents(
+        transform.position(point.0 as f32, point.1 as f32, point.2 as f32),
+        &world.nodes,
+        &world.leaves,
+        &world.planes,
+    )
+}
+
+fn assert_non_solid(world: &bsp::BspWorld, label: &str, point: (i32, i32, i32)) {
+    let contents = point_contents_quake(world, point);
+    assert!(
+        !contents.is_solid(),
+        "{label} is solid at {point:?}: {contents:?}"
+    );
+}
+
+fn assert_solid(world: &bsp::BspWorld, label: &str, point: (i32, i32, i32)) {
+    let contents = point_contents_quake(world, point);
+    assert!(
+        contents.is_solid(),
+        "{label} lacks solid support at {point:?}: {contents:?}"
+    );
+}
+
+fn assert_trace(
+    world: &bsp::BspWorld,
+    label: &str,
+    hull: bsp::StoredHull,
+    start: (i32, i32, i32),
+    end: (i32, i32, i32),
+) {
+    let transform = bsp::QuakeToEngine::default();
+    let trace = bsp::trace_line(
+        transform.position(start.0 as f32, start.1 as f32, start.2 as f32),
+        transform.position(end.0 as f32, end.1 as f32, end.2 as f32),
+        hull,
+        &world.clipnodes,
+        &world.planes,
+        &world.models,
+        &transform,
+    );
+    assert!(
+        !trace.starts_solid && !trace.all_solid && trace.hit_fraction >= 0.999_9,
+        "{label} {hull:?} trace {start:?}->{end:?} blocked: {trace:?}"
+    );
+}
+
+fn assert_player_trace(
+    world: &bsp::BspWorld,
+    label: &str,
+    start: (i32, i32, i32),
+    end: (i32, i32, i32),
+) {
+    assert_trace(world, label, bsp::StoredHull::Player, start, end);
+}
+
+fn assert_point_trace(
+    world: &bsp::BspWorld,
+    label: &str,
+    start: (i32, i32, i32),
+    end: (i32, i32, i32),
+) {
+    // Sample the compiler-produced render BSP at half-quantum spacing. Hull-0
+    // clipnodes may outside-fill disconnected-by-expansion stair volumes even
+    // when the authored 64×80 swept centerline is open, so node/leaf contents
+    // are the strict source-space continuity witness here.
+    let delta = (end.0 - start.0, end.1 - start.1, end.2 - start.2);
+    let distance = delta.0.abs().max(delta.1.abs()).max(delta.2.abs());
+    let steps = (distance / 8).max(1);
+    for step in 0..=steps {
+        let point = (
+            start.0 + delta.0 * step / steps,
+            start.1 + delta.1 * step / steps,
+            start.2 + delta.2 * step / steps,
+        );
+        assert_non_solid(world, &format!("{label} sample {step}/{steps}"), point);
+    }
+}
+
+fn wall_witness(
+    room: &CommittedRoom,
+    direction: &str,
+    tangent: i32,
+    normal_depth: i32,
+    z: i32,
+) -> (i32, i32, i32) {
+    match direction {
+        "north" => (tangent, room.shell.1 + normal_depth, z),
+        "south" => (tangent, room.shell.3 - normal_depth, z),
+        "west" => (room.shell.0 + normal_depth, tangent, z),
+        "east" => (room.shell.2 - normal_depth, tangent, z),
+        other => panic!("non-cardinal direction {other}"),
+    }
+}
+
+fn opposite(direction: &str) -> &'static str {
+    match direction {
+        "north" => "south",
+        "south" => "north",
+        "west" => "east",
+        "east" => "west",
+        other => panic!("non-cardinal direction {other}"),
+    }
 }
 
 // ── Compiler availability gate ────────────────────────────────────────────
@@ -202,6 +331,259 @@ fn rich_compiles_warning_free() {
     assert!(compiled.qbsp_output.diagnostics.is_empty());
     assert!(compiled.vis_output.diagnostics.is_empty());
     assert!(compiled.light_output.diagnostics.is_empty());
+}
+
+// ── Production seed-42 structural compilation ─────────────────────────────
+
+#[test]
+fn seed_42_production_presets_compile_and_pass_strict_spatial_witnesses() {
+    // Stored-hull witnesses sit one unit above exact floor/tread contact so the
+    // trace proves clear volume rather than depending on clip-plane equality.
+    const HULL_EYE_OFFSET: i32 = 25;
+    let cases = [
+        (
+            "seed42-sparse",
+            V3Config::new(42, V3Preset::Sparse, 2048).unwrap(),
+        ),
+        (
+            "seed42-moderate",
+            V3Config::new(42, V3Preset::Moderate, 2048).unwrap(),
+        ),
+        (
+            "seed42-rich",
+            V3Config::new(42, V3Preset::Rich, 3072).unwrap(),
+        ),
+    ];
+
+    for (label, config) in cases {
+        let (output, compiled) =
+            generate_and_compile(&config, label).unwrap_or_else(|error| panic!("{label}: {error}"));
+        let topology = build_production_topology(&config);
+        let world = strict_reload(&compiled, label);
+        assert!(compiled.qbsp_output.diagnostics.is_empty());
+        assert!(compiled.vis_output.diagnostics.is_empty());
+        assert!(compiled.light_output.diagnostics.is_empty());
+        assert!(output.metadata.actual_faces() <= config.preset.face_budget());
+
+        let spawn = output.metadata.spawn_origin();
+        assert_non_solid(&world, &format!("{label} spawn"), spawn);
+        assert_player_trace(&world, &format!("{label} spawn hull"), spawn, spawn);
+
+        let room_by_id: BTreeMap<_, _> =
+            topology.rooms.iter().map(|room| (room.id, room)).collect();
+        let room_center = |room: &CommittedRoom| {
+            (
+                (room.shell.0 + room.shell.2) / 2,
+                (room.shell.1 + room.shell.3) / 2,
+                room.floor_z + CONSTRUCTION_QUANTUM + HULL_EYE_OFFSET,
+            )
+        };
+        for room in &topology.rooms {
+            let center = room_center(room);
+            assert_non_solid(&world, &format!("{label} {} center", room.id), center);
+        }
+
+        let mut adjacency: BTreeMap<RoomId, Vec<RoomId>> = BTreeMap::new();
+        for route in &topology.routes {
+            adjacency
+                .entry(route.source_room)
+                .or_default()
+                .push(route.target_room);
+            adjacency
+                .entry(route.target_room)
+                .or_default()
+                .push(route.source_room);
+            let portal = topology
+                .portals
+                .iter()
+                .find(|portal| {
+                    portal.source_room == route.source_room
+                        && portal.target_room == Some(route.target_room)
+                })
+                .expect("every route has one structural portal");
+            let source = room_by_id[&route.source_room];
+            let target = room_by_id[&route.target_room];
+            let target_direction = opposite(&portal.wall);
+            let tangent = if matches!(portal.wall.as_str(), "east" | "west") {
+                portal.anchor.1
+            } else {
+                portal.anchor.0
+            };
+            let eye_z = source.floor_z + CONSTRUCTION_QUANTUM + HULL_EYE_OFFSET;
+            let source_throat = wall_witness(source, &portal.wall, tangent, 8, eye_z);
+            let target_throat = wall_witness(target, target_direction, tangent, 8, eye_z);
+            let source_approach = wall_witness(source, &portal.wall, tangent, 40, eye_z);
+            let target_approach = wall_witness(target, target_direction, tangent, 40, eye_z);
+            let corridor = if matches!(portal.wall.as_str(), "east" | "west") {
+                ((source_throat.0 + target_throat.0) / 2, tangent, eye_z)
+            } else {
+                (tangent, (source_throat.1 + target_throat.1) / 2, eye_z)
+            };
+            let route_points = [
+                room_center(source),
+                source_approach,
+                source_throat,
+                corridor,
+                target_throat,
+                target_approach,
+                room_center(target),
+            ];
+            for (index, point) in route_points.iter().enumerate() {
+                assert_non_solid(
+                    &world,
+                    &format!("{label} route {} witness {index}", route.id),
+                    *point,
+                );
+            }
+            for (index, segment) in route_points.windows(2).enumerate() {
+                assert_point_trace(
+                    &world,
+                    &format!("{label} route {} segment {index}", route.id),
+                    segment[0],
+                    segment[1],
+                );
+            }
+
+            // The 80-unit rectangular swept core remains clear through the
+            // full wall depth, and the first pointed step has a visible apex.
+            for (room, direction) in [(source, portal.wall.as_str()), (target, target_direction)] {
+                let floor_top = room.floor_z + CONSTRUCTION_QUANTUM;
+                for depth in [1, 8, 15] {
+                    for height in [1, 40, 79] {
+                        assert_non_solid(
+                            &world,
+                            &format!("{label} portal {} core", portal.id),
+                            wall_witness(room, direction, tangent, depth, floor_top + height),
+                        );
+                    }
+                }
+                assert_non_solid(
+                    &world,
+                    &format!("{label} portal {} pointed apex", portal.id),
+                    wall_witness(room, direction, tangent, 8, floor_top + HEADROOM + 8),
+                );
+            }
+        }
+
+        let transition = &topology.transitions[0];
+        adjacency
+            .entry(transition.lower_room)
+            .or_default()
+            .push(transition.upper_room);
+        adjacency
+            .entry(transition.upper_room)
+            .or_default()
+            .push(transition.lower_room);
+        let lower = room_by_id[&transition.lower_room];
+        let upper = room_by_id[&transition.upper_room];
+        let x_center = (transition.protected_volume.0 + transition.protected_volume.3) / 2;
+        let tread_start = transition.tread_run.1;
+        let mut stair_path = Vec::new();
+        let lower_landing = (
+            (transition.lower_landing.0 + transition.lower_landing.2) / 2,
+            (transition.lower_landing.1 + transition.lower_landing.3) / 2,
+            lower.floor_z + CONSTRUCTION_QUANTUM + HULL_EYE_OFFSET,
+        );
+        stair_path.push(lower_landing);
+        for step in 0..12_i32 {
+            let tread_center = (
+                x_center,
+                tread_start + step * CONSTRUCTION_QUANTUM + CONSTRUCTION_QUANTUM / 2,
+            );
+            let tread_top = lower.floor_z + (step + 1) * CONSTRUCTION_QUANTUM;
+            let eye = (tread_center.0, tread_center.1, tread_top + HULL_EYE_OFFSET);
+            assert_solid(
+                &world,
+                &format!("{label} tread {step} support"),
+                (tread_center.0, tread_center.1, tread_top - 8),
+            );
+            assert_non_solid(
+                &world,
+                &format!("{label} tread {step} clearance"),
+                (tread_center.0, tread_center.1, tread_top + 79),
+            );
+            stair_path.push(eye);
+        }
+        let run_end = tread_start + 12 * CONSTRUCTION_QUANTUM;
+        assert_eq!(run_end - tread_start, 192);
+        let upper_approach = (
+            x_center,
+            (run_end + upper.shell.1) / 2,
+            upper.floor_z + CONSTRUCTION_QUANTUM + HULL_EYE_OFFSET,
+        );
+        let upper_landing = (
+            (transition.upper_landing.0 + transition.upper_landing.2) / 2,
+            (transition.upper_landing.1 + transition.upper_landing.3) / 2,
+            upper.floor_z + CONSTRUCTION_QUANTUM + HULL_EYE_OFFSET,
+        );
+        for (name, point) in [
+            ("upper approach", upper_approach),
+            ("upper landing", upper_landing),
+        ] {
+            assert_non_solid(&world, &format!("{label} {name}"), point);
+        }
+        assert_solid(
+            &world,
+            &format!("{label} upper approach support"),
+            (upper_approach.0, upper_approach.1, upper.floor_z + 8),
+        );
+        assert_non_solid(
+            &world,
+            &format!("{label} upper approach 80-unit crest clearance"),
+            (
+                upper_approach.0,
+                upper_approach.1,
+                upper.floor_z + CONSTRUCTION_QUANTUM + 79,
+            ),
+        );
+        stair_path.extend([upper_approach, upper_landing]);
+        for (index, segment) in stair_path.windows(2).enumerate() {
+            assert_point_trace(
+                &world,
+                &format!("{label} stair segment {index}"),
+                segment[0],
+                segment[1],
+            );
+        }
+        assert_point_trace(
+            &world,
+            &format!("{label} lower room to stair"),
+            room_center(lower),
+            lower_landing,
+        );
+        assert_point_trace(
+            &world,
+            &format!("{label} stair to upper room"),
+            upper_landing,
+            room_center(upper),
+        );
+
+        let spawn_room = topology
+            .rooms
+            .iter()
+            .find(|room| {
+                spawn.0 > room.shell.0
+                    && spawn.0 < room.shell.2
+                    && spawn.1 > room.shell.1
+                    && spawn.1 < room.shell.3
+                    && spawn.2 > room.floor_z
+                    && spawn.2 < room.floor_z + room.dims.2 as i32
+            })
+            .expect("spawn belongs to a committed room");
+        let mut visited = BTreeSet::new();
+        let mut stack = vec![spawn_room.id];
+        while let Some(room) = stack.pop() {
+            if !visited.insert(room) {
+                continue;
+            }
+            stack.extend(adjacency.get(&room).into_iter().flatten().copied());
+        }
+        assert_eq!(
+            visited.len(),
+            topology.rooms.len(),
+            "{label}: physically witnessed route graph does not reach every room"
+        );
+    }
 }
 
 // ── Budget validation tests ───────────────────────────────────────────────
@@ -364,8 +746,9 @@ fn room_centers_are_in_empty_space() {
     let contents = bsp::point_contents(point, &world.nodes, &world.leaves, &world.planes);
     assert!(!contents.is_solid(), "room center is solid");
 
-    // Also probe a lower point in the same room (near floor + headroom/2)
-    let low_point = transform.position(sx as f32, sy as f32, (sz - 40) as f32);
+    // Also probe a lower standing-height point. `spawn_origin` is floor +
+    // 48, so subtracting 40 would sample inside the 0..16 floor slab.
+    let low_point = transform.position(sx as f32, sy as f32, (sz - CONSTRUCTION_QUANTUM) as f32);
     let low_contents = bsp::point_contents(low_point, &world.nodes, &world.leaves, &world.planes);
     assert!(!low_contents.is_solid(), "lower room point is solid");
 }

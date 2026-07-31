@@ -18,14 +18,16 @@
 //! Two calls with identical `V3Config` produce byte-identical `.map` output
 //! and field-identical metadata.
 
-use super::assembly::{self, Assembly, AssemblyBrush, BrushRole, Interface, Support};
+use super::assembly::{
+    self, Assembly, AssemblyBrush, BrushRole, Interface, ProtectedVolume, Support,
+};
 #[allow(unused_imports)]
 use super::config::V3Preset;
-use super::config::{V3Config, CONSTRUCTION_QUANTUM, HEADROOM};
+use super::config::{V3Config, CONSTRUCTION_QUANTUM, HEADROOM, ROUTE_WIDTH};
 use super::emission;
 use super::error::V3Error;
 use super::footprint::build_footprints;
-use super::geometry::{ConvexBrush, FaceRole};
+use super::geometry::{CanonicalPlane, ConvexBrush, FaceRole};
 use super::ids::{
     CommittedPortal, CommittedRoom, CommittedTopology, QuantumVolume, RoomId, V3IdAllocator,
 };
@@ -124,6 +126,10 @@ pub fn run_pipeline(config: &V3Config) -> Result<V3PipelineOutput, V3Error> {
 
 // ── Assembly construction ─────────────────────────────────────────────────
 
+/// Stair step count and dimensions.
+const STAIR_STEPS: i32 = 12;
+const STAIR_RISER: i32 = 16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum WallDirection {
     North,
@@ -179,6 +185,7 @@ struct WallAperture {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct BrushBounds {
     id: String,
     x: (i128, i128),
@@ -304,6 +311,55 @@ fn collect_wall_apertures(
         }
     }
 
+    // A transition owns two real wall omissions: the lower stair entry and
+    // the upper connector crest.  They are structural apertures, not solids
+    // pretending to carve an opening.
+    for transition in &topology.transitions {
+        let lower =
+            topology
+                .room(transition.lower_room)
+                .ok_or_else(|| V3Error::TopologyInvariant {
+                    detail: format!("transition/{:04} lower room missing", transition.id),
+                })?;
+        let upper =
+            topology
+                .room(transition.upper_room)
+                .ok_or_else(|| V3Error::TopologyInvariant {
+                    detail: format!("transition/{:04} upper room missing", transition.id),
+                })?;
+        let center = (i128::from(transition.protected_volume.0)
+            + i128::from(transition.protected_volume.3))
+            / 2;
+        let lower_z0 = i128::from(lower.floor_z) + i128::from(CONSTRUCTION_QUANTUM);
+        let upper_z0 = i128::from(upper.floor_z) + i128::from(CONSTRUCTION_QUANTUM);
+        apertures
+            .entry((lower.id, WallDirection::South))
+            .or_default()
+            .push(make_wall_aperture(
+                format!("transition/{:04}/lower_entry", transition.id),
+                lower,
+                WallDirection::South,
+                room_wall_coordinate(lower, WallDirection::South),
+                center,
+                lower_z0 + i128::from(HEADROOM) / 2,
+                ROUTE_WIDTH as u32,
+                HEADROOM as u32,
+            )?);
+        apertures
+            .entry((upper.id, WallDirection::North))
+            .or_default()
+            .push(make_wall_aperture(
+                format!("transition/{:04}/upper_crest", transition.id),
+                upper,
+                WallDirection::North,
+                room_wall_coordinate(upper, WallDirection::North),
+                center,
+                upper_z0 + i128::from(HEADROOM) / 2,
+                ROUTE_WIDTH as u32,
+                HEADROOM as u32,
+            )?);
+    }
+
     for room_apertures in apertures.values_mut() {
         room_apertures.sort_by(|left, right| {
             (left.center - left.width / 2)
@@ -383,28 +439,679 @@ fn wall_piece_bounds(
     }
 }
 
-fn build_room_wall(
-    room: &CommittedRoom,
-    direction: WallDirection,
-    apertures: &[WallAperture],
-    wall_thickness: i128,
+/// Build a floor or ceiling slab split around rectangular openings.
+///
+/// The slab is divided into axis-aligned rectangular pieces that avoid
+/// the given openings. Each piece is a separate brush.
+fn build_split_slab(
     brushes: &mut Vec<AssemblyBrush>,
     bounds: &mut Vec<BrushBounds>,
+    base_id: &str,
+    x_range: (i128, i128),
+    y_range: (i128, i128),
+    z: (i128, i128),
+    role: BrushRole,
+    openings: &[(i128, i128, i128, i128)],
+    _wall_thickness: i128,
 ) -> Result<(), V3Error> {
-    let rid = room.id.stable_key();
-    let base_id = format!("{rid}/wall_{}", direction.tag());
+    let mut clipped: Vec<_> = openings
+        .iter()
+        .map(|&(x0, y0, x1, y1)| {
+            (
+                x0.max(x_range.0),
+                y0.max(y_range.0),
+                x1.min(x_range.1),
+                y1.min(y_range.1),
+            )
+        })
+        .filter(|&(x0, y0, x1, y1)| x0 < x1 && y0 < y1)
+        .collect();
+    clipped.sort_unstable();
+    clipped.dedup();
+    if clipped.is_empty() {
+        return push_box_brush(
+            brushes,
+            bounds,
+            base_id.to_string(),
+            role,
+            x_range,
+            y_range,
+            z,
+        );
+    }
+
+    // Partition on every opening boundary. Each cell is wholly solid or
+    // wholly omitted, so multiple openings can never restore solid volume.
+    let mut x_cuts = vec![x_range.0, x_range.1];
+    let mut y_cuts = vec![y_range.0, y_range.1];
+    for &(x0, y0, x1, y1) in &clipped {
+        x_cuts.extend([x0, x1]);
+        y_cuts.extend([y0, y1]);
+    }
+    x_cuts.sort_unstable();
+    x_cuts.dedup();
+    y_cuts.sort_unstable();
+    y_cuts.dedup();
+
+    let mut segment = 0u32;
+    for y in y_cuts.windows(2) {
+        for x in x_cuts.windows(2) {
+            let cell = (x[0], y[0], x[1], y[1]);
+            if clipped.iter().any(|&opening| {
+                cell.0 >= opening.0
+                    && cell.2 <= opening.2
+                    && cell.1 >= opening.1
+                    && cell.3 <= opening.3
+            }) {
+                continue;
+            }
+            push_box_brush(
+                brushes,
+                bounds,
+                format!("{base_id}/seg_{segment:04}"),
+                role,
+                (cell.0, cell.2),
+                (cell.1, cell.3),
+                z,
+            )?;
+            segment += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Compute the actual cardinal wall interior span for a room, accounting for
+/// chamfer corners that shorten the cardinal edge.
+fn cardinal_wall_interior_span(
+    room: &CommittedRoom,
+    direction: WallDirection,
+    wall_thickness: i128,
+) -> (i128, i128) {
     let (x0, y0, x1, y1) = (
         i128::from(room.shell.0),
         i128::from(room.shell.1),
         i128::from(room.shell.2),
         i128::from(room.shell.3),
     );
+    if !room.is_chamfered {
+        let inner_x0 = x0 + wall_thickness;
+        let inner_x1 = x1 - wall_thickness;
+        let inner_y0 = y0 + wall_thickness;
+        let inner_y1 = y1 - wall_thickness;
+        return match direction {
+            WallDirection::North | WallDirection::South => (inner_x0, inner_x1),
+            WallDirection::West | WallDirection::East => (inner_y0, inner_y1),
+        };
+    }
+
+    // For chamfered rooms, the cardinal wall span is determined by the
+    // actual footprint polygon edges, which are shorter due to chamfers.
+    // The footprint vertices are on the OUTER edge of the room AABB.
+    // We need to inset by wall_thickness to get the INTERIOR wall span.
+    let mut span: Option<(i128, i128)> = None;
+    for idx in 0..room.footprint_vertices.len() {
+        let a = room.footprint_vertices[idx];
+        let b = room.footprint_vertices[(idx + 1) % room.footprint_vertices.len()];
+        let a = (i128::from(a.0), i128::from(a.1));
+        let b = (i128::from(b.0), i128::from(b.1));
+
+        // Check if this edge lies on the requested cardinal wall.
+        let on_wall = match direction {
+            WallDirection::West if a.0 == x0 && b.0 == x0 => true,
+            WallDirection::East if a.0 == x1 && b.0 == x1 => true,
+            WallDirection::North if a.1 == y0 && b.1 == y0 => true,
+            WallDirection::South if a.1 == y1 && b.1 == y1 => true,
+            _ => false,
+        };
+
+        if !on_wall {
+            continue;
+        }
+
+        let (lo, hi) = if direction.is_horizontal_route() {
+            (a.1.min(b.1), a.1.max(b.1))
+        } else {
+            (a.0.min(b.0), a.0.max(b.0))
+        };
+        span = match span {
+            None => Some((lo, hi)),
+            Some((slo, shi)) => Some((slo.min(lo), shi.max(hi))),
+        };
+    }
+
+    // At a chamfered endpoint the cardinal edge already terminates on the
+    // diagonal shell, so trimming it would create a 16-unit leak slit.  At an
+    // intact endpoint retain the conventional one-wall-thickness trim so the
+    // two perpendicular cardinal wall brushes never overlap.
+    let (mut lo, mut hi) = span.unwrap_or(match direction {
+        WallDirection::North | WallDirection::South => (x0, x1),
+        WallDirection::West | WallDirection::East => (y0, y1),
+    });
+    let (low_corner, high_corner) = match direction {
+        WallDirection::North => ((-1, -1), (1, -1)),
+        WallDirection::South => ((-1, 1), (1, 1)),
+        WallDirection::West => ((-1, -1), (-1, 1)),
+        WallDirection::East => ((1, -1), (1, 1)),
+    };
+    if !room.chamfer_corners.contains(&low_corner) {
+        lo += wall_thickness;
+    }
+    if !room.chamfer_corners.contains(&high_corner) {
+        hi -= wall_thickness;
+    }
+    (lo, hi)
+}
+
+#[allow(dead_code)]
+fn build_chamfered_slab(
+    room: &CommittedRoom,
+    z: (i128, i128),
+    role: BrushRole,
+    id: &str,
+    brushes: &mut Vec<AssemblyBrush>,
+    bounds: &mut Vec<BrushBounds>,
+) -> Result<(), V3Error> {
+    let x_range = (i128::from(room.shell.0), i128::from(room.shell.2));
+    let y_range = (i128::from(room.shell.1), i128::from(room.shell.3));
+
+    let brush = if !room.is_chamfered || room.chamfer_corners.is_empty() {
+        ConvexBrush::make_box(x_range, y_range, z)?
+    } else {
+        let chamfer_corners_i128: Vec<(i128, i128)> = room
+            .chamfer_corners
+            .iter()
+            .map(|&(sx, sy)| (i128::from(sx), i128::from(sy)))
+            .collect();
+        super::geometry::make_chamfered_slab(
+            x_range,
+            y_range,
+            z.0,
+            z.1,
+            &chamfer_corners_i128,
+            i128::from(room.chamfer_size),
+        )?
+    };
+    brushes.push(AssemblyBrush::new(
+        id.to_string(),
+        role,
+        brush,
+        Support::World {
+            surface: FaceRole::Floor,
+        },
+    ));
+    bounds.push(BrushBounds::new(id.to_string(), x_range, y_range, z));
+    Ok(())
+}
+
+/// Build diagonal wall pieces for a chamfered room.
+/// Fill each intact cardinal corner left open by non-overlapping wall spans.
+/// The four wall brushes intentionally stop one quantum short of an uncut
+/// corner; these posts own that remaining cell and keep a room shell sealed
+/// without positive-volume wall/wall overlap.
+fn build_cardinal_corner_posts(
+    room: &CommittedRoom,
+    wall_thickness: i128,
+    brushes: &mut Vec<AssemblyBrush>,
+    bounds: &mut Vec<BrushBounds>,
+) -> Result<(), V3Error> {
+    let x0 = i128::from(room.shell.0);
+    let y0 = i128::from(room.shell.1);
+    let x1 = i128::from(room.shell.2);
+    let y1 = i128::from(room.shell.3);
+    let z = (
+        i128::from(room.floor_z) + wall_thickness,
+        i128::from(room.floor_z) + i128::from(room.dims.2) - wall_thickness,
+    );
+    for ((sx, sy), tag) in [
+        ((-1, -1), "nw"),
+        ((1, -1), "ne"),
+        ((-1, 1), "sw"),
+        ((1, 1), "se"),
+    ] {
+        if room.chamfer_corners.contains(&(sx, sy)) {
+            continue;
+        }
+        let x = if sx < 0 {
+            (x0, x0 + wall_thickness)
+        } else {
+            (x1 - wall_thickness, x1)
+        };
+        let y = if sy < 0 {
+            (y0, y0 + wall_thickness)
+        } else {
+            (y1 - wall_thickness, y1)
+        };
+        push_wall_brush(
+            brushes,
+            bounds,
+            format!("{}/corner_{tag}", room.id.stable_key()),
+            x,
+            y,
+            z,
+        )?;
+    }
+    Ok(())
+}
+
+fn build_diagonal_walls(
+    room: &CommittedRoom,
+    _wall_thickness: i128,
+    brushes: &mut Vec<AssemblyBrush>,
+    bounds: &mut Vec<BrushBounds>,
+) -> Result<(), V3Error> {
+    if !room.is_chamfered || room.chamfer_corners.is_empty() {
+        return Ok(());
+    }
+
+    let rid = room.id.stable_key();
+    // Chamfered slabs stop at the diagonal interior plane. The diagonal wall
+    // therefore owns the complementary corner prism through the floor and
+    // ceiling bands as well as the clear-height wall band; limiting it to
+    // 16..160 would leave open triangular holes under and over every chamfer.
+    let wall_z0 = i128::from(room.floor_z);
+    let wall_z1 = i128::from(room.floor_z) + i128::from(room.dims.2);
+    let x_range = (i128::from(room.shell.0), i128::from(room.shell.2));
+    let y_range = (i128::from(room.shell.1), i128::from(room.shell.3));
+    let chamfer_size = i128::from(room.chamfer_size);
+
+    for &(sx, sy) in &room.chamfer_corners {
+        let tag = match (sx, sy) {
+            (1, 1) => "diag_ne",
+            (1, -1) => "diag_se",
+            (-1, 1) => "diag_nw",
+            (-1, -1) => "diag_sw",
+            _ => continue,
+        };
+        let diag_id = format!("{rid}/wall_{tag}");
+        let sx = i128::from(sx);
+        let sy = i128::from(sy);
+
+        let brush = super::geometry::make_diagonal_wall(
+            x_range,
+            y_range,
+            wall_z0,
+            wall_z1,
+            sx,
+            sy,
+            chamfer_size,
+        )?;
+
+        brushes.push(AssemblyBrush::new(
+            diag_id.clone(),
+            BrushRole::WallShell,
+            brush,
+            Support::World {
+                surface: FaceRole::Floor,
+            },
+        ));
+        // Conservative AABB bounds for contact derivation
+        let (dx0, dx1) = if sx > 0 {
+            (x_range.1 - chamfer_size, x_range.1)
+        } else {
+            (x_range.0, x_range.0 + chamfer_size)
+        };
+        let (dy0, dy1) = if sy > 0 {
+            (y_range.1 - chamfer_size, y_range.1)
+        } else {
+            (y_range.0, y_range.0 + chamfer_size)
+        };
+        bounds.push(BrushBounds::new(
+            diag_id,
+            (dx0, dx1),
+            (dy0, dy1),
+            (wall_z0, wall_z1),
+        ));
+    }
+    Ok(())
+}
+
+/// Build pointed arch portal surrounds for Moderate/Rich presets.
+///
+/// Creates stepped axis-aligned segments above the 64×80 clear core
+/// to form a pointed arch silhouette. Uses only cardinal XY normals
+/// (no XZ slopes) for compiler safety.
+fn build_pointed_arch_surround(
+    room: &CommittedRoom,
+    direction: WallDirection,
+    _wall_coordinate: i128,
+    aperture_center: i128,
+    wall_thickness: i128,
+    brushes: &mut Vec<AssemblyBrush>,
+    bounds: &mut Vec<BrushBounds>,
+) -> Result<(), V3Error> {
+    let rid = room.id.stable_key();
     let wall_z0 = i128::from(room.floor_z) + wall_thickness;
     let wall_z1 = i128::from(room.floor_z) + i128::from(room.dims.2) - wall_thickness;
-    let wall_span = if direction.is_horizontal_route() {
-        (y0 + wall_thickness, y1 - wall_thickness)
+    let arch_base_z = wall_z0 + i128::from(HEADROOM); // Z = floor+16+80 = 96
+    let half_width: i128 = 32; // half of 64-unit core
+    let step_height: i128 = 16;
+    let step_width: i128 = 16;
+    let num_steps = 2i128; // two steps each side
+
+    // Stepped arch: each side steps inward by step_width at each step_height
+    // until reaching an apex. The aperture Z goes from wall_z0 to arch_base_z
+    // (the 64×80 core). Above that, stepped jambs narrow the opening.
+
+    let base_id = format!("{rid}/wall_{}/arch", direction.tag());
+
+    let mut highest_step_top = arch_base_z;
+    for step in 0..num_steps {
+        let step_z0 = arch_base_z + step * step_height;
+        let step_z1 = step_z0 + step_height;
+        if step_z1 > wall_z1 {
+            break;
+        }
+        highest_step_top = step_z1;
+        // Each step narrows the opening by step_width on each side.
+        let solid_inner = half_width - (step + 1) * step_width;
+        if solid_inner < 0 {
+            // Apex: fill the entire width above and stop.
+            let apex_z0 = step_z0;
+            let apex_z1 = wall_z1;
+            let (x, y, z) = wall_piece_bounds(
+                room,
+                direction,
+                (aperture_center - half_width, aperture_center + half_width),
+                (apex_z0, apex_z1),
+                wall_thickness,
+            );
+            push_wall_brush(brushes, bounds, format!("{base_id}/apex"), x, y, z)?;
+            highest_step_top = apex_z1;
+            break;
+        }
+
+        // Left jamb fill
+        let left_inner = aperture_center - solid_inner;
+        let left_span = (aperture_center - half_width, left_inner);
+        if left_span.0 < left_span.1 {
+            let (x, y, z) = wall_piece_bounds(
+                room,
+                direction,
+                left_span,
+                (step_z0, step_z1),
+                wall_thickness,
+            );
+            push_wall_brush(
+                brushes,
+                bounds,
+                format!("{base_id}/step_{step}_left"),
+                x,
+                y,
+                z,
+            )?;
+        }
+
+        // Right jamb fill
+        let right_inner = aperture_center + solid_inner;
+        let right_span = (right_inner, aperture_center + half_width);
+        if right_span.0 < right_span.1 {
+            let (x, y, z) = wall_piece_bounds(
+                room,
+                direction,
+                right_span,
+                (step_z0, step_z1),
+                wall_thickness,
+            );
+            push_wall_brush(
+                brushes,
+                bounds,
+                format!("{base_id}/step_{step}_right"),
+                x,
+                y,
+                z,
+            )?;
+        }
+    }
+
+    // Lintel above the highest arch step: full-width fill from highest step
+    // to ceiling.
+    if highest_step_top < wall_z1 {
+        let (x, y, z) = wall_piece_bounds(
+            room,
+            direction,
+            (aperture_center - half_width, aperture_center + half_width),
+            (highest_step_top, wall_z1),
+            wall_thickness,
+        );
+        push_wall_brush(brushes, bounds, format!("{base_id}/lintel"), x, y, z)?;
+    }
+
+    Ok(())
+}
+
+/// Emit stair tread geometry for a committed transition.
+///
+/// Creates 12 tread×riser sealed shells with side, underside, and top
+/// boundaries. Also emits the lower-room ceiling aperture, upper-room floor
+/// aperture, and approach portals.
+fn build_stair_emission(
+    transition: &super::ids::CommittedTransition,
+    topology: &CommittedTopology,
+    wall_thickness: i128,
+    brushes: &mut Vec<AssemblyBrush>,
+    bounds: &mut Vec<BrushBounds>,
+) -> Result<(), V3Error> {
+    let q = i128::from(CONSTRUCTION_QUANTUM);
+    let (pv_x0, _pv_y0, _pv_z0, pv_x1, _pv_y1, _pv_z1) = (
+        i128::from(transition.protected_volume.0),
+        i128::from(transition.protected_volume.1),
+        i128::from(transition.protected_volume.2),
+        i128::from(transition.protected_volume.3),
+        i128::from(transition.protected_volume.4),
+        i128::from(transition.protected_volume.5),
+    );
+
+    let lower = topology
+        .room(transition.lower_room)
+        .ok_or_else(|| V3Error::TopologyInvariant {
+            detail: "transition lower room missing".into(),
+        })?;
+    let upper = topology
+        .room(transition.upper_room)
+        .ok_or_else(|| V3Error::TopologyInvariant {
+            detail: "transition upper room missing".into(),
+        })?;
+
+    // The stair runs south→north from a supported lower approach to a
+    // supported upper connector. Topology owns every positive-volume tread;
+    // emission validates and consumes those boxes without reconstructing them.
+    let lower_floor = i128::from(lower.floor_z);
+    let upper_floor = i128::from(upper.floor_z);
+    let tread_x0 = i128::from(transition.tread_run.0);
+    let stair_y_start = i128::from(transition.tread_run.1);
+    let tread_x1 = i128::from(transition.tread_run.2);
+    let stair_y_end = i128::from(transition.tread_run.3);
+    let trans_id = format!("transition/{:04}", transition.id);
+
+    if transition.tread_boxes.len() != STAIR_STEPS as usize
+        || stair_y_end - stair_y_start != i128::from(STAIR_STEPS) * q
+        || tread_x0 != pv_x0
+        || tread_x1 != pv_x1
+    {
+        return Err(V3Error::TopologyInvariant {
+            detail: format!("{trans_id} does not satisfy the 12×16 tread-run contract"),
+        });
+    }
+
+    let lower_approach = (
+        i128::from(transition.lower_approach.0),
+        i128::from(transition.lower_approach.1),
+        i128::from(transition.lower_approach.2),
+        i128::from(transition.lower_approach.3),
+    );
+    let connector_x = (tread_x0 - wall_thickness, tread_x1 + wall_thickness);
+    push_floor_brush(
+        brushes,
+        bounds,
+        format!("{trans_id}/lower_approach/floor"),
+        connector_x,
+        (lower_approach.1, lower_approach.3),
+        (lower_floor, lower_floor + wall_thickness),
+    )?;
+
+    for (step, &(x0, y0, z0, x1, y1, z1)) in transition.tread_boxes.iter().enumerate() {
+        let expected = (
+            transition.tread_run.0,
+            transition.tread_run.1 + step as i32 * CONSTRUCTION_QUANTUM,
+            lower.floor_z,
+            transition.tread_run.2,
+            transition.tread_run.1 + (step as i32 + 1) * CONSTRUCTION_QUANTUM,
+            lower.floor_z + (step as i32 + 1) * STAIR_RISER,
+        );
+        if (x0, y0, z0, x1, y1, z1) != expected {
+            return Err(V3Error::TopologyInvariant {
+                detail: format!(
+                    "{trans_id} tread {step} is {:?}, expected {expected:?}",
+                    (x0, y0, z0, x1, y1, z1)
+                ),
+            });
+        }
+        let id = format!("{trans_id}/tread_{step:04}");
+        let brush = ConvexBrush::make_box(
+            (i128::from(x0), i128::from(x1)),
+            (i128::from(y0), i128::from(y1)),
+            (i128::from(z0), i128::from(z1)),
+        )?;
+        brushes.push(AssemblyBrush::new(
+            id.clone(),
+            BrushRole::Feature,
+            brush,
+            Support::World {
+                surface: FaceRole::Floor,
+            },
+        ));
+        bounds.push(BrushBounds::new(
+            id,
+            (i128::from(x0), i128::from(x1)),
+            (i128::from(y0), i128::from(y1)),
+            (i128::from(z0), i128::from(z1)),
+        ));
+    }
+    let clear_z0 = lower_floor + wall_thickness;
+    // The upper approach is walked on top of its 16-unit support slab, so its
+    // 80-unit headroom is measured from that top surface.
+    let clear_z1 = upper_floor + wall_thickness + i128::from(HEADROOM);
+
+    // Side shells begin at the lower wall face, enclose the supported lower
+    // approach and complete tread run, and stop exactly at the crest.
+    let side_y = (lower_approach.1, stair_y_end);
+    for (tag, x) in [
+        ("wall_west", (tread_x0 - wall_thickness, tread_x0)),
+        ("wall_east", (tread_x1, tread_x1 + wall_thickness)),
+    ] {
+        push_wall_brush(
+            brushes,
+            bounds,
+            format!("{trans_id}/{tag}"),
+            x,
+            side_y,
+            (clear_z0, clear_z1),
+        )?;
+    }
+    // A flat structural roof at the crest clearance seals the top while
+    // retaining at least 80 units above the twelfth (Z=192) tread.
+    push_box_brush(
+        brushes,
+        bounds,
+        format!("{trans_id}/roof"),
+        BrushRole::CeilingSlab,
+        (tread_x0 - wall_thickness, tread_x1 + wall_thickness),
+        (lower_approach.1, stair_y_end),
+        (clear_z1, clear_z1 + wall_thickness),
+    )?;
+    // Above the lower room's own ceiling, close the external face of the
+    // stairwell.  The lower portal core and its stepped apex remain omissions
+    // below this cap; without it, the high exterior volume can enter the
+    // stairwell around the finite-height lower room wall.
+    let lower_ceiling_top = lower_floor + i128::from(lower.dims.2);
+    push_wall_brush(
+        brushes,
+        bounds,
+        format!("{trans_id}/lower_entry_cap"),
+        (tread_x0, tread_x1),
+        (
+            i128::from(lower.shell.3),
+            i128::from(lower.shell.3) + wall_thickness,
+        ),
+        (lower_ceiling_top, clear_z1),
+    )?;
+
+    // The final tread joins an upper-floor connector which runs directly to
+    // the committed upper room's north-wall omission.  This makes the
+    // transition physically traversable instead of a topology-only edge.
+    let connector_y = (
+        i128::from(transition.upper_approach.1),
+        i128::from(transition.upper_approach.3),
+    );
+    if connector_y.0 != stair_y_end
+        || connector_y.1 != i128::from(upper.shell.1)
+        || connector_y.0 >= connector_y.1
+    {
+        return Err(V3Error::TopologyInvariant {
+            detail: format!("{trans_id} crest does not precede upper approach"),
+        });
+    }
+    push_floor_brush(
+        brushes,
+        bounds,
+        format!("{trans_id}/upper_approach/floor"),
+        connector_x,
+        connector_y,
+        (upper_floor, upper_floor + wall_thickness),
+    )?;
+    push_box_brush(
+        brushes,
+        bounds,
+        format!("{trans_id}/upper_approach/ceiling"),
+        BrushRole::CeilingSlab,
+        connector_x,
+        connector_y,
+        (clear_z1, clear_z1 + wall_thickness),
+    )?;
+    for (tag, x) in [
+        ("wall_west", (tread_x0 - wall_thickness, tread_x0)),
+        ("wall_east", (tread_x1, tread_x1 + wall_thickness)),
+    ] {
+        push_wall_brush(
+            brushes,
+            bounds,
+            format!("{trans_id}/upper_approach/{tag}"),
+            x,
+            connector_y,
+            (upper_floor + wall_thickness, clear_z1),
+        )?;
+    }
+    Ok(())
+}
+
+fn build_room_wall(
+    room: &CommittedRoom,
+    direction: WallDirection,
+    apertures: &[WallAperture],
+    wall_thickness: i128,
+    skip_lintels: bool,
+    brushes: &mut Vec<AssemblyBrush>,
+    bounds: &mut Vec<BrushBounds>,
+) -> Result<(), V3Error> {
+    let rid = room.id.stable_key();
+    let base_id = format!("{rid}/wall_{}", direction.tag());
+    let wall_z0 = i128::from(room.floor_z) + wall_thickness;
+    let wall_z1 = i128::from(room.floor_z) + i128::from(room.dims.2) - wall_thickness;
+    // Use chamfer-aware wall span to avoid overlapping diagonal corner pieces.
+    let wall_span = if room.is_chamfered {
+        cardinal_wall_interior_span(room, direction, wall_thickness)
     } else {
-        (x0 + wall_thickness, x1 - wall_thickness)
+        let (x0, y0, x1, y1) = (
+            i128::from(room.shell.0),
+            i128::from(room.shell.1),
+            i128::from(room.shell.2),
+            i128::from(room.shell.3),
+        );
+        if direction.is_horizontal_route() {
+            (y0 + wall_thickness, y1 - wall_thickness)
+        } else {
+            (x0 + wall_thickness, x1 - wall_thickness)
+        }
     };
 
     if apertures.is_empty() {
@@ -510,7 +1217,7 @@ fn build_room_wall(
                 z,
             )?;
         }
-        if opening.z.1 < wall_z1 {
+        if opening.z.1 < wall_z1 && !skip_lintels {
             let (x, y, z) = wall_piece_bounds(
                 room,
                 direction,
@@ -853,10 +1560,12 @@ fn build_route_brushes(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn positive_overlap(left: (i128, i128), right: (i128, i128)) -> bool {
     left.0 < right.1 && left.1 > right.0
 }
 
+#[allow(dead_code)]
 fn contact_faces(left: &BrushBounds, right: &BrushBounds) -> Option<(FaceRole, FaceRole)> {
     if left.x.1 == right.x.0
         && positive_overlap(left.y, right.y)
@@ -897,6 +1606,35 @@ fn contact_faces(left: &BrushBounds, right: &BrushBounds) -> Option<(FaceRole, F
     None
 }
 
+#[allow(dead_code)]
+fn find_contact_faces(a: &ConvexBrush, b: &ConvexBrush) -> Option<(FaceRole, FaceRole)> {
+    for fa in &a.faces {
+        for fb in &b.faces {
+            // Check if the planes are coincident (same normal and same plane).
+            // This covers both opposite-normals (Floor↔Ceiling) and
+            // same-normals (Floor↔Floor at same Z — adjacent pieces).
+            if let Ok(true) = fa.plane.is_coincident_with(&fb.plane) {
+                return Some((fa.role, fb.role));
+            }
+            // Check opposite normals
+            if let (Some(neg_nx), Some(neg_ny), Some(neg_nz), Some(neg_d)) = (
+                fb.plane.nx.checked_neg(),
+                fb.plane.ny.checked_neg(),
+                fb.plane.nz.checked_neg(),
+                fb.plane.d.checked_neg(),
+            ) {
+                if let Ok(neg_fb) = CanonicalPlane::new(neg_nx, neg_ny, neg_nz, neg_d) {
+                    if let Ok(true) = fa.plane.is_coincident_with(&neg_fb) {
+                        return Some((fa.role, fb.role));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[allow(dead_code)]
 fn build_contact_interfaces(mut bounds: Vec<BrushBounds>) -> Vec<Interface> {
     bounds.sort_by(|left, right| left.id.cmp(&right.id));
     let mut interfaces = Vec::new();
@@ -930,35 +1668,118 @@ fn build_assembly_from_topology(
     let mut brushes: Vec<AssemblyBrush> = Vec::new();
     let mut bounds: Vec<BrushBounds> = Vec::new();
 
+    // Detect whether we should emit pointed arch surrounds.
+    // For Phase 03, all presets get pointed arches on portals.
+    let use_pointed_arches = true;
+
+    // Both transition approaches meet their host slabs at wall planes. No
+    // tread enters a room slab, so the exact mask is empty; inventing a broad
+    // lower/upper aperture here would weaken otherwise continuous shells.
+    let transition_openings: Vec<(RoomId, (i128, i128, i128, i128), bool)> = Vec::new();
+
     for room in &topology.rooms {
-        let (x0, y0, x1, y1) = (
-            i128::from(room.shell.0),
-            i128::from(room.shell.1),
-            i128::from(room.shell.2),
-            i128::from(room.shell.3),
-        );
         let z0 = i128::from(room.floor_z);
         let z1 = z0 + i128::from(room.dims.2);
         let rid = room.id.stable_key();
 
-        push_floor_brush(
-            &mut brushes,
-            &mut bounds,
-            format!("{rid}/floor"),
-            (x0, x1),
-            (y0, y1),
-            (z0, z0 + wall_thickness),
-        )?;
-        push_box_brush(
-            &mut brushes,
-            &mut bounds,
-            format!("{rid}/ceiling"),
-            BrushRole::CeilingSlab,
-            (x0, x1),
-            (y0, y1),
-            (z1 - wall_thickness, z1),
-        )?;
+        let x_range = (i128::from(room.shell.0), i128::from(room.shell.2));
+        let y_range = (i128::from(room.shell.1), i128::from(room.shell.3));
 
+        // Floor/ceiling slabs carry the exact committed polygon, not the
+        // footprint AABB.  AABB slabs would fill every clipped corner and turn
+        // a chamfer into a decorative diagonal wall.  Transition openings that
+        // genuinely enter a host room are split; exterior-only transition
+        // envelopes do not weaken an otherwise continuous slab.
+        let floor_openings: Vec<(i128, i128, i128, i128)> = transition_openings
+            .iter()
+            .filter(|(owner, rect, is_floor)| {
+                *owner == room.id
+                    && *is_floor
+                    && rect.0 < x_range.1
+                    && rect.2 > x_range.0
+                    && rect.1 < y_range.1
+                    && rect.3 > y_range.0
+            })
+            .map(|(_, rect, _)| *rect)
+            .collect();
+        if room.is_chamfered && floor_openings.is_empty() {
+            build_chamfered_slab(
+                room,
+                (z0, z0 + wall_thickness),
+                BrushRole::FloorSlab,
+                &format!("{rid}/floor"),
+                &mut brushes,
+                &mut bounds,
+            )?;
+        } else if floor_openings.is_empty() {
+            push_floor_brush(
+                &mut brushes,
+                &mut bounds,
+                format!("{rid}/floor"),
+                x_range,
+                y_range,
+                (z0, z0 + wall_thickness),
+            )?;
+        } else {
+            build_split_slab(
+                &mut brushes,
+                &mut bounds,
+                &format!("{rid}/floor"),
+                x_range,
+                y_range,
+                (z0, z0 + wall_thickness),
+                BrushRole::FloorSlab,
+                &floor_openings,
+                wall_thickness,
+            )?;
+        }
+
+        let ceil_openings: Vec<(i128, i128, i128, i128)> = transition_openings
+            .iter()
+            .filter(|(owner, rect, is_floor)| {
+                *owner == room.id
+                    && !*is_floor
+                    && rect.0 < x_range.1
+                    && rect.2 > x_range.0
+                    && rect.1 < y_range.1
+                    && rect.3 > y_range.0
+            })
+            .map(|(_, rect, _)| *rect)
+            .collect();
+        if room.is_chamfered && ceil_openings.is_empty() {
+            build_chamfered_slab(
+                room,
+                (z1 - wall_thickness, z1),
+                BrushRole::CeilingSlab,
+                &format!("{rid}/ceiling"),
+                &mut brushes,
+                &mut bounds,
+            )?;
+        } else if ceil_openings.is_empty() {
+            push_box_brush(
+                &mut brushes,
+                &mut bounds,
+                format!("{rid}/ceiling"),
+                BrushRole::CeilingSlab,
+                x_range,
+                y_range,
+                (z1 - wall_thickness, z1),
+            )?;
+        } else {
+            build_split_slab(
+                &mut brushes,
+                &mut bounds,
+                &format!("{rid}/ceiling"),
+                x_range,
+                y_range,
+                (z1 - wall_thickness, z1),
+                BrushRole::CeilingSlab,
+                &ceil_openings,
+                wall_thickness,
+            )?;
+        }
+
+        // Cardinal wall pieces (split around apertures).
         for direction in [
             WallDirection::North,
             WallDirection::South,
@@ -974,18 +1795,118 @@ fn build_assembly_from_topology(
                 direction,
                 wall_apertures,
                 wall_thickness,
+                use_pointed_arches,
                 &mut brushes,
                 &mut bounds,
             )?;
+
+            // Build pointed arch surrounds above portal apertures.
+            if use_pointed_arches {
+                for aperture in wall_apertures {
+                    let wall_coord = room_wall_coordinate(room, direction);
+                    build_pointed_arch_surround(
+                        room,
+                        direction,
+                        wall_coord,
+                        aperture.center,
+                        wall_thickness,
+                        &mut brushes,
+                        &mut bounds,
+                    )?;
+                }
+            }
         }
+
+        build_cardinal_corner_posts(room, wall_thickness, &mut brushes, &mut bounds)?;
+        // Diagonal wall pieces for chamfered corners.
+        build_diagonal_walls(room, wall_thickness, &mut brushes, &mut bounds)?;
     }
 
+    // Every committed portal must own a physical connector; omitting an
+    // intersecting route creates an exterior-facing room aperture rather than
+    // resolving a transition conflict.
     build_route_brushes(topology, wall_thickness, &mut brushes, &mut bounds)?;
 
-    let interfaces = build_contact_interfaces(bounds);
-    let protected_volumes = reservations.to_protected_volumes()?;
+    // Build stair transition geometry.
+    for transition in &topology.transitions {
+        build_stair_emission(
+            transition,
+            topology,
+            wall_thickness,
+            &mut brushes,
+            &mut bounds,
+        )?;
+    }
+
+    let mut protected_volumes = reservations.to_protected_volumes()?;
+    for transition in &topology.transitions {
+        for (index, &(x0, y0, z0, x1, y1, z1)) in transition.headroom_volumes.iter().enumerate() {
+            protected_volumes.push(ProtectedVolume {
+                id: format!("transition/{:04}/clearance_{index:04}", transition.id),
+                brush: ConvexBrush::make_box(
+                    (i128::from(x0), i128::from(x1)),
+                    (i128::from(y0), i128::from(y1)),
+                    (i128::from(z0), i128::from(z1)),
+                )?,
+            });
+        }
+    }
     brushes.sort_by(|left, right| left.id.cmp(&right.id));
-    let assembly = Assembly::new(brushes, interfaces, protected_volumes)?;
+    // Derive interfaces from actual ConvexBrush face geometry. Cache exact
+    // AABBs so disjoint brush pairs never enter the coincident-plane scan;
+    // touching pairs remain eligible and are still proven by Assembly.
+    let brush_aabbs = brushes
+        .iter()
+        .map(|brush| brush.brush.aabb())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut all_interfaces: Vec<Interface> = Vec::new();
+    for i in 0..brushes.len() {
+        for j in (i + 1)..brushes.len() {
+            let left = brush_aabbs[i];
+            let right = brush_aabbs[j];
+            if left.0 .0 > right.1 .0
+                || right.0 .0 > left.1 .0
+                || left.0 .1 > right.1 .1
+                || right.0 .1 > left.1 .1
+                || left.0 .2 > right.1 .2
+                || right.0 .2 > left.1 .2
+            {
+                continue;
+            }
+            let mut found = false;
+            for fa in &brushes[i].brush.faces {
+                if found {
+                    break;
+                }
+                for fb in &brushes[j].brush.faces {
+                    let same = fa.plane.is_coincident_with(&fb.plane).unwrap_or(false);
+                    let opp = (|| -> Option<bool> {
+                        let neg = CanonicalPlane::new(
+                            fb.plane.nx.checked_neg()?,
+                            fb.plane.ny.checked_neg()?,
+                            fb.plane.nz.checked_neg()?,
+                            fb.plane.d.checked_neg()?,
+                        )
+                        .ok()?;
+                        fa.plane.is_coincident_with(&neg).ok()
+                    })()
+                    .unwrap_or(false);
+                    if same || opp {
+                        all_interfaces.push(Interface::new(
+                            format!("interface/{i:04}/{j:04}"),
+                            brushes[i].id.clone(),
+                            brushes[j].id.clone(),
+                            fa.role,
+                            fb.role,
+                        ));
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let assembly = Assembly::new(brushes, all_interfaces, protected_volumes)?;
 
     // Spawn origin shares the reservation's XY center and uses a
     // quantum-aligned standing height inside its clear 80-unit volume.
@@ -1042,13 +1963,221 @@ mod tests {
     }
 
     fn point_is_inside_brush(brush: &AssemblyBrush, point: (i128, i128, i128)) -> bool {
-        let (minimum, maximum) = brush.brush.aabb().unwrap();
-        point.0 > minimum.0
-            && point.0 < maximum.0
-            && point.1 > minimum.1
-            && point.1 < maximum.1
-            && point.2 > minimum.2
-            && point.2 < maximum.2
+        let point = super::super::geometry::Point3::from_ints(point.0, point.1, point.2);
+        brush.brush.faces.iter().all(|face| {
+            face.plane
+                .signed_distance_rational(&point)
+                .is_ok_and(|distance| distance > super::super::geometry::Rational::ZERO)
+        })
+    }
+
+    fn point_is_solid(assembly: &Assembly, point: (i128, i128, i128)) -> bool {
+        assembly
+            .brushes
+            .iter()
+            .any(|brush| point_is_inside_brush(brush, point))
+    }
+
+    fn boxes_overlap(
+        left: ((i128, i128, i128), (i128, i128, i128)),
+        right: ((i128, i128, i128), (i128, i128, i128)),
+    ) -> bool {
+        left.0 .0 < right.1 .0
+            && left.1 .0 > right.0 .0
+            && left.0 .1 < right.1 .1
+            && left.1 .1 > right.0 .1
+            && left.0 .2 < right.1 .2
+            && left.1 .2 > right.0 .2
+    }
+
+    #[test]
+    fn transition_emits_twelve_supported_treads_and_clear_approaches() {
+        let (topology, assembly) = sparse_topology_and_assembly();
+        let transition = topology.transitions.first().unwrap();
+        let lower = topology.room(transition.lower_room).unwrap();
+        let upper = topology.room(transition.upper_room).unwrap();
+        let q = i128::from(CONSTRUCTION_QUANTUM);
+        let x0 = i128::from(transition.protected_volume.0);
+        let x1 = i128::from(transition.protected_volume.3);
+        let y0 = i128::from(transition.tread_run.1);
+        let lower_floor = i128::from(lower.floor_z);
+        let upper_floor = i128::from(upper.floor_z);
+        let run_end = y0 + i128::from(STAIR_STEPS) * q;
+
+        let treads: Vec<_> = assembly
+            .brushes
+            .iter()
+            .filter(|brush| brush.id.starts_with("transition/0000/tread_"))
+            .collect();
+        assert_eq!(treads.len(), STAIR_STEPS as usize);
+        for (index, tread) in treads.iter().enumerate() {
+            assert_eq!(tread.id, format!("transition/0000/tread_{index:04}"));
+            let (minimum, maximum) = tread.brush.aabb().unwrap();
+            assert_eq!(minimum, (x0, y0 + index as i128 * q, lower_floor));
+            assert_eq!(
+                maximum,
+                (
+                    x1,
+                    y0 + (index as i128 + 1) * q,
+                    lower_floor + (index as i128 + 1) * q,
+                )
+            );
+            assert_eq!(maximum.1 - minimum.1, q, "tread {index} depth drifted");
+            assert_eq!(maximum.2 - lower_floor, (index as i128 + 1) * q);
+            let center = ((x0 + x1) / 2, (minimum.1 + maximum.1) / 2);
+            assert!(
+                point_is_inside_brush(tread, (center.0, center.1, maximum.2 - 1)),
+                "tread {index} has no solid support"
+            );
+            for clearance in [1, 55, 79] {
+                let witness = (center.0, center.1, maximum.2 + clearance);
+                assert!(
+                    !point_is_solid(&assembly, witness),
+                    "tread {index} lacks frozen headroom at {witness:?}"
+                );
+            }
+        }
+        assert_eq!(run_end - y0, 192);
+        assert_eq!(run_end, i128::from(transition.tread_run.3));
+        assert_eq!(lower_floor + i128::from(STAIR_STEPS) * q, upper_floor);
+
+        let roof = assembly
+            .brushes
+            .iter()
+            .find(|brush| brush.id == "transition/0000/roof")
+            .unwrap();
+        assert_eq!(
+            roof.brush.aabb().unwrap(),
+            (
+                (
+                    x0 - q,
+                    i128::from(transition.lower_approach.1),
+                    upper_floor + q + i128::from(HEADROOM),
+                ),
+                (x1 + q, run_end, upper_floor + 2 * q + i128::from(HEADROOM)),
+            )
+        );
+        for (id, expected_y) in [
+            (
+                "transition/0000/wall_west",
+                (i128::from(lower.shell.3), run_end),
+            ),
+            (
+                "transition/0000/wall_east",
+                (i128::from(lower.shell.3), run_end),
+            ),
+        ] {
+            let wall = assembly
+                .brushes
+                .iter()
+                .find(|brush| brush.id == id)
+                .unwrap();
+            let (minimum, maximum) = wall.brush.aabb().unwrap();
+            assert_eq!((minimum.1, maximum.1), expected_y);
+        }
+
+        let lower_approach_floor = assembly
+            .brushes
+            .iter()
+            .find(|brush| brush.id == "transition/0000/lower_approach/floor")
+            .unwrap();
+        assert_eq!(
+            lower_approach_floor.brush.aabb().unwrap(),
+            (
+                (x0 - q, i128::from(transition.lower_approach.1), lower_floor,),
+                (
+                    x1 + q,
+                    i128::from(transition.lower_approach.3),
+                    lower_floor + q,
+                ),
+            )
+        );
+
+        let approach_floor = assembly
+            .brushes
+            .iter()
+            .find(|brush| brush.id == "transition/0000/upper_approach/floor")
+            .unwrap();
+        let approach_bounds = approach_floor.brush.aabb().unwrap();
+        assert_eq!(approach_bounds.0, (x0 - q, run_end, upper_floor));
+        assert_eq!(
+            approach_bounds.1,
+            (x1 + q, i128::from(upper.shell.1), upper_floor + q)
+        );
+        let approach_center = ((x0 + x1) / 2, (run_end + i128::from(upper.shell.1)) / 2);
+        assert!(point_is_solid(
+            &assembly,
+            (approach_center.0, approach_center.1, upper_floor + q / 2)
+        ));
+        assert!(!point_is_solid(
+            &assembly,
+            (
+                approach_center.0,
+                approach_center.1,
+                upper_floor + q + i128::from(HEADROOM) - 1,
+            )
+        ));
+
+        let lower_landing = transition.lower_landing;
+        let lower_center = (
+            i128::from((lower_landing.0 + lower_landing.2) / 2),
+            i128::from((lower_landing.1 + lower_landing.3) / 2),
+        );
+        assert!(point_is_solid(
+            &assembly,
+            (lower_center.0, lower_center.1, lower_floor + q / 2)
+        ));
+        assert!(!point_is_solid(
+            &assembly,
+            (lower_center.0, lower_center.1, lower_floor + q + 79)
+        ));
+        let upper_landing = transition.upper_landing;
+        let upper_center = (
+            i128::from((upper_landing.0 + upper_landing.2) / 2),
+            i128::from((upper_landing.1 + upper_landing.3) / 2),
+        );
+        assert!(point_is_solid(
+            &assembly,
+            (upper_center.0, upper_center.1, upper_floor + q / 2)
+        ));
+        assert!(!point_is_solid(
+            &assembly,
+            (upper_center.0, upper_center.1, upper_floor + q + 79)
+        ));
+
+        let first_tread_bounds = treads[0].brush.aabb().unwrap();
+        let lower_floor_id = format!("{}/floor", lower.id.stable_key());
+        assert!(assembly
+            .brushes
+            .iter()
+            .filter(|brush| brush.id.starts_with(&lower_floor_id))
+            .all(|brush| !boxes_overlap(brush.brush.aabb().unwrap(), first_tread_bounds)));
+        assert!(assembly
+            .brushes
+            .iter()
+            .any(|brush| brush.id == "transition/0000/lower_entry_cap"));
+
+        // The actual lower/upper wall masks omit every point in each 64×80
+        // core across the complete 16-unit wall depth.
+        for (room, y_sign, floor) in [(lower, -1_i128, lower_floor), (upper, 1, upper_floor)] {
+            let wall_y = if y_sign < 0 {
+                i128::from(lower.shell.3)
+            } else {
+                i128::from(upper.shell.1)
+            };
+            for normal in [1_i128, 8, 15] {
+                for tangent in [x0 + 1, (x0 + x1) / 2, x1 - 1] {
+                    for height in [1_i128, 40, 79] {
+                        let point = (tangent, wall_y + y_sign * normal, floor + q + height);
+                        assert!(
+                            !point_is_solid(&assembly, point),
+                            "transition wall opening for {} is solid at {point:?}",
+                            room.id
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1072,11 +2201,12 @@ mod tests {
         assert!(assembly
             .brushes
             .iter()
-            .any(|brush| brush.id == "room/0000/wall_east/lintel_0000"));
+            .any(|brush| brush.id.contains("room/0000/wall_east") && brush.id.contains("lintel")));
         assert!(assembly
             .brushes
             .iter()
-            .any(|brush| brush.id == "room/0001/wall_west/segment_0000"));
+            .any(|brush| brush.id.contains("room/0001")
+                && (brush.id.contains("wall_west") || brush.id.contains("diag"))));
 
         for (suffix, role) in [
             ("floor", BrushRole::FloorSlab),
@@ -1120,6 +2250,158 @@ mod tests {
                 "portal/corridor point {point:?} is inside a solid brush"
             );
         }
+    }
+
+    #[test]
+    fn cardinal_portals_are_full_depth_pointed_omissions_without_opening_brushes() {
+        let (topology, assembly) = sparse_topology_and_assembly();
+        assert!(assembly
+            .brushes
+            .iter()
+            .all(|brush| brush.role != BrushRole::PortalThroat));
+
+        for portal in &topology.portals {
+            let source_direction = WallDirection::parse(portal).unwrap();
+            let endpoints = [
+                (portal.source_room, source_direction),
+                (portal.target_room.unwrap(), source_direction.opposite()),
+            ];
+            for (room_id, direction) in endpoints {
+                let room = topology.room(room_id).unwrap();
+                let center = if direction.is_horizontal_route() {
+                    i128::from(portal.anchor.1)
+                } else {
+                    i128::from(portal.anchor.0)
+                };
+                let core_bottom = i128::from(room.floor_z + CONSTRUCTION_QUANTUM);
+                let core_top = core_bottom + i128::from(HEADROOM);
+                let wall_point = |tangent: i128, normal: i128, z: i128| match direction {
+                    WallDirection::North => (tangent, i128::from(room.shell.1) + normal, z),
+                    WallDirection::South => (tangent, i128::from(room.shell.3) - normal, z),
+                    WallDirection::West => (i128::from(room.shell.0) + normal, tangent, z),
+                    WallDirection::East => (i128::from(room.shell.2) - normal, tangent, z),
+                };
+
+                for normal in [1_i128, 8, 15] {
+                    for tangent in [center - 31, center, center + 31] {
+                        for z in [core_bottom + 1, core_bottom + 40, core_top - 1] {
+                            let point = wall_point(tangent, normal, z);
+                            assert!(
+                                !point_is_solid(&assembly, point),
+                                "{} {} portal core is solid at {point:?}",
+                                room.id,
+                                direction.tag(),
+                            );
+                        }
+                    }
+                }
+
+                let arch_root = format!("{}/wall_{}/arch", room.id.stable_key(), direction.tag());
+                for suffix in ["step_0_left", "step_0_right", "step_1_left", "step_1_right"] {
+                    assert!(
+                        assembly
+                            .brushes
+                            .iter()
+                            .any(|brush| brush.id == format!("{arch_root}/{suffix}")),
+                        "missing pointed surround {arch_root}/{suffix}",
+                    );
+                }
+                let apex_center = wall_point(center, 8, core_top + 8);
+                assert!(
+                    !point_is_solid(&assembly, apex_center),
+                    "pointed first step lost its visible center"
+                );
+                for tangent in [center - 24, center + 24] {
+                    assert!(point_is_solid(
+                        &assembly,
+                        wall_point(tangent, 8, core_top + 8)
+                    ));
+                }
+                assert!(point_is_solid(
+                    &assembly,
+                    wall_point(center - 8, 8, core_top + 24)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn chamfered_rooms_emit_sealed_diagonal_slabs_and_walls() {
+        let (topology, assembly) = sparse_topology_and_assembly();
+        let room = topology
+            .rooms
+            .iter()
+            .find(|room| room.is_chamfered)
+            .expect("production placement must contain a chamfered room");
+        let floor = assembly
+            .brushes
+            .iter()
+            .find(|brush| brush.id == format!("{}/floor", room.id.stable_key()))
+            .unwrap();
+        let ceiling = assembly
+            .brushes
+            .iter()
+            .find(|brush| brush.id == format!("{}/ceiling", room.id.stable_key()))
+            .unwrap();
+        let is_diagonal = |role| {
+            matches!(
+                role,
+                FaceRole::DiagNE | FaceRole::DiagNW | FaceRole::DiagSE | FaceRole::DiagSW
+            )
+        };
+        assert!(floor.brush.faces.iter().any(|face| is_diagonal(face.role)));
+        assert!(ceiling
+            .brush
+            .faces
+            .iter()
+            .any(|face| is_diagonal(face.role)));
+
+        let &(sx, sy) = room.chamfer_corners.first().unwrap();
+        let tag = match (sx, sy) {
+            (1, 1) => "diag_ne",
+            (1, -1) => "diag_se",
+            (-1, 1) => "diag_nw",
+            (-1, -1) => "diag_sw",
+            _ => unreachable!(),
+        };
+        let diagonal = assembly
+            .brushes
+            .iter()
+            .find(|brush| brush.id == format!("{}/wall_{tag}", room.id.stable_key()))
+            .unwrap();
+        assert!(diagonal
+            .brush
+            .faces
+            .iter()
+            .any(|face| is_diagonal(face.role)));
+        let (minimum, maximum) = diagonal.brush.aabb().unwrap();
+        assert_eq!(minimum.2, i128::from(room.floor_z));
+        assert_eq!(maximum.2, i128::from(room.floor_z + room.dims.2 as i32));
+        assert!(
+            i128::from(room.chamfer_size).pow(2) >= 2 * i128::from(CONSTRUCTION_QUANTUM).pow(2)
+        );
+
+        let corner_x = if sx > 0 { room.shell.2 } else { room.shell.0 };
+        let corner_y = if sy > 0 { room.shell.3 } else { room.shell.1 };
+        let exterior = (i128::from(corner_x - sx * 8), i128::from(corner_y - sy * 8));
+        let interior = (
+            i128::from(corner_x - sx * 24),
+            i128::from(corner_y - sy * 24),
+        );
+        for z in [
+            i128::from(room.floor_z) + 8,
+            i128::from(room.floor_z) + 80,
+            i128::from(room.floor_z + room.dims.2 as i32) - 8,
+        ] {
+            assert!(
+                point_is_inside_brush(diagonal, (exterior.0, exterior.1, z)),
+                "diagonal shell has an underside/top gap at z={z}",
+            );
+        }
+        assert!(!point_is_solid(
+            &assembly,
+            (interior.0, interior.1, i128::from(room.floor_z) + 80,)
+        ));
     }
 
     #[test]
