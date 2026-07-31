@@ -26,3 +26,4 @@ package_io = { path = "../../src/package_io" }
 bsp_generator = { path = "../../src/bsp_generator" }
 engine_pack = { path = "../../tools/engine_pack" }
 sha2 = "0.10"
+tempfile = "3"

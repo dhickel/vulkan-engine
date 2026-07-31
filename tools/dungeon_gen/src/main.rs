@@ -65,7 +65,21 @@ fn run() -> Result<(), String> {
                 out,
             )?;
         }
-        other => return Err(format!("--class must be m1 or m2, got {other}")),
+        "m3" => {
+            let config = bsp_generator::V3Config::new(seed, bsp_generator::V3Preset::Sparse, 2048)
+                .map_err(|err| format!("v3 config invalid: {err}"))?;
+            let (map_text, meta) = bsp_generator::generate_enhanced_v3(&config)
+                .map_err(|err| format!("v3 generation failed: {err}"))?;
+            write_output(
+                map_text,
+                meta.room_count(),
+                meta.route_count(),
+                meta.actual_faces(),
+                seed,
+                out,
+            )?;
+        }
+        other => return Err(format!("--class must be m1, m2, or m3, got {other}")),
     }
 
     Ok(())
@@ -97,7 +111,8 @@ fn write_output(
 }
 
 fn print_usage() {
-    eprintln!("Usage: dungeon_gen [--seed <u64>] [--class m1|m2] [--out <path>]");
+    eprintln!("Usage: dungeon_gen [--seed <u64>] [--class m1|m2|m3] [--out <path>]");
     eprintln!("  m1: Legacy v1 single-layer dungeon");
     eprintln!("  m2: Enhanced v2 two-layer dungeon with stairs");
+    eprintln!("  m3: Enhanced v3 semantic-core pipeline");
 }

@@ -4,6 +4,7 @@ set -euo pipefail
 # ─── defaults ───────────────────────────────────────────────────────────────
 SEED="${DUNGEON_SEED:-0}"
 CLASS="${DUNGEON_CLASS:-m1}"
+V3_PRESET="${DUNGEON_V3_PRESET:-moderate}"
 MODE="${DUNGEON_MODE:-strict}"
 CAMERA="${DUNGEON_CAMERA:-}"
 STATS="${DUNGEON_STATS:-}"
@@ -21,7 +22,7 @@ cache_root=".internal-dev/captures/bsp-dungeon-generator"
 configure_theme_paths() {
   # Recompute defaults whenever the class changes so CLI and interactive M2
   # runs cannot accidentally retain the Legacy v1 resource roots.
-  if [[ "$CLASS" == "m2" ]]; then
+  if [[ "$CLASS" == "m2" || "$CLASS" == "m3" ]]; then
     DEFAULT_WAD_PATH="src/bsp_generator/themes/cc0_dungeon_v2/cc0_dungeon_v2.wad"
     DEFAULT_PALETTE_PATH="src/bsp_generator/themes/cc0_dungeon_v2/palette.lmp"
     DEFAULT_TEXTURES_DIR="src/bsp_generator/themes/cc0_dungeon_v2/textures"
@@ -79,12 +80,18 @@ verify_cache() {
   [[ -f "$bsp" ]] || return 1
   [[ -f "$manifest" ]] || return 1
 
+  # ── Structural integrity: BSP2 and QLIT magic ──────────────────
+  local bsp_header; bsp_header="$(head -c 4 "$bsp" 2>/dev/null || true)"
+  [[ "$bsp_header" == "BSP2" ]] || { echo "  $(dim "BSP2 magic missing, invalid cache")"; return 1; }
+  [[ -f "$lit" ]] || return 1
+  local lit_header; lit_header="$(head -c 4 "$lit" 2>/dev/null || true)"
+  [[ "$lit_header" == "QLIT" ]] || { echo "  $(dim "QLIT magic missing, invalid cache")"; return 1; }
+
   # Check manifest declares a version and it matches current code.
   local stored_version; stored_version="$(grep '^generator_version' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
   local current_version; current_version="$(generator_version)"
   [[ "$stored_version" == "$current_version" ]] || { echo "  $(dim "generator changed ($stored_version → $current_version), rebuilding")"; return 1; }
 
-  [[ -f "$lit" ]] || return 1
   local stored_bsp; stored_bsp="$(grep '^bsp\.sha256' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
   local stored_lit; stored_lit="$(grep '^lit\.sha256' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
   [[ -n "$stored_bsp" && -n "$stored_lit" ]] || return 1
@@ -105,6 +112,15 @@ verify_cache() {
     [[ -n "$stored_tx" ]] || return 1
     local current_tx; current_tx="$(texture_tree_sha256 "$TEXTURES_DIR")" || return 1
     [[ "$stored_tx" == "$current_tx" ]] || return 1
+  elif [[ "$CLASS" == "m3" ]]; then
+    # M3 Enhanced v3 uses the same cc0_dungeon_v2 theme closure as m2.
+    [[ "$stored_gen" == "engine_pack:enhanced-dungeon-v3" ]] || return 1
+    local stored_tx; stored_tx="$(grep '^textures_tree\.sha256' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
+    [[ -n "$stored_tx" ]] || return 1
+    local current_tx; current_tx="$(texture_tree_sha256 "$TEXTURES_DIR")" || return 1
+    [[ "$stored_tx" == "$current_tx" ]] || return 1
+    local stored_preset; stored_preset="$(grep '^preset' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
+    [[ "$stored_preset" == "$V3_PRESET" ]] || { echo "  $(dim "preset changed ($stored_preset → $V3_PRESET), rebuilding")"; return 1; }
   else
     [[ "$stored_gen" == "dungeon_gen" ]] || return 1
   fi
@@ -135,9 +151,10 @@ generator_version() {
       "$repo_root/tools/engine_pack" \
       -type f \( -name '*.rs' -o -name 'Cargo.toml' \) -print0
   )
-  # For M2, fingerprint the effective texture closure with stable relative
-  # names and bytes. This catches addition, removal, rename, and replacement.
-  if [[ "$CLASS" == "m2" ]]; then
+  # For M2 and M3, fingerprint the effective texture closure with stable
+  # relative names and bytes. This catches addition, removal, rename, and
+  # replacement.
+  if [[ "$CLASS" == "m2" || "$CLASS" == "m3" ]]; then
     local texture_tree
     texture_tree="$(texture_tree_sha256 "$TEXTURES_DIR")" || return 1
     files+=("$TEXTURES_DIR")
@@ -155,8 +172,11 @@ generator_version() {
   while IFS= read -r -d '' f; do
     [[ -f "$f" ]] && hash_input+="$(sha256sum "$f" | awk '{print $1}')"
   done < <(printf '%s\0' "${files[@]}" | sort -zu)
-  if [[ "$CLASS" == "m2" ]]; then
+  if [[ "$CLASS" == "m2" || "$CLASS" == "m3" ]]; then
     hash_input+="textures_tree:$texture_tree"
+  fi
+  if [[ "$CLASS" == "m3" ]]; then
+    hash_input+="preset:$V3_PRESET"
   fi
   echo "$hash_input" | sha256sum | awk '{print $1}' | head -c 16
 }
@@ -179,7 +199,34 @@ build_cache() {
   local tmp_dir; tmp_dir="$(mktemp -d -t dungeon-explore-${class}-${seed}-XXXXXX)"
   trap 'rm -rf "$tmp_dir"' RETURN
 
-  if [[ "$class" == "m2" ]]; then
+  if [[ "$class" == "m3" ]]; then
+    # Enhanced v3: use engine_pack enhanced-dungeon-v3 (generate + compile + publish atomically)
+    echo "  $(dim "generating+compiling") $(bold "$class") seed $(bold "$seed") preset $(bold "$V3_PRESET") via engine_pack..."
+    local out_dir="$tmp_dir/out"
+    local compile_args=(
+      run -q -p engine_pack -- enhanced-dungeon-v3
+      --seed "$seed"
+      --preset "$V3_PRESET"
+      --out "$out_dir"
+      --name "${class}-seed-${seed}"
+    )
+    if [[ -x "$DEFAULT_TOOL_PATH/qbsp" && -x "$DEFAULT_TOOL_PATH/vis" && -x "$DEFAULT_TOOL_PATH/light" ]]; then
+      compile_args+=(--tool-path "$DEFAULT_TOOL_PATH")
+    fi
+    cargo "${compile_args[@]}" || {
+      echo "  $(red "✗") engine_pack enhanced-dungeon-v3 failed" >&2; return 1
+    }
+
+    local published_name="${class}-seed-${seed}"
+    local compiled_bsp="$out_dir/${published_name}.bsp"
+    local compiled_lit="$out_dir/${published_name}.lit"
+    [[ -f "$compiled_bsp" && -f "$compiled_lit" ]] || {
+      echo "  $(red "✗") compiler did not produce the required BSP/LIT pair" >&2
+      return 1
+    }
+    candidate_bsp="$compiled_bsp"
+    candidate_lit="$compiled_lit"
+  elif [[ "$class" == "m2" ]]; then
     # Enhanced v2: use engine_pack enhanced-dungeon (generate + compile + publish atomically)
     echo "  $(dim "generating+compiling") $(bold "$class") seed $(bold "$seed") via engine_pack..."
     local out_dir="$tmp_dir/out"
@@ -248,7 +295,16 @@ build_cache() {
 
   local gen_id; gen_id="dungeon_gen"
   local textures_tree_line=""
-  if [[ "$class" == "m2" ]]; then
+  local preset_line=""
+  if [[ "$class" == "m3" ]]; then
+    gen_id="engine_pack:enhanced-dungeon-v3"
+    local tx_tree; tx_tree="$(texture_tree_sha256 "$TEXTURES_DIR")" || {
+      echo "  $(red "✗") Enhanced v3 requires a non-empty texture directory: $TEXTURES_DIR" >&2
+      return 1
+    }
+    textures_tree_line="textures_tree.sha256 = \"$tx_tree\""
+    preset_line="preset = \"$V3_PRESET\""
+  elif [[ "$class" == "m2" ]]; then
     gen_id="engine_pack:enhanced-dungeon"
     local tx_tree; tx_tree="$(texture_tree_sha256 "$TEXTURES_DIR")" || {
       echo "  $(red "✗") Enhanced v2 requires a non-empty texture directory: $TEXTURES_DIR" >&2
@@ -265,7 +321,7 @@ generator = "$gen_id"
 seed = $seed
 class = "$class"
 generator_version = "$(generator_version)"
-
+$preset_line
 [profile]
 profile = "ericw-q1-bsp2-generated"
 
@@ -311,7 +367,7 @@ draw_menu() {
   echo "  $(dim "─────────────────────────────────────────────")"
   echo ""
   printf "  %s Seed:       %s\n" "$(bold "1.")" "$(green "$SEED")"
-  printf "  %s Class:      %s  %s\n" "$(bold "2.")" "$(green "$CLASS")" "$(dim "(m1 / m2)")"
+  printf "  %s Class:      %s  %s\n" "$(bold "2.")" "$(green "$CLASS")" "$(dim "(m1 / m2 / m3)")"
   printf "  $(bold "3.") Mode:       %s\n" "$(status_badge "$MODE")"
   printf "  $(bold "4.") Camera:     %s  $(dim "('' / spawn / corridor / junction)")\n" "${CAMERA:-(default)}"
   printf "  $(bold "5.") Stats:      %s  $(dim "(set to '1' or leave empty)")\n" "${STATS:-(off)}"
@@ -345,10 +401,14 @@ run_explorer() {
   local bsp="$CACHE_BSP" lit="$CACHE_LIT" manifest="$CACHE_MANIFEST"
 
   # Build or verify cache
-  if [[ -n "$BUST" ]] || ! verify_cache "$bsp" "$lit" "$manifest"; then
-    if [[ -n "$BUST" ]]; then
-      bust_cache "$SEED" "$CLASS"
+  if [[ -n "$BUST" ]]; then
+    bust_cache "$SEED" "$CLASS"
+    if [[ -n "$CACHE_ONLY" ]]; then
+      return 0
     fi
+  fi
+
+  if ! verify_cache "$bsp" "$lit" "$manifest"; then
     echo ""
     echo "$(bold "Building cache...")"
     build_cache "$SEED" "$CLASS" || die "build failed"
@@ -394,12 +454,12 @@ interactive() {
         BUST=""  # don't auto-bust; user can bust manually or run to rebuild if stale
         ;;
       2)
-        printf "  Enter class (m1/m2): "
+        printf "  Enter class (m1/m2/m3): "
         read -r val
-        if [[ "$val" == "m1" || "$val" == "m2" ]]; then
+        if [[ "$val" == "m1" || "$val" == "m2" || "$val" == "m3" ]]; then
           CLASS="$val"
         else
-          echo "  $(red "✗") class must be m1 or m2"; sleep 1
+          echo "  $(red "✗") class must be m1, m2, or m3"; sleep 1
         fi
         ;;
       3)
@@ -468,7 +528,7 @@ else
         echo ""
         echo "CLI options:"
         echo "  --seed <0-255>     Seed value (default: 0)"
-        echo "  --class <m1|m2>    Dungeon class (default: m1)"
+        echo "  --class <m1|m2|m3> Dungeon class (default: m1)"
         echo "  --strict            Strict mode (default)"
         echo "  --development       Development mode"
         echo "  --camera <label>    Acceptance camera (spawn/corridor/junction)"
@@ -479,8 +539,8 @@ else
         echo ""
         echo "Environment overrides: DUNGEON_SEED, DUNGEON_CLASS, DUNGEON_MODE,"
         echo "  DUNGEON_CAMERA, DUNGEON_STATS, DUNGEON_ALL_VISIBLE, DUNGEON_BUST,"
-        echo "  DUNGEON_WAD_PATH, DUNGEON_PALETTE_PATH, DUNGEON_TEXTURES_DIR,"
-        echo "  DUNGEON_PROFILE_PATH, DUNGEON_TOOL_PATH"
+        echo "  DUNGEON_V3_PRESET, DUNGEON_WAD_PATH, DUNGEON_PALETTE_PATH,"
+        echo "  DUNGEON_TEXTURES_DIR, DUNGEON_PROFILE_PATH, DUNGEON_TOOL_PATH"
         exit 0
         ;;
       *) die "unknown argument: $1 (use -h for help)" ;;

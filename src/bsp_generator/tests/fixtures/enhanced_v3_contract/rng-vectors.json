@@ -1,0 +1,117 @@
+{
+  "schema": "enhanced-v3-contract-rng-vectors/v1",
+  "frozen_at": "2026-07-31T02:45:00Z",
+  "reconciliation_source": "DECISION-20260731-03",
+  "description": "Frozen SHA-256 RNG contract vectors for domain dungeon-gen/v3. Every vector carries explicit input fields and expected digest/draw/error outcome. The oracle recomputes each vector without v3 or proof helpers.",
+  "domain": "dungeon-gen/v3",
+  "framing": {
+    "algorithm": "SHA-256",
+    "layout": "u32_le(domain.len()) || domain || seed.to_le_bytes() || u32_le(stage.len()) || stage || u32_le(key.len()) || key",
+    "endianness": "little-endian",
+    "seed_width": 64,
+    "length_prefix_width": 32,
+    "rejection_stream_marker": "rejection-stream/v1",
+    "max_rejection_blocks": 256
+  },
+  "vectors": [
+    {
+      "id": "ordinary-candidate-keyed",
+      "description": "Ordinary candidate-keyed seed derivation with a non-empty key.",
+      "seed": 42,
+      "stage": "v3-placement",
+      "key": "room/0001",
+      "expected_digest": "01eb571565ac8db8cf9a2adaf4dd7e455a844597688eb701a8ea9ce3f19bf064",
+      "expected_u64s": [
+        13298474824844700417,
+        5007683879384554191,
+        123724094641636442,
+        7273484861411486376
+      ]
+    },
+    {
+      "id": "block-zero-empty-key",
+      "description": "Stage seed with empty key (block zero of the rejection stream).",
+      "seed": 0,
+      "stage": "v3-topology",
+      "key": "",
+      "expected_digest": "f94e81f0ebc369aa2cea9a75f18c37a0a2d1c97615d1f7e092773a32293d18cd",
+      "expected_u64s": [
+        12279561277122105081,
+        11544851138475649580,
+        16210655273860845986,
+        14778629424361928594
+      ]
+    },
+    {
+      "id": "continuation-block-1",
+      "description": "Rejection stream continuation block 1 with a candidate key.",
+      "seed": 0,
+      "stage": "v3-topology",
+      "key": "room/0001",
+      "block": 1,
+      "expected_digest": "fe465d5f860f4e8ccf089de032ac597efbb060cdad18acfcc3767310d2de8cf2",
+      "expected_u64s": [
+        10110035283293325054,
+        9104497456222898383,
+        18206954528306147579,
+        17477589247718553283
+      ]
+    },
+    {
+      "id": "final-block-255",
+      "description": "Rejection stream at the maximum block index (255).",
+      "seed": 0,
+      "stage": "v3-topology",
+      "key": "room/0001",
+      "block": 255,
+      "expected_digest": "1dd74fd38c43bf5cbe661e3dc64b3c09c2c337030aa735c89073ff83470702a9",
+      "expected_u64s": [
+        6683134644160812829,
+        665490159745001150,
+        14426620642796749762,
+        12178304346101871504
+      ]
+    },
+    {
+      "id": "bounded-draw-success",
+      "description": "Bounded uniform selection from [0, 7) succeeds on the first block's first draw.",
+      "seed": 42,
+      "stage": "v3-placement",
+      "key": "room/0001",
+      "upper_exclusive": 7,
+      "expected_draw": 3,
+      "expected_error": null
+    },
+    {
+      "id": "bounded-draw-bound-3",
+      "description": "Bounded uniform selection from [0, 3) with non-zero threshold.",
+      "seed": 42,
+      "stage": "v3-placement",
+      "key": "room/0001",
+      "upper_exclusive": 3,
+      "expected_draw": 0,
+      "expected_error": null
+    },
+    {
+      "id": "zero-bound",
+      "description": "Zero upper_exclusive produces a typed ZeroBound error.",
+      "seed": 42,
+      "stage": "v3-placement",
+      "key": "room/0001",
+      "upper_exclusive": 0,
+      "expected_draw": null,
+      "expected_error": "ZeroBound"
+    },
+    {
+      "id": "exhaustion",
+      "description": "Zero max_blocks produces a typed RejectionStreamExhausted error.",
+      "seed": 42,
+      "stage": "v3-placement",
+      "key": "room/0001",
+      "upper_exclusive": 7,
+      "max_blocks": 0,
+      "expected_draw": null,
+      "expected_error": "RejectionStreamExhausted"
+    }
+  ]
+}

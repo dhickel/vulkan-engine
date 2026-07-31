@@ -102,6 +102,159 @@ themes/cc0_dungeon_v2/
   cc0_dungeon_v2.wad    — WAD2 texture archive
 ```
 
+### Enhanced v3
+
+```
+src/enhanced_v3/
+  mod.rs          — module declarations, generate_v3(), re-exports
+  config.rs       — V3Config, V3Preset, NormalClass, frozen constants
+  error.rs        — V3Error (45 typed variants across 9 categories)
+  rng.rs          — V3Seed, V3StageSeed (domain "dungeon-gen/v3", 4 tags)
+  ids.rs          — typed newtype IDs (RoomId, PortalId, etc.),
+                    CommittedTopology, V3IdAllocator
+  geometry.rs     — Point3, Rational, Vector3, CanonicalPlane, ConvexBrush
+  footprint.rs    — build_footprints(), Footprint, FootprintLayout
+  reservation.rs  — build_reservations(), Reservation, ReservationSet
+  topology.rs     — build_topology(), compute_reservations()
+  intent.rs       — plan_composition(), CompositionPlan, GrammarDescriptor
+  assembly.rs     — Assembly, AssemblyBrush, Interface, Support, ProtectedVolume
+  composition.rs  — CompositionPlan, GrammarDescriptor
+  emission.rs     — emit_map_text(), texture_for_role()
+  metadata.rs     — EnhancedV3Metadata (22 read-only accessors)
+  pipeline.rs     — run_pipeline(), V3PipelineOutput
+
+tests/
+  enhanced_v3_contract_baseline.rs   — 25 frozen contract identity tests
+  enhanced_v3_public_api.rs          — public API surface tests
+  enhanced_v3_generation.rs          — can-generate tests for all presets
+  enhanced_v3_semantic_core.rs       — geometry, footprint, topology unit tests
+  enhanced_v3_geometry.rs            — ConvexBrush, CanonicalPlane, half-space tests
+  enhanced_v3_compatibility.rs       — v1/v2 baseline preservation
+  enhanced_v3_budget.rs              — M2 budget evidence (faces, entities, batches)
+  enhanced_v3_compiled_space.rs      — compiled spatial witnesses
+  enhanced_v3_compiler.rs            — compiler integration tests
+  enhanced_v3_compiler_smoke.rs      — quick compiler smoke
+  enhanced_v3_integrated.rs          — integrated pipeline tests
+  enhanced_v3_proof_model.rs         — proof model contract tests
+  enhanced_v3_qualification.rs       — qualification suite
+  support/enhanced_v3_compiler.rs    — compiler test support
+```
+
+### Enhanced v3 Profile
+
+The Enhanced v3 profile is an additive, structurally disjoint generation path
+in `src/enhanced_v3/`. It produces M2-only two-layer dungeons with cardinal +
+45° chamfered-octagonal rooms, pointed-arch portal apertures, grounded
+assemblies, and Sparse/Moderate/Rich density presets.
+
+#### Quick Start
+
+```rust
+use bsp_generator::enhanced_v3::{generate_v3, V3Config, V3Preset};
+
+// Generate a Sparse m3 dungeon (seed 42, 2048² extent)
+let config = V3Config::new(42, V3Preset::Sparse, 2048)?;
+let map_text = generate_v3(&config)?;
+
+// Or use nominal constructors
+let config = V3Config::nominal_moderate();
+let map_text = generate_v3(&config)?;
+```
+
+#### V3Config API
+
+`V3Config` validates at construction — no separate `validate()` step:
+
+```rust
+use bsp_generator::enhanced_v3::{V3Config, V3Preset};
+
+// Full validation at construction
+let config = V3Config::new(42, V3Preset::Rich, 3072)?;
+
+// Convenience constructors:
+let config = V3Config::nominal_sparse();    // seed 0, Sparse, 2048²
+let config = V3Config::nominal_moderate();  // seed 0, Moderate, 2048²
+let config = V3Config::nominal_rich();      // seed 0, Rich, 3072²
+```
+
+#### Vertical Contract (frozen)
+
+Identical to Enhanced v2:
+
+| parameter | value |
+|-----------|-------|
+| lower floor Z | 0 |
+| upper floor Z | 192 |
+| room height (both layers) | 176 |
+| total Z span | 368 (≤ 384 M2 max) |
+| layer count | 2 (frozen) |
+
+#### RNG Domains
+
+Enhanced v3 uses domain separator `"dungeon-gen/v3"` — **independent** from
+Legacy v1's `"dungeon-gen/v1"` and Enhanced v2's `"dungeon-gen/v2"`. Stage tags:
+
+| tag | stage |
+|-----|-------|
+| `v3-placement` | two-layer room placement with 45° footprint support |
+| `v3-topology` | topology and transition selection |
+| `v3-features` | chamfered footprints, pointed arches, grounded assemblies |
+| `v3-detail` | preset-driven feature density, pillar placement |
+
+#### Presets
+
+| preset | min rooms | target loops | min families | face budget |
+|--------|----------|-------------|-------------|-------------|
+| Sparse | 12 | 0 | 1 | 3,000 |
+| Moderate | 20 | 2 | 2 | 5,000 |
+| Rich | 28 | 4 | 3 | 8,000 |
+
+#### Key Differences from Enhanced v2
+
+| aspect | Enhanced v2 | Enhanced v3 |
+|--------|-------------|-------------|
+| domain | `"dungeon-gen/v2"` | `"dungeon-gen/v3"` |
+| geometry | axis-aligned only | cardinal + 45° diagonal |
+| room shape | rectangular only | chamfered/octagonal + rectangular |
+| portals | rectangular aperture | pointed-arch aperture |
+| assemblies | none | grounded support graph |
+| grammar families | 2 strategies only | 6 descriptor families |
+| presets | none (single config) | Sparse/Moderate/Rich |
+| theme | cc0_dungeon_v2 | cc0_dungeon_v2 (reused) |
+| minimum-identity | none | typed MinimumIdentityFailure |
+
+#### Geometry Contract
+
+- **Approved normals**: cardinal (axis-aligned) and exact 45° diagonal in XY plane
+- **Wall thickness (cardinal)**: 16 Quake units
+- **Wall thickness (45° diagonal)**: ≥ 16 Quake units perpendicular (32/√2 ≈ 22.63)
+- **Integer arithmetic only**: i128 Rational geometry, no floating-point
+- **Construction quantum**: 16 Quake units
+- **Unapproved normals** (15°, 30°, arbitrary-angle): typed `UnapprovedNormal` error
+
+#### Theme
+
+Enhanced v3 reuses the CC0 Dungeon v2 theme at
+`src/bsp_generator/themes/cc0_dungeon_v2/` — no new theme is created.
+Texture roles map to WAD identities:
+
+| BrushRole | WAD texture |
+|-----------|------------|
+| WallShell | `bs_wall` |
+| FloorSlab | `bs_floor` |
+| CeilingSlab | `bs_ceil` |
+| Column | `bs_accent` |
+| Feature | `bs_accent` |
+
+#### Testing
+
+```bash
+cargo test -p bsp_generator --test enhanced_v3_contract_baseline  # 25 contract tests
+cargo test -p bsp_generator --test enhanced_v3_budget             # M2 budget evidence
+cargo test -p bsp_generator --test enhanced_v3_public_api         # API surface
+cargo test -p bsp_generator --test enhanced_v3_semantic_core      # geometry + topology
+```
+
 ## Key Design Rules
 
 1. **No renderer/Vulkan/windowing deps**: This crate is an offline pipeline. If you need BSP loading or rendering, use `bsp_runtime` + `renderer` downstream.

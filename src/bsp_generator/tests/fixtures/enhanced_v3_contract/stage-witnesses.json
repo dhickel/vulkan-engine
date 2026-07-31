@@ -1,0 +1,183 @@
+{
+  "schema": "enhanced-v3-contract-stage-witnesses/v1",
+  "frozen_at": "2026-07-31T02:45:00Z",
+  "reconciliation_source": "DECISION-20260731-03",
+  "description": "Frozen stage tags, candidate keys, enumeration order, rank/tie rules, validation order, stable-ID grammar, acceptance/rejection records, topology order, family eligibility, support order, binary simplification order, emission order, and emitted-roster membership. These are declarations for later production tests, not a claim that a production map has already been emitted.",
+  "identities": {
+    "profile_serialization": "enhanced-v3",
+    "adapter_token": "m3",
+    "output_identity": "enhanced-v3-output/v1",
+    "rng_domain": "dungeon-gen/v3",
+    "metadata_schema": "enhanced-v3-generation-metadata/v1",
+    "package_identity": "enhanced-dungeon-v3-package/v1"
+  },
+  "layers": {
+    "count": 2,
+    "lower_floor_z": 0,
+    "upper_floor_z": 192,
+    "room_height": 176,
+    "total_z_span": 368
+  },
+  "geometry_policy": {
+    "construction_quantum": 16,
+    "route_width": 64,
+    "headroom": 80,
+    "wall_thickness": 16,
+    "allowed_normals": ["cardinal", "diagonal-45"],
+    "diagonal_portals": "forbidden",
+    "cardinal_portal_policy": "full-depth",
+    "min_contact_area": 256
+  },
+  "stages": [
+    {
+      "tag": "v3-placement",
+      "ordinal": 0,
+      "description": "Two-layer room placement with 45° footprint support.",
+      "candidate_keys": ["footprint/width", "footprint/depth", "footprint/chamfer"],
+      "enumeration_order": "by_rank_ascending",
+      "rank_rule": "SHA-256 candidate-keyed derivation from seed + tag + candidate_key",
+      "tie_break": "lexicographic key comparison",
+      "validation_order": ["bounds_check", "overlap_check", "layer_assignment", "quantum_alignment"],
+      "rejection_isolation": "per-candidate, no perturbation of peers"
+    },
+    {
+      "tag": "v3-topology",
+      "ordinal": 1,
+      "description": "Topology and transition selection.",
+      "candidate_keys": ["transition/source", "transition/target", "transition/direction"],
+      "enumeration_order": "by_rank_ascending",
+      "rank_rule": "SHA-256 candidate-keyed derivation from seed + tag + candidate_key",
+      "tie_break": "lexicographic key comparison",
+      "validation_order": ["layer_adjacency", "portal_feasibility", "route_width", "headroom_clearance"],
+      "rejection_isolation": "per-candidate, no perturbation of peers",
+      "stable_id_grammar": "transition/NNNN",
+      "allocation_order": "by topological distance from spawn, then by key"
+    },
+    {
+      "tag": "v3-features",
+      "ordinal": 2,
+      "description": "Chamfered footprints, pointed arches, grounded assemblies.",
+      "candidate_keys": ["feature/type", "feature/parent_room", "feature/orientation"],
+      "enumeration_order": "by_rank_descending",
+      "rank_rule": "SHA-256 candidate-keyed derivation from seed + tag + candidate_key",
+      "tie_break": "lexicographic key comparison",
+      "validation_order": ["capability_check", "geometry_feasibility", "support_graph", "budget_check"],
+      "rejection_isolation": "per-candidate, no perturbation of peers",
+      "stable_id_grammar": "feature/NNNN",
+      "allocation_order": "by room dependency order, then by key",
+      "families": [
+        {
+          "stable_id": "portal_chamber",
+          "approved": true,
+          "lowerer_witness": "chamfered-octagonal-footprint + pointed-arch-portal + grounded-assembly",
+          "support_requirement": "acyclic-anchored",
+          "optionality": "required-for-sparse",
+          "cost_priority": 1,
+          "preset_contribution": {"sparse": 1, "moderate": 1, "rich": 3}
+        },
+        {
+          "stable_id": "buttressed_hall",
+          "approved": true,
+          "lowerer_witness": "planning-only",
+          "support_requirement": "acyclic-anchored",
+          "optionality": "optional",
+          "cost_priority": 2,
+          "preset_contribution": {"sparse": 0, "moderate": 1, "rich": 2}
+        },
+        {
+          "stable_id": "column_grove",
+          "approved": true,
+          "lowerer_witness": "planning-only",
+          "support_requirement": "acyclic-anchored",
+          "optionality": "optional",
+          "cost_priority": 3,
+          "preset_contribution": {"sparse": 0, "moderate": 0, "rich": 1}
+        },
+        {
+          "stable_id": "fractured_vault",
+          "approved": true,
+          "lowerer_witness": "planning-only",
+          "support_requirement": "acyclic-anchored",
+          "optionality": "optional",
+          "cost_priority": 4,
+          "preset_contribution": {"sparse": 0, "moderate": 0, "rich": 1}
+        },
+        {
+          "stable_id": "terraced_shrine",
+          "approved": true,
+          "lowerer_witness": "planning-only",
+          "support_requirement": "acyclic-anchored",
+          "optionality": "optional",
+          "cost_priority": 5,
+          "preset_contribution": {"sparse": 0, "moderate": 0, "rich": 1}
+        },
+        {
+          "stable_id": "monolithic_chamber",
+          "approved": true,
+          "lowerer_witness": "planning-only",
+          "support_requirement": "acyclic-anchored",
+          "optionality": "optional",
+          "cost_priority": 6,
+          "preset_contribution": {"sparse": 0, "moderate": 0, "rich": 1}
+        }
+      ]
+    },
+    {
+      "tag": "v3-detail",
+      "ordinal": 3,
+      "description": "Preset-driven feature density and pillar placement.",
+      "candidate_keys": ["detail/type", "detail/parent_room", "detail/count"],
+      "enumeration_order": "by_rank_descending",
+      "rank_rule": "SHA-256 candidate-keyed derivation from seed + tag + candidate_key",
+      "tie_break": "lexicographic key comparison",
+      "validation_order": ["budget_check", "overlap_check", "preset_minimum"],
+      "rejection_isolation": "per-candidate, no perturbation of peers",
+      "stable_id_grammar": "detail/NNNN",
+      "allocation_order": "by feature dependency order, then by key",
+      "simplification_policy": {
+        "rule": "binary-removal-of-lowest-priority-optional-transitive-closures",
+        "timing": "before final identity validation",
+        "representation": "metadata.simplification_outcomes"
+      }
+    }
+  ],
+  "emission_order": [
+    "worldspawn_header",
+    "wad_palette",
+    "minlight",
+    "rooms_by_stable_id_then_layer",
+    "transitions_by_stable_id",
+    "features_by_stable_id",
+    "details_by_stable_id",
+    "spawn_entity",
+    "light_entities"
+  ],
+  "serializer_contract": {
+    "encoding": "UTF-8",
+    "line_endings": "LF",
+    "terminal_newline": true,
+    "integers": "decimal-locale-independent",
+    "texture_mapping": "0 0 0 0.25 0.25",
+    "minlight": 16,
+    "entity_order": "deterministic by semantic key",
+    "brush_order": "deterministic by footprint then face normal",
+    "face_order": "deterministic by plane index"
+  },
+  "rejection_records": {
+    "typed_errors": [
+      "ZeroBound",
+      "RejectionStreamExhausted",
+      "AuthorizationDenied",
+      "ConfigOutOfRange",
+      "InvariantViolation",
+      "ArithmeticOverflow",
+      "ResourceConflict",
+      "MinimumIdentityFailure",
+      "SupportGraphCycle",
+      "DeferredCapability"
+    ],
+    "no_reseed": true,
+    "no_fallback_profile": true,
+    "no_downgraded_success": true
+  }
+}
