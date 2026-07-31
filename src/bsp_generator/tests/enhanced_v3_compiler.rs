@@ -5,6 +5,7 @@
 //! traversal, but it can never qualify qbsp, BSP2/LIT artifacts, strict reload,
 //! or a focused fixture.
 
+#[path = "enhanced_v3_proof/compiler_support.rs"]
 mod enhanced_v3_proof;
 
 use enhanced_v3_proof::compiler::{self, CompileFailure, CompilerProfile, StageOutput};
