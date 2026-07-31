@@ -11,6 +11,8 @@ fn run() -> Result<(), String> {
     let mut seed: Option<u64> = None;
     let mut class: Option<String> = None;
     let mut out: Option<PathBuf> = None;
+    let mut preset: Option<String> = None;
+    let mut extent: Option<u32> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -29,6 +31,17 @@ fn run() -> Result<(), String> {
             "--out" => {
                 out = Some(PathBuf::from(args.next().ok_or("--out requires a value")?));
             }
+            "--preset" => {
+                preset = Some(args.next().ok_or("--preset requires a value")?);
+            }
+            "--extent" => {
+                let value = args.next().ok_or("--extent requires a value")?;
+                extent = Some(
+                    value
+                        .parse::<u32>()
+                        .map_err(|_| format!("invalid --extent value: {value}"))?,
+                );
+            }
             "--help" | "-h" => {
                 print_usage();
                 return Ok(());
@@ -40,6 +53,12 @@ fn run() -> Result<(), String> {
     let seed = seed.unwrap_or(0);
     match class.as_deref().unwrap_or("m1") {
         "m1" => {
+            if preset.is_some() {
+                return Err("--preset is not valid for class m1".to_string());
+            }
+            if extent.is_some() {
+                return Err("--extent is not valid for class m1".to_string());
+            }
             let config = bsp_generator::DungeonConfig::nominal_m1();
             let (map_text, meta) = bsp_generator::generate(seed, config)
                 .map_err(|err| format!("generation failed: {err:?}"))?;
@@ -53,6 +72,12 @@ fn run() -> Result<(), String> {
             )?;
         }
         "m2" => {
+            if preset.is_some() {
+                return Err("--preset is not valid for class m2".to_string());
+            }
+            if extent.is_some() {
+                return Err("--extent is not valid for class m2".to_string());
+            }
             let config = bsp_generator::enhanced::config::EnhancedConfig::nominal();
             let (map_text, meta) = bsp_generator::generate_enhanced(seed, config)
                 .map_err(|err| format!("enhanced generation failed: {err}"))?;
@@ -66,7 +91,19 @@ fn run() -> Result<(), String> {
             )?;
         }
         "m3" => {
-            let config = bsp_generator::V3Config::new(seed, bsp_generator::V3Preset::Sparse, 2048)
+            let preset_tag = preset.as_deref().unwrap_or("sparse");
+            let v3_preset = bsp_generator::V3Preset::from_tag(preset_tag).ok_or_else(|| {
+                format!("unknown --preset '{preset_tag}'. Use sparse, moderate, or rich")
+            })?;
+
+            // Default extent: Sparse/Moderate 2048, Rich 3072
+            let default_extent = match v3_preset {
+                bsp_generator::V3Preset::Sparse | bsp_generator::V3Preset::Moderate => 2048,
+                bsp_generator::V3Preset::Rich => 3072,
+            };
+            let xy_extent = extent.unwrap_or(default_extent);
+
+            let config = bsp_generator::V3Config::new(seed, v3_preset, xy_extent)
                 .map_err(|err| format!("v3 config invalid: {err}"))?;
             let (map_text, meta) = bsp_generator::generate_enhanced_v3(&config)
                 .map_err(|err| format!("v3 generation failed: {err}"))?;
@@ -111,8 +148,11 @@ fn write_output(
 }
 
 fn print_usage() {
-    eprintln!("Usage: dungeon_gen [--seed <u64>] [--class m1|m2|m3] [--out <path>]");
+    eprintln!("Usage: dungeon_gen [--seed <u64>] [--class m1|m2|m3] [--out <path>] [--preset sparse|moderate|rich] [--extent <1024..3072>]");
     eprintln!("  m1: Legacy v1 single-layer dungeon");
     eprintln!("  m2: Enhanced v2 two-layer dungeon with stairs");
-    eprintln!("  m3: Enhanced v3 semantic-core pipeline");
+    eprintln!("  m3: Enhanced v3 two-layer dungeon with cardinal+45° geometry");
+    eprintln!("  --preset: (m3 only) sparse (default), moderate, or rich");
+    eprintln!("  --extent: (m3 only) XY extent (1024–3072, multiple of 16)");
+    eprintln!("            Sparse/Moderate default: 2048, Rich default: 3072");
 }

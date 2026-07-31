@@ -653,18 +653,25 @@ produce cryptographically independent output streams across all three domains.
 | `TerracedShrine` | stepped floor elevation changes within a room |
 | `MonolithicChamber` | large open room with minimal interior subdivision |
 
-These are planning descriptors, not fully integrated feature generators.
-Preset `minimum_families` enforces that at least N families are represented.
+These are real integrated feature generators, not planning descriptors.
+Each family materializes grounded, family-distinct brushes. Preset
+`minimum_families` enforces that at least N families are materialized in the output.
 
 ### 17.6 Preset Details
 
 | parameter | Sparse | Moderate | Rich |
 |-----------|--------|----------|------|
-| `min_rooms` | 12 | 20 | 28 |
+| `min_rooms` (exact emitted count) | 12 | 20 | 28 |
+| same-layer routes (exact emitted count) | 10 | 20 | 30 |
 | `target_loops` | 0 | 2 | 4 |
-| `minimum_families` | 1 | 2 | 3 |
+| `minimum_families` | 1 | 3 | 6 |
+| `minimum_assemblies` | 1 | 3 | 6 |
+| `minimum_feature_brushes` | 2 | 6 | 12 |
 | `face_budget` | 3,000 | 5,000 | 8,000 |
-| typical nominal faces | ~165 | ~230 | ~280 |
+
+The measured default-extent seed matrix (0, 42, 99, 255) emits 1,856–1,883
+Sparse, 3,275–3,310 Moderate, and 4,725–4,782 Rich source faces. These values
+are below their preset ceilings and the M2 10,000-face ceiling.
 
 ### 17.7 Key Differences from Enhanced v2
 
@@ -699,3 +706,8 @@ Preset `minimum_families` enforces that at least N families are represented.
 | `enhanced_v3_compatibility.rs` | v1/v2 baseline byte-identical preservation |
 | `enhanced_v3_integrated.rs` | integrated pipeline tests |
 | `enhanced_v3_qualification.rs` | full qualification suite |
+| `enhanced_v3_production_acceptance.rs` | exact preset topology, 12-entry source matrix, real plan identity, and source evidence |
+| `enhanced_v3_compiled_space.rs` | pinned 12-entry compiler matrix, strict reload, budgets, and compiled witnesses |
+| `tools/dungeon_gen/tests/enhanced_v3_cli.rs` | m3 defaults, preset/extent parsing, exact summaries, deterministic replay, seed distinction, and v1/v2 flag isolation |
+
+Phase 05 does not claim a headless renderer capture; that evidence remains owned by the root phase.

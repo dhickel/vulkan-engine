@@ -137,6 +137,7 @@ tests/
   enhanced_v3_integrated.rs          — integrated pipeline tests
   enhanced_v3_proof_model.rs         — proof model contract tests
   enhanced_v3_qualification.rs       — qualification suite
+  enhanced_v3_production_acceptance.rs — exact preset identity and 12-entry source acceptance
   support/enhanced_v3_compiler.rs    — compiler test support
 ```
 
@@ -203,11 +204,11 @@ Legacy v1's `"dungeon-gen/v1"` and Enhanced v2's `"dungeon-gen/v2"`. Stage tags:
 
 #### Presets
 
-| preset | min rooms | target loops | min families | face budget |
-|--------|----------|-------------|-------------|-------------|
-| Sparse | 12 | 0 | 1 | 3,000 |
-| Moderate | 20 | 2 | 2 | 5,000 |
-| Rich | 28 | 4 | 3 | 8,000 |
+| preset | exact rooms | same-layer routes | min families | min assemblies | min features | face budget |
+|--------|-------------|-------------------|--------------|----------------|--------------|-------------|
+| Sparse | 12 | 10 | 1 | 1 | 2 | 3,000 |
+| Moderate | 20 | 20 | 3 | 3 | 6 | 5,000 |
+| Rich | 28 | 30 | 6 | 6 | 12 | 8,000 |
 
 #### Key Differences from Enhanced v2
 

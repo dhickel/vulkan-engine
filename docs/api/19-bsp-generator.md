@@ -694,8 +694,15 @@ pub enum V3Preset {
 | `tag()` | `"sparse"` | `"moderate"` | `"rich"` |
 | `min_rooms()` | 12 | 20 | 28 |
 | `target_loops()` | 0 | 2 | 4 |
-| `minimum_families()` | 1 | 2 | 3 |
+| `minimum_families()` | 1 | 3 | 6 |
+| `minimum_assemblies()` | 1 | 3 | 6 |
+| `minimum_feature_brushes()` | 2 | 6 | 12 |
 | `face_budget()` | 3,000 | 5,000 | 8,000 |
+
+For every supported production seed/configuration, the current pipeline emits
+exactly 12/20/28 rooms and 10/20/30 same-layer routes for
+Sparse/Moderate/Rich. The methods retain `min_` names because they define the
+validated preset contract; production acceptance treats those counts as exact.
 
 **Parse from tag:**
 ```rust
@@ -809,18 +816,19 @@ Read-only accessors:
 
 ### Profile Dispatch
 
-The `GenerationProfile::EnhancedV3` variant is in `bsp_generator::enhanced::profile`:
+`GenerationProfile` provides dispatch tags for all three pipeline variants:
 
 ```rust
 pub enum GenerationProfile {
-    LegacyV1,      // tag: "legacy-v1"
-    EnhancedV2,    // tag: "enhanced-v2"
+    LegacyV1,      // tag: "legacy-v1" → from_tag("m1") → Some
+    EnhancedV2,    // tag: "enhanced-v2" → from_tag("m2") → Some
     EnhancedV3,    // tag: "m3"
 }
 ```
 
-Production dispatch uses the tag `"m3"` — `from_tag("m3")` returns `Some(EnhancedV3)`.
+Production dispatch uses `from_tag("m3")` → `Some(EnhancedV3)`.
 The proof-only tag `"enhanced-v3"` returns `None`.
+The `dungeon_gen` CLI uses `--class m3` with optional `--preset` and `--extent` flags.
 
 ### Enhanced v3 Constants
 

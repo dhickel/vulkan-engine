@@ -1,182 +1,244 @@
-//! Phase 05 — Enhanced V3 CLI integration tests.
+//! Enhanced V3 CLI production integration tests.
 //!
-//! Validates that `dungeon_gen --class m3` produces valid .map output
-//! through the binary. Uses `std::process::Command` to invoke the binary
-//! via `cargo run`.
+//! These invoke the released `dungeon_gen` binary, rather than testing the
+//! library directly, so m3 argument parsing, defaults, summaries, and output
+//! bytes remain part of the production contract.
 
-use std::process::Command;
+use std::collections::BTreeSet;
+use std::process::{Command, Output};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_dungeon_gen");
 
-#[test]
-fn cli_m3_produces_valid_map() {
-    let output = Command::new(BINARY)
-        .args(["--class", "m3", "--seed", "42", "--out", "/dev/stdout"])
-        .output()
-        .expect("failed to run dungeon_gen");
-
-    assert!(
-        output.status.success(),
-        "dungeon_gen exited with error: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let map = String::from_utf8_lossy(&output.stdout);
-    assert!(!map.is_empty());
-    assert!(map.contains("worldspawn"));
-    assert!(map.contains("info_player_start"));
-    assert!(map.contains("light"));
-    assert!(map.contains("cc0_dungeon_v2.wad"));
+#[derive(Debug)]
+struct M3Run {
+    map: Vec<u8>,
+    stderr: String,
 }
 
-#[test]
-fn cli_m3_with_different_seeds_both_valid() {
-    let output_a = Command::new(BINARY)
-        .args(["--class", "m3", "--seed", "0", "--out", "/dev/stdout"])
+fn invoke(args: &[String]) -> Output {
+    Command::new(BINARY)
+        .args(args)
         .output()
-        .expect("failed to run dungeon_gen seed 0");
-    assert!(output_a.status.success());
+        .expect("run dungeon_gen")
+}
 
-    let output_b = Command::new(BINARY)
-        .args(["--class", "m3", "--seed", "42", "--out", "/dev/stdout"])
-        .output()
-        .expect("failed to run dungeon_gen seed 42");
-    assert!(output_b.status.success());
+fn run_m3(seed: u64, preset: &str, extent: Option<u32>) -> M3Run {
+    let mut args = vec![
+        "--class".into(),
+        "m3".into(),
+        "--seed".into(),
+        seed.to_string(),
+        "--preset".into(),
+        preset.into(),
+    ];
+    if let Some(extent) = extent {
+        args.extend(["--extent".into(), extent.to_string()]);
+    }
+    args.extend(["--out".into(), "/dev/stdout".into()]);
+    let output = invoke(&args);
+    assert!(
+        output.status.success(),
+        "m3 seed={seed} preset={preset} extent={extent:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    M3Run {
+        map: output.stdout,
+        stderr: String::from_utf8(output.stderr).expect("UTF-8 stderr"),
+    }
+}
 
-    let map_a = String::from_utf8_lossy(&output_a.stdout);
-    let map_b = String::from_utf8_lossy(&output_b.stdout);
-    assert!(!map_a.is_empty());
-    assert!(!map_b.is_empty());
+fn run_m3_default(seed: u64, preset: Option<&str>) -> M3Run {
+    let mut args = vec![
+        "--class".into(),
+        "m3".into(),
+        "--seed".into(),
+        seed.to_string(),
+    ];
+    if let Some(preset) = preset {
+        args.extend(["--preset".into(), preset.into()]);
+    }
+    args.extend(["--out".into(), "/dev/stdout".into()]);
+    let output = invoke(&args);
+    assert!(
+        output.status.success(),
+        "m3 default seed={seed} preset={preset:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    M3Run {
+        map: output.stdout,
+        stderr: String::from_utf8(output.stderr).expect("UTF-8 stderr"),
+    }
+}
 
-    // Both produce valid Quake .map structure
-    for map in &[&map_a, &map_b] {
-        assert!(map.contains("worldspawn"));
-        assert!(map.contains("info_player_start"));
-        assert!(map.contains("light"));
-        let open = map.matches('{').count();
-        let close = map.matches('}').count();
-        assert_eq!(open, close, "mismatched braces");
+fn summary_value(stderr: &str, key: &str) -> u32 {
+    stderr
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix(&format!("{key}=")))
+        .and_then(|value| value.trim_end_matches(',').parse().ok())
+        .unwrap_or_else(|| panic!("missing {key} summary in stderr: {stderr}"))
+}
+
+fn assert_valid_map(label: &str, map: &[u8]) {
+    let map = std::str::from_utf8(map).unwrap_or_else(|_| panic!("{label}: map is not UTF-8"));
+    assert!(!map.is_empty(), "{label}: empty map");
+    assert!(map.contains("worldspawn"), "{label}: no worldspawn");
+    assert!(map.contains("info_player_start"), "{label}: no spawn");
+    assert!(
+        map.contains("\"classname\" \"light\""),
+        "{label}: no lights"
+    );
+    assert!(
+        map.contains("cc0_dungeon_v2.wad"),
+        "{label}: no WAD reference"
+    );
+    assert!(map.contains("_minlight"), "{label}: no _minlight");
+    assert!(map.contains("bs_wall"), "{label}: no bs_wall");
+    assert!(map.contains("bs_floor"), "{label}: no bs_floor");
+    assert!(map.contains("bs_ceil"), "{label}: no bs_ceil");
+    assert_eq!(
+        map.matches('{').count(),
+        map.matches('}').count(),
+        "{label}: mismatched braces"
+    );
+    assert!(map.ends_with('\n'), "{label}: no trailing newline");
+    assert!(!map.contains('\r'), "{label}: contains CR bytes");
+}
+
+fn assert_m3_contract(run: &M3Run, label: &str, rooms: u32, routes: u32) {
+    assert_valid_map(label, &run.map);
+    assert_eq!(summary_value(&run.stderr, "rooms"), rooms, "{label}");
+    assert_eq!(summary_value(&run.stderr, "corridors"), routes, "{label}");
+}
+
+fn expected(preset: &str) -> (u32, u32, u32) {
+    match preset {
+        "sparse" => (12, 10, 2048),
+        "moderate" => (20, 20, 2048),
+        "rich" => (28, 30, 3072),
+        _ => unreachable!("test preset"),
     }
 }
 
 #[test]
-fn cli_m3_deterministic() {
-    let run = |seed: u64| -> Vec<u8> {
-        let output = Command::new(BINARY)
-            .args([
-                "--class",
-                "m3",
-                "--seed",
-                &seed.to_string(),
-                "--out",
-                "/dev/stdout",
-            ])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        output.stdout
-    };
-
-    let run1 = run(42);
-    let run2 = run(42);
-    assert_eq!(run1, run2, "same seed should produce identical output");
+fn cli_m3_default_is_sparse_at_2048() {
+    let default = run_m3_default(42, None);
+    let explicit = run_m3(42, "sparse", Some(2048));
+    assert_m3_contract(&default, "m3 default", 12, 10);
+    assert_eq!(default.map, explicit.map, "default must be Sparse@2048");
 }
 
 #[test]
-fn cli_m3_balanced_braces() {
-    let output = Command::new(BINARY)
-        .args(["--class", "m3", "--seed", "42", "--out", "/dev/stdout"])
-        .output()
-        .expect("failed to run dungeon_gen");
-
-    assert!(output.status.success());
-    let map = String::from_utf8_lossy(&output.stdout);
-    let open = map.matches('{').count();
-    let close = map.matches('}').count();
-    assert_eq!(open, close, "mismatched braces");
-    assert!(open > 2, "expected multiple brush blocks");
+fn cli_m3_rich_default_extent_is_3072() {
+    let default = run_m3_default(42, Some("rich"));
+    let explicit = run_m3(42, "rich", Some(3072));
+    assert_m3_contract(&default, "m3 rich default", 28, 30);
+    assert_eq!(default.map, explicit.map, "Rich default must be 3072");
 }
 
 #[test]
-fn cli_m3_map_has_worldspawn_first() {
-    let output = Command::new(BINARY)
-        .args(["--class", "m3", "--seed", "42", "--out", "/dev/stdout"])
-        .output()
-        .expect("failed to run dungeon_gen");
-
-    assert!(output.status.success());
-    let map = String::from_utf8_lossy(&output.stdout);
-    let worldspawn_pos = map.find("worldspawn").unwrap();
-    let spawn_pos = map.find("info_player_start").unwrap();
-    assert!(
-        worldspawn_pos < spawn_pos,
-        "worldspawn must precede spawn entity"
-    );
+fn cli_m3_seed_preset_matrix_has_exact_topology_counts() {
+    for preset in ["sparse", "moderate", "rich"] {
+        let (rooms, routes, extent) = expected(preset);
+        for seed in [0, 42, 99, 255] {
+            let run = run_m3(seed, preset, Some(extent));
+            assert_m3_contract(&run, &format!("{preset}/{seed}"), rooms, routes);
+        }
+    }
 }
 
 #[test]
-fn cli_m3_map_has_approved_textures() {
-    let output = Command::new(BINARY)
-        .args(["--class", "m3", "--seed", "42", "--out", "/dev/stdout"])
-        .output()
-        .expect("failed to run dungeon_gen");
-
-    assert!(output.status.success());
-    let map = String::from_utf8_lossy(&output.stdout);
-    assert!(map.contains("bs_wall"));
-    assert!(map.contains("bs_floor"));
-    assert!(map.contains("bs_ceil"));
+fn cli_m3_seed_preset_matrix_replays_byte_identically() {
+    for preset in ["sparse", "moderate", "rich"] {
+        let (_, _, extent) = expected(preset);
+        for seed in [0, 42, 99, 255] {
+            let first = run_m3(seed, preset, Some(extent));
+            let replay = run_m3(seed, preset, Some(extent));
+            assert_eq!(first.map, replay.map, "{preset}/{seed}: map replay drift");
+            assert_eq!(
+                first.stderr, replay.stderr,
+                "{preset}/{seed}: summary replay drift"
+            );
+        }
+    }
 }
 
 #[test]
-fn cli_m3_help_mentions_m3() {
-    let output = Command::new(BINARY)
-        .args(["--help"])
-        .output()
-        .expect("failed to run dungeon_gen --help");
-
-    // --help exits with 0 but writes to stderr
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("m3"),
-        "help should mention m3 class: {stderr}"
-    );
+fn cli_m3_seed_preset_matrix_has_distinct_seed_outputs() {
+    for preset in ["sparse", "moderate", "rich"] {
+        let (_, _, extent) = expected(preset);
+        let maps: BTreeSet<_> = [0, 42, 99, 255]
+            .into_iter()
+            .map(|seed| run_m3(seed, preset, Some(extent)).map)
+            .collect();
+        assert_eq!(
+            maps.len(),
+            4,
+            "{preset}: required seed outputs must all differ"
+        );
+    }
 }
 
 #[test]
-fn cli_legacy_m1_still_works() {
-    let output = Command::new(BINARY)
-        .args(["--class", "m1", "--seed", "0", "--out", "/dev/stdout"])
-        .output()
-        .expect("failed to run dungeon_gen m1");
+fn cli_m3_rejects_invalid_preset_and_extent() {
+    let bad_preset = invoke(&[
+        "--class".into(),
+        "m3".into(),
+        "--preset".into(),
+        "dense".into(),
+    ]);
+    assert!(!bad_preset.status.success());
+    assert!(String::from_utf8_lossy(&bad_preset.stderr).contains("dense"));
 
-    assert!(output.status.success());
-    let map = String::from_utf8_lossy(&output.stdout);
-    assert!(!map.is_empty());
-    assert!(map.contains("worldspawn"));
+    for extent in ["2047", "512", "4096"] {
+        let output = invoke(&[
+            "--class".into(),
+            "m3".into(),
+            "--extent".into(),
+            extent.into(),
+        ]);
+        assert!(!output.status.success(), "m3 accepted extent {extent}");
+    }
 }
 
 #[test]
-fn cli_enhanced_m2_still_works() {
-    let output = Command::new(BINARY)
-        .args(["--class", "m2", "--seed", "0", "--out", "/dev/stdout"])
-        .output()
-        .expect("failed to run dungeon_gen m2");
-
-    assert!(output.status.success());
-    let map = String::from_utf8_lossy(&output.stdout);
-    assert!(!map.is_empty());
-    assert!(map.contains("worldspawn"));
+fn cli_m1_m2_reject_m3_only_flags() {
+    for class in ["m1", "m2"] {
+        for (flag, value) in [("--preset", "sparse"), ("--extent", "2048")] {
+            let output = invoke(&["--class".into(), class.into(), flag.into(), value.into()]);
+            assert!(!output.status.success(), "{class} accepted m3-only {flag}");
+        }
+    }
 }
 
 #[test]
-fn cli_rejects_unknown_class() {
-    let output = Command::new(BINARY)
-        .args(["--class", "v3", "--seed", "0", "--out", "/dev/stdout"])
-        .output()
-        .expect("failed to run dungeon_gen v3");
+fn cli_v1_v2_remain_available() {
+    for class in ["m1", "m2"] {
+        let output = invoke(&[
+            "--class".into(),
+            class.into(),
+            "--seed".into(),
+            "0".into(),
+            "--out".into(),
+            "/dev/stdout".into(),
+        ]);
+        assert!(
+            output.status.success(),
+            "{class}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("worldspawn"));
+    }
+}
 
-    assert!(!output.status.success(), "v3 class should be rejected");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("v3"), "error should mention v3: {stderr}");
+#[test]
+fn cli_help_and_unknown_class_report_the_production_interface() {
+    let help = invoke(&["--help".into()]);
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stderr);
+    for required in ["m1", "m2", "m3", "--preset", "--extent"] {
+        assert!(help.contains(required), "help lacks {required}: {help}");
+    }
+
+    let unknown = invoke(&["--class".into(), "v3".into()]);
+    assert!(!unknown.status.success());
 }

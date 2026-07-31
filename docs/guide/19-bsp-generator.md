@@ -331,8 +331,8 @@ and Sparse/Moderate/Rich density presets. It reuses the CC0 Dungeon v2 theme.
 - **Three density presets**: Sparse (≥12 rooms), Moderate (≥20 rooms, 2 loops),
   Rich (≥28 rooms, 4 loops)
 - **6 grammar families**: PortalChamber, ButtressedHall, ColumnGrove,
-  FracturedVault, TerracedShrine, MonolithicChamber (descriptors for composition
-  planning)
+  FracturedVault, TerracedShrine, MonolithicChamber — real integrated feature
+  generators materializing grounded family-distinct brushes
 - **Two-layer M2 arrangement**: lower floor Z=0, upper floor Z=192, 176-unit
   room height — identical vertical contract to Enhanced v2
 - **Minimum-identity enforcement**: presets require specific minimum grammar
@@ -343,11 +343,15 @@ and Sparse/Moderate/Rich density presets. It reuses the CC0 Dungeon v2 theme.
 ### CLI Usage
 
 ```bash
-# Generate an m3 dungeon through the dungeon_gen tool
+# Generate an m3 dungeon (defaults to Sparse, x2048)
 dungeon_gen --class m3 --seed 42
 
+# Explicit preset and extent
+dungeon_gen --class m3 --seed 42 --preset moderate --extent 2048
+dungeon_gen --class m3 --seed 99 --preset rich --extent 3072
+
 # Publish through engine_pack with a preset
-eingine_pack enhanced-dungeon-v3 --seed 42 --preset moderate --out /tmp/pkg
+engine_pack enhanced-dungeon-v3 --seed 42 --preset moderate --out /tmp/pkg
 
 # Explore interactively with the dungeon explorer
 ./tools/dungeon_explore.sh --class m3 --seed 42
@@ -406,11 +410,15 @@ let map_text = generate_v3(&config)?;
 
 ### Preset Comparison
 
-| preset | min rooms | target loops | min families | face budget | typical output faces |
-|--------|----------|-------------|-------------|-------------|---------------------|
-| Sparse | 12 | 0 | 1 | 3,000 | ~165–180 |
-| Moderate | 20 | 2 | 2 | 5,000 | ~220–250 |
-| Rich | 28 | 4 | 3 | 8,000 | ~260–288 |
+| preset | exact rooms | same-layer routes | target loops | min families | min assemblies | min features | face budget |
+|--------|-------------|-------------------|--------------|--------------|----------------|--------------|-------------|
+| Sparse | 12 | 10 | 0 | 1 | 1 | 2 | 3,000 |
+| Moderate | 20 | 20 | 2 | 3 | 3 | 6 | 5,000 |
+| Rich | 28 | 30 | 4 | 6 | 6 | 12 | 8,000 |
+
+The measured default-extent seed matrix (0, 42, 99, 255) emits 1,856–1,883
+Sparse, 3,275–3,310 Moderate, and 4,725–4,782 Rich source faces. The preset
+and M2 ceilings remain 3,000/5,000/8,000 and 10,000 respectively.
 
 ### Deferred Capabilities
 
@@ -418,9 +426,7 @@ The following capabilities are deferred and not available in Enhanced v3 product
 
 - Diagonal portals (pointed-arch on 45° walls)
 - Concave rooms (T/L/alcove shapes)
-- Accessible upper features (walkable above ground level)
 - Segmented-arch portal integration
-- Additional room families beyond the 6 descriptor families
 - Trim theme role
 - Lattice-slope walls (15°/30°)
 - Third navigation layer
