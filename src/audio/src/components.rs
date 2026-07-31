@@ -45,7 +45,13 @@ pub struct AudioSource {
 
 impl AudioSource {
     /// Create a new audio source component with validated fields.
-    pub fn new(clip_id: AudioClipId, gain: f32, pitch: f32, looping: bool, spatial_blend: f32) -> Self {
+    pub fn new(
+        clip_id: AudioClipId,
+        gain: f32,
+        pitch: f32,
+        looping: bool,
+        spatial_blend: f32,
+    ) -> Self {
         Self {
             clip_id,
             gain: clamp_finite(gain),

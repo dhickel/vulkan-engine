@@ -7,8 +7,7 @@ use super::determinism::{Pcg32V1, SemanticComponent, SemanticStage, SemanticStre
 use super::error::{ErrorStage, GeneratorError};
 use super::ir::{
     Direction, GridCoord, IdAllocator, IntendedTopology, OccupancyClass, OccupancyGrid,
-    PlacedRegion, PlacedSocket, RegionRole, SocketRole,
-    TransitionReservation,
+    PlacedRegion, PlacedSocket, RegionRole, SocketRole, TransitionReservation,
 };
 use super::prefab::{
     PrefabCatalog, PrefabVariant, ReservationKind, ReservationOwner, SocketRole as PrefabSocketRole,
@@ -159,12 +158,14 @@ impl RoleManifest {
         config: &NormalizedGeneratorConfig,
         rng: &mut Pcg32V1,
     ) -> Result<Self, GeneratorError> {
-        let upper = config.region_max().checked_add(1).ok_or(
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "role_region_upper",
-            },
-        )?;
+        let upper =
+            config
+                .region_max()
+                .checked_add(1)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "role_region_upper",
+                })?;
         let total = rng.gen_range(config.region_min(), upper)?;
         let layer_pairs = u32::from(config.layers().2.checked_sub(1).ok_or(
             GeneratorError::ArithmeticOverflow {
@@ -178,26 +179,28 @@ impl RoleManifest {
                 stage: ErrorStage::Placement,
                 operation: "role_transition_count",
             })?;
-        let vertical_hub_count = transitions.checked_mul(2).ok_or(
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "role_transition_endpoint_count",
-            },
-        )?;
-        let mandatory = 5u32
-            .checked_add(vertical_hub_count)
-            .ok_or(GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "role_mandatory_count",
-            })?;
-        let remaining = total.checked_sub(mandatory).ok_or(
-            GeneratorError::MandatoryInfeasibility {
-                stage: ErrorStage::Placement,
-                constraint: "mandatory_role_minimum",
-                required: u64::from(mandatory),
-                available: u64::from(total),
-            },
-        )?;
+        let vertical_hub_count =
+            transitions
+                .checked_mul(2)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "role_transition_endpoint_count",
+                })?;
+        let mandatory =
+            5u32.checked_add(vertical_hub_count)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "role_mandatory_count",
+                })?;
+        let remaining =
+            total
+                .checked_sub(mandatory)
+                .ok_or(GeneratorError::MandatoryInfeasibility {
+                    stage: ErrorStage::Placement,
+                    constraint: "mandatory_role_minimum",
+                    required: u64::from(mandatory),
+                    available: u64::from(total),
+                })?;
 
         // Extra major, junction, dead-end, required-route, optional, ordinary.
         let weights = [20u64, 20, 15, 15, 15, 15];
@@ -205,51 +208,56 @@ impl RoleManifest {
         let mut shares = [0u32; 6];
         let mut allocated = 0u32;
         for (index, weight) in weights.iter().copied().enumerate() {
-            let value = u64::from(remaining)
-                .checked_mul(weight)
-                .ok_or(GeneratorError::ArithmeticOverflow {
+            let value = u64::from(remaining).checked_mul(weight).ok_or(
+                GeneratorError::ArithmeticOverflow {
                     stage: ErrorStage::Placement,
                     operation: "role_share_mul",
-                })?
-                / weight_sum;
+                },
+            )? / weight_sum;
             let share = u32::try_from(value).map_err(|_| GeneratorError::ArithmeticOverflow {
                 stage: ErrorStage::Placement,
                 operation: "role_share_convert",
             })?;
             shares[index] = share;
-            allocated = allocated.checked_add(share).ok_or(
-                GeneratorError::ArithmeticOverflow {
+            allocated = allocated
+                .checked_add(share)
+                .ok_or(GeneratorError::ArithmeticOverflow {
                     stage: ErrorStage::Placement,
                     operation: "role_share_sum",
-                },
-            )?;
+                })?;
         }
-        let mut remainder = remaining.checked_sub(allocated).ok_or(
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "role_share_remainder",
-            },
-        )?;
+        let mut remainder =
+            remaining
+                .checked_sub(allocated)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "role_share_remainder",
+                })?;
         let mut index = 0usize;
         while remainder > 0 {
             let share = shares.get_mut(index).ok_or(GeneratorError::IrInvariant {
                 stage: ErrorStage::Placement,
                 detail: "role_share_index_out_of_bounds".into(),
             })?;
-            *share = share.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "role_share_remainder_add",
-            })?;
-            remainder = remainder.checked_sub(1).ok_or(
-                GeneratorError::ArithmeticOverflow {
+            *share = share
+                .checked_add(1)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "role_share_remainder_add",
+                })?;
+            remainder = remainder
+                .checked_sub(1)
+                .ok_or(GeneratorError::ArithmeticOverflow {
                     stage: ErrorStage::Placement,
                     operation: "role_share_remainder_sub",
-                },
-            )?;
-            index = index.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "role_share_index_add",
-            })? % shares.len();
+                })?;
+            index = index
+                .checked_add(1)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "role_share_index_add",
+                })?
+                % shares.len();
         }
 
         Ok(Self {
@@ -294,10 +302,11 @@ impl RoleManifest {
         ]
         .into_iter()
         .try_fold(0u32, |sum, value| {
-            sum.checked_add(value).ok_or(GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "role_total",
-            })
+            sum.checked_add(value)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "role_total",
+                })
         })
     }
 
@@ -408,12 +417,15 @@ fn enumerate_ramp_candidates(
     config: &NormalizedGeneratorConfig,
 ) -> Result<Vec<RampCandidate>, GeneratorError> {
     let mut candidates = Vec::new();
-    let layer_pairs = config.layers().2.checked_sub(1).ok_or(
-        GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Placement,
-            operation: "ramp_candidate_layer_pairs",
-        },
-    )?;
+    let layer_pairs =
+        config
+            .layers()
+            .2
+            .checked_sub(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "ramp_candidate_layer_pairs",
+            })?;
     for (variant_index, variant) in catalog.variants().iter().enumerate() {
         if !variant_supports_role(variant, RegionRole::VerticalHub)
             || variant.width > config.width()
@@ -421,12 +433,11 @@ fn enumerate_ramp_candidates(
         {
             continue;
         }
-        let variant_index = u16::try_from(variant_index).map_err(|_| {
-            GeneratorError::ArithmeticOverflow {
+        let variant_index =
+            u16::try_from(variant_index).map_err(|_| GeneratorError::ArithmeticOverflow {
                 stage: ErrorStage::Placement,
                 operation: "ramp_variant_index_convert",
-            }
-        })?;
+            })?;
         let max_x = config.width().checked_sub(variant.width).ok_or(
             GeneratorError::ArithmeticOverflow {
                 stage: ErrorStage::Placement,
@@ -532,18 +543,20 @@ fn materialize_transition(
                     operation: "transition_cell_layer",
                 },
             )?;
-            let x = candidate.x.checked_add(cell.x).ok_or(
-                GeneratorError::ArithmeticOverflow {
+            let x = candidate
+                .x
+                .checked_add(cell.x)
+                .ok_or(GeneratorError::ArithmeticOverflow {
                     stage: ErrorStage::Placement,
                     operation: "transition_cell_x",
-                },
-            )?;
-            let y = candidate.y.checked_add(cell.y).ok_or(
-                GeneratorError::ArithmeticOverflow {
+                })?;
+            let y = candidate
+                .y
+                .checked_add(cell.y)
+                .ok_or(GeneratorError::ArithmeticOverflow {
                     stage: ErrorStage::Placement,
                     operation: "transition_cell_y",
-                },
-            )?;
+                })?;
             target.push(GridCoord::new(
                 layer,
                 x,
@@ -593,12 +606,14 @@ fn projected_hub_cells(
     materialized: &MaterializedTransition,
     config: &NormalizedGeneratorConfig,
 ) -> Result<Vec<GridCoord>, GeneratorError> {
-    let upper = materialized.lower_layer.checked_add(1).ok_or(
-        GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Placement,
-            operation: "hub_upper_layer",
-        },
-    )?;
+    let upper =
+        materialized
+            .lower_layer
+            .checked_add(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "hub_upper_layer",
+            })?;
     let (x, y, width, height) = materialized.hub_footprint;
     let capacity = usize::from(width)
         .checked_mul(usize::from(height))
@@ -611,14 +626,18 @@ fn projected_hub_cells(
     for layer in [materialized.lower_layer, upper] {
         for dy in 0..height {
             for dx in 0..width {
-                let cell_x = x.checked_add(dx).ok_or(GeneratorError::ArithmeticOverflow {
-                    stage: ErrorStage::Placement,
-                    operation: "hub_cell_x",
-                })?;
-                let cell_y = y.checked_add(dy).ok_or(GeneratorError::ArithmeticOverflow {
-                    stage: ErrorStage::Placement,
-                    operation: "hub_cell_y",
-                })?;
+                let cell_x = x
+                    .checked_add(dx)
+                    .ok_or(GeneratorError::ArithmeticOverflow {
+                        stage: ErrorStage::Placement,
+                        operation: "hub_cell_x",
+                    })?;
+                let cell_y = y
+                    .checked_add(dy)
+                    .ok_or(GeneratorError::ArithmeticOverflow {
+                        stage: ErrorStage::Placement,
+                        operation: "hub_cell_y",
+                    })?;
                 cells.push(GridCoord::new(
                     layer,
                     cell_x,
@@ -673,24 +692,25 @@ fn placed_sockets_for_endpoint(
         if socket.anchor.layer != variant_layer {
             continue;
         }
-        let x = origin_x.checked_add(socket.anchor.x).ok_or(
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "endpoint_socket_x",
-            },
-        )?;
-        let y = origin_y.checked_add(socket.anchor.y).ok_or(
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "endpoint_socket_y",
-            },
-        )?;
-        let variant_socket_index = u16::try_from(index).map_err(|_| {
-            GeneratorError::ArithmeticOverflow {
+        let x =
+            origin_x
+                .checked_add(socket.anchor.x)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "endpoint_socket_x",
+                })?;
+        let y =
+            origin_y
+                .checked_add(socket.anchor.y)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "endpoint_socket_y",
+                })?;
+        let variant_socket_index =
+            u16::try_from(index).map_err(|_| GeneratorError::ArithmeticOverflow {
                 stage: ErrorStage::Placement,
                 operation: "endpoint_socket_index",
-            }
-        })?;
+            })?;
         sockets.push((
             index,
             PlacedSocket {
@@ -740,12 +760,14 @@ fn commit_transition(
     let transition_id = staged_alloc.next_transition()?;
     let lower_region_id = staged_alloc.next_region()?;
     let upper_region_id = staged_alloc.next_region()?;
-    let upper_layer = materialized.lower_layer.checked_add(1).ok_or(
-        GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Placement,
-            operation: "commit_transition_upper_layer",
-        },
-    )?;
+    let upper_layer =
+        materialized
+            .lower_layer
+            .checked_add(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "commit_transition_upper_layer",
+            })?;
     let (origin_x, origin_y, width, height) = materialized.hub_footprint;
 
     let mut lower_sockets = placed_sockets_for_endpoint(
@@ -841,7 +863,10 @@ fn commit_transition(
         variant_index: materialized.variant_index,
         layer: materialized.lower_layer,
         footprint: (origin_x, origin_y, width, height),
-        sockets: lower_sockets.into_iter().map(|(_, socket)| socket).collect(),
+        sockets: lower_sockets
+            .into_iter()
+            .map(|(_, socket)| socket)
+            .collect(),
         transitions: vec![transition_id],
         marker_variant_indices: lower_marker_indices,
     };
@@ -851,7 +876,10 @@ fn commit_transition(
         variant_index: materialized.variant_index,
         layer: upper_layer,
         footprint: (origin_x, origin_y, width, height),
-        sockets: upper_sockets.into_iter().map(|(_, socket)| socket).collect(),
+        sockets: upper_sockets
+            .into_iter()
+            .map(|(_, socket)| socket)
+            .collect(),
         transitions: vec![transition_id],
         marker_variant_indices: upper_marker_indices,
     };
@@ -908,23 +936,26 @@ fn reserve_transitions_and_endpoints(
     factory: SemanticStreamFactory,
     ctx: &mut AttemptContext,
 ) -> Result<(Vec<TransitionReservation>, Vec<PlacedRegion>), GeneratorError> {
-    let layer_pairs = config.layers().2.checked_sub(1).ok_or(
-        GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Placement,
-            operation: "reserve_transition_layer_pairs",
-        },
-    )?;
+    let layer_pairs =
+        config
+            .layers()
+            .2
+            .checked_sub(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "reserve_transition_layer_pairs",
+            })?;
     let required = config.transitions_per_adjacent_pair();
     let mut transitions = Vec::new();
     let mut endpoints = Vec::new();
 
     for lower_layer in 0..layer_pairs {
-        let upper_layer = lower_layer.checked_add(1).ok_or(
-            GeneratorError::ArithmeticOverflow {
+        let upper_layer = lower_layer
+            .checked_add(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
                 stage: ErrorStage::Placement,
                 operation: "reserve_transition_upper_layer",
-            },
-        )?;
+            })?;
         let mut pair_candidates: Vec<RampCandidate> = candidates
             .iter()
             .copied()
@@ -943,38 +974,34 @@ fn reserve_transitions_and_endpoints(
             }
             let materialized = materialize_transition(candidate, catalog, config)?;
             if !transition_fits(&materialized, grid, config)? {
-                rejected = rejected.checked_add(1).ok_or(
-                    GeneratorError::ArithmeticOverflow {
+                rejected = rejected
+                    .checked_add(1)
+                    .ok_or(GeneratorError::ArithmeticOverflow {
                         stage: ErrorStage::Placement,
                         operation: "transition_rejection_count",
-                    },
-                )?;
+                    })?;
                 continue;
             }
-            let Some((transition, lower, upper)) = commit_transition(
-                &materialized,
-                catalog,
-                grid,
-                alloc,
-                config,
-                &endpoints,
-                ctx,
-            )? else {
-                rejected = rejected.checked_add(1).ok_or(
-                    GeneratorError::ArithmeticOverflow {
+            let Some((transition, lower, upper)) =
+                commit_transition(&materialized, catalog, grid, alloc, config, &endpoints, ctx)?
+            else {
+                rejected = rejected
+                    .checked_add(1)
+                    .ok_or(GeneratorError::ArithmeticOverflow {
                         stage: ErrorStage::Placement,
                         operation: "transition_connectivity_rejection_count",
-                    },
-                )?;
+                    })?;
                 continue;
             };
             transitions.push(transition);
             endpoints.push(lower);
             endpoints.push(upper);
-            placed = placed.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "transition_placed_count",
-            })?;
+            placed = placed
+                .checked_add(1)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "transition_placed_count",
+                })?;
         }
         if placed < required {
             return Err(GeneratorError::TransitionInfeasible {
@@ -1047,15 +1074,7 @@ fn stage_candidate_region(
     config: &NormalizedGeneratorConfig,
     alloc: &IdAllocator,
     ctx: &mut AttemptContext,
-) -> Result<
-    (
-        OccupancyGrid,
-        IdAllocator,
-        Vec<PlacedSocket>,
-        PlacedRegion,
-    ),
-    GeneratorError,
-> {
+) -> Result<(OccupancyGrid, IdAllocator, Vec<PlacedSocket>, PlacedRegion), GeneratorError> {
     if !can_place_footprint(variant, layer, origin_x, origin_y, free_cells, config)? {
         return Err(GeneratorError::OccupancyConflict {
             stage: ErrorStage::Placement,
@@ -1072,24 +1091,27 @@ fn stage_candidate_region(
     let region_id = staged_alloc.next_region()?;
     let mut sockets = Vec::with_capacity(variant.sockets.len());
     for (index, socket) in variant.sockets.iter().enumerate() {
-        let global_layer = layer.checked_add(socket.anchor.layer).ok_or(
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "stage_region_socket_layer",
-            },
-        )?;
-        let global_x = origin_x.checked_add(socket.anchor.x).ok_or(
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "stage_region_socket_x",
-            },
-        )?;
-        let global_y = origin_y.checked_add(socket.anchor.y).ok_or(
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "stage_region_socket_y",
-            },
-        )?;
+        let global_layer =
+            layer
+                .checked_add(socket.anchor.layer)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "stage_region_socket_layer",
+                })?;
+        let global_x =
+            origin_x
+                .checked_add(socket.anchor.x)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "stage_region_socket_x",
+                })?;
+        let global_y =
+            origin_y
+                .checked_add(socket.anchor.y)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "stage_region_socket_y",
+                })?;
         sockets.push(PlacedSocket {
             id: staged_alloc.next_socket()?,
             variant_socket_index: u16::try_from(index).map_err(|_| {
@@ -1141,12 +1163,11 @@ fn stage_candidate_region(
         }
     }
 
-    let spacing = i32::try_from(config.spacing()).map_err(|_| {
-        GeneratorError::ArithmeticOverflow {
+    let spacing =
+        i32::try_from(config.spacing()).map_err(|_| GeneratorError::ArithmeticOverflow {
             stage: ErrorStage::Placement,
             operation: "stage_spacing_convert",
-        }
-    })?;
+        })?;
     let min_x = i32::from(origin_x)
         .checked_sub(spacing)
         .ok_or(GeneratorError::ArithmeticOverflow {
@@ -1169,14 +1190,12 @@ fn stage_candidate_region(
             stage: ErrorStage::Placement,
             operation: "stage_spacing_max_x",
         })?)
-    .min(
-        i32::from(config.width())
-            .checked_sub(1)
-            .ok_or(GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "stage_spacing_grid_max_x",
-            })?,
-    );
+    .min(i32::from(config.width()).checked_sub(1).ok_or(
+        GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "stage_spacing_grid_max_x",
+        },
+    )?);
     let max_y = (i32::from(origin_y)
         .checked_add(i32::from(variant.height))
         .and_then(|value| value.checked_add(spacing))
@@ -1185,14 +1204,12 @@ fn stage_candidate_region(
             stage: ErrorStage::Placement,
             operation: "stage_spacing_max_y",
         })?)
-    .min(
-        i32::from(config.height())
-            .checked_sub(1)
-            .ok_or(GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "stage_spacing_grid_max_y",
-            })?,
-    );
+    .min(i32::from(config.height()).checked_sub(1).ok_or(
+        GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "stage_spacing_grid_max_y",
+        },
+    )?);
     for cell_y in min_y..=max_y {
         for cell_x in min_x..=max_x {
             let cell = GridCoord::new(
@@ -1314,18 +1331,18 @@ fn can_place_footprint(
     free_cells: &FreeCells,
     config: &NormalizedGeneratorConfig,
 ) -> Result<bool, GeneratorError> {
-    let end_x = x.checked_add(variant.width).ok_or(
-        GeneratorError::ArithmeticOverflow {
+    let end_x = x
+        .checked_add(variant.width)
+        .ok_or(GeneratorError::ArithmeticOverflow {
             stage: ErrorStage::Placement,
             operation: "footprint_end_x",
-        },
-    )?;
-    let end_y = y.checked_add(variant.height).ok_or(
-        GeneratorError::ArithmeticOverflow {
+        })?;
+    let end_y = y
+        .checked_add(variant.height)
+        .ok_or(GeneratorError::ArithmeticOverflow {
             stage: ErrorStage::Placement,
             operation: "footprint_end_y",
-        },
-    )?;
+        })?;
     if layer >= config.layers().2
         || x == 0
         || y == 0
@@ -1334,13 +1351,7 @@ fn can_place_footprint(
     {
         return Ok(false);
     }
-    Ok(free_cells.can_place_rect(
-        layer,
-        x,
-        y,
-        variant.width,
-        variant.height,
-    ))
+    Ok(free_cells.can_place_rect(layer, x, y, variant.width, variant.height))
 }
 
 fn occupy_placement(
@@ -1389,20 +1400,22 @@ fn placement_score(
     let mut variant_usage = 0u32;
     for region in placed {
         if region.layer == layer {
-            layer_population = layer_population.checked_add(1).ok_or(
-                GeneratorError::ArithmeticOverflow {
-                    stage: ErrorStage::Placement,
-                    operation: "placement_layer_population",
-                },
-            )?;
+            layer_population =
+                layer_population
+                    .checked_add(1)
+                    .ok_or(GeneratorError::ArithmeticOverflow {
+                        stage: ErrorStage::Placement,
+                        operation: "placement_layer_population",
+                    })?;
         }
         if region.variant_index == variant_index {
-            variant_usage = variant_usage.checked_add(1).ok_or(
-                GeneratorError::ArithmeticOverflow {
-                    stage: ErrorStage::Placement,
-                    operation: "placement_variant_usage",
-                },
-            )?;
+            variant_usage =
+                variant_usage
+                    .checked_add(1)
+                    .ok_or(GeneratorError::ArithmeticOverflow {
+                        stage: ErrorStage::Placement,
+                        operation: "placement_variant_usage",
+                    })?;
         }
         if region.layer != layer {
             continue;
@@ -1442,7 +1455,10 @@ fn placement_score(
             .map(|region| region.layer);
         if spawn_layer == Some(layer) {
             layer_population = 0;
-            if let Some(spawn) = placed.iter().find(|region| region.role == RegionRole::Spawn) {
+            if let Some(spawn) = placed
+                .iter()
+                .find(|region| region.role == RegionRole::Spawn)
+            {
                 separation = u32::from(x.abs_diff(spawn.footprint.0))
                     .checked_add(u32::from(y.abs_diff(spawn.footprint.1)))
                     .ok_or(GeneratorError::ArithmeticOverflow {
@@ -1510,24 +1526,27 @@ fn commit_region(
     let region_id = staged_alloc.next_region()?;
     let mut sockets = Vec::with_capacity(variant.sockets.len());
     for (index, socket) in variant.sockets.iter().enumerate() {
-        let global_layer = layer.checked_add(socket.anchor.layer).ok_or(
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "region_socket_layer",
-            },
-        )?;
-        let global_x = origin_x.checked_add(socket.anchor.x).ok_or(
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "region_socket_x",
-            },
-        )?;
-        let global_y = origin_y.checked_add(socket.anchor.y).ok_or(
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "region_socket_y",
-            },
-        )?;
+        let global_layer =
+            layer
+                .checked_add(socket.anchor.layer)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "region_socket_layer",
+                })?;
+        let global_x =
+            origin_x
+                .checked_add(socket.anchor.x)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "region_socket_x",
+                })?;
+        let global_y =
+            origin_y
+                .checked_add(socket.anchor.y)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "region_socket_y",
+                })?;
         sockets.push(PlacedSocket {
             id: staged_alloc.next_socket()?,
             variant_socket_index: u16::try_from(index).map_err(|_| {
@@ -1579,12 +1598,11 @@ fn commit_region(
         }
     }
 
-    let spacing = i32::try_from(config.spacing()).map_err(|_| {
-        GeneratorError::ArithmeticOverflow {
+    let spacing =
+        i32::try_from(config.spacing()).map_err(|_| GeneratorError::ArithmeticOverflow {
             stage: ErrorStage::Placement,
             operation: "spacing_convert",
-        }
-    })?;
+        })?;
     let min_x = i32::from(origin_x)
         .checked_sub(spacing)
         .ok_or(GeneratorError::ArithmeticOverflow {
@@ -1607,14 +1625,12 @@ fn commit_region(
             stage: ErrorStage::Placement,
             operation: "spacing_max_x",
         })?)
-    .min(
-        i32::from(config.width())
-            .checked_sub(1)
-            .ok_or(GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "spacing_grid_max_x",
-            })?,
-    );
+    .min(i32::from(config.width()).checked_sub(1).ok_or(
+        GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "spacing_grid_max_x",
+        },
+    )?);
     let max_y = (i32::from(origin_y)
         .checked_add(i32::from(variant.height))
         .and_then(|value| value.checked_add(spacing))
@@ -1623,14 +1639,12 @@ fn commit_region(
             stage: ErrorStage::Placement,
             operation: "spacing_max_y",
         })?)
-    .min(
-        i32::from(config.height())
-            .checked_sub(1)
-            .ok_or(GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "spacing_grid_max_y",
-            })?,
-    );
+    .min(i32::from(config.height()).checked_sub(1).ok_or(
+        GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "spacing_grid_max_y",
+        },
+    )?);
     for cell_y in min_y..=max_y {
         for cell_x in min_x..=max_x {
             let cell = GridCoord::new(
@@ -1710,14 +1724,7 @@ fn place_role_regions(
                                 layer,
                                 x,
                                 y,
-                                score: placement_score(
-                                    role,
-                                    layer,
-                                    x,
-                                    y,
-                                    variant_index,
-                                    placed,
-                                )?,
+                                score: placement_score(role, layer, x, y, variant_index, placed)?,
                             });
                         }
                     }
@@ -1738,7 +1745,11 @@ fn place_role_regions(
                 .score
                 .separation_distance
                 .cmp(&left.score.separation_distance)
-                .then_with(|| left.score.layer_population.cmp(&right.score.layer_population))
+                .then_with(|| {
+                    left.score
+                        .layer_population
+                        .cmp(&right.score.layer_population)
+                })
                 .then_with(|| {
                     right
                         .score
@@ -1846,13 +1857,12 @@ fn place_role_regions(
             }
         } else {
             // Non-gated roles: use existing deterministic selection.
-            let best_score = scored
-                .first()
-                .map(|candidate| candidate.score)
-                .ok_or(GeneratorError::IrInvariant {
+            let best_score = scored.first().map(|candidate| candidate.score).ok_or(
+                GeneratorError::IrInvariant {
                     stage: ErrorStage::Placement,
                     detail: "sorted_placement_candidates_empty".into(),
-                })?;
+                },
+            )?;
             let equal_count = scored
                 .iter()
                 .take_while(|candidate| candidate.score == best_score)
@@ -1951,18 +1961,12 @@ pub(super) fn place_regions(
     )?;
     ctx.transitions_reserved = u64::try_from(transitions.len()).unwrap_or(u64::MAX);
     ctx.end_scope(super::context::TelemetryScope::TransitionReservation);
-    let mut free_cells = FreeCells::new(
-        config.width(),
-        config.height(),
-        config.layers().2,
-        &grid,
-    );
-    let endpoint_count = u32::try_from(regions.len()).map_err(|_| {
-        GeneratorError::ArithmeticOverflow {
+    let mut free_cells = FreeCells::new(config.width(), config.height(), config.layers().2, &grid);
+    let endpoint_count =
+        u32::try_from(regions.len()).map_err(|_| GeneratorError::ArithmeticOverflow {
             stage: ErrorStage::Placement,
             operation: "endpoint_region_count_convert",
-        }
-    })?;
+        })?;
     if endpoint_count != manifest.vertical_hub_count {
         return Err(GeneratorError::MandatoryInfeasibility {
             stage: ErrorStage::Placement,
@@ -1995,12 +1999,11 @@ pub(super) fn place_regions(
     }
     ctx.end_scope(super::context::TelemetryScope::RolePlacement);
     regions.sort_by_key(|region| region.id.raw());
-    let actual_total = u32::try_from(regions.len()).map_err(|_| {
-        GeneratorError::ArithmeticOverflow {
+    let actual_total =
+        u32::try_from(regions.len()).map_err(|_| GeneratorError::ArithmeticOverflow {
             stage: ErrorStage::Placement,
             operation: "placed_region_count_convert",
-        }
-    })?;
+        })?;
     if actual_total != expected_total {
         return Err(GeneratorError::MandatoryInfeasibility {
             stage: ErrorStage::Placement,
@@ -2054,10 +2057,10 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
-    use super::*;
     use super::super::config::{GeneratorConfig, QualifiedProfile};
     use super::super::context::TelemetryMode;
     use super::super::determinism::{AttemptIdentity, GeneratorIdentity};
+    use super::*;
 
     fn catalog() -> PrefabCatalog {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/prefabs");
@@ -2139,19 +2142,10 @@ mod tests {
             .expect("ordinary variant");
         let variant = &catalog.variants()[variant_index];
         let variant_index = u16::try_from(variant_index).expect("variant index");
-        let mut grid = OccupancyGrid::new(
-            config.width(),
-            config.height(),
-            config.layers().2,
-        )
-        .expect("grid");
+        let mut grid =
+            OccupancyGrid::new(config.width(), config.height(), config.layers().2).expect("grid");
         grid.reserve_borders();
-        let mut free = FreeCells::new(
-            config.width(),
-            config.height(),
-            config.layers().2,
-            &grid,
-        );
+        let mut free = FreeCells::new(config.width(), config.height(), config.layers().2, &grid);
         let mut alloc = IdAllocator::new();
 
         commit_region(
@@ -2171,12 +2165,7 @@ mod tests {
 
         assert_eq!(
             free,
-            FreeCells::new(
-                config.width(),
-                config.height(),
-                config.layers().2,
-                &grid,
-            )
+            FreeCells::new(config.width(), config.height(), config.layers().2, &grid,)
         );
     }
 
@@ -2230,9 +2219,7 @@ mod tests {
         let variant_index = catalog
             .variants()
             .iter()
-            .position(|variant| {
-                variant.base_id == "ramp-hub-turn" && variant.rotation_degrees == 0
-            })
+            .position(|variant| variant.base_id == "ramp-hub-turn" && variant.rotation_degrees == 0)
             .expect("turn ramp variant");
         let materialized = materialize_transition(
             RampCandidate {
@@ -2259,12 +2246,8 @@ mod tests {
             .collect();
         assert!(!protected.contains_key(&approach));
 
-        let mut grid = OccupancyGrid::new(
-            config.width(),
-            config.height(),
-            config.layers().2,
-        )
-        .expect("grid");
+        let mut grid =
+            OccupancyGrid::new(config.width(), config.height(), config.layers().2).expect("grid");
         let mut allocator = IdAllocator::new();
         let (transition, _, _) = commit_transition(
             &materialized,
@@ -2352,8 +2335,22 @@ mod tests {
         let factory = factory(&config, &catalog, 99);
         let mut rng_a = factory.stream(SemanticStage::Roles, &[]);
         let mut rng_b = factory.stream(SemanticStage::Roles, &[]);
-        let a = place_regions(&config, &catalog, &mut rng_a, factory, &mut AttemptContext::new(TelemetryMode::Off)).expect("placement a");
-        let b = place_regions(&config, &catalog, &mut rng_b, factory, &mut AttemptContext::new(TelemetryMode::Off)).expect("placement b");
+        let a = place_regions(
+            &config,
+            &catalog,
+            &mut rng_a,
+            factory,
+            &mut AttemptContext::new(TelemetryMode::Off),
+        )
+        .expect("placement a");
+        let b = place_regions(
+            &config,
+            &catalog,
+            &mut rng_b,
+            factory,
+            &mut AttemptContext::new(TelemetryMode::Off),
+        )
+        .expect("placement b");
         assert_eq!(a.0, b.0);
     }
 
@@ -2387,7 +2384,15 @@ mod tests {
             sockets: vec![PlacedSocket {
                 id: alloc.next_socket().unwrap(),
                 variant_socket_index: 0,
-                global_anchor: GridCoord::new(0, 3, 3, config.width(), config.height(), config.layers().2).unwrap(),
+                global_anchor: GridCoord::new(
+                    0,
+                    3,
+                    3,
+                    config.width(),
+                    config.height(),
+                    config.layers().2,
+                )
+                .unwrap(),
                 direction: Direction::East,
                 width: 1,
                 role: SocketRole::Corridor,
@@ -2405,7 +2410,15 @@ mod tests {
             sockets: vec![PlacedSocket {
                 id: alloc.next_socket().unwrap(),
                 variant_socket_index: 0,
-                global_anchor: GridCoord::new(0, 11, 3, config.width(), config.height(), config.layers().2).unwrap(),
+                global_anchor: GridCoord::new(
+                    0,
+                    11,
+                    3,
+                    config.width(),
+                    config.height(),
+                    config.layers().2,
+                )
+                .unwrap(),
                 direction: Direction::West,
                 width: 1,
                 role: SocketRole::DeadEnd,
@@ -2428,18 +2441,13 @@ mod tests {
             .expect("minimum config");
         let catalog = catalog();
         let materialized = materialize_transition(
-            enumerate_ramp_candidates(&catalog, &config)
-                .expect("ramp candidates")[0],
+            enumerate_ramp_candidates(&catalog, &config).expect("ramp candidates")[0],
             &catalog,
             &config,
         )
         .expect("materialized transition");
-        let mut grid = OccupancyGrid::new(
-            config.width(),
-            config.height(),
-            config.layers().2,
-        )
-        .expect("grid");
+        let mut grid =
+            OccupancyGrid::new(config.width(), config.height(), config.layers().2).expect("grid");
         grid.reserve_borders();
         let original_grid = grid.clone();
         let mut allocator = IdAllocator::new();
@@ -2503,8 +2511,8 @@ mod tests {
             .variants()
             .get(usize::from(variant_index))
             .expect("variant");
-        let mut grid = OccupancyGrid::new(config.width(), config.height(), config.layers().2)
-            .expect("grid");
+        let mut grid =
+            OccupancyGrid::new(config.width(), config.height(), config.layers().2).expect("grid");
         grid.reserve_borders();
         let mut alloc = IdAllocator::new();
         // Allocate a real ID to establish a baseline.
@@ -2549,7 +2557,10 @@ mod tests {
         for socket in &staged_region.sockets {
             match grid.get(socket.global_anchor) {
                 Some(OccupancyClass::Empty) | None => {}
-                other => panic!("real grid should still be empty after drop, got {:?}", other),
+                other => panic!(
+                    "real grid should still be empty after drop, got {:?}",
+                    other
+                ),
             }
         }
     }
@@ -2571,7 +2582,15 @@ mod tests {
             sockets: vec![PlacedSocket {
                 id: alloc.next_socket().unwrap(),
                 variant_socket_index: 0,
-                global_anchor: GridCoord::new(0, 5, 5, config.width(), config.height(), config.layers().2).unwrap(),
+                global_anchor: GridCoord::new(
+                    0,
+                    5,
+                    5,
+                    config.width(),
+                    config.height(),
+                    config.layers().2,
+                )
+                .unwrap(),
                 direction: Direction::East,
                 width: 1,
                 role: SocketRole::Corridor,
@@ -2580,8 +2599,8 @@ mod tests {
             transitions: vec![],
             marker_variant_indices: vec![],
         };
-        let mut grid = OccupancyGrid::new(config.width(), config.height(), config.layers().2)
-            .expect("grid");
+        let mut grid =
+            OccupancyGrid::new(config.width(), config.height(), config.layers().2).expect("grid");
         grid.reserve_borders();
         grid.reserve_rect(
             backbone.layer,
@@ -2611,21 +2630,20 @@ mod tests {
             .variants()
             .get(usize::from(variant_index))
             .expect("variant");
-        let (staged_grid, _staged_alloc, staged_sockets, staged_region) =
-            stage_candidate_region(
-                variant,
-                variant_index,
-                0,
-                8, // to the east with gap for corridor
-                4,
-                RegionRole::MajorLandmark,
-                &grid,
-                &FreeCells::new(config.width(), config.height(), config.layers().2, &grid),
-                &config,
-                &alloc,
-                &mut AttemptContext::new(TelemetryMode::Off),
-            )
-            .expect("stage candidate");
+        let (staged_grid, _staged_alloc, staged_sockets, staged_region) = stage_candidate_region(
+            variant,
+            variant_index,
+            0,
+            8, // to the east with gap for corridor
+            4,
+            RegionRole::MajorLandmark,
+            &grid,
+            &FreeCells::new(config.width(), config.height(), config.layers().2, &grid),
+            &config,
+            &alloc,
+            &mut AttemptContext::new(TelemetryMode::Off),
+        )
+        .expect("stage candidate");
 
         // The staged region should be connectable.
         let connected = can_connect_to_backbone(
@@ -2657,7 +2675,15 @@ mod tests {
             sockets: vec![PlacedSocket {
                 id: alloc.next_socket().unwrap(),
                 variant_socket_index: 0,
-                global_anchor: GridCoord::new(0, 5, 3, config.width(), config.height(), config.layers().2).unwrap(),
+                global_anchor: GridCoord::new(
+                    0,
+                    5,
+                    3,
+                    config.width(),
+                    config.height(),
+                    config.layers().2,
+                )
+                .unwrap(),
                 direction: Direction::East,
                 width: 1,
                 role: SocketRole::Corridor,
@@ -2666,8 +2692,8 @@ mod tests {
             transitions: vec![],
             marker_variant_indices: vec![],
         };
-        let mut grid = OccupancyGrid::new(config.width(), config.height(), config.layers().2)
-            .expect("grid");
+        let mut grid =
+            OccupancyGrid::new(config.width(), config.height(), config.layers().2).expect("grid");
         grid.reserve_borders();
         grid.reserve_rect(
             backbone.layer,

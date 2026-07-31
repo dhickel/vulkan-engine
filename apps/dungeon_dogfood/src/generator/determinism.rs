@@ -71,11 +71,7 @@ pub(super) struct AttemptIdentity {
 impl AttemptIdentity {
     pub(super) fn new(generator: GeneratorIdentity, index: u32) -> Self {
         Self {
-            digest: digest(&[
-                ATTEMPT_DOMAIN,
-                &generator.bytes(),
-                &index.to_be_bytes(),
-            ]),
+            digest: digest(&[ATTEMPT_DOMAIN, &generator.bytes(), &index.to_be_bytes()]),
             index,
         }
     }
@@ -297,7 +293,10 @@ mod tests {
     fn bounded_vectors_cover_one_and_u32_max() {
         let mut rng = Pcg32V1::new(7, 11);
         assert_eq!(rng.gen_bounded(NonZeroU32::new(1).unwrap()), 0);
-        assert_eq!(rng.gen_bounded(NonZeroU32::new(u32::MAX).unwrap()), 579_918_250);
+        assert_eq!(
+            rng.gen_bounded(NonZeroU32::new(u32::MAX).unwrap()),
+            579_918_250
+        );
         assert!(rng.gen_range(9, 9).is_err());
     }
 
@@ -326,7 +325,10 @@ mod tests {
         let mut topology = factory.stream(SemanticStage::Topology, &[]);
         assert_ne!(roles.next_u32(), topology.next_u32());
         let components_a = [SemanticComponent::StableId(b"a/b")];
-        let components_b = [SemanticComponent::StableId(b"a"), SemanticComponent::StableId(b"b")];
+        let components_b = [
+            SemanticComponent::StableId(b"a"),
+            SemanticComponent::StableId(b"b"),
+        ];
         let mut a = factory.stream(SemanticStage::Routing, &components_a);
         let mut b = factory.stream(SemanticStage::Routing, &components_b);
         assert_ne!(a.next_u32(), b.next_u32());
@@ -360,7 +362,11 @@ mod tests {
         assert_eq!(unique.len(), outputs.len());
         let mut coordinate = factory.stream(
             SemanticStage::Placement,
-            &[SemanticComponent::Coordinate { x: 1, y: 2, layer: 3 }],
+            &[SemanticComponent::Coordinate {
+                x: 1,
+                y: 2,
+                layer: 3,
+            }],
         );
         let mut index = factory.stream(SemanticStage::Placement, &[SemanticComponent::Index(1)]);
         assert_ne!(coordinate.next_u32(), index.next_u32());
@@ -373,6 +379,9 @@ mod tests {
         assert_eq!(generator.hex().len(), 64);
         assert_eq!(attempt.hex().len(), 64);
         assert_eq!(attempt.index(), 7);
-        assert!(generator.hex().bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert!(generator
+            .hex()
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
     }
 }

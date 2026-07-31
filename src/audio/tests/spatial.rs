@@ -4,9 +4,12 @@
 //! device-backed spatial playback, mono-only validation, component DTOs,
 //! and legacy non-spatial playback compatibility.
 
-use audio::components::{AudioListener, AudioSource, AUDIO_LISTENER_COMPONENT_KEY, AUDIO_SPATIAL_SOURCE_COMPONENT_KEY};
+use audio::components::{
+    AudioListener, AudioSource, AUDIO_LISTENER_COMPONENT_KEY, AUDIO_SPATIAL_SOURCE_COMPONENT_KEY,
+};
 use audio::spatial::{
-    self, AtomicSpatialGains, Attenuation, ListenerPose, SourcePose, SpatialGain, SpatialSource, Vec3,
+    self, AtomicSpatialGains, Attenuation, ListenerPose, SourcePose, SpatialGain, SpatialSource,
+    Vec3,
 };
 use audio::{AudioClip, AudioEngine, AudioError, PlaybackOptions};
 use rodio::buffer::SamplesBuffer;
@@ -21,9 +24,8 @@ fn tiny_wav_bytes_mono() -> Vec<u8> {
     let sample_rate = 8_000u32;
     let bits_per_sample = 16u16;
     let samples: [i16; 32] = [
-        0, 2048, 4096, 2048, 0, -2048, -4096, -2048, 0, 2048, 4096, 2048, 0, -2048, -4096,
-        -2048, 0, 2048, 4096, 2048, 0, -2048, -4096, -2048, 0, 2048, 4096, 2048, 0, -2048,
-        -4096, -2048,
+        0, 2048, 4096, 2048, 0, -2048, -4096, -2048, 0, 2048, 4096, 2048, 0, -2048, -4096, -2048,
+        0, 2048, 4096, 2048, 0, -2048, -4096, -2048, 0, 2048, 4096, 2048, 0, -2048, -4096, -2048,
     ];
     let data_len = samples.len() as u32 * std::mem::size_of::<i16>() as u32;
     let byte_rate = sample_rate * channels as u32 * bits_per_sample as u32 / 8;
@@ -56,14 +58,10 @@ fn tiny_wav_bytes_stereo() -> Vec<u8> {
     let bits_per_sample = 16u16;
     // Interleaved stereo: [L, R, L, R, ...]
     let samples: [i16; 64] = [
-        0, 0, 2048, 1024, 4096, 2048, 2048, 1024,
-        0, 0, -2048, -1024, -4096, -2048, -2048, -1024,
-        0, 0, 2048, 1024, 4096, 2048, 2048, 1024,
-        0, 0, -2048, -1024, -4096, -2048, -2048, -1024,
-        0, 0, 2048, 1024, 4096, 2048, 2048, 1024,
-        0, 0, -2048, -1024, -4096, -2048, -2048, -1024,
-        0, 0, 2048, 1024, 4096, 2048, 2048, 1024,
-        0, 0, -2048, -1024, -4096, -2048, -2048, -1024,
+        0, 0, 2048, 1024, 4096, 2048, 2048, 1024, 0, 0, -2048, -1024, -4096, -2048, -2048, -1024,
+        0, 0, 2048, 1024, 4096, 2048, 2048, 1024, 0, 0, -2048, -1024, -4096, -2048, -2048, -1024,
+        0, 0, 2048, 1024, 4096, 2048, 2048, 1024, 0, 0, -2048, -1024, -4096, -2048, -2048, -1024,
+        0, 0, 2048, 1024, 4096, 2048, 2048, 1024, 0, 0, -2048, -1024, -4096, -2048, -2048, -1024,
     ];
     let data_len = samples.len() as u32 * std::mem::size_of::<i16>() as u32;
     let byte_rate = sample_rate * channels as u32 * bits_per_sample as u32 / 8;
@@ -107,10 +105,7 @@ fn spatial_source_produces_different_left_and_right_samples_from_mono_input() {
     for pair in samples.chunks(2) {
         let left = pair[0];
         let right = pair[1];
-        assert!(
-            (left - 0.8).abs() < 1e-5,
-            "expected left=0.8, got {left}"
-        );
+        assert!((left - 0.8).abs() < 1e-5, "expected left=0.8, got {left}");
         assert!(
             (right - 0.2).abs() < 1e-5,
             "expected right=0.2, got {right}"

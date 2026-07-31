@@ -19,8 +19,8 @@ use glam::Vec3;
 /// Player hull half-extents in engine units (symmetric player hull).
 pub const PLAYER_HALF_EXTENTS_ENGINE: Vec3 = Vec3::new(
     16.0 * 0.0254,
-    24.0 * 0.0254,  // Z extent → engine Y (up)
-    16.0 * 0.0254,  // Y extent → engine -Z
+    24.0 * 0.0254, // Z extent → engine Y (up)
+    16.0 * 0.0254, // Y extent → engine -Z
 );
 
 /// Fixed-step player mover using BSP clipnode traces.
@@ -127,8 +127,7 @@ impl PlayerMover {
                 let slide = remaining - normal * dot;
                 // Recurse with the slide vector (one level, no infinite recursion)
                 if slide.length_squared() > 1e-10 {
-                    let slide_result =
-                        self.trace_move(slide, clipnodes, planes_data, models, qte);
+                    let slide_result = self.trace_move(slide, clipnodes, planes_data, models, qte);
                     if slide_result.no_hit {
                         self.position += slide;
                     } else if slide_result.hit_fraction > 1e-6 {
@@ -223,7 +222,8 @@ mod tests {
         );
         assert!(
             moved_q.x > -100.0,
-            "mover should have moved east, x={}", moved_q.x
+            "mover should have moved east, x={}",
+            moved_q.x
         );
         assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
     }
@@ -260,7 +260,8 @@ mod tests {
         // The pillar is at x=-16..16. Mover should not have reached past x=-17
         assert!(
             moved_q.x < 0.0,
-            "mover should be blocked by pillar, x={}", moved_q.x
+            "mover should be blocked by pillar, x={}",
+            moved_q.x
         );
         assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
     }
@@ -301,7 +302,11 @@ mod tests {
             mover.position.y / qte.scale,
         );
         // Should slide north along west wall
-        assert!(pos_q.x <= -210.0, "mover must not pass through west wall, x={}", pos_q.x);
+        assert!(
+            pos_q.x <= -210.0,
+            "mover must not pass through west wall, x={}",
+            pos_q.x
+        );
         assert!(pos_q.y > -90.0, "mover must slide north, y={}", pos_q.y);
         assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
     }
@@ -326,7 +331,8 @@ mod tests {
             let mover = PlayerMover::new(eng_pos);
             assert!(
                 mover.validate_position(&world.nodes, &world.leaves, &world.planes),
-                "position {:?} should be clear", q_pos
+                "position {:?} should be clear",
+                q_pos
             );
         }
     }
@@ -361,7 +367,8 @@ mod tests {
         );
         assert!(
             moved_q.x > 100.0,
-            "mover should reach east room, x={}", moved_q.x
+            "mover should reach east room, x={}",
+            moved_q.x
         );
         assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
     }

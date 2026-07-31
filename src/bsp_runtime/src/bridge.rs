@@ -18,7 +18,10 @@
 //! Rollback consumes only prepared state; teardown consumes only active state.
 //! Both are exact-once at the aggregate boundary.
 
-use crate::error::{BridgePhase, BspRuntimeError, INVARIANT_DOUBLE_ACTIVATION, INVARIANT_DUPLICATE_TEARDOWN, INVARIANT_REGISTRATION_MISMATCH, INVARIANT_TEARDOWN_OF_PREPARED};
+use crate::error::{
+    BridgePhase, BspRuntimeError, INVARIANT_DOUBLE_ACTIVATION, INVARIANT_DUPLICATE_TEARDOWN,
+    INVARIANT_REGISTRATION_MISMATCH, INVARIANT_TEARDOWN_OF_PREPARED,
+};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 // ── DTO Types ──────────────────────────────────────────────────────────
@@ -369,7 +372,10 @@ impl std::fmt::Debug for ActivationQuarantine {
             .field("panic_bridge", &self.panic_bridge)
             .field("panic_index", &self.panic_index)
             .field("generation", &self.generation)
-            .field("completed_count", &self.completed_receipts.iter().flatten().count())
+            .field(
+                "completed_count",
+                &self.completed_receipts.iter().flatten().count(),
+            )
             .field("suffix_count", &self.suffix_tokens.iter().flatten().count())
             .finish()
     }
@@ -401,7 +407,10 @@ impl std::fmt::Debug for TeardownQuarantine {
             .field("failed_index", &self.failed_index)
             .field("generation", &self.generation)
             .field("was_panic", &self.was_panic)
-            .field("unattempted_count", &self.unattempted.iter().flatten().count())
+            .field(
+                "unattempted_count",
+                &self.unattempted.iter().flatten().count(),
+            )
             .finish()
     }
 }
@@ -510,10 +519,7 @@ impl BridgeAggregator {
     pub fn register(&mut self, name: impl Into<String>, bridge: Box<dyn AppBridge>) {
         let name = name.into();
         let index = self.bridges.len();
-        self.bridges.push(BridgeEntry {
-            name,
-            bridge,
-        });
+        self.bridges.push(BridgeEntry { name, bridge });
         // Ensure consistent indexing — index is assigned at push time.
         let _ = index;
     }
@@ -579,11 +585,7 @@ impl BridgeAggregator {
 
             let (_, name, phase, msg) = failures.remove(0);
             for (_, n, _, m) in &failures {
-                log::warn!(
-                    "additional bridge prepare failure: [{}] {}",
-                    n,
-                    m
-                );
+                log::warn!("additional bridge prepare failure: [{}] {}", n, m);
             }
             return Err(BspRuntimeError::BridgeFailure {
                 bridge_name: name,
@@ -825,11 +827,8 @@ impl BridgeAggregator {
 
         if let Some((failed_receipt, msg, idx, name, was_panic)) = first_error {
             // Collect unattempted receipts
-            let unattempted: Vec<Option<ActiveBridgeReceipt>> = receipts
-                .receipts
-                .into_iter()
-                .skip(idx + 1)
-                .collect();
+            let unattempted: Vec<Option<ActiveBridgeReceipt>> =
+                receipts.receipts.into_iter().skip(idx + 1).collect();
 
             Err(TeardownQuarantine {
                 failed: Some((failed_receipt, msg.clone())),

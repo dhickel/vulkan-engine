@@ -89,7 +89,7 @@ fn golden_uv0_from_texinfo_projection() {
 
     // Texinfo with identity projection (1 unit per texel in X and Y)
     let texinfo = lumps::Texinfo {
-        vec_s: Vec3::new(0.03125, 0.0, 0.0),  // 1/32 scale
+        vec_s: Vec3::new(0.03125, 0.0, 0.0), // 1/32 scale
         dist_s: 0.0,
         vec_t: Vec3::new(0.0, 0.03125, 0.0),
         dist_t: 0.0,
@@ -98,12 +98,18 @@ fn golden_uv0_from_texinfo_projection() {
     };
 
     let qte = QuakeToEngine::default();
-    let geo = geometry::build_face_geometry(&face, 0, &plane, &texinfo, &vertices, &edges, &surfedges, &qte);
+    let geo = geometry::build_face_geometry(
+        &face, 0, &plane, &texinfo, &vertices, &edges, &surfedges, &qte,
+    );
 
     // UV0 should be projected via dot(vertex, vecS) + distS
     // For vertex (64, 0, 0): u = 64 * 0.03125 = 2.0
     let v1_uv = geo.uv0[1]; // vertex at (64, 0, 0)
-    assert!((v1_uv.x - 2.0).abs() < 0.01, "UV0.x should be ~2.0, got {}", v1_uv.x);
+    assert!(
+        (v1_uv.x - 2.0).abs() < 0.01,
+        "UV0.x should be ~2.0, got {}",
+        v1_uv.x
+    );
 }
 
 #[test]
@@ -146,7 +152,9 @@ fn golden_engine_space_conversion() {
     };
 
     let qte = QuakeToEngine::default();
-    let geo = geometry::build_face_geometry(&face, 0, &plane, &texinfo, &vertices, &edges, &surfedges, &qte);
+    let geo = geometry::build_face_geometry(
+        &face, 0, &plane, &texinfo, &vertices, &edges, &surfedges, &qte,
+    );
 
     // Engine-space: (100*0.0254, 300*0.0254, -200*0.0254) = (2.54, 7.62, -5.08)
     let v0 = geo.vertices[0];
@@ -185,7 +193,9 @@ fn golden_bounds_computation() {
     };
 
     let qte = QuakeToEngine::default();
-    let geo = geometry::build_face_geometry(&face, 0, &plane, &texinfo, &vertices, &edges, &surfedges, &qte);
+    let geo = geometry::build_face_geometry(
+        &face, 0, &plane, &texinfo, &vertices, &edges, &surfedges, &qte,
+    );
 
     assert!(geo.bounds.0.x <= geo.bounds.1.x);
     assert!(geo.bounds.0.y <= geo.bounds.1.y);
@@ -239,7 +249,10 @@ fn golden_non_origin_plane_remains_valid() {
         &QuakeToEngine::default(),
     );
 
-    assert!(geo.is_valid, "planarity must account for non-zero plane distance");
+    assert!(
+        geo.is_valid,
+        "planarity must account for non-zero plane distance"
+    );
 }
 
 #[test]
@@ -264,7 +277,11 @@ fn golden_batch_inline_models_do_not_merge() {
         &[(1, 10), (2, 20)],
     );
 
-    assert_eq!(batches.len(), 2, "inline models with identical material keys stay separate");
+    assert_eq!(
+        batches.len(),
+        2,
+        "inline models with identical material keys stay separate"
+    );
     assert_eq!(batches[0].face_indices, vec![10]);
     assert_eq!(batches[1].face_indices, vec![20]);
     assert_ne!(batches[0].model_index, batches[1].model_index);
@@ -292,7 +309,10 @@ fn golden_batch_emits_each_valid_renderable_face_once_with_sorted_leaf_set() {
         &[],
     );
 
-    let emitted: Vec<u32> = batches.iter().flat_map(|b| b.face_indices.iter().copied()).collect();
+    let emitted: Vec<u32> = batches
+        .iter()
+        .flat_map(|b| b.face_indices.iter().copied())
+        .collect();
     assert_eq!(emitted, vec![3]);
     assert!(batches.iter().any(|b| b.leaf_signature == vec![1, 5]));
     assert!(!batches.iter().any(|b| b.leaf_signature == vec![1, 2]));
@@ -320,11 +340,7 @@ fn golden_batch_keeps_distinct_style_slots_separate() {
         ],
         &[42, 42, 42],
         &[0, 0, 0],
-        &[
-            [0, 255, 255, 255],
-            [0, 255, 255, 255],
-            [1, 255, 255, 255],
-        ],
+        &[[0, 255, 255, 255], [0, 255, 255, 255], [1, 255, 255, 255]],
         &[],
     );
 
@@ -430,7 +446,9 @@ fn golden_lightmap_extents_from_texinfo() {
     };
 
     let qte = QuakeToEngine::default();
-    let geo = geometry::build_face_geometry(&face, 0, &plane, &texinfo, &vertices, &edges, &surfedges, &qte);
+    let geo = geometry::build_face_geometry(
+        &face, 0, &plane, &texinfo, &vertices, &edges, &surfedges, &qte,
+    );
 
     // Luxel extents should be > 0 for faces with lightmap data
     assert!(geo.luxel_extents.0 > 0);
@@ -440,10 +458,7 @@ fn golden_lightmap_extents_from_texinfo() {
 #[test]
 fn golden_degenerate_face_rejected() {
     // Two vertices cannot form a face
-    let vertices = vec![
-        Vec3::new(0.0, 0.0, 0.0),
-        Vec3::new(1.0, 0.0, 0.0),
-    ];
+    let vertices = vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)];
     let edges = vec![lumps::Edge { v: [0, 1] }];
     let surfedges = vec![0i32];
 
@@ -473,7 +488,9 @@ fn golden_degenerate_face_rejected() {
     };
 
     let qte = QuakeToEngine::default();
-    let geo = geometry::build_face_geometry(&face, 0, &plane, &texinfo, &vertices, &edges, &surfedges, &qte);
+    let geo = geometry::build_face_geometry(
+        &face, 0, &plane, &texinfo, &vertices, &edges, &surfedges, &qte,
+    );
 
     assert!(!geo.is_valid, "2-vertex face should be invalid");
 }
@@ -519,7 +536,9 @@ fn golden_overflow_vertices_rejected() {
     };
 
     let qte = QuakeToEngine::default();
-    let geo = geometry::build_face_geometry(&face, 0, &plane, &texinfo, &vertices, &edges, &surfedges, &qte);
+    let geo = geometry::build_face_geometry(
+        &face, 0, &plane, &texinfo, &vertices, &edges, &surfedges, &qte,
+    );
 
     assert!(!geo.is_valid, "overflow vertices should be rejected");
 }

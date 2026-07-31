@@ -14,7 +14,7 @@
 //!   targets, light styles).
 
 pub mod physics_bridge;
+pub mod player_navigation;
 pub mod runtime_bridge;
 pub mod scene_sync;
 pub mod snapshot;
-pub mod player_navigation;

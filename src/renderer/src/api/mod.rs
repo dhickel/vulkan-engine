@@ -2,7 +2,6 @@ mod assets;
 #[cfg(feature = "bsp")]
 pub mod bsp;
 pub mod config;
-pub mod sprite;
 mod errors;
 pub mod event_logging;
 mod frame_extensions;
@@ -12,6 +11,7 @@ pub mod prelude;
 mod renderer;
 pub(crate) mod scene;
 mod scene_file_tx;
+pub mod sprite;
 mod utils;
 
 #[cfg(feature = "advanced-interop")]
@@ -41,12 +41,17 @@ pub use crate::debug_ui::{
     DebugViewDescriptor, DebugViewId,
 };
 pub use crate::object::query::{
-    EditorPickResult, EditorProxyPolicy, ObjectQueryFilter, RayHit, UnknownBoundsPolicy,
-    VolumeHit, VolumeQuery, VolumeShape,
+    EditorPickResult, EditorProxyPolicy, ObjectQueryFilter, RayHit, UnknownBoundsPolicy, VolumeHit,
+    VolumeQuery, VolumeShape,
 };
 pub use crate::object::selection::{Selection, SelectionChange};
 pub use crate::object::ObjectId;
 pub use crate::object::{ObjectLifecycleOutcome, ObjectMutationOutcome, ObjectSummary};
+pub use crate::scene::object_commands::{
+    AttachComponentCommand, DuplicateObjectsCommand, RemoveComponentCommand, RemoveObjectsCommand,
+    ReplaceComponentStateCommand, SetComponentPropertyCommand, SetObjectParentCommand,
+    SetObjectTransformCommand,
+};
 pub use crate::scene::SceneNodeId;
 pub use assets::{
     AssetManager, EnvironmentSource, EnvironmentState, FacePattern, PbrMaterialDesc,
@@ -71,6 +76,7 @@ pub use errors::{
     AnimationError, AssetError, CommandError, HookError, HookFailureEntry, HookFailureStage,
     HookReport, ObjectError, RendererError, RendererFrameError, RendererInitError, SceneError,
 };
+pub use frame_extensions::FrameExtensions;
 pub use hooks::{boxed_render_hook, BoxedRenderHook, RenderHook, RenderHookContext};
 pub use input::{
     editor_ui_capture_layer, priority_bands, ActionBinding, ActionId, ActionMap, ActionMapLayer,
@@ -79,7 +85,6 @@ pub use input::{
     InputSystem, LayerDescriptor, LayerHandle, LayerId, LayerPriority, LayerSpec,
 };
 pub use loading::{LoadStatus, LoadTicket};
-pub use frame_extensions::FrameExtensions;
 pub use renderer::{
     CameraView, EnvironmentRuntimeStatus, FrameContext, FrameRenderOutcome, Renderer,
     RendererInputRouting, RendererInputSuppression, RetirementSerials,
@@ -90,9 +95,4 @@ pub use scene::{
     DirectionalShadowConfig, MeshBoundsEntry, PointLight, PointLightId, Scene, SceneAssetReference,
     SceneBounds, SceneFragment, SceneFragmentMount, SceneFragmentNode, SceneFragmentNodeId,
     SceneNodeSummary, SceneValidationOptions, SpotLight, SpotLightId,
-};
-pub use crate::scene::object_commands::{
-    AttachComponentCommand, DuplicateObjectsCommand, RemoveComponentCommand,
-    RemoveObjectsCommand, ReplaceComponentStateCommand, SetComponentPropertyCommand,
-    SetObjectParentCommand, SetObjectTransformCommand,
 };

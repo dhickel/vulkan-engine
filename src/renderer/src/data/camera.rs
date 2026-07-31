@@ -99,11 +99,7 @@ impl Aabb {
 
     /// Conservative union of `self` and `other`. Returns `None` if either is non-finite.
     pub fn union(&self, other: &Aabb) -> Option<Aabb> {
-        if !self.is_finite()
-            || !self.is_ordered()
-            || !other.is_finite()
-            || !other.is_ordered()
-        {
+        if !self.is_finite() || !self.is_ordered() || !other.is_finite() || !other.is_ordered() {
             return None;
         }
         Some(Aabb::from_min_max(
@@ -114,11 +110,7 @@ impl Aabb {
 
     /// Extend `self` to enclose `other`. Returns false if either is non-finite.
     pub fn extend_to_enclose(&mut self, other: &Aabb) -> bool {
-        if !self.is_finite()
-            || !self.is_ordered()
-            || !other.is_finite()
-            || !other.is_ordered()
-        {
+        if !self.is_finite() || !self.is_ordered() || !other.is_finite() || !other.is_ordered() {
             return false;
         }
         self.min = self.min.min(other.min);
@@ -963,11 +955,7 @@ impl EditorCamera {
     ///
     /// Returns `None` if the view-projection matrix is singular or the
     /// ray cannot be constructed.
-    pub fn screen_to_ray(
-        &self,
-        screen_pos: (f32, f32),
-        viewport_size: (u32, u32),
-    ) -> Option<Ray> {
+    pub fn screen_to_ray(&self, screen_pos: (f32, f32), viewport_size: (u32, u32)) -> Option<Ray> {
         let inv_vp = self.inv_view_projection();
         if !inv_vp.is_finite() {
             return None;
@@ -997,7 +985,8 @@ impl EditorCamera {
                 if world_near.w.abs() < 1e-10 {
                     return None;
                 }
-                let origin = glam::Vec3::new(world_near.x, world_near.y, world_near.z) / world_near.w;
+                let origin =
+                    glam::Vec3::new(world_near.x, world_near.y, world_near.z) / world_near.w;
                 // Direction is along the view axis (camera forward), not eye-relative.
                 let forward = (self.orbit.target - self.eye_position()).normalize();
                 if forward.length_squared() < 1e-10 {
@@ -1031,10 +1020,7 @@ impl EditorCamera {
     ///
     /// Returns `Err` if any AABB is non-finite or the aggregate is
     /// degenerate.
-    pub fn focus_on_many(
-        &mut self,
-        aabbs: &[Aabb],
-    ) -> Result<(), &'static str> {
+    pub fn focus_on_many(&mut self, aabbs: &[Aabb]) -> Result<(), &'static str> {
         if aabbs.is_empty() {
             return Err("no AABBs provided");
         }
@@ -1066,9 +1052,12 @@ impl EditorCamera {
             EditorProjection::Orthographic { half_height } => {
                 let half_width = half_height * aspect;
                 glam::Mat4::orthographic_rh(
-                    -half_width, half_width,
-                    -half_height, half_height,
-                    self.near_plane, self.far_plane,
+                    -half_width,
+                    half_width,
+                    -half_height,
+                    half_height,
+                    self.near_plane,
+                    self.far_plane,
                 )
             }
         };

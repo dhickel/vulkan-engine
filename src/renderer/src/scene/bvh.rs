@@ -325,10 +325,7 @@ mod tests {
         BvhBuildItem {
             node_id: SceneNodeId::new(node, 0),
             mesh_handle: MeshHandle::new(mesh, 0),
-            world_aabb: mk_aabb(
-                Vec3::new(min_x, -0.5, -1.0),
-                Vec3::new(max_x, 0.5, -0.5),
-            ),
+            world_aabb: mk_aabb(Vec3::new(min_x, -0.5, -1.0), Vec3::new(max_x, 0.5, -0.5)),
             last_reference_serial: FrameSerial::new(1),
         }
     }
@@ -417,8 +414,7 @@ mod tests {
             }
 
             let bvh = SceneBvh::build(&bvh_items, Vec::new());
-            let bs: std::collections::BTreeSet<_> =
-                bvh.collect_visible(&f).into_iter().collect();
+            let bs: std::collections::BTreeSet<_> = bvh.collect_visible(&f).into_iter().collect();
             let ls: std::collections::BTreeSet<_> =
                 linear_cull(&linear_items, &f).into_iter().collect();
             assert_eq!(bs, ls, "BVH parity failed for generated scene {scene}");

@@ -255,10 +255,7 @@ pub fn validate_triangle_indices(
 ) -> Result<(), MeshGeometryError> {
     if indices.len() % 3 != 0 {
         return Err(MeshGeometryError::InvalidIndices {
-            message: format!(
-                "index count {} is not a multiple of 3",
-                indices.len()
-            ),
+            message: format!("index count {} is not a multiple of 3", indices.len()),
         });
     }
     for (i, &idx) in indices.iter().enumerate() {
@@ -311,7 +308,10 @@ impl std::fmt::Display for MeshGeometryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DuplicateHandle { slot, generation } => {
-                write!(f, "duplicate mesh handle slot {slot} generation {generation}")
+                write!(
+                    f,
+                    "duplicate mesh handle slot {slot} generation {generation}"
+                )
             }
             Self::InvalidIndices { message } => {
                 write!(f, "invalid triangle indices: {message}")
@@ -332,7 +332,12 @@ mod tests {
         MeshHandle::new(slot, gen)
     }
 
-    fn make_dto(slot: u32, gen: u32, positions: Vec<[f32; 3]>, indices: Vec<u32>) -> MeshGeometryDto {
+    fn make_dto(
+        slot: u32,
+        gen: u32,
+        positions: Vec<[f32; 3]>,
+        indices: Vec<u32>,
+    ) -> MeshGeometryDto {
         let aabb = compute_local_aabb(&positions);
         MeshGeometryDto {
             mesh: make_handle(slot, gen),
@@ -444,27 +449,46 @@ mod tests {
     #[test]
     fn store_rejects_duplicate() {
         let mut store = MeshGeometryStore::new();
-        store.insert(make_dto(10, 0, triangle_positions(), vec![0, 1, 2])).unwrap();
-        let err = store.insert(make_dto(10, 0, triangle_positions(), vec![0, 1, 2])).unwrap_err();
-        assert!(matches!(err, MeshGeometryError::DuplicateHandle { slot: 10, generation: 0 }));
+        store
+            .insert(make_dto(10, 0, triangle_positions(), vec![0, 1, 2]))
+            .unwrap();
+        let err = store
+            .insert(make_dto(10, 0, triangle_positions(), vec![0, 1, 2]))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MeshGeometryError::DuplicateHandle {
+                slot: 10,
+                generation: 0
+            }
+        ));
     }
 
     #[test]
     fn store_requires_old_generation_removal_before_slot_reuse() {
         let mut store = MeshGeometryStore::new();
-        store.insert(make_dto(10, 0, triangle_positions(), vec![0, 1, 2])).unwrap();
+        store
+            .insert(make_dto(10, 0, triangle_positions(), vec![0, 1, 2]))
+            .unwrap();
         assert!(matches!(
             store.insert(make_dto(10, 1, triangle_positions(), vec![0, 1, 2])),
-            Err(MeshGeometryError::DuplicateHandle { slot: 10, generation: 1 })
+            Err(MeshGeometryError::DuplicateHandle {
+                slot: 10,
+                generation: 1
+            })
         ));
         store.remove(make_handle(10, 0));
-        store.insert(make_dto(10, 1, triangle_positions(), vec![0, 1, 2])).unwrap();
+        store
+            .insert(make_dto(10, 1, triangle_positions(), vec![0, 1, 2]))
+            .unwrap();
     }
 
     #[test]
     fn store_stale_generation_rejected() {
         let mut store = MeshGeometryStore::new();
-        store.insert(make_dto(10, 0, triangle_positions(), vec![0, 1, 2])).unwrap();
+        store
+            .insert(make_dto(10, 0, triangle_positions(), vec![0, 1, 2]))
+            .unwrap();
         // Query with a different generation before removal — should be stale.
         let before = store.get(make_handle(10, 1));
         assert!(matches!(before, Err(CacheError::StaleHandle)));
@@ -480,8 +504,12 @@ mod tests {
     #[test]
     fn store_remove_makes_query_fail_without_removing_other_slots() {
         let mut store = MeshGeometryStore::new();
-        store.insert(make_dto(10, 0, triangle_positions(), vec![0, 1, 2])).unwrap();
-        store.insert(make_dto(11, 0, triangle_positions(), vec![0, 1, 2])).unwrap();
+        store
+            .insert(make_dto(10, 0, triangle_positions(), vec![0, 1, 2]))
+            .unwrap();
+        store
+            .insert(make_dto(11, 0, triangle_positions(), vec![0, 1, 2]))
+            .unwrap();
         store.remove(make_handle(10, 0));
         assert!(store.get(make_handle(10, 0)).is_err());
         assert!(store.get(make_handle(11, 0)).is_ok());
@@ -491,7 +519,9 @@ mod tests {
     fn store_batch_insert_is_atomic() {
         let mut store = MeshGeometryStore::new();
         // First insert works
-        store.insert(make_dto(10, 0, triangle_positions(), vec![0, 1, 2])).unwrap();
+        store
+            .insert(make_dto(10, 0, triangle_positions(), vec![0, 1, 2]))
+            .unwrap();
         // Batch insert tries duplicate
         let batch = vec![
             make_dto(11, 0, triangle_positions(), vec![0, 1, 2]),
@@ -500,7 +530,10 @@ mod tests {
         let err = store.insert_batch(batch).unwrap_err();
         assert!(matches!(err, MeshGeometryError::DuplicateHandle { .. }));
         // slot 11 should NOT be present (rollback)
-        assert!(matches!(store.get(make_handle(11, 0)), Err(CacheError::OutOfBounds)));
+        assert!(matches!(
+            store.get(make_handle(11, 0)),
+            Err(CacheError::OutOfBounds)
+        ));
         // slot 10 should still be present (it was pre-existing).
         assert!(store.get(make_handle(10, 0)).is_ok());
 
@@ -509,14 +542,19 @@ mod tests {
             make_dto(12, 1, triangle_positions(), vec![0, 1, 2]),
         ];
         assert!(store.insert_batch(duplicate_within_batch).is_err());
-        assert!(matches!(store.get(make_handle(12, 0)), Err(CacheError::OutOfBounds)));
+        assert!(matches!(
+            store.get(make_handle(12, 0)),
+            Err(CacheError::OutOfBounds)
+        ));
     }
 
     #[test]
     fn store_get_aabb() {
         let mut store = MeshGeometryStore::new();
         let aabb_positions = vec![[0.0, 0.0, 0.0], [2.0, 3.0, 4.0], [1.0, 1.0, 1.0]];
-        store.insert(make_dto(10, 0, aabb_positions, vec![0, 1, 2])).unwrap();
+        store
+            .insert(make_dto(10, 0, aabb_positions, vec![0, 1, 2]))
+            .unwrap();
         let aabb = store.get_aabb(make_handle(10, 0)).unwrap().unwrap();
         assert_eq!(aabb.min, [0.0, 0.0, 0.0]);
         assert_eq!(aabb.max, [2.0, 3.0, 4.0]);
@@ -525,7 +563,9 @@ mod tests {
     #[test]
     fn store_get_aabb_stale_rejected() {
         let mut store = MeshGeometryStore::new();
-        store.insert(make_dto(10, 0, triangle_positions(), vec![0, 1, 2])).unwrap();
+        store
+            .insert(make_dto(10, 0, triangle_positions(), vec![0, 1, 2]))
+            .unwrap();
         let result = store.get_aabb(make_handle(10, 1));
         assert!(matches!(result, Err(CacheError::StaleHandle)));
     }
@@ -535,7 +575,9 @@ mod tests {
         let mut store = MeshGeometryStore::new();
         assert!(store.is_empty());
         assert_eq!(store.len(), 0);
-        store.insert(make_dto(10, 0, triangle_positions(), vec![0, 1, 2])).unwrap();
+        store
+            .insert(make_dto(10, 0, triangle_positions(), vec![0, 1, 2]))
+            .unwrap();
         assert!(!store.is_empty());
         assert_eq!(store.len(), 1);
     }
@@ -557,8 +599,12 @@ mod tests {
     #[test]
     fn store_remove_batch() {
         let mut store = MeshGeometryStore::new();
-        store.insert(make_dto(10, 0, triangle_positions(), vec![0, 1, 2])).unwrap();
-        store.insert(make_dto(11, 0, triangle_positions(), vec![0, 1, 2])).unwrap();
+        store
+            .insert(make_dto(10, 0, triangle_positions(), vec![0, 1, 2]))
+            .unwrap();
+        store
+            .insert(make_dto(11, 0, triangle_positions(), vec![0, 1, 2]))
+            .unwrap();
         store.remove_batch(&[make_handle(10, 0), make_handle(11, 0)]);
         assert!(store.is_empty());
     }
@@ -575,10 +621,14 @@ mod tests {
     #[test]
     fn mesh_geometry_double_unload_is_idempotent_and_does_not_touch_reuse() {
         let mut store = MeshGeometryStore::new();
-        store.insert(make_dto(20, 0, triangle_positions(), vec![0, 1, 2])).unwrap();
+        store
+            .insert(make_dto(20, 0, triangle_positions(), vec![0, 1, 2]))
+            .unwrap();
         store.remove(make_handle(20, 0));
         store.remove(make_handle(20, 0));
-        store.insert(make_dto(20, 1, triangle_positions(), vec![0, 1, 2])).unwrap();
+        store
+            .insert(make_dto(20, 1, triangle_positions(), vec![0, 1, 2]))
+            .unwrap();
         store.remove(make_handle(20, 0));
         assert!(store.get(make_handle(20, 1)).is_ok());
         assert!(matches!(
@@ -614,6 +664,8 @@ mod tests {
                 make_dto(21, 0, triangle_positions(), vec![0, 1, 2]),
             ])
             .unwrap();
-        assert!(fragment_meshes.into_iter().all(|mesh| store.get(mesh).is_ok()));
+        assert!(fragment_meshes
+            .into_iter()
+            .all(|mesh| store.get(mesh).is_ok()));
     }
 }

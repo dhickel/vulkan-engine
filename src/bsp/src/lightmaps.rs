@@ -158,19 +158,10 @@ impl AtlasPage {
     }
 
     /// Write a luxel block at the given atlas offset and update used extent.
-    pub fn write_luxels(
-        &mut self,
-        offset: (u32, u32),
-        luxels: &[Luxel],
-        width: u32,
-        height: u32,
-    ) {
+    pub fn write_luxels(&mut self, offset: (u32, u32), luxels: &[Luxel], width: u32, height: u32) {
         let end_x = offset.0.saturating_add(width);
         let end_y = offset.1.saturating_add(height);
-        self.used_extent = (
-            self.used_extent.0.max(end_x),
-            self.used_extent.1.max(end_y),
-        );
+        self.used_extent = (self.used_extent.0.max(end_x), self.used_extent.1.max(end_y));
         for y in 0..height {
             for x in 0..width {
                 let lx = (offset.0 + x) as usize;
@@ -232,8 +223,8 @@ impl LightmapAtlas {
     ) -> Result<FaceLightmapLayout, BspReport> {
         let style_layout = self.allocate_face_style_with_limit(
             face_index,
-            0,   // style_id
-            0,   // source_slot
+            0, // style_id
+            0, // source_slot
             luxel_data,
             luxel_width,
             luxel_height,
@@ -565,25 +556,46 @@ mod tests {
     #[test]
     fn face_kind_vertex() {
         assert_eq!(LightmapFaceKind::classify((1, 1)), LightmapFaceKind::Vertex);
-        assert_eq!(LightmapFaceKind::classify((1, 16)), LightmapFaceKind::Vertex);
-        assert_eq!(LightmapFaceKind::classify((16, 1)), LightmapFaceKind::Vertex);
+        assert_eq!(
+            LightmapFaceKind::classify((1, 16)),
+            LightmapFaceKind::Vertex
+        );
+        assert_eq!(
+            LightmapFaceKind::classify((16, 1)),
+            LightmapFaceKind::Vertex
+        );
         assert!(LightmapFaceKind::Vertex.requires_baked_lightmap());
     }
 
     #[test]
     fn face_kind_light() {
         assert_eq!(LightmapFaceKind::classify((2, 2)), LightmapFaceKind::Light);
-        assert_eq!(LightmapFaceKind::classify((16, 16)), LightmapFaceKind::Light);
+        assert_eq!(
+            LightmapFaceKind::classify((16, 16)),
+            LightmapFaceKind::Light
+        );
         assert_eq!(LightmapFaceKind::classify((8, 32)), LightmapFaceKind::Light);
         assert!(LightmapFaceKind::Light.requires_baked_lightmap());
     }
 
     #[test]
     fn face_kind_surface() {
-        assert_eq!(LightmapFaceKind::classify((64, 16)), LightmapFaceKind::Surface);
-        assert_eq!(LightmapFaceKind::classify((8, 64)), LightmapFaceKind::Surface);
-        assert_eq!(LightmapFaceKind::classify((64, 64)), LightmapFaceKind::Surface);
-        assert_eq!(LightmapFaceKind::classify((128, 256)), LightmapFaceKind::Surface);
+        assert_eq!(
+            LightmapFaceKind::classify((64, 16)),
+            LightmapFaceKind::Surface
+        );
+        assert_eq!(
+            LightmapFaceKind::classify((8, 64)),
+            LightmapFaceKind::Surface
+        );
+        assert_eq!(
+            LightmapFaceKind::classify((64, 64)),
+            LightmapFaceKind::Surface
+        );
+        assert_eq!(
+            LightmapFaceKind::classify((128, 256)),
+            LightmapFaceKind::Surface
+        );
         assert!(!LightmapFaceKind::Surface.requires_baked_lightmap());
     }
 }

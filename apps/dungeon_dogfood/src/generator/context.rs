@@ -153,16 +153,30 @@ pub(super) enum TelemetryScope {
 
 impl TelemetryScope {
     pub(super) const ALL: [Self; 19] = [
-        Self::Placement, Self::TransitionReservation, Self::RolePlacement,
-        Self::CandidateConstruction, Self::CandidateValidation, Self::TopologySelection,
-        Self::TopologyReroute, Self::Materialization, Self::CorridorCarve,
-        Self::TransitionMaterialization, Self::Repair, Self::ValidationStructural,
-        Self::ValidationConnectivity, Self::ValidationTopology, Self::ValidationMovementProbe,
-        Self::MarkerPlacement, Self::ResourceCounting, Self::CaptureViewDerivation,
+        Self::Placement,
+        Self::TransitionReservation,
+        Self::RolePlacement,
+        Self::CandidateConstruction,
+        Self::CandidateValidation,
+        Self::TopologySelection,
+        Self::TopologyReroute,
+        Self::Materialization,
+        Self::CorridorCarve,
+        Self::TransitionMaterialization,
+        Self::Repair,
+        Self::ValidationStructural,
+        Self::ValidationConnectivity,
+        Self::ValidationTopology,
+        Self::ValidationMovementProbe,
+        Self::MarkerPlacement,
+        Self::ResourceCounting,
+        Self::CaptureViewDerivation,
         Self::Diagnostics,
     ];
 
-    const fn index(self) -> usize { self as usize }
+    const fn index(self) -> usize {
+        self as usize
+    }
 }
 
 // ─── Route search kind ─────────────────────────────────────────────────────
@@ -363,7 +377,9 @@ impl AttemptContext {
 
     /// Begin a named timing scope. The clock is acquired only in Timing mode.
     pub(super) fn begin_scope(&mut self, scope: TelemetryScope) {
-        if self.mode != TelemetryMode::Timing { return; }
+        if self.mode != TelemetryMode::Timing {
+            return;
+        }
         let slot = &mut self.scope_started[scope.index()];
         if slot.is_some() {
             self.overflow = true;
@@ -374,7 +390,9 @@ impl AttemptContext {
 
     /// Complete a scope without panicking or influencing canonical flow.
     pub(super) fn end_scope(&mut self, scope: TelemetryScope) {
-        if self.mode != TelemetryMode::Timing { return; }
+        if self.mode != TelemetryMode::Timing {
+            return;
+        }
         let Some(started) = self.scope_started[scope.index()].take() else {
             self.overflow = true;
             return;
@@ -411,8 +429,7 @@ impl AttemptContext {
         match _kind {
             CloneKind::Occupancy => {
                 self.occupancy_clones = self.occupancy_clones.saturating_add(1);
-                self.occupancy_clone_elements =
-                    self.occupancy_clone_elements.saturating_add(len);
+                self.occupancy_clone_elements = self.occupancy_clone_elements.saturating_add(len);
                 self.occupancy_clone_capacity =
                     self.occupancy_clone_capacity.saturating_add(capacity);
             }
@@ -423,7 +440,9 @@ impl AttemptContext {
                 self.topology_graph_clone_capacity =
                     self.topology_graph_clone_capacity.saturating_add(capacity);
             }
-            CloneKind::EdgeVector | CloneKind::Selection | CloneKind::TileBuffer
+            CloneKind::EdgeVector
+            | CloneKind::Selection
+            | CloneKind::TileBuffer
             | CloneKind::IdAllocator => {
                 // Counted as topology clone activity
             }
@@ -456,8 +475,7 @@ impl AttemptContext {
         match kind {
             RouteSearchKind::CandidateConstruction => {
                 self.candidate_queries = self.candidate_queries.saturating_add(1);
-                self.candidate_expansions =
-                    self.candidate_expansions.saturating_add(expansions);
+                self.candidate_expansions = self.candidate_expansions.saturating_add(expansions);
                 match outcome {
                     RouteOutcome::Path => {
                         self.candidate_paths = self.candidate_paths.saturating_add(1)
@@ -473,8 +491,9 @@ impl AttemptContext {
             RouteSearchKind::CandidateValidation => {
                 self.candidate_validation_searches =
                     self.candidate_validation_searches.saturating_add(1);
-                self.candidate_validation_expansions =
-                    self.candidate_validation_expansions.saturating_add(expansions);
+                self.candidate_validation_expansions = self
+                    .candidate_validation_expansions
+                    .saturating_add(expansions);
                 match outcome {
                     RouteOutcome::Path => {
                         self.candidate_validation_paths =
@@ -495,8 +514,7 @@ impl AttemptContext {
                 // connectivity uses the same A* router.
             }
             RouteSearchKind::TopologyReroute => {
-                self.topology_reroute_attempts =
-                    self.topology_reroute_attempts.saturating_add(1);
+                self.topology_reroute_attempts = self.topology_reroute_attempts.saturating_add(1);
                 match outcome {
                     RouteOutcome::Path => {
                         self.topology_reroute_successes =
@@ -515,8 +533,7 @@ impl AttemptContext {
         if self.mode == TelemetryMode::Off {
             return;
         }
-        self.candidate_pairs_considered =
-            self.candidate_pairs_considered.saturating_add(1);
+        self.candidate_pairs_considered = self.candidate_pairs_considered.saturating_add(1);
     }
 
     // ── Placement observation ────────────────────────────────────────────
@@ -569,32 +586,28 @@ impl AttemptContext {
         if self.mode == TelemetryMode::Off {
             return;
         }
-        self.topology_branch_attempts =
-            self.topology_branch_attempts.saturating_add(1);
+        self.topology_branch_attempts = self.topology_branch_attempts.saturating_add(1);
     }
 
     pub(super) fn topology_fallback_crossing(&mut self) {
         if self.mode == TelemetryMode::Off {
             return;
         }
-        self.topology_fallback_crossings =
-            self.topology_fallback_crossings.saturating_add(1);
+        self.topology_fallback_crossings = self.topology_fallback_crossings.saturating_add(1);
     }
 
     pub(super) fn topology_edge_added(&mut self) {
         if self.mode == TelemetryMode::Off {
             return;
         }
-        self.topology_edge_additions =
-            self.topology_edge_additions.saturating_add(1);
+        self.topology_edge_additions = self.topology_edge_additions.saturating_add(1);
     }
 
     pub(super) fn topology_edge_rolled_back(&mut self) {
         if self.mode == TelemetryMode::Off {
             return;
         }
-        self.topology_edge_rollbacks =
-            self.topology_edge_rollbacks.saturating_add(1);
+        self.topology_edge_rollbacks = self.topology_edge_rollbacks.saturating_add(1);
     }
 
     // ── Materialization observation ──────────────────────────────────────
@@ -619,8 +632,9 @@ impl AttemptContext {
         if self.mode == TelemetryMode::Off {
             return;
         }
-        self.materialization_transitions_materialized =
-            self.materialization_transitions_materialized.saturating_add(1);
+        self.materialization_transitions_materialized = self
+            .materialization_transitions_materialized
+            .saturating_add(1);
     }
 
     pub(super) fn border_cells_sealed(&mut self) {
@@ -633,11 +647,7 @@ impl AttemptContext {
 
     // ── Validation observation ───────────────────────────────────────────
 
-    pub(super) fn validation_error(
-        &mut self,
-        stage: ErrorStage,
-        _kind: &str,
-    ) {
+    pub(super) fn validation_error(&mut self, stage: ErrorStage, _kind: &str) {
         if self.mode == TelemetryMode::Off {
             return;
         }
@@ -651,8 +661,7 @@ impl AttemptContext {
                     self.validation_connectivity_errors.saturating_add(1);
             }
             ErrorStage::Ir => {
-                self.validation_topology_errors =
-                    self.validation_topology_errors.saturating_add(1);
+                self.validation_topology_errors = self.validation_topology_errors.saturating_add(1);
             }
             ErrorStage::Configuration
             | ErrorStage::CanonicalConfiguration
@@ -690,16 +699,14 @@ impl AttemptContext {
         if self.mode == TelemetryMode::Off {
             return;
         }
-        self.repair_optional_edges_removed =
-            self.repair_optional_edges_removed.saturating_add(1);
+        self.repair_optional_edges_removed = self.repair_optional_edges_removed.saturating_add(1);
     }
 
     pub(super) fn repair_state_rejected(&mut self) {
         if self.mode == TelemetryMode::Off {
             return;
         }
-        self.repair_states_rejected =
-            self.repair_states_rejected.saturating_add(1);
+        self.repair_states_rejected = self.repair_states_rejected.saturating_add(1);
     }
 
     // ── Markers / Resources / Views / Diagnostics ────────────────────────
@@ -743,16 +750,14 @@ impl AttemptContext {
         if self.mode == TelemetryMode::Off {
             return;
         }
-        self.resource_static_bodies =
-            self.resource_static_bodies.saturating_add(count);
+        self.resource_static_bodies = self.resource_static_bodies.saturating_add(count);
     }
 
     pub(super) fn resource_total_bodies_count(&mut self, count: u64) {
         if self.mode == TelemetryMode::Off {
             return;
         }
-        self.resource_total_bodies =
-            self.resource_total_bodies.saturating_add(count);
+        self.resource_total_bodies = self.resource_total_bodies.saturating_add(count);
     }
 
     pub(super) fn resource_vertices_count(&mut self, count: u64) {
@@ -773,8 +778,7 @@ impl AttemptContext {
         if self.mode == TelemetryMode::Off {
             return;
         }
-        self.capture_views_generated =
-            self.capture_views_generated.saturating_add(count);
+        self.capture_views_generated = self.capture_views_generated.saturating_add(count);
     }
 
     pub(super) fn diagnostics_bytes_count(&mut self, count: u64) {
@@ -794,7 +798,9 @@ impl AttemptContext {
     /// Finish the attempt. Any unclosed scopes are drained without panic.
     /// Called after the canonical outcome is independently determined.
     pub(super) fn finish_attempt(&mut self) {
-        if self.mode != TelemetryMode::Timing { return; }
+        if self.mode != TelemetryMode::Timing {
+            return;
+        }
         for scope in TelemetryScope::ALL {
             if let Some(started) = self.scope_started[scope.index()].take() {
                 self.accumulate_timing(scope, started);
@@ -924,11 +930,7 @@ mod tests {
             RouteOutcome::Cap,
             10,
         );
-        ctx.route_finished(
-            RouteSearchKind::CandidateValidation,
-            RouteOutcome::Path,
-            7,
-        );
+        ctx.route_finished(RouteSearchKind::CandidateValidation, RouteOutcome::Path, 7);
         ctx.candidate_pair_considered();
         ctx.candidate_pair_considered();
 
@@ -1020,16 +1022,8 @@ mod tests {
             RouteOutcome::Path,
             10,
         );
-        ctx.route_finished(
-            RouteSearchKind::CandidateValidation,
-            RouteOutcome::Path,
-            20,
-        );
-        ctx.route_finished(
-            RouteSearchKind::TopologyReroute,
-            RouteOutcome::Path,
-            5,
-        );
+        ctx.route_finished(RouteSearchKind::CandidateValidation, RouteOutcome::Path, 20);
+        ctx.route_finished(RouteSearchKind::TopologyReroute, RouteOutcome::Path, 5);
         assert_eq!(ctx.candidate_queries, 1);
         assert_eq!(ctx.candidate_paths, 1);
         assert_eq!(ctx.candidate_validation_searches, 1);

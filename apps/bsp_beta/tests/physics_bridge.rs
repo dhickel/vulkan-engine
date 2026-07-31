@@ -7,10 +7,11 @@
 
 use bsp_beta::physics_bridge::{PhysicsActiveState, PhysicsBridge, PhysicsPreparedState};
 use bsp_runtime::bridge::{
-    AppBridge, BehaviorEntityRecipe, EntityCollisionRecipe, LightEntityRecipe,
-    WorldCollisionRecipe,
+    AppBridge, BehaviorEntityRecipe, EntityCollisionRecipe, LightEntityRecipe, WorldCollisionRecipe,
 };
-use physics::{BodyKind, PhysicsBodyId, PhysicsColliderId, PhysicsContactKind, PhysicsContactPhase};
+use physics::{
+    BodyKind, PhysicsBodyId, PhysicsColliderId, PhysicsContactKind, PhysicsContactPhase,
+};
 
 fn world_with_plane() -> WorldCollisionRecipe {
     WorldCollisionRecipe {
@@ -71,7 +72,12 @@ fn prepare_and_activate(
     entities: &[EntityCollisionRecipe],
 ) -> (Box<dyn bsp_runtime::ActiveBridgeState>, PhysicsBodyId) {
     let mut prepared = bridge
-        .prepare(&empty_world(), entities, &empty_lights(), &empty_behaviors())
+        .prepare(
+            &empty_world(),
+            entities,
+            &empty_lights(),
+            &empty_behaviors(),
+        )
         .unwrap();
     bridge.validate(&*prepared).unwrap();
 
@@ -100,7 +106,12 @@ fn prepare_and_activate(
 fn prepare_creates_world_static_body_from_collision_planes() {
     let mut bridge = PhysicsBridge::new();
     let prepared = bridge
-        .prepare(&world_with_plane(), &[], &empty_lights(), &empty_behaviors())
+        .prepare(
+            &world_with_plane(),
+            &[],
+            &empty_lights(),
+            &empty_behaviors(),
+        )
         .unwrap();
 
     let ps: &PhysicsPreparedState = prepared
@@ -123,7 +134,12 @@ fn prepare_creates_kinematic_body_for_brush_entity() {
     let entity = make_entity_collision(5, false);
 
     let prepared = bridge
-        .prepare(&empty_world(), &[entity], &empty_lights(), &empty_behaviors())
+        .prepare(
+            &empty_world(),
+            &[entity],
+            &empty_lights(),
+            &empty_behaviors(),
+        )
         .unwrap();
 
     let ps: &PhysicsPreparedState = prepared
@@ -184,7 +200,12 @@ fn validate_accepts_prepared_state() {
 fn activate_and_teardown_lifecycle() {
     let mut bridge = PhysicsBridge::new();
     let mut prepared = bridge
-        .prepare(&world_with_plane(), &[], &empty_lights(), &empty_behaviors())
+        .prepare(
+            &world_with_plane(),
+            &[],
+            &empty_lights(),
+            &empty_behaviors(),
+        )
         .unwrap();
 
     bridge.validate(&*prepared).unwrap();
@@ -216,7 +237,12 @@ fn activate_and_teardown_lifecycle() {
 fn double_activate_after_teardown_is_allowed() {
     let mut bridge = PhysicsBridge::new();
     let mut prepared = bridge
-        .prepare(&world_with_plane(), &[], &empty_lights(), &empty_behaviors())
+        .prepare(
+            &world_with_plane(),
+            &[],
+            &empty_lights(),
+            &empty_behaviors(),
+        )
         .unwrap();
 
     bridge.validate(&*prepared).unwrap();
@@ -225,7 +251,12 @@ fn double_activate_after_teardown_is_allowed() {
 
     // Second prepare/activate cycle
     let mut prepared2 = bridge
-        .prepare(&world_with_plane(), &[], &empty_lights(), &empty_behaviors())
+        .prepare(
+            &world_with_plane(),
+            &[],
+            &empty_lights(),
+            &empty_behaviors(),
+        )
         .unwrap();
     bridge.validate(&*prepared2).unwrap();
     let active2 = bridge.activate(&mut *prepared2);
@@ -242,7 +273,12 @@ fn activate_publishes_entity_body_and_collider_in_private_world() {
     let mut bridge = PhysicsBridge::new();
     let entity = make_entity_collision(42, false);
     let mut prepared = bridge
-        .prepare(&empty_world(), &[entity], &empty_lights(), &empty_behaviors())
+        .prepare(
+            &empty_world(),
+            &[entity],
+            &empty_lights(),
+            &empty_behaviors(),
+        )
         .unwrap();
     bridge.validate(&*prepared).unwrap();
 
@@ -268,7 +304,12 @@ fn teardown_removes_colliders_before_bodies() {
     let mut bridge = PhysicsBridge::new();
     let entity = make_entity_collision(12, false);
     let mut prepared = bridge
-        .prepare(&empty_world(), &[entity], &empty_lights(), &empty_behaviors())
+        .prepare(
+            &empty_world(),
+            &[entity],
+            &empty_lights(),
+            &empty_behaviors(),
+        )
         .unwrap();
     bridge.validate(&*prepared).unwrap();
 
@@ -298,7 +339,12 @@ fn sync_body_transform_updates_registered_kinematic_body() {
     let mut bridge = PhysicsBridge::new();
     let entity = make_entity_collision(7, false);
     let mut prepared = bridge
-        .prepare(&empty_world(), &[entity], &empty_lights(), &empty_behaviors())
+        .prepare(
+            &empty_world(),
+            &[entity],
+            &empty_lights(),
+            &empty_behaviors(),
+        )
         .unwrap();
     bridge.validate(&*prepared).unwrap();
     let mut active = bridge.activate(&mut *prepared);
@@ -321,7 +367,12 @@ fn sync_from_snapshot_updates_full_kinematic_pose() {
     let mut bridge = PhysicsBridge::new();
     let entity = make_entity_collision(8, false);
     let mut prepared = bridge
-        .prepare(&empty_world(), &[entity], &empty_lights(), &empty_behaviors())
+        .prepare(
+            &empty_world(),
+            &[entity],
+            &empty_lights(),
+            &empty_behaviors(),
+        )
         .unwrap();
     bridge.validate(&*prepared).unwrap();
     let mut active = bridge.activate(&mut *prepared);
@@ -331,8 +382,7 @@ fn sync_from_snapshot_updates_full_kinematic_pose() {
         .unwrap();
 
     let rotation = glam::Quat::from_rotation_y(90.0_f32.to_radians());
-    let transform =
-        glam::Mat4::from_rotation_translation(rotation, glam::Vec3::new(4.0, 5.0, 6.0));
+    let transform = glam::Mat4::from_rotation_translation(rotation, glam::Vec3::new(4.0, 5.0, 6.0));
     let mut builder = bsp_runtime::SnapshotBuilder::new(1, 1, 1.0 / 60.0, 1.0 / 60.0);
     builder.push_entity_pose(bsp_runtime::SnapshotEntityPose {
         entity_index: 8,
@@ -365,7 +415,12 @@ fn trigger_sensor_reports_enter_stay_and_exit_phases() {
     let mut bridge = PhysicsBridge::new();
     let trigger = make_entity_collision(10, true);
     let mut prepared = bridge
-        .prepare(&empty_world(), &[trigger], &empty_lights(), &empty_behaviors())
+        .prepare(
+            &empty_world(),
+            &[trigger],
+            &empty_lights(),
+            &empty_behaviors(),
+        )
         .unwrap();
     bridge.validate(&*prepared).unwrap();
     let mut active = bridge.activate(&mut *prepared);
@@ -386,15 +441,13 @@ fn trigger_sensor_reports_enter_stay_and_exit_phases() {
         ))
         .unwrap();
     ast.world
-        .create_collider(
-            physics::ColliderDescriptor::new(
-                actor_collider.clone(),
-                actor_body.clone(),
-                physics::ColliderShape::Cuboid {
-                    half_extents: [0.25, 0.25, 0.25],
-                },
-            ),
-        )
+        .create_collider(physics::ColliderDescriptor::new(
+            actor_collider.clone(),
+            actor_body.clone(),
+            physics::ColliderShape::Cuboid {
+                half_extents: [0.25, 0.25, 0.25],
+            },
+        ))
         .unwrap();
 
     ast.world.step(0.016).unwrap();

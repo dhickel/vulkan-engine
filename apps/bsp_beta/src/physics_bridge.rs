@@ -238,8 +238,8 @@ impl AppBridge for PhysicsBridge {
 
         // Track what we've created so we can undo on failure.
         let clean_undo = |w: &mut physics::PhysicsWorld,
-                              body_ids: &[physics::PhysicsBodyId],
-                              collider_ids: &[physics::PhysicsColliderId]| {
+                          body_ids: &[physics::PhysicsBodyId],
+                          collider_ids: &[physics::PhysicsColliderId]| {
             for cid in collider_ids.iter().rev() {
                 w.remove_collider(cid);
             }
@@ -370,8 +370,7 @@ impl AppBridge for PhysicsBridge {
             .ok_or_else(|| "physics bridge received non-physics prepared state".to_string())?;
 
         // Verify all body references in colliders have matching bodies
-        let body_ids: std::collections::HashSet<_> =
-            state.all_body_ids.iter().collect();
+        let body_ids: std::collections::HashSet<_> = state.all_body_ids.iter().collect();
         for cid in &state.all_collider_ids {
             // Check collider exists in the world
             if !state.world.collider_exists(cid) {

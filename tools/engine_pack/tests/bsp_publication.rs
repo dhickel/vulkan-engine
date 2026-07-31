@@ -18,10 +18,7 @@ fn unique_tmp(label: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "bsp-pub-{label}-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("bsp-pub-{label}-{}-{nanos}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -35,20 +32,20 @@ fn make_minimal_bsp_bytes() -> Vec<u8> {
     let entity_size = entity_bytes.len() as u32;
     let lumps: [(u32, u32); 15] = [
         (entity_offset, entity_size), // entities
-        (0, 0), // planes
-        (0, 0), // miptex
-        (0, 0), // vertices
-        (0, 0), // visinfo
-        (0, 0), // nodes
-        (0, 0), // texinfo
-        (0, 0), // faces
-        (0, 0), // lightmaps
-        (0, 0), // clipnodes
-        (0, 0), // leaves
-        (0, 0), // markfaces
-        (0, 0), // edges
-        (0, 0), // surfedges
-        (0, 0), // models
+        (0, 0),                       // planes
+        (0, 0),                       // miptex
+        (0, 0),                       // vertices
+        (0, 0),                       // visinfo
+        (0, 0),                       // nodes
+        (0, 0),                       // texinfo
+        (0, 0),                       // faces
+        (0, 0),                       // lightmaps
+        (0, 0),                       // clipnodes
+        (0, 0),                       // leaves
+        (0, 0),                       // markfaces
+        (0, 0),                       // edges
+        (0, 0),                       // surfedges
+        (0, 0),                       // models
     ];
     for (off, sz) in &lumps {
         data.extend_from_slice(&off.to_le_bytes());
@@ -100,8 +97,7 @@ fn pub_stage_fail_empty_staging_publishes_nothing() {
     assert!(result.is_err());
     let err_msg = format!("{}", result.unwrap_err());
     assert!(
-        err_msg.contains("missing required .bsp")
-            || err_msg.contains("test.bsp"),
+        err_msg.contains("missing required .bsp") || err_msg.contains("test.bsp"),
         "expected missing-bsp diagnostic, got: {err_msg}"
     );
 
@@ -389,14 +385,18 @@ fn pub_late_collision_competitor_bytes_unchanged() {
     let result = fs_tx::publish_directory_no_replace(&staging, &target);
 
     match result {
-        Err(fs_tx::FsTxError::PreExistingDestination { .. }) | Err(fs_tx::FsTxError::UnsupportedPlatform { .. }) => {}
+        Err(fs_tx::FsTxError::PreExistingDestination { .. })
+        | Err(fs_tx::FsTxError::UnsupportedPlatform { .. }) => {}
         other => panic!("expected PreExistingDestination, got: {:?}", other),
     }
 
     // Competitor file must be byte-for-byte unchanged (when renameat2 was used)
     if target.exists() {
         let actual = fs::read(target.join("rival.dat")).unwrap();
-        assert_eq!(actual, competitor_data, "competitor bytes must be unchanged");
+        assert_eq!(
+            actual, competitor_data,
+            "competitor bytes must be unchanged"
+        );
         // Verify staging files were NOT mixed in
         assert!(
             !target.join("test.bsp").exists(),
@@ -847,7 +847,8 @@ fn pub_rejects_symlink_target() {
 
     let result = fs_tx::publish_directory_no_replace(&staging, &link_target);
     match result {
-        Err(fs_tx::FsTxError::PreExistingDestination { .. }) | Err(fs_tx::FsTxError::UnsupportedPlatform { .. }) => {}
+        Err(fs_tx::FsTxError::PreExistingDestination { .. })
+        | Err(fs_tx::FsTxError::UnsupportedPlatform { .. }) => {}
         other => {
             fs_tx::cleanup_staging(&staging);
             panic!("expected PreExistingDestination, got: {:?}", other);
@@ -886,7 +887,10 @@ fn pub_no_clobber_from_two_stagings() {
     let r1 = fs_tx::publish_directory_no_replace(&staging_a, &target);
     match r1 {
         Ok(()) | Err(fs_tx::FsTxError::UnsupportedPlatform { .. }) => {}
-        other => panic!("first publish should succeed or be unsupported: {:?}", other),
+        other => panic!(
+            "first publish should succeed or be unsupported: {:?}",
+            other
+        ),
     }
 
     // Second publisher must fail (either PreExistingDestination or
@@ -949,7 +953,10 @@ fn pub_cleanup_residue_after_failed_publish() {
 
     // Cleanup staging explicitly (caller responsibility on error)
     fs_tx::cleanup_staging(&staging);
-    assert!(!staging.exists(), "staging must be cleaned up after failure");
+    assert!(
+        !staging.exists(),
+        "staging must be cleaned up after failure"
+    );
 
     // Target must still exist with original content
     assert!(target.exists());

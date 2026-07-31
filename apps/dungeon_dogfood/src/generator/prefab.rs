@@ -128,7 +128,13 @@ impl Tile {
         if bytes.len() >= 3 && bytes[0] == b'R' && bytes[1].is_ascii_digit() && bytes[1] <= b'2' {
             if let Some(dir) = Direction::from_ramp_char(bytes[2] as char) {
                 let step = bytes[1] - b'0';
-                return Some((Self::Ramp { direction: dir, step }, 3));
+                return Some((
+                    Self::Ramp {
+                        direction: dir,
+                        step,
+                    },
+                    3,
+                ));
             }
         }
         // Single-char tokens
@@ -260,7 +266,11 @@ impl CellBox {
         let mut out = Vec::with_capacity(box_width.saturating_mul(box_height));
         for y in self.y_min..=self.y_max {
             for x in self.x_min..=self.x_max {
-                out.push(Cell { layer: self.layer, x, y });
+                out.push(Cell {
+                    layer: self.layer,
+                    x,
+                    y,
+                });
             }
         }
         out
@@ -493,12 +503,11 @@ fn parse_layers(
             return Err(prefab_err(context, "layer_count_mismatch"));
         }
     }
-    let layer_count_u16 = u16::try_from(parsed_count).map_err(|_| {
-        GeneratorError::ArithmeticOverflow {
+    let layer_count_u16 =
+        u16::try_from(parsed_count).map_err(|_| GeneratorError::ArithmeticOverflow {
             stage: ErrorStage::Prefab,
             operation: "layer_count_conversion",
-        }
-    })?;
+        })?;
 
     let mut layers: Vec<Vec<Vec<Tile>>> = Vec::with_capacity(parsed_count);
     let mut width: Option<u16> = None;
@@ -522,13 +531,12 @@ fn parse_layers(
         let mut w: Option<u16> = None;
 
         for (ri, row_str) in layer_def.rows.iter().enumerate() {
-            let tiles = Tile::tokenize_row(row_str).ok_or_else(|| {
-                GeneratorError::PrefabIntegrity {
+            let tiles =
+                Tile::tokenize_row(row_str).ok_or_else(|| GeneratorError::PrefabIntegrity {
                     stage: ErrorStage::Prefab,
                     context: format!("{} layer={} row={}", context, li, ri),
                     reason: "invalid_token",
-                }
-            })?;
+                })?;
             if tiles.is_empty() {
                 return Err(GeneratorError::PrefabIntegrity {
                     stage: ErrorStage::Prefab,
@@ -536,12 +544,11 @@ fn parse_layers(
                     reason: "empty_row",
                 });
             }
-            let row_w = u16::try_from(tiles.len()).map_err(|_| {
-                GeneratorError::ArithmeticOverflow {
+            let row_w =
+                u16::try_from(tiles.len()).map_err(|_| GeneratorError::ArithmeticOverflow {
                     stage: ErrorStage::Prefab,
                     operation: "column_count_conversion",
-                }
-            })?;
+                })?;
             match w {
                 None => w = Some(row_w),
                 Some(prev) if prev != row_w => {
@@ -628,11 +635,18 @@ fn validate_origin(
     height: u16,
     context: &str,
 ) -> Result<Cell, GeneratorError> {
-    let origin = origin_def.map_or(Cell { layer: 0, x: 0, y: 0 }, |o| Cell {
-        layer: 0,
-        x: o.x,
-        y: o.y,
-    });
+    let origin = origin_def.map_or(
+        Cell {
+            layer: 0,
+            x: 0,
+            y: 0,
+        },
+        |o| Cell {
+            layer: 0,
+            x: o.x,
+            y: o.y,
+        },
+    );
     if origin.x >= width || origin.y >= height {
         return Err(prefab_err(context, "origin_out_of_bounds"));
     }
@@ -666,7 +680,11 @@ fn validate_sockets(
             return Err(prefab_err(context, "socket_width_zero"));
         }
 
-        let anchor = Cell { layer: sd.anchor.layer, x: sd.anchor.x, y: sd.anchor.y };
+        let anchor = Cell {
+            layer: sd.anchor.layer,
+            x: sd.anchor.x,
+            y: sd.anchor.y,
+        };
 
         if anchor.layer >= layer_count {
             return Err(prefab_err(context, "socket_layer_out_of_bounds"));
@@ -755,7 +773,13 @@ fn validate_sockets(
             }
         }
 
-        sockets.push(Socket { id: sd.id.clone(), anchor, direction, width: sd.width, role });
+        sockets.push(Socket {
+            id: sd.id.clone(),
+            anchor,
+            direction,
+            width: sd.width,
+            role,
+        });
     }
 
     Ok(sockets)
@@ -782,11 +806,20 @@ fn validate_markers(
             .ok_or_else(|| prefab_err(context, "invalid_marker_facing"))?;
         let kind = MarkerKind::from_str(&md.kind)
             .ok_or_else(|| prefab_err(context, "invalid_marker_kind"))?;
-        let position = Cell { layer: md.position.layer, x: md.position.x, y: md.position.y };
+        let position = Cell {
+            layer: md.position.layer,
+            x: md.position.x,
+            y: md.position.y,
+        };
         if position.layer >= layer_count || position.x >= width || position.y >= height {
             return Err(prefab_err(context, "marker_out_of_bounds"));
         }
-        markers.push(Marker { id: md.id.clone(), position, facing, kind });
+        markers.push(Marker {
+            id: md.id.clone(),
+            position,
+            facing,
+            kind,
+        });
     }
     Ok(markers)
 }
@@ -807,7 +840,11 @@ fn expand_reservation(
             }
             let mut out = Vec::with_capacity(cells.len());
             for c in cells {
-                out.push(Cell { layer: c.layer, x: c.x, y: c.y });
+                out.push(Cell {
+                    layer: c.layer,
+                    x: c.x,
+                    y: c.y,
+                });
             }
             // Sort and deduplicate
             out.sort();
@@ -924,8 +961,14 @@ fn infer_ramps(layers: &[Vec<Vec<Tile>>]) -> Vec<InferredRamp> {
                         grid[y2 as usize][x2 as usize],
                     ) {
                         (
-                            Tile::Ramp { direction: d1, step: 1 },
-                            Tile::Ramp { direction: d2, step: 2 },
+                            Tile::Ramp {
+                                direction: d1,
+                                step: 1,
+                            },
+                            Tile::Ramp {
+                                direction: d2,
+                                step: 2,
+                            },
                         ) if d1 == direction && d2 == direction => {
                             ramps.push(InferredRamp {
                                 cells: [
@@ -1065,13 +1108,7 @@ fn validate_transitions(
                 let r0 = (ramp.cells[0].0 as i32, ramp.cells[0].1 as i32);
                 let approach_distance = (r0.0 - inward.0).abs() + (r0.1 - inward.1).abs();
                 let connected = approach_distance <= 1
-                    || reservation_connects_approach(
-                        reservations,
-                        &td.id,
-                        lower_layer,
-                        inward,
-                        r0,
-                    );
+                    || reservation_connects_approach(reservations, &td.id, lower_layer, inward, r0);
                 (ramp.lower_layer == lower_layer && connected).then_some(index)
             })
             .collect();
@@ -1165,8 +1202,14 @@ fn validate_prefab(toml: PrefabToml, context: &str) -> Result<Prefab, GeneratorE
     let origin = validate_origin(toml.origin.as_ref(), width, height, context)?;
     let sockets = validate_sockets(&toml.sockets, width, height, layer_count, &layers, context)?;
     let markers = validate_markers(&toml.markers, width, height, layer_count, context)?;
-    let reservations =
-        validate_reservations(&toml.reservations, width, height, layer_count, &layers, context)?;
+    let reservations = validate_reservations(
+        &toml.reservations,
+        width,
+        height,
+        layer_count,
+        &layers,
+        context,
+    )?;
     let transitions = validate_transitions(
         &toml.transitions,
         &sockets,
@@ -1177,13 +1220,7 @@ fn validate_prefab(toml: PrefabToml, context: &str) -> Result<Prefab, GeneratorE
         layer_count,
         context,
     )?;
-    validate_component_ids_and_owners(
-        &sockets,
-        &markers,
-        &reservations,
-        &transitions,
-        context,
-    )?;
+    validate_component_ids_and_owners(&sockets, &markers, &reservations, &transitions, context)?;
 
     Ok(Prefab {
         id: toml.id,
@@ -1221,7 +1258,11 @@ fn rotate_cell(c: Cell, width: u16, height: u16, quarter_turns: u8) -> Cell {
         // Swap w, h
         std::mem::swap(&mut w, &mut h);
     }
-    Cell { layer: c.layer, x, y }
+    Cell {
+        layer: c.layer,
+        x,
+        y,
+    }
 }
 
 fn rotate_direction(d: Direction, quarter_turns: u8) -> Direction {
@@ -1238,12 +1279,7 @@ fn rotate_tile(tile: Tile, quarter_turns: u8) -> Tile {
     }
 }
 
-fn rotate_cells_sorted(
-    cells: &[Cell],
-    width: u16,
-    height: u16,
-    quarter_turns: u8,
-) -> Vec<Cell> {
+fn rotate_cells_sorted(cells: &[Cell], width: u16, height: u16, quarter_turns: u8) -> Vec<Cell> {
     let mut out: Vec<Cell> = cells
         .iter()
         .map(|c| rotate_cell(*c, width, height, quarter_turns))
@@ -1253,10 +1289,7 @@ fn rotate_cells_sorted(
     out
 }
 
-fn rotate_grid(
-    grid: &[Vec<Tile>],
-    quarter_turns: u8,
-) -> (Vec<Vec<Tile>>, u16, u16) {
+fn rotate_grid(grid: &[Vec<Tile>], quarter_turns: u8) -> (Vec<Vec<Tile>>, u16, u16) {
     let q = quarter_turns % 4;
     if q == 0 {
         let h = grid.len() as u16;
@@ -1271,10 +1304,13 @@ fn rotate_grid(
 
     for y in 0..h {
         for x in 0..w {
-            let cell = Cell { layer: 0, x: x as u16, y: y as u16 };
+            let cell = Cell {
+                layer: 0,
+                x: x as u16,
+                y: y as u16,
+            };
             let rotated = rotate_cell(cell, w as u16, h as u16, q);
-            new_grid[rotated.y as usize][rotated.x as usize] =
-                rotate_tile(grid[y][x], q);
+            new_grid[rotated.y as usize][rotated.x as usize] = rotate_tile(grid[y][x], q);
         }
     }
 
@@ -1302,8 +1338,16 @@ fn rotate_socket(socket: &Socket, old_w: u16, old_h: u16, q: u8) -> Socket {
         .collect();
     let anchor = Cell {
         layer: socket.anchor.layer,
-        x: rotated_aperture.iter().map(|cell| cell.x).min().unwrap_or(socket.anchor.x),
-        y: rotated_aperture.iter().map(|cell| cell.y).min().unwrap_or(socket.anchor.y),
+        x: rotated_aperture
+            .iter()
+            .map(|cell| cell.x)
+            .min()
+            .unwrap_or(socket.anchor.x),
+        y: rotated_aperture
+            .iter()
+            .map(|cell| cell.y)
+            .min()
+            .unwrap_or(socket.anchor.y),
     };
     Socket {
         id: socket.id.clone(),
@@ -1333,7 +1377,10 @@ fn rotate_reservation(res: &Reservation, old_w: u16, old_h: u16, q: u8) -> Reser
 
 /// Generate a single rotated variant and run the same domain validation used
 /// for source prefabs over every transformed component.
-fn generate_variant(prefab: &Prefab, rotation_degrees: u16) -> Result<PrefabVariant, GeneratorError> {
+fn generate_variant(
+    prefab: &Prefab,
+    rotation_degrees: u16,
+) -> Result<PrefabVariant, GeneratorError> {
     let quarter_turns = match rotation_degrees {
         0 => 0,
         90 => 1,
@@ -1353,7 +1400,10 @@ fn generate_variant(prefab: &Prefab, rotation_degrees: u16) -> Result<PrefabVari
     }
     let origin = rotate_cell(prefab.origin, prefab.width, prefab.height, quarter_turns);
     if origin.x >= new_w || origin.y >= new_h {
-        return Err(prefab_err(&prefab.id, "origin_out_of_bounds_after_rotation"));
+        return Err(prefab_err(
+            &prefab.id,
+            "origin_out_of_bounds_after_rotation",
+        ));
     }
 
     let rotated_sockets: Vec<Socket> = prefab
@@ -1402,13 +1452,7 @@ fn generate_variant(prefab: &Prefab, rotation_degrees: u16) -> Result<PrefabVari
             kind: marker.kind.as_str().to_owned(),
         })
         .collect();
-    let markers = validate_markers(
-        &marker_defs,
-        new_w,
-        new_h,
-        prefab.layer_count,
-        &prefab.id,
-    )?;
+    let markers = validate_markers(&marker_defs, new_w, new_h, prefab.layer_count, &prefab.id)?;
 
     let rotated_reservations: Vec<Reservation> = prefab
         .reservations
@@ -1426,7 +1470,11 @@ fn generate_variant(prefab: &Prefab, rotation_degrees: u16) -> Result<PrefabVari
                 reservation
                     .cells
                     .iter()
-                    .map(|cell| CellDef { layer: cell.layer, x: cell.x, y: cell.y })
+                    .map(|cell| CellDef {
+                        layer: cell.layer,
+                        x: cell.x,
+                        y: cell.y,
+                    })
                     .collect(),
             ),
             box_def: None,
@@ -1461,13 +1509,7 @@ fn generate_variant(prefab: &Prefab, rotation_degrees: u16) -> Result<PrefabVari
         prefab.layer_count,
         &prefab.id,
     )?;
-    validate_component_ids_and_owners(
-        &sockets,
-        &markers,
-        &reservations,
-        &transitions,
-        &prefab.id,
-    )?;
+    validate_component_ids_and_owners(&sockets, &markers, &reservations, &transitions, &prefab.id)?;
 
     Ok(PrefabVariant {
         base_id: prefab.id.clone(),
@@ -1519,9 +1561,7 @@ impl PrefabCatalog {
         }
 
         // Sort by relative path bytes (canonical order)
-        entries.sort_by(|a, b| {
-            a.relative_path.as_bytes().cmp(b.relative_path.as_bytes())
-        });
+        entries.sort_by(|a, b| a.relative_path.as_bytes().cmp(b.relative_path.as_bytes()));
 
         // Check for duplicate relative paths (shouldn't happen after canonicalization)
         for w in entries.windows(2) {
@@ -1535,20 +1575,18 @@ impl PrefabCatalog {
         let mut seen_ids = BTreeSet::new();
 
         for entry in &entries {
-            let content = std::str::from_utf8(&entry.bytes).map_err(|_| {
-                GeneratorError::PrefabIntegrity {
+            let content =
+                std::str::from_utf8(&entry.bytes).map_err(|_| GeneratorError::PrefabIntegrity {
                     stage: ErrorStage::Prefab,
                     context: entry.relative_path.clone(),
                     reason: "toml_parse_failed",
-                }
-            })?;
-            let toml: PrefabToml = toml::from_str(content).map_err(|_| {
-                GeneratorError::PrefabIntegrity {
+                })?;
+            let toml: PrefabToml =
+                toml::from_str(content).map_err(|_| GeneratorError::PrefabIntegrity {
                     stage: ErrorStage::Prefab,
                     context: entry.relative_path.clone(),
                     reason: "toml_parse_failed",
-                }
-            })?;
+                })?;
 
             // Check for id duplicates across the catalog
             if !seen_ids.insert(toml.id.clone()) {
@@ -1598,7 +1636,6 @@ impl PrefabCatalog {
     pub(crate) fn variants(&self) -> &[PrefabVariant] {
         &self.variants
     }
-
 }
 
 // ─── File collection ────────────────────────────────────────────────────────
@@ -1618,15 +1655,17 @@ fn collect_toml_files(
     dir: &Path,
     entries: &mut Vec<CatalogFile>,
 ) -> Result<(), GeneratorError> {
-    let read_dir = dir.read_dir().map_err(|_| prefab_err("catalog", "read_dir_failed"))?;
+    let read_dir = dir
+        .read_dir()
+        .map_err(|_| prefab_err("catalog", "read_dir_failed"))?;
 
     for entry in read_dir {
         let entry = entry.map_err(|_| prefab_err("catalog", "read_entry_failed"))?;
         let path = entry.path();
         let context = catalog_relative_path(canonical_root, &path)?;
-        let file_type = entry.file_type().map_err(|_| {
-            prefab_err(&context, "file_type_failed")
-        })?;
+        let file_type = entry
+            .file_type()
+            .map_err(|_| prefab_err(&context, "file_type_failed"))?;
         if file_type.is_symlink() {
             return Err(prefab_err(&context, "symlink_rejected"));
         }
@@ -1643,9 +1682,12 @@ fn collect_toml_files(
                 return Err(prefab_err(&context, "path_escape"));
             }
             let relative_path = catalog_relative_path(canonical_root, &absolute_path)?;
-            let bytes = fs::read(&absolute_path)
-                .map_err(|_| prefab_err(&relative_path, "read_failed"))?;
-            entries.push(CatalogFile { relative_path, bytes });
+            let bytes =
+                fs::read(&absolute_path).map_err(|_| prefab_err(&relative_path, "read_failed"))?;
+            entries.push(CatalogFile {
+                relative_path,
+                bytes,
+            });
         } else {
             return Err(prefab_err(&context, "unsupported_file_type"));
         }
@@ -1788,22 +1830,45 @@ y = {mid_y}
     #[test]
     fn tokenize_simple_row() {
         let tiles = Tile::tokenize_row("##..__").unwrap();
-        assert_eq!(tiles, vec![
-            Tile::Wall, Tile::Wall, Tile::Floor, Tile::Floor, Tile::Void, Tile::Void
-        ]);
+        assert_eq!(
+            tiles,
+            vec![
+                Tile::Wall,
+                Tile::Wall,
+                Tile::Floor,
+                Tile::Floor,
+                Tile::Void,
+                Tile::Void
+            ]
+        );
     }
 
     #[test]
     fn tokenize_with_ramps() {
         let tiles = Tile::tokenize_row("#R0^R1>R2vR0<#").unwrap();
-        assert_eq!(tiles, vec![
-            Tile::Wall,
-            Tile::Ramp { direction: Direction::North, step: 0 },
-            Tile::Ramp { direction: Direction::East, step: 1 },
-            Tile::Ramp { direction: Direction::South, step: 2 },
-            Tile::Ramp { direction: Direction::West, step: 0 },
-            Tile::Wall,
-        ]);
+        assert_eq!(
+            tiles,
+            vec![
+                Tile::Wall,
+                Tile::Ramp {
+                    direction: Direction::North,
+                    step: 0
+                },
+                Tile::Ramp {
+                    direction: Direction::East,
+                    step: 1
+                },
+                Tile::Ramp {
+                    direction: Direction::South,
+                    step: 2
+                },
+                Tile::Ramp {
+                    direction: Direction::West,
+                    step: 0
+                },
+                Tile::Wall,
+            ]
+        );
     }
 
     #[test]
@@ -1835,16 +1900,41 @@ y = {mid_y}
     #[test]
     fn cell_rotation_square() {
         // 5 wide, 3 tall grid
-        let c = Cell { layer: 0, x: 1, y: 0 };
+        let c = Cell {
+            layer: 0,
+            x: 1,
+            y: 0,
+        };
         // 90° CW: (x,y)=(1,0) w=5,h=3 → new x = 3-1-0 = 2, new y = 1
         let r1 = rotate_cell(c, 5, 3, 1);
-        assert_eq!(r1, Cell { layer: 0, x: 2, y: 1 });
+        assert_eq!(
+            r1,
+            Cell {
+                layer: 0,
+                x: 2,
+                y: 1
+            }
+        );
         // 180°: (1,0) w=5,h=3 → new x = 5-1-1=3, new y = 3-1-0=2
         let r2 = rotate_cell(c, 5, 3, 2);
-        assert_eq!(r2, Cell { layer: 0, x: 3, y: 2 });
+        assert_eq!(
+            r2,
+            Cell {
+                layer: 0,
+                x: 3,
+                y: 2
+            }
+        );
         // 270°: (1,0) w=5,h=3 → (0,3)
         let r3 = rotate_cell(c, 5, 3, 3);
-        assert_eq!(r3, Cell { layer: 0, x: 0, y: 3 });
+        assert_eq!(
+            r3,
+            Cell {
+                layer: 0,
+                x: 0,
+                y: 3
+            }
+        );
     }
 
     #[test]
@@ -1924,7 +2014,11 @@ y = {mid_y}
     #[test]
     fn malformed_unsupported_version() {
         let dir = temp_dir();
-        write_prefab(dir.path(), "bad.toml", "format_version = 99\nid = \"x\"\n[[layers]]\nrows = [\"###\"]\nrotations = [0]\n");
+        write_prefab(
+            dir.path(),
+            "bad.toml",
+            "format_version = 99\nid = \"x\"\n[[layers]]\nrows = [\"###\"]\nrotations = [0]\n",
+        );
         assert!(PrefabCatalog::load(dir.path()).is_err());
     }
 
@@ -2072,7 +2166,10 @@ rotations = [0]\norigin = { x = 1, y = 2 }\n\
     fn malformed_overflow_dimension() {
         let dir = temp_dir();
         let big = "#".repeat(u16::MAX as usize + 1);
-        let toml = format!("format_version = 1\nid = \"big\"\n[[layers]]\nrows = [\"{}\"]\nrotations = [0]\n", big);
+        let toml = format!(
+            "format_version = 1\nid = \"big\"\n[[layers]]\nrows = [\"{}\"]\nrotations = [0]\n",
+            big
+        );
         write_prefab(dir.path(), "big.toml", &toml);
         assert!(PrefabCatalog::load(dir.path()).is_err());
     }
@@ -2146,9 +2243,20 @@ rotations = [0]\norigin = { x = 1, y = 2 }\n\
         // After 90° CW rotation of 3×3 grid:
         // (0,0) → (2,0), (1,0) → (2,1)
         let expected: BTreeSet<Cell> = [
-            Cell { layer: 0, x: 2, y: 0 },
-            Cell { layer: 0, x: 2, y: 1 },
-        ].iter().copied().collect();
+            Cell {
+                layer: 0,
+                x: 2,
+                y: 0,
+            },
+            Cell {
+                layer: 0,
+                x: 2,
+                y: 1,
+            },
+        ]
+        .iter()
+        .copied()
+        .collect();
         let actual: BTreeSet<Cell> = v90.reservations[0].cells.iter().copied().collect();
         assert_eq!(actual, expected);
     }
@@ -2444,14 +2552,25 @@ rotations = [0]\norigin = { x = 1, y = 2 }\n\
     fn wide_socket_rotation_normalizes_aperture_anchor() {
         let socket = Socket {
             id: "wide".to_owned(),
-            anchor: Cell { layer: 0, x: 1, y: 0 },
+            anchor: Cell {
+                layer: 0,
+                x: 1,
+                y: 0,
+            },
             direction: Direction::North,
             width: 2,
             role: SocketRole::Hall,
         };
         let rotated = rotate_socket(&socket, 5, 3, 2);
         assert_eq!(rotated.direction, Direction::South);
-        assert_eq!(rotated.anchor, Cell { layer: 0, x: 2, y: 2 });
+        assert_eq!(
+            rotated.anchor,
+            Cell {
+                layer: 0,
+                x: 2,
+                y: 2
+            }
+        );
         assert_eq!(rotated.width, 2);
     }
 
@@ -2462,8 +2581,16 @@ rotations = [0]\norigin = { x = 1, y = 2 }\n\
 
         let dir = temp_dir();
         let outside = temp_dir();
-        write_prefab(outside.path(), "outside.toml", &basic_room_toml("outside", 3, 3));
-        symlink(outside.path().join("outside.toml"), dir.path().join("linked.toml")).unwrap();
+        write_prefab(
+            outside.path(),
+            "outside.toml",
+            &basic_room_toml("outside", 3, 3),
+        );
+        symlink(
+            outside.path().join("outside.toml"),
+            dir.path().join("linked.toml"),
+        )
+        .unwrap();
         let error = PrefabCatalog::load(dir.path()).unwrap_err();
         let rendered = error.to_string();
         assert_eq!(error.reason_code(), "symlink_rejected");
@@ -2517,7 +2644,12 @@ rotations = [0]\norigin = { x = 1, y = 2 }\n\
         assert_eq!(small_shapes.len(), 2, "small rooms must be distinct assets");
         // Every variant must have the tags from its base prefab
         for v in cat.variants() {
-            assert!(!v.tags.is_empty(), "variant {} rotation={} has no tags", v.base_id, v.rotation_degrees);
+            assert!(
+                !v.tags.is_empty(),
+                "variant {} rotation={} has no tags",
+                v.base_id,
+                v.rotation_degrees
+            );
         }
     }
 }

@@ -6,6 +6,7 @@
 pub mod assembly;
 pub mod compiler;
 pub mod contract;
+pub mod corpus;
 pub mod emission;
 pub mod fixtures;
 pub mod footprint;

@@ -2771,9 +2771,11 @@ impl CoreShaderType {
     #[cfg(not(feature = "debug-draw"))]
     const DEBUG_DRAW_DELTA: usize = 0;
     const SPRITES_2D_DELTA: usize = 2;
-    pub const COUNT: usize =
-        Self::BASE + Self::INSTANCING_DELTA + Self::BSP_DELTA + Self::DEBUG_DRAW_DELTA
-            + Self::SPRITES_2D_DELTA;
+    pub const COUNT: usize = Self::BASE
+        + Self::INSTANCING_DELTA
+        + Self::BSP_DELTA
+        + Self::DEBUG_DRAW_DELTA
+        + Self::SPRITES_2D_DELTA;
 
     fn from_manifest_key(key: &str) -> Option<Self> {
         match key {
@@ -3004,9 +3006,11 @@ impl VkPipelineType {
     #[cfg(not(feature = "debug-draw"))]
     const DEBUG_DRAW_DELTA: usize = 0;
     const SPRITES_2D_DELTA: usize = 1;
-    pub const COUNT: usize =
-        Self::BASE + Self::INSTANCING_DELTA + Self::BSP_DELTA + Self::DEBUG_DRAW_DELTA
-            + Self::SPRITES_2D_DELTA;
+    pub const COUNT: usize = Self::BASE
+        + Self::INSTANCING_DELTA
+        + Self::BSP_DELTA
+        + Self::DEBUG_DRAW_DELTA
+        + Self::SPRITES_2D_DELTA;
 }
 
 //#[derive(Clone, Copy)]
@@ -3346,10 +3350,14 @@ impl BspSurfaceArena {
     fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {
         // Pools own their sets; destroy pools first.
         if let Some(pool) = self.material_desc_pool.take() {
-            unsafe { device.destroy_descriptor_pool(pool, None); }
+            unsafe {
+                device.destroy_descriptor_pool(pool, None);
+            }
         }
         if let Some(pool) = self.frame_values_desc_pool.take() {
-            unsafe { device.destroy_descriptor_pool(pool, None); }
+            unsafe {
+                device.destroy_descriptor_pool(pool, None);
+            }
         }
         self.frame_values_descriptors.clear();
         // Destroy UBOs and atlas after pools.
@@ -3533,12 +3541,12 @@ impl BspSurfaceCache {
         device: &ash::Device,
     ) -> Result<vk::DescriptorSet, String> {
         let arena = self.arena(arena_id)?;
-        let layout = arena
-            .material_set_layout
-            .ok_or_else(|| format!("BSP arena {arena_id} material descriptor layout not initialized"))?;
-        let pool = arena
-            .material_desc_pool
-            .ok_or_else(|| format!("BSP arena {arena_id} material descriptor pool not initialized"))?;
+        let layout = arena.material_set_layout.ok_or_else(|| {
+            format!("BSP arena {arena_id} material descriptor layout not initialized")
+        })?;
+        let pool = arena.material_desc_pool.ok_or_else(|| {
+            format!("BSP arena {arena_id} material descriptor pool not initialized")
+        })?;
 
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(pool)
@@ -3562,9 +3570,7 @@ impl BspSurfaceCache {
     ) -> Result<(), String> {
         let arena = self.arena_mut(arena_id)?;
         if arena.lightmap_atlas.is_some() {
-            return Err(format!(
-                "BSP arena {arena_id} already has a lightmap atlas"
-            ));
+            return Err(format!("BSP arena {arena_id} already has a lightmap atlas"));
         }
         arena.lightmap_atlas = Some(atlas);
         Ok(())
@@ -3578,9 +3584,7 @@ impl BspSurfaceCache {
     ) -> Result<(), String> {
         let arena = self.arena_mut(arena_id)?;
         if arena.surface_ubo.is_some() {
-            return Err(format!(
-                "BSP arena {arena_id} already has a surface UBO"
-            ));
+            return Err(format!("BSP arena {arena_id} already has a surface UBO"));
         }
         arena.surface_ubo = Some(ubo);
         Ok(())
@@ -3602,7 +3606,9 @@ impl BspSurfaceCache {
     ) -> Result<(), String> {
         let arena = self.arena_mut(arena_id)?;
         if arena.frame_values_desc_pool.is_some() {
-            return Err(format!("BSP arena {arena_id} frame-values already installed"));
+            return Err(format!(
+                "BSP arena {arena_id} frame-values already installed"
+            ));
         }
         arena.frame_values_ubo = Some(ubo);
         arena.frame_values_desc_pool = Some(pool);
@@ -3641,7 +3647,9 @@ impl BspSurfaceCache {
     ) -> Result<(), String> {
         let arena = self.arena(arena_id)?;
         if arena.frame_slot_count == 0 {
-            return Err(format!("BSP arena {arena_id} frame-values slot count is zero"));
+            return Err(format!(
+                "BSP arena {arena_id} frame-values slot count is zero"
+            ));
         }
         let slot = slot_index % arena.frame_slot_count;
         let ubo_size = std::mem::size_of::<crate::data::gpu_data::BspFrameValuesUniform>() as u64;
@@ -3788,7 +3796,9 @@ impl BspSurfaceCache {
             .arena_id;
         self.remove_by_slot(handle.slot)?;
         if let Ok(arena) = self.arena_mut(arena_id) {
-            arena.material_slots.retain(|registered| *registered != handle.slot);
+            arena
+                .material_slots
+                .retain(|registered| *registered != handle.slot);
         }
         Ok(())
     }
@@ -3910,13 +3920,20 @@ impl BspSurfaceCache {
         closure: crate::data::retirement::BspRetirementClosure,
         device: &ash::Device,
         allocator: &vk_mem::Allocator,
-    ) -> (Vec<crate::data::handles::MeshHandle>, Vec<crate::data::handles::TextureHandle>) {
+    ) -> (
+        Vec<crate::data::handles::MeshHandle>,
+        Vec<crate::data::handles::TextureHandle>,
+    ) {
         // Pool destruction releases all descriptor sets allocated from them.
         if let Some(pool) = closure.material_desc_pool {
-            unsafe { device.destroy_descriptor_pool(pool, None); }
+            unsafe {
+                device.destroy_descriptor_pool(pool, None);
+            }
         }
         if let Some(pool) = closure.frame_values_desc_pool {
-            unsafe { device.destroy_descriptor_pool(pool, None); }
+            unsafe {
+                device.destroy_descriptor_pool(pool, None);
+            }
         }
         // Destroy UBOs.
         if let Some(mut ubo) = closure.surface_ubo {

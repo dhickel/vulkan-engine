@@ -625,7 +625,10 @@ impl Command for RemoveNodeCommand {
 
 #[cfg(test)]
 mod tests {
-    use super::{mount_fragment_for_asset, CommandHistory, PlaceAssetCommand, RemoveNodeCommand, SetTransformCommand};
+    use super::{
+        mount_fragment_for_asset, CommandHistory, PlaceAssetCommand, RemoveNodeCommand,
+        SetTransformCommand,
+    };
     use crate::api::scene::{SceneAssetReference, SceneFragment};
     use crate::api::{CommandError, SceneError};
     use crate::data::handles::MeshHandle;
@@ -821,7 +824,10 @@ mod tests {
         assert!(!history.can_undo());
         assert!(!history.can_redo());
         let err = history.undo(&mut world).unwrap_err();
-        assert!(matches!(err, SceneError::CommandError(CommandError::NothingToUndo)));
+        assert!(matches!(
+            err,
+            SceneError::CommandError(CommandError::NothingToUndo)
+        ));
     }
 
     #[test]
@@ -831,7 +837,10 @@ mod tests {
 
         // Redo on empty redo stack.
         let err = history.redo(&mut world).unwrap_err();
-        assert!(matches!(err, SceneError::CommandError(CommandError::NothingToRedo)));
+        assert!(matches!(
+            err,
+            SceneError::CommandError(CommandError::NothingToRedo)
+        ));
     }
 
     #[test]
@@ -879,17 +888,15 @@ mod tests {
 
     #[test]
     fn fragment_placement_preserves_mesh_bounds_field() {
-        use crate::api::scene::{MeshBoundsEntry, SceneBounds, BoundsUnknownReason};
+        use crate::api::scene::{BoundsUnknownReason, MeshBoundsEntry, SceneBounds};
 
         let mut world = SceneWorld::new();
         let root = world.add_node(None, SceneNode::default());
 
-        let bounds = SceneBounds::Known(
-            crate::data::camera::Aabb::from_min_max(
-                Vec3::new(-2.0, -2.0, -2.0),
-                Vec3::new(2.0, 2.0, 2.0),
-            ),
-        );
+        let bounds = SceneBounds::Known(crate::data::camera::Aabb::from_min_max(
+            Vec3::new(-2.0, -2.0, -2.0),
+            Vec3::new(2.0, 2.0, 2.0),
+        ));
         let entry = MeshBoundsEntry {
             mesh: MeshHandle::new(7, 0),
             bounds,

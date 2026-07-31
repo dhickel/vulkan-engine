@@ -25,7 +25,6 @@ use crate::debug_ui::{
 use crate::vulkan::vk_render;
 use crate::vulkan::vk_types::VkWindowState;
 
-use super::frame_extensions::FrameExtensions;
 use super::assets::{AssetLoadTracker, AssetManager};
 use super::config::{
     AssetPolicyConfig, CaptureTarget, FrameCaptureRequest, FrameCaptureScheduler,
@@ -35,6 +34,7 @@ use super::errors::{
     map_frame_input_err, map_frame_render_err, map_init_err, HookReport, RendererError,
     RendererInitError,
 };
+use super::frame_extensions::FrameExtensions;
 use super::hooks::{invoke_render_hook, BoxedRenderHook, RenderHookStage};
 use super::scene::Scene;
 
@@ -852,9 +852,8 @@ impl Renderer {
         } = detached;
 
         // ── Preflight: compute retire_after ────────────────────────
-        let retire_after = crate::data::retirement::FrameSerial::new(
-            core.latest_submitted_serial.max(0),
-        );
+        let retire_after =
+            crate::data::retirement::FrameSerial::new(core.latest_submitted_serial.max(0));
 
         let mesh_count = lease.mesh_handles.len();
         let texture_count = lease.texture_handles.len();
@@ -928,7 +927,11 @@ impl Renderer {
         };
 
         let arena_id = closure.arena_id;
-        let lightmap_atlas_count = if closure.lightmap_atlas.is_some() { 1 } else { 0 };
+        let lightmap_atlas_count = if closure.lightmap_atlas.is_some() {
+            1
+        } else {
+            0
+        };
 
         // Enqueue the closure for deferred GPU destruction.
         core.bsp_retirement_queue.enqueue(
@@ -1319,7 +1322,8 @@ impl Renderer {
                 );
             } else {
                 scene.set_bsp_evidence_request(
-                    String::new(), String::new(),
+                    String::new(),
+                    String::new(),
                     crate::api::bsp::BspEvidenceVisibility::NormalPvs,
                     frame_number,
                 );
@@ -1412,17 +1416,25 @@ impl Renderer {
             let evidence_collected = submission.bsp_evidence_collector.borrow_mut().take();
             if let Some(collector) = evidence_collected {
                 let report = collector.seal();
-                let request_key = self.runtime.core.bsp_evidence_request.as_ref()
+                let request_key = self
+                    .runtime
+                    .core
+                    .bsp_evidence_request
+                    .as_ref()
                     .map(|(key, _)| *key)
                     .unwrap_or(crate::api::bsp::BspEvidenceRequestKey(0));
-                self.runtime.core.bsp_evidence_report = Some((request_key, crate::api::bsp::BspEvidenceStatus::Sealed(report)));
+                self.runtime.core.bsp_evidence_report = Some((
+                    request_key,
+                    crate::api::bsp::BspEvidenceStatus::Sealed(report),
+                ));
                 self.runtime.core.bsp_evidence_frame_number = frame_number;
                 // Consume the request since evidence was collected.
                 self.runtime.core.bsp_evidence_request = None;
             } else if self.runtime.core.bsp_evidence_request.is_some() {
                 // Request was pending but no evidence was collected (e.g., no BSP mount active).
                 let (key, _) = self.runtime.core.bsp_evidence_request.take().unwrap();
-                self.runtime.core.bsp_evidence_report = Some((key, crate::api::bsp::BspEvidenceStatus::RejectedNoMount));
+                self.runtime.core.bsp_evidence_report =
+                    Some((key, crate::api::bsp::BspEvidenceStatus::RejectedNoMount));
             }
         }
 

@@ -775,12 +775,8 @@ pub fn init_pipeline_cache(
 
     #[cfg(feature = "debug-draw")]
     {
-        let (pipeline, layout) = init_debug_lines_pipeline(
-            device,
-            shader_cache,
-            draw_color_format,
-            draw_depth_format,
-        )?;
+        let (pipeline, layout) =
+            init_debug_lines_pipeline(device, shader_cache, draw_color_format, draw_depth_format)?;
         stage.push_single(
             VkPipelineType::DebugLines,
             OwnedPipeline::new(device.clone(), pipeline, layout),
@@ -788,12 +784,8 @@ pub fn init_pipeline_cache(
     }
 
     {
-        let (pipeline, layout) = init_sprite_pipeline(
-            device,
-            shader_cache,
-            draw_color_format,
-            draw_depth_format,
-        )?;
+        let (pipeline, layout) =
+            init_sprite_pipeline(device, shader_cache, draw_color_format, draw_depth_format)?;
         stage.push_single(
             VkPipelineType::Sprites,
             OwnedPipeline::new(device.clone(), pipeline, layout),

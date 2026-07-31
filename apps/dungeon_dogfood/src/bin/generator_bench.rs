@@ -7,31 +7,31 @@
 //!   summarize <file> — compute p50/p95/max/Wilson from non-held-out JSONL
 
 // Module declarations via #[path] so we share source files with the main binary.
+#[path = "../collision.rs"]
+mod collision;
+#[path = "../content.rs"]
+mod content;
 #[path = "../generator/mod.rs"]
 mod generator;
 #[path = "../layout.rs"]
 mod layout;
-#[path = "../collision.rs"]
-mod collision;
 #[path = "../player.rs"]
 mod player;
-#[path = "../content.rs"]
-mod content;
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
+use generator::context::AttemptContext;
+use generator::prefab::PrefabCatalog;
+use generator::telemetry::serialize_telemetry;
 use generator::{
     alloc_metrics, compute_config_hash, error_stage_code, generate, generate_with_telemetry,
-    GeneratorConfig, GeneratorError, GenerationResult, QualifiedProfile,
+    GenerationResult, GeneratorConfig, GeneratorError, QualifiedProfile,
 };
-use generator::context::AttemptContext;
-use generator::telemetry::serialize_telemetry;
-use generator::prefab::PrefabCatalog;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -58,8 +58,7 @@ fn hash_file(path: &Path) -> Result<String, String> {
 }
 
 fn hash_executable() -> Result<String, String> {
-    let exe =
-        std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     hash_file(&exe)
 }
 
@@ -467,9 +466,7 @@ fn wilson_lower_bound(successes: usize, trials: usize, z: f64) -> f64 {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!(
-            "usage: generator_bench <freeze|worker <seed>|run <cohort>|summarize <file>>"
-        );
+        eprintln!("usage: generator_bench <freeze|worker <seed>|run <cohort>|summarize <file>>");
         std::process::exit(1);
     }
 
@@ -517,13 +514,11 @@ fn main() {
 fn cmd_freeze() -> Result<(), String> {
     // Load catalog
     let catalog_path = prefab_catalog_path();
-    let catalog = PrefabCatalog::load(&catalog_path)
-        .map_err(|e| format!("catalog load: {e:?}"))?;
+    let catalog = PrefabCatalog::load(&catalog_path).map_err(|e| format!("catalog load: {e:?}"))?;
 
     // Build normalized config
     let config = primary_config();
-    let config_hash =
-        compute_config_hash(&config).map_err(|e| format!("config hash: {e:?}"))?;
+    let config_hash = compute_config_hash(&config).map_err(|e| format!("config hash: {e:?}"))?;
     let catalog_hash = hex::encode(&catalog.identity_bytes());
 
     // Build cohorts
@@ -544,11 +539,17 @@ fn cmd_freeze() -> Result<(), String> {
     let exe_hash = hash_executable()?;
 
     // Build and write manifest
-    let manifest = build_manifest(&config_hash, &catalog_hash, &exe_hash, &fixed, &tuning, &heldout);
+    let manifest = build_manifest(
+        &config_hash,
+        &catalog_hash,
+        &exe_hash,
+        &fixed,
+        &tuning,
+        &heldout,
+    );
 
     let out_dir = benchmarks_dir();
-    std::fs::create_dir_all(&out_dir)
-        .map_err(|e| format!("create benchmarks dir: {e}"))?;
+    std::fs::create_dir_all(&out_dir).map_err(|e| format!("create benchmarks dir: {e}"))?;
 
     write_json(&out_dir.join("manifest.json"), &manifest)?;
     write_json(&out_dir.join("cohort-fixed.json"), &fixed)?;
@@ -584,13 +585,11 @@ fn cmd_worker(seed: u64) -> Result<(), String> {
 
     eprintln!("[worker] seed={seed} telemetry={telemetry_mode:?} loading catalog...");
     let catalog_path = prefab_catalog_path();
-    let catalog = PrefabCatalog::load(&catalog_path)
-        .map_err(|e| format!("catalog load: {e:?}"))?;
+    let catalog = PrefabCatalog::load(&catalog_path).map_err(|e| format!("catalog load: {e:?}"))?;
     eprintln!("[worker] seed={seed} catalog loaded, generating...");
 
     let config = primary_config();
-    let config_hash =
-        compute_config_hash(&config).map_err(|e| format!("config hash: {e:?}"))?;
+    let config_hash = compute_config_hash(&config).map_err(|e| format!("config hash: {e:?}"))?;
     let catalog_hash = hex::encode(&catalog.identity_bytes());
 
     // Reset alloc counters if instrumented
@@ -600,7 +599,10 @@ fn cmd_worker(seed: u64) -> Result<(), String> {
     let started = Instant::now();
     let result = generate_with_telemetry(config, &catalog, seed, telemetry_mode);
     let elapsed = started.elapsed();
-    eprintln!("[worker] seed={seed} generate completed in {}ms", elapsed.as_millis());
+    eprintln!(
+        "[worker] seed={seed} generate completed in {}ms",
+        elapsed.as_millis()
+    );
 
     // Snapshot alloc counters
     let alloc_snap = alloc_metrics::snapshot();
@@ -752,11 +754,9 @@ fn cmd_run(cohort_label: &str) -> Result<(), String> {
 
     // Normalized config hash
     let catalog_path = prefab_catalog_path();
-    let catalog = PrefabCatalog::load(&catalog_path)
-        .map_err(|e| format!("catalog load: {e:?}"))?;
+    let catalog = PrefabCatalog::load(&catalog_path).map_err(|e| format!("catalog load: {e:?}"))?;
     let config = primary_config();
-    let config_hash =
-        compute_config_hash(&config).map_err(|e| format!("config hash: {e:?}"))?;
+    let config_hash = compute_config_hash(&config).map_err(|e| format!("config hash: {e:?}"))?;
     let catalog_hash = hex::encode(&catalog.identity_bytes());
 
     if manifest.executable_hash != exe_hash
@@ -779,14 +779,12 @@ fn cmd_run(cohort_label: &str) -> Result<(), String> {
         || frozen_cohort.derivation_hash != cohort.derivation_hash
         || frozen_cohort.sealed != cohort.sealed
     {
-        return Err(format!("cohort '{cohort_label}' does not match the frozen manifest"));
+        return Err(format!(
+            "cohort '{cohort_label}' does not match the frozen manifest"
+        ));
     }
 
-    let run_id = format!(
-        "run-{}-{}",
-        cohort_label,
-        &exe_hash[..12]
-    );
+    let run_id = format!("run-{}-{}", cohort_label, &exe_hash[..12]);
 
     let output_path = out_dir.join(format!("baseline-{cohort_label}.jsonl"));
 
@@ -861,13 +859,9 @@ fn cmd_run(cohort_label: &str) -> Result<(), String> {
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 let group = format!("-{pid}");
-                let _ = Command::new("kill")
-                    .args(["-TERM", "--", &group])
-                    .status();
+                let _ = Command::new("kill").args(["-TERM", "--", &group]).status();
                 std::thread::sleep(std::time::Duration::from_millis(200));
-                let _ = Command::new("kill")
-                    .args(["-KILL", "--", &group])
-                    .status();
+                let _ = Command::new("kill").args(["-KILL", "--", &group]).status();
                 WaitOutcome::TimedOut
             }
         };
@@ -878,22 +872,10 @@ fn cmd_run(cohort_label: &str) -> Result<(), String> {
 
         let (worker_status, duration_ns, attempt_index, outcome, replay_hex, exit_code) =
             match wait_result {
-                WaitOutcome::TimedOut => (
-                    "timeout".to_string(),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-                WaitOutcome::ProcessLost => (
-                    "process_loss".to_string(),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
+                WaitOutcome::TimedOut => ("timeout".to_string(), None, None, None, None, None),
+                WaitOutcome::ProcessLost => {
+                    ("process_loss".to_string(), None, None, None, None, None)
+                }
                 WaitOutcome::Exited(exit_status) => {
                     let code = exit_status.code();
                     if code != Some(0) {
@@ -931,7 +913,14 @@ fn cmd_run(cohort_label: &str) -> Result<(), String> {
                             }
                         }
                     } else {
-                        ("missing_output".to_string(), None, None, None, None, Some(0))
+                        (
+                            "missing_output".to_string(),
+                            None,
+                            None,
+                            None,
+                            None,
+                            Some(0),
+                        )
                     }
                 }
             };
@@ -959,7 +948,11 @@ fn cmd_run(cohort_label: &str) -> Result<(), String> {
         writeln!(file, "{line}").map_err(|e| format!("write: {e}"))?;
     }
 
-    println!("Completed {} seeds for cohort '{}'", cohort.seeds.len(), cohort_label);
+    println!(
+        "Completed {} seeds for cohort '{}'",
+        cohort.seeds.len(),
+        cohort_label
+    );
     println!("Output: {}", output_path.display());
 
     // Seal heldout — make read-only
@@ -1193,11 +1186,7 @@ fn read_vm_hwm_kb() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     for line in status.lines() {
         if line.starts_with("VmHWM:") {
-            let value = line
-                .split_whitespace()
-                .nth(1)?
-                .parse::<u64>()
-                .ok()?;
+            let value = line.split_whitespace().nth(1)?.parse::<u64>().ok()?;
             return Some(value);
         }
     }
@@ -1240,8 +1229,16 @@ fn base64_encode(data: &[u8]) -> String {
         let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
         let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
         let triple = (b0 << 16) | (b1 << 8) | b2;
-        let _ = write!(result, "{}", CHARS[((triple >> 18) & 0x3f) as usize] as char);
-        let _ = write!(result, "{}", CHARS[((triple >> 12) & 0x3f) as usize] as char);
+        let _ = write!(
+            result,
+            "{}",
+            CHARS[((triple >> 18) & 0x3f) as usize] as char
+        );
+        let _ = write!(
+            result,
+            "{}",
+            CHARS[((triple >> 12) & 0x3f) as usize] as char
+        );
         if chunk.len() >= 2 {
             let _ = write!(result, "{}", CHARS[((triple >> 6) & 0x3f) as usize] as char);
         } else {
@@ -1263,8 +1260,7 @@ fn seal_file(path: &Path) -> Result<(), String> {
         .map_err(|e| format!("metadata: {e}"))?
         .permissions();
     perms.set_mode(0o444);
-    std::fs::set_permissions(path, perms)
-        .map_err(|e| format!("set_permissions: {e}"))?;
+    std::fs::set_permissions(path, perms).map_err(|e| format!("set_permissions: {e}"))?;
     Ok(())
 }
 
@@ -1379,12 +1375,7 @@ mod tests {
     fn manifest_identities_match_cohorts() {
         let (fixed, tuning, heldout) = build_cohorts();
         let manifest = build_manifest(
-            "cfg_hash",
-            "cat_hash",
-            "exe_hash",
-            &fixed,
-            &tuning,
-            &heldout,
+            "cfg_hash", "cat_hash", "exe_hash", &fixed, &tuning, &heldout,
         );
         assert_eq!(manifest.cohorts[0].label, "fixed");
         assert_eq!(manifest.cohorts[0].seed_count, 9);

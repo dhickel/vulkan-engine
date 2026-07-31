@@ -59,9 +59,7 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer, culling_enabled: bool
     let mut cube = build_cube_mesh("culling_cube");
     cube.material = Some(material);
     let cube_mesh = assets.upload_procedural_mesh(cube).expect("culling cube");
-    let cube_bounds = assets
-        .mesh_scene_bounds(cube_mesh)
-        .expect("cube bounds");
+    let cube_bounds = assets.mesh_scene_bounds(cube_mesh).expect("cube bounds");
 
     // ---- Center reference cube ----
     let center = scene

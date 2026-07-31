@@ -622,12 +622,11 @@ pub(super) fn place_lights(
                 operation: "required_light_role_count",
             }
         })?;
-        let available = u64::try_from(max_lights).map_err(|_| {
-            GeneratorError::ArithmeticOverflow {
+        let available =
+            u64::try_from(max_lights).map_err(|_| GeneratorError::ArithmeticOverflow {
                 stage: ErrorStage::Ir,
                 operation: "required_light_capacity",
-            }
-        })?;
+            })?;
         return Err(GeneratorError::MandatoryInfeasibility {
             stage: ErrorStage::Ir,
             constraint: "required_light_capacity",
@@ -1251,8 +1250,8 @@ mod tests {
         let mut topology = tiny_topology();
         topology.regions[0].role = RegionRole::RequiredRoute;
         let (movement, _inferred) = reconstruct_movement_graph(&level, &topology).unwrap();
-        let spawn = GridCoord::new(0, 1, 1, config.width(), config.height(), config.layers().2)
-            .unwrap();
+        let spawn =
+            GridCoord::new(0, 1, 1, config.width(), config.height(), config.layers().2).unwrap();
 
         let (lights, _omissions) = place_lights(
             &level,

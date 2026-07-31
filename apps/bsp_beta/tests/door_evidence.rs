@@ -288,7 +288,9 @@ fn trigger_state_persists_fired_flag() {
         height: None,
         light_style: None,
     }]);
-    adapter2.update_trigger_occupants(3, HashSet::from([100])).unwrap();
+    adapter2
+        .update_trigger_occupants(3, HashSet::from([100]))
+        .unwrap();
     assert!(adapter2.triggers.get(&3).unwrap().fired);
 
     let state2 = adapter2.export_state();
@@ -365,22 +367,20 @@ fn runtime_bridge_export_import_state() {
     // Fresh bridge, import
     let mut fresh = RuntimeBridge::new();
     fresh.adapter = StructuralBehaviorAdapter::new();
-    fresh.adapter.register_entities(vec![
-        BehaviorEntityInfo {
-            entity_index: 1,
-            classname: "func_door".into(),
-            targetname: Some("test_door".into()),
-            target: None,
-            killtarget: None,
-            origin: [0.0, 0.0, 0.0],
-            movedir: Some([0.0, 0.0, 1.0]),
-            speed: Some(100.0),
-            wait: Some(3.0),
-            lip: Some(0.0),
-            height: None,
-            light_style: None,
-        },
-    ]);
+    fresh.adapter.register_entities(vec![BehaviorEntityInfo {
+        entity_index: 1,
+        classname: "func_door".into(),
+        targetname: Some("test_door".into()),
+        target: None,
+        killtarget: None,
+        origin: [0.0, 0.0, 0.0],
+        movedir: Some([0.0, 0.0, 1.0]),
+        speed: Some(100.0),
+        wait: Some(3.0),
+        lip: Some(0.0),
+        height: None,
+        light_style: None,
+    }]);
 
     fresh.import_state(&state);
     let door = fresh.adapter.doors.get(&1).unwrap();

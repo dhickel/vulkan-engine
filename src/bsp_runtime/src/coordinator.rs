@@ -25,16 +25,15 @@
 //! then consumes A's active bridge receipts exactly once.
 
 use crate::bridge::{
-    ActiveBridgeReceipts, AppBridge, BehaviorEntityRecipe, BridgeAggregator,
-    EntityCollisionRecipe, LightEntityRecipe, WorldCollisionRecipe,
+    ActiveBridgeReceipts, AppBridge, BehaviorEntityRecipe, BridgeAggregator, EntityCollisionRecipe,
+    LightEntityRecipe, WorldCollisionRecipe,
 };
 use crate::cache::{
     canonical_f32_bytes, compute_identity_hash, CacheIdentity, CompanionId, PbrClosureEntry,
     WadCacheEntry,
 };
 use crate::candidate::{
-    ActiveBspMount, BspCandidate, CandidatePointLight, ImportProvenanceRecord,
-    RendererAttachPermit,
+    ActiveBspMount, BspCandidate, CandidatePointLight, ImportProvenanceRecord, RendererAttachPermit,
 };
 use crate::error::{BridgePhase, BspRuntimeError};
 use crate::generation::{BspGenerationCounter, BspGenerationToken};
@@ -253,9 +252,7 @@ impl BspCoordinator {
     /// Borrow the candidate, if any.
     fn candidate_ref(&self) -> Option<&BspCandidate> {
         match &self.state {
-            CoordinatorState::CandidateBesideActive {
-                candidate, ..
-            } => Some(candidate),
+            CoordinatorState::CandidateBesideActive { candidate, .. } => Some(candidate),
             CoordinatorState::CleanupBlocked {
                 candidate: Some(c), ..
             } => Some(c),
@@ -266,9 +263,7 @@ impl BspCoordinator {
     /// Borrow the candidate mutably, if any.
     fn candidate_mut(&mut self) -> Option<&mut BspCandidate> {
         match &mut self.state {
-            CoordinatorState::CandidateBesideActive {
-                candidate, ..
-            } => Some(candidate),
+            CoordinatorState::CandidateBesideActive { candidate, .. } => Some(candidate),
             CoordinatorState::CleanupBlocked {
                 candidate: Some(c), ..
             } => Some(c),
@@ -303,10 +298,7 @@ impl BspCoordinator {
                 let active_mount = active.take();
                 // Now take candidate by swapping state
                 let old = std::mem::replace(&mut self.state, CoordinatorState::Idle);
-                if let CoordinatorState::CandidateBesideActive {
-                    candidate: c, ..
-                } = old
-                {
+                if let CoordinatorState::CandidateBesideActive { candidate: c, .. } = old {
                     if let Some(m) = active_mount {
                         self.state = CoordinatorState::Active(m);
                     }
@@ -509,10 +501,7 @@ impl BspCoordinator {
         });
 
         let active = self.take_active_mount();
-        self.state = CoordinatorState::CandidateBesideActive {
-            candidate,
-            active,
-        };
+        self.state = CoordinatorState::CandidateBesideActive { candidate, active };
 
         Ok(PrepareResult {
             token,
@@ -662,10 +651,7 @@ impl BspCoordinator {
         );
 
         let active = self.take_active_mount();
-        self.state = CoordinatorState::CandidateBesideActive {
-            candidate,
-            active,
-        };
+        self.state = CoordinatorState::CandidateBesideActive { candidate, active };
 
         Ok(PrepareResult {
             token,
@@ -909,28 +895,24 @@ impl BspCoordinator {
                 detail: "candidate missing after bridge activation".to_string(),
             }
         })?;
-        let (mut active_mount, prepared_mount) =
-            match candidate.consume_into_active(
-                self.generation.current(),
-                Vec::new(),
-                active_receipts,
-            ) {
-                Ok(value) => value,
-                Err((error, candidate)) => {
-                    // Restore candidate in state for cleanup
-                    let active = self.take_active_mount();
-                    self.state = CoordinatorState::CandidateBesideActive {
-                        candidate,
-                        active,
-                    };
-                    let _ = self.rollback_candidate_with_retirement();
-                    self.enter_cleanup_blocked(
-                        format!("commit candidate consumption failed: {error}"),
-                        false,
-                    );
-                    return Err(error);
-                }
-            };
+        let (mut active_mount, prepared_mount) = match candidate.consume_into_active(
+            self.generation.current(),
+            Vec::new(),
+            active_receipts,
+        ) {
+            Ok(value) => value,
+            Err((error, candidate)) => {
+                // Restore candidate in state for cleanup
+                let active = self.take_active_mount();
+                self.state = CoordinatorState::CandidateBesideActive { candidate, active };
+                let _ = self.rollback_candidate_with_retirement();
+                self.enter_cleanup_blocked(
+                    format!("commit candidate consumption failed: {error}"),
+                    false,
+                );
+                return Err(error);
+            }
+        };
 
         // ── Step 3: Finalize B's renderer attach/replacement ───────
         // Scene::set_bsp_mount publishes B and returns A's DetachedBspMount.
@@ -973,18 +955,13 @@ impl BspCoordinator {
 
             // Teardown A's active bridge receipts exactly once.
             if !old_mount.active_bridge_receipts.is_empty() {
-                if let Err(quarantine) = self
-                    .bridges
-                    .teardown_all(old_mount.active_bridge_receipts)
+                if let Err(quarantine) = self.bridges.teardown_all(old_mount.active_bridge_receipts)
                 {
                     // B is published, but A bridge teardown failed.
                     // Enter PublishedQuarantined.
                     let q_detail = format!(
                         "{}: {}",
-                        quarantine
-                            .failed_bridge
-                            .as_deref()
-                            .unwrap_or("<unknown>"),
+                        quarantine.failed_bridge.as_deref().unwrap_or("<unknown>"),
                         quarantine
                             .failed
                             .as_ref()
@@ -1052,11 +1029,13 @@ impl BspCoordinator {
 
         // Auto-validate if the candidate has no scene lights (backward compat).
         // If there are lights, validate_for_scene must have been called already.
-        let needs_validate = self.candidate_ref()
+        let needs_validate = self
+            .candidate_ref()
             .map(|c| c.state == crate::candidate::CandidateState::RendererReady)
             .unwrap_or(false);
         if needs_validate {
-            let point_lights_empty = self.candidate_ref()
+            let point_lights_empty = self
+                .candidate_ref()
                 .map(|c| c.point_lights.is_empty())
                 .unwrap_or(true);
             if point_lights_empty {
@@ -1146,7 +1125,8 @@ impl BspCoordinator {
         }
 
         let source_identity = source_identity.into();
-        let previous_overrides = self.active_mount_ref()
+        let previous_overrides = self
+            .active_mount_ref()
             .map(|m| m.source_link.overrides.clone())
             .unwrap_or_default();
 
@@ -1154,13 +1134,13 @@ impl BspCoordinator {
         let prepare = self.prepare(bsp_bytes, scale, source_identity.clone())?;
 
         // Build mount from extraction
-        let extracted = self.candidate_ref()
-            .map(|c| &c.extracted)
-            .ok_or_else(|| BspRuntimeError::BridgeFailure {
+        let extracted = self.candidate_ref().map(|c| &c.extracted).ok_or_else(|| {
+            BspRuntimeError::BridgeFailure {
                 bridge_name: "coordinator".to_string(),
                 phase: BridgePhase::Commit,
                 message: "candidate missing after prepare".to_string(),
-            })?;
+            }
+        })?;
         let mount = build_mount(extracted);
 
         // Set mount ready
@@ -1231,19 +1211,20 @@ impl BspCoordinator {
         let prepare = self.prepare(bsp_bytes, scale, source_identity.clone())?;
 
         // Capture previous overrides for reconciliation
-        let previous_overrides = self.active_mount_ref()
+        let previous_overrides = self
+            .active_mount_ref()
             .map(|m| m.source_link.overrides.clone())
             .unwrap_or_default();
 
         // Reconcile overrides against candidate extraction
         let (reconciliation, reconciled) = {
-            let candidate =
-                self.candidate_ref()
-                    .ok_or_else(|| BspRuntimeError::BridgeFailure {
-                        bridge_name: "coordinator".to_string(),
-                        phase: BridgePhase::Commit,
-                        message: "candidate missing after prepare".to_string(),
-                    })?;
+            let candidate = self
+                .candidate_ref()
+                .ok_or_else(|| BspRuntimeError::BridgeFailure {
+                    bridge_name: "coordinator".to_string(),
+                    phase: BridgePhase::Commit,
+                    message: "candidate missing after prepare".to_string(),
+                })?;
             reconcile_overrides(
                 &previous_overrides,
                 &candidate.extracted.entity_identities,
@@ -1264,13 +1245,13 @@ impl BspCoordinator {
         }
 
         // Build mount from extraction
-        let extracted = self.candidate_ref()
-            .map(|c| &c.extracted)
-            .ok_or_else(|| BspRuntimeError::BridgeFailure {
+        let extracted = self.candidate_ref().map(|c| &c.extracted).ok_or_else(|| {
+            BspRuntimeError::BridgeFailure {
                 bridge_name: "coordinator".to_string(),
                 phase: BridgePhase::Commit,
                 message: "candidate missing after prepare".to_string(),
-            })?;
+            }
+        })?;
         let mount = build_mount(extracted);
 
         // Set mount ready
@@ -1377,13 +1358,13 @@ impl BspCoordinator {
 
         // 4. Verify content hash matches the restored source before any publication.
         {
-            let candidate =
-                self.candidate_ref()
-                    .ok_or_else(|| BspRuntimeError::BridgeFailure {
-                        bridge_name: "coordinator".into(),
-                        phase: BridgePhase::Validate,
-                        message: "candidate missing after prepare".into(),
-                    })?;
+            let candidate = self
+                .candidate_ref()
+                .ok_or_else(|| BspRuntimeError::BridgeFailure {
+                    bridge_name: "coordinator".into(),
+                    phase: BridgePhase::Validate,
+                    message: "candidate missing after prepare".into(),
+                })?;
 
             if stored_link.content_hash != candidate.source_link.content_hash {
                 let err = BspRuntimeError::SourceMismatch {
@@ -1551,7 +1532,8 @@ impl BspCoordinator {
         }
 
         // Reserve point-light capacity before commit (no growing during commit).
-        let active_light_count = self.active_mount_ref()
+        let active_light_count = self
+            .active_mount_ref()
             .map(|m| m.light_ids.len())
             .unwrap_or(0);
 
@@ -1565,7 +1547,8 @@ impl BspCoordinator {
         // Transition candidate to ValidatedForScene. If an unexpected state
         // violation appears here, clean up this candidate rather than leaving
         // a ready lease stranded after a failed validation call.
-        let transition = self.candidate_mut()
+        let transition = self
+            .candidate_mut()
             .expect("candidate was checked during validation")
             .transition_to_validated_for_scene(current_gen);
         if let Err(error) = transition {
@@ -2007,7 +1990,8 @@ impl BspCoordinator {
         candidate: &BspCandidate,
         scene: &Scene,
     ) -> Result<(), BspRuntimeError> {
-        let replacing_active_lights = self.active_mount_ref()
+        let replacing_active_lights = self
+            .active_mount_ref()
             .map(|m| m.light_ids.len())
             .unwrap_or(0);
         let available_slots = scene
@@ -2129,10 +2113,7 @@ impl BspCoordinator {
         // Teardown bridge receipts — on failure, the quarantine retains receipts
         // but the scene is still detached.
         if !old_mount.active_bridge_receipts.is_empty() {
-            if let Err(quarantine) = self
-                .bridges
-                .teardown_all(old_mount.active_bridge_receipts)
-            {
+            if let Err(quarantine) = self.bridges.teardown_all(old_mount.active_bridge_receipts) {
                 log::error!(
                     "BSP coordinator: bridge teardown quarantine for mount '{}': {:?}",
                     old_mount.source_identity,

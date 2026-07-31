@@ -28,9 +28,19 @@ fn minimal_bsp_bytes() -> Vec<u8> {
     let lumps: [(u32, u32); 15] = [
         (entity_offset, entity_size),
         (plane_offset, plane_size),
-        (0, 0), (0, 0), (0, 0), (0, 0), (0, 0),
-        (0, 0), (0, 0), (0, 0), (0, 0), (0, 0),
-        (0, 0), (0, 0), (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
     ];
     for (off, sz) in &lumps {
         data.extend_from_slice(&off.to_le_bytes());

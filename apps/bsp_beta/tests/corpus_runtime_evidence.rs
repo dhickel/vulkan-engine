@@ -226,8 +226,10 @@ fn unique_tmp(label: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir()
-        .join(format!("bsp-corpus-runtime-{label}-{}-{nanos}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "bsp-corpus-runtime-{label}-{}-{nanos}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -266,7 +268,9 @@ fn chrono_now() -> String {
 
 /// Generate a BSP from the frozen corpus entry, compile it, and stage
 /// the published package artifacts. Returns (bsp_bytes, lit_bytes, staging_dir).
-fn compile_corpus_entry(entry: &TransportEntry) -> Result<(Vec<u8>, Option<Vec<u8>>, PathBuf), String> {
+fn compile_corpus_entry(
+    entry: &TransportEntry,
+) -> Result<(Vec<u8>, Option<Vec<u8>>, PathBuf), String> {
     let tool_dir = ericw_tools_dir();
     if !tools_available(&tool_dir) {
         return Err("ericw-tools unavailable".to_string());
@@ -306,9 +310,15 @@ fn compile_corpus_entry(entry: &TransportEntry) -> Result<(Vec<u8>, Option<Vec<u
     qbsp.args(["-bsp2", "-threads", "1", "generated.map"])
         .current_dir(&staging)
         .env_clear();
-    if let Some(path) = std::env::var_os("PATH") { qbsp.env("PATH", path); }
-    if let Some(home) = std::env::var_os("HOME") { qbsp.env("HOME", home); }
-    if let Some(tmp) = std::env::var_os("TMPDIR") { qbsp.env("TMPDIR", tmp); }
+    if let Some(path) = std::env::var_os("PATH") {
+        qbsp.env("PATH", path);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        qbsp.env("HOME", home);
+    }
+    if let Some(tmp) = std::env::var_os("TMPDIR") {
+        qbsp.env("TMPDIR", tmp);
+    }
     let qbsp_out = qbsp.output().map_err(|e| format!("qbsp spawn: {e}"))?;
     if !qbsp_out.status.success() {
         let stderr = String::from_utf8_lossy(&qbsp_out.stderr);
@@ -321,8 +331,12 @@ fn compile_corpus_entry(entry: &TransportEntry) -> Result<(Vec<u8>, Option<Vec<u
     vis.args(["-threads", "1", "generated.bsp"])
         .current_dir(&staging)
         .env_clear();
-    if let Some(path) = std::env::var_os("PATH") { vis.env("PATH", path); }
-    if let Some(home) = std::env::var_os("HOME") { vis.env("HOME", home); }
+    if let Some(path) = std::env::var_os("PATH") {
+        vis.env("PATH", path);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        vis.env("HOME", home);
+    }
     let vis_out = vis.output().map_err(|e| format!("vis spawn: {e}"))?;
     if !vis_out.status.success() {
         let stderr = String::from_utf8_lossy(&vis_out.stderr);
@@ -332,11 +346,16 @@ fn compile_corpus_entry(entry: &TransportEntry) -> Result<(Vec<u8>, Option<Vec<u
     // light
     let light_path = tool_dir.join("light");
     let mut light = Command::new(&light_path);
-    light.args(["-threads", "1", "-lit", "generated.bsp"])
+    light
+        .args(["-threads", "1", "-lit", "generated.bsp"])
         .current_dir(&staging)
         .env_clear();
-    if let Some(path) = std::env::var_os("PATH") { light.env("PATH", path); }
-    if let Some(home) = std::env::var_os("HOME") { light.env("HOME", home); }
+    if let Some(path) = std::env::var_os("PATH") {
+        light.env("PATH", path);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        light.env("HOME", home);
+    }
     let light_out = light.output().map_err(|e| format!("light spawn: {e}"))?;
     if !light_out.status.success() {
         let stderr = String::from_utf8_lossy(&light_out.stderr);
@@ -350,7 +369,10 @@ fn compile_corpus_entry(entry: &TransportEntry) -> Result<(Vec<u8>, Option<Vec<u
         String::from_utf8_lossy(&light_out.stderr)
     );
     let lower = combined.to_ascii_lowercase();
-    if lower.contains("warning:") || lower.contains("no entities in empty space") || lower.contains("no filling performed") {
+    if lower.contains("warning:")
+        || lower.contains("no entities in empty space")
+        || lower.contains("no filling performed")
+    {
         return Err(format!("compiler warning detected: {combined}"));
     }
 
@@ -435,7 +457,8 @@ fn execute_corpus_child(
     if let Some(ref expected) = entry.bsp_hash {
         if bsp_hash != *expected {
             let duration = t0.elapsed().unwrap_or_default().as_millis() as u64;
-            let mismatch_msg = format!("bsp hash mismatch: expected {}, got {}", expected, bsp_hash);
+            let mismatch_msg =
+                format!("bsp hash mismatch: expected {}, got {}", expected, bsp_hash);
             let _ = std::fs::remove_dir_all(&staging);
             return CampaignEntry {
                 entry_id: entry.entry_id.clone(),
@@ -518,7 +541,11 @@ fn execute_corpus_child(
     }
 
     // Build child command: two reports per entry (normal-PVS then all-visible)
-    let lit_path_ref: Option<&Path> = if lit_path.exists() { Some(&lit_path) } else { None };
+    let lit_path_ref: Option<&Path> = if lit_path.exists() {
+        Some(&lit_path)
+    } else {
+        None
+    };
     let mut pvs_entry = run_child_report(
         &bsp_path,
         lit_path_ref,
@@ -570,12 +597,17 @@ fn run_child_report(
     let mut cmd = Command::new(bsp_beta_bin);
     cmd.arg("--strict")
         .arg("--headless")
-        .arg("--capture-frames").arg("0")
+        .arg("--capture-frames")
+        .arg("0")
         .arg("--stats")
-        .arg("--bsp").arg(bsp_path)
-        .arg("--palette").arg(staging.join("palette.lmp"))
-        .arg("--wad").arg(staging.join("cc0_stone_beta.wad"))
-        .arg("--corpus").arg(format!("{}-{}", entry.entry_id, campaign));
+        .arg("--bsp")
+        .arg(bsp_path)
+        .arg("--palette")
+        .arg(staging.join("palette.lmp"))
+        .arg("--wad")
+        .arg(staging.join("cc0_stone_beta.wad"))
+        .arg("--corpus")
+        .arg(format!("{}-{}", entry.entry_id, campaign));
 
     if all_visible {
         cmd.arg("--all-visible");
@@ -662,11 +694,23 @@ fn run_child_report(
         submitted_total_draws: evidence_parsed.submitted_total_draws,
         recorded_total_draws: evidence_parsed.recorded_total_draws,
         normal_pvs_complete: !all_visible && evidence_parsed.eligible,
-        normal_pvs_submitted_draws: if all_visible { None } else { evidence_parsed.submitted_static_draws },
+        normal_pvs_submitted_draws: if all_visible {
+            None
+        } else {
+            evidence_parsed.submitted_static_draws
+        },
         normal_pvs_camera_identity: evidence_parsed.camera_identity,
         all_visible_complete: all_visible && evidence_parsed.eligible,
-        all_visible_submitted_draws: if all_visible { evidence_parsed.submitted_static_draws } else { None },
-        all_visible_recorded_draws: if all_visible { evidence_parsed.recorded_static_draws } else { None },
+        all_visible_submitted_draws: if all_visible {
+            evidence_parsed.submitted_static_draws
+        } else {
+            None
+        },
+        all_visible_recorded_draws: if all_visible {
+            evidence_parsed.recorded_static_draws
+        } else {
+            None
+        },
         all_visible_face_coverage: evidence_parsed.face_coverage,
         stable_digest: evidence_parsed.stable_digest,
         child_exit_code: exit_code,
@@ -675,9 +719,13 @@ fn run_child_report(
         capability_blocked: false,
         blocked_cell: None,
         stderr_snippet: Some(truncate_str(&stderr, 8192)),
-        status: if exit_code == Some(0) && evidence_parsed.eligible { "PASS".to_string() }
-                else if exit_code == Some(0) { "FAIL".to_string() }
-                else { "FAIL".to_string() },
+        status: if exit_code == Some(0) && evidence_parsed.eligible {
+            "PASS".to_string()
+        } else if exit_code == Some(0) {
+            "FAIL".to_string()
+        } else {
+            "FAIL".to_string()
+        },
         error: if exit_code != Some(0) {
             Some(format!("child exited with code {:?}", exit_code))
         } else if !evidence_parsed.eligible {
@@ -704,12 +752,13 @@ struct ChildEvidence {
 
 fn parse_child_evidence(stdout: &str) -> ChildEvidence {
     // Try to find a JSON line with "evidence" or "stats" fields
-    let json_line = stdout
-        .lines()
-        .find(|line| {
-            let trimmed = line.trim();
-            trimmed.starts_with('{') && (trimmed.contains("\"evidence\"") || trimmed.contains("\"stats\"") || trimmed.contains("\"eligible\""))
-        });
+    let json_line = stdout.lines().find(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with('{')
+            && (trimmed.contains("\"evidence\"")
+                || trimmed.contains("\"stats\"")
+                || trimmed.contains("\"eligible\""))
+    });
 
     let json_str = match json_line {
         Some(line) => line.trim(),
@@ -751,7 +800,10 @@ fn parse_child_evidence(stdout: &str) -> ChildEvidence {
         }
     };
 
-    let eligible = parsed.get("eligible").and_then(|v| v.as_bool()).unwrap_or(false);
+    let eligible = parsed
+        .get("eligible")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // Extract counts from the report structure
     let extract_u32 = |keys: &[&str]| -> Option<u32> {
@@ -773,10 +825,16 @@ fn parse_child_evidence(stdout: &str) -> ChildEvidence {
         submitted_total_draws: extract_u32(&["submitted_total_draws"])
             .or_else(|| extract_u32(&["total_draws"])),
         recorded_total_draws: extract_u32(&["recorded_total_draws"]),
-        camera_identity: parsed.get("camera_identity").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        camera_identity: parsed
+            .get("camera_identity")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         face_coverage: extract_u32(&["face_coverage"])
             .or_else(|| extract_u32(&["source_face_coverage"])),
-        stable_digest: parsed.get("stable_digest").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        stable_digest: parsed
+            .get("stable_digest")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
     }
 }
 
@@ -831,7 +889,11 @@ fn corpus_runtime_two_campaigns() {
     let hardware_class = std::env::var("BSP_HARDWARE_CLASS").unwrap_or_else(|_| "UNKNOWN".into());
 
     eprintln!("=== Phase 08: Frozen Corpus Runtime Evidence ===");
-    eprintln!("  ericw-tools: {} ({})", if tools_ok { "available" } else { "NOT FOUND" }, tool_dir.display());
+    eprintln!(
+        "  ericw-tools: {} ({})",
+        if tools_ok { "available" } else { "NOT FOUND" },
+        tool_dir.display()
+    );
     eprintln!("  hardware class: {hardware_class}");
 
     // Build the transport manifest in-memory
@@ -857,12 +919,30 @@ fn corpus_runtime_two_campaigns() {
     let budget_violations = enforce_budgets(&campaign_a_entries, &campaign_b_entries);
 
     // ── Reducer ───────────────────────────────────────────────────
-    let pass_count = campaign_a_entries.iter().filter(|e| e.status == "PASS").count()
-        + campaign_b_entries.iter().filter(|e| e.status == "PASS").count();
-    let fail_count = campaign_a_entries.iter().filter(|e| e.status == "FAIL").count()
-        + campaign_b_entries.iter().filter(|e| e.status == "FAIL").count();
-    let not_run_count = campaign_a_entries.iter().filter(|e| e.status == "NOT_RUN").count()
-        + campaign_b_entries.iter().filter(|e| e.status == "NOT_RUN").count();
+    let pass_count = campaign_a_entries
+        .iter()
+        .filter(|e| e.status == "PASS")
+        .count()
+        + campaign_b_entries
+            .iter()
+            .filter(|e| e.status == "PASS")
+            .count();
+    let fail_count = campaign_a_entries
+        .iter()
+        .filter(|e| e.status == "FAIL")
+        .count()
+        + campaign_b_entries
+            .iter()
+            .filter(|e| e.status == "FAIL")
+            .count();
+    let not_run_count = campaign_a_entries
+        .iter()
+        .filter(|e| e.status == "NOT_RUN")
+        .count()
+        + campaign_b_entries
+            .iter()
+            .filter(|e| e.status == "NOT_RUN")
+            .count();
 
     let mut failure_reasons: Vec<String> = Vec::new();
     for e in campaign_a_entries.iter().chain(campaign_b_entries.iter()) {
@@ -879,9 +959,18 @@ fn corpus_runtime_two_campaigns() {
         started_at: campaign_a_start,
         completed_at: chrono_now(),
         entries_executed: campaign_a_entries.len(),
-        entries_passed: campaign_a_entries.iter().filter(|e| e.status == "PASS").count(),
-        entries_not_run: campaign_a_entries.iter().filter(|e| e.status == "NOT_RUN").count(),
-        entries_failed: campaign_a_entries.iter().filter(|e| e.status == "FAIL").count(),
+        entries_passed: campaign_a_entries
+            .iter()
+            .filter(|e| e.status == "PASS")
+            .count(),
+        entries_not_run: campaign_a_entries
+            .iter()
+            .filter(|e| e.status == "NOT_RUN")
+            .count(),
+        entries_failed: campaign_a_entries
+            .iter()
+            .filter(|e| e.status == "FAIL")
+            .count(),
     };
 
     let campaign_b_meta = CampaignMetadata {
@@ -889,9 +978,18 @@ fn corpus_runtime_two_campaigns() {
         started_at: campaign_b_start,
         completed_at: chrono_now(),
         entries_executed: campaign_b_entries.len(),
-        entries_passed: campaign_b_entries.iter().filter(|e| e.status == "PASS").count(),
-        entries_not_run: campaign_b_entries.iter().filter(|e| e.status == "NOT_RUN").count(),
-        entries_failed: campaign_b_entries.iter().filter(|e| e.status == "FAIL").count(),
+        entries_passed: campaign_b_entries
+            .iter()
+            .filter(|e| e.status == "PASS")
+            .count(),
+        entries_not_run: campaign_b_entries
+            .iter()
+            .filter(|e| e.status == "NOT_RUN")
+            .count(),
+        entries_failed: campaign_b_entries
+            .iter()
+            .filter(|e| e.status == "FAIL")
+            .count(),
     };
 
     let reducer = ReducerSummary {
@@ -899,8 +997,10 @@ fn corpus_runtime_two_campaigns() {
         pass: pass_count,
         fail: fail_count,
         not_run: not_run_count,
-        phase_pass: fail_count == 0 && comparison.all_entries_present_in_both
-            && comparison.normal_pvs_deterministic && comparison.all_visible_equal
+        phase_pass: fail_count == 0
+            && comparison.all_entries_present_in_both
+            && comparison.normal_pvs_deterministic
+            && comparison.all_visible_equal
             && budget_violations.is_empty(),
         failure_reasons,
     };
@@ -937,7 +1037,10 @@ fn corpus_runtime_two_campaigns() {
         serde_json::to_string_pretty(&report).unwrap(),
     )
     .expect("write corpus-runtime.json");
-    eprintln!("\nCorpus runtime evidence written to {}", runtime_path.display());
+    eprintln!(
+        "\nCorpus runtime evidence written to {}",
+        runtime_path.display()
+    );
 
     // Assertions
     if fail_count > 0 {
@@ -963,18 +1066,186 @@ fn build_transport_entries() -> Vec<TransportEntry> {
     let wad_hash = sha256(&wad_bytes);
 
     vec![
-        transport_entry("nominal-m1-seed-0", "M1", 0, 12, 1, 1024, 1024, 192, 16, 64, 131_072, &palette_hash, &wad_hash),
-        transport_entry("nominal-m1-seed-1", "M1", 1, 12, 1, 1024, 1024, 192, 16, 64, 131_072, &palette_hash, &wad_hash),
-        transport_entry("nominal-m1-seed-2", "M1", 2, 12, 1, 1024, 1024, 192, 16, 64, 131_072, &palette_hash, &wad_hash),
-        transport_entry("nominal-m1-seed-3", "M1", 3, 12, 1, 1024, 1024, 192, 16, 64, 131_072, &palette_hash, &wad_hash),
-        transport_entry("nominal-m2-seed-17", "M2", 17, 28, 3, 2048, 2048, 256, 32, 96, 524_288, &palette_hash, &wad_hash),
-        transport_entry("nominal-m2-seed-255", "M2", 255, 28, 3, 2048, 2048, 256, 32, 96, 524_288, &palette_hash, &wad_hash),
-        transport_entry("nominal-m2-seed-0x5555", "M2", 0x5555555555555555, 28, 3, 2048, 2048, 256, 32, 96, 524_288, &palette_hash, &wad_hash),
-        transport_entry("nominal-m2-seed-u64-max", "M2", u64::MAX, 28, 3, 2048, 2048, 256, 32, 96, 524_288, &palette_hash, &wad_hash),
-        transport_entry("boundary-A-m1-min", "M1", 42, 8, 0, 1024, 1024, 192, 16, 64, 131_072, &palette_hash, &wad_hash),
-        transport_entry("boundary-B-m1-max", "M1", 43, 16, 2, 1024, 1024, 192, 16, 64, 131_072, &palette_hash, &wad_hash),
-        transport_entry("boundary-C-m2-min", "M2", 44, 17, 1, 2048, 2048, 256, 32, 96, 524_288, &palette_hash, &wad_hash),
-        transport_entry("boundary-D-m2-max", "M2", 45, 40, 6, 2048, 2048, 256, 32, 96, 524_288, &palette_hash, &wad_hash),
+        transport_entry(
+            "nominal-m1-seed-0",
+            "M1",
+            0,
+            12,
+            1,
+            1024,
+            1024,
+            192,
+            16,
+            64,
+            131_072,
+            &palette_hash,
+            &wad_hash,
+        ),
+        transport_entry(
+            "nominal-m1-seed-1",
+            "M1",
+            1,
+            12,
+            1,
+            1024,
+            1024,
+            192,
+            16,
+            64,
+            131_072,
+            &palette_hash,
+            &wad_hash,
+        ),
+        transport_entry(
+            "nominal-m1-seed-2",
+            "M1",
+            2,
+            12,
+            1,
+            1024,
+            1024,
+            192,
+            16,
+            64,
+            131_072,
+            &palette_hash,
+            &wad_hash,
+        ),
+        transport_entry(
+            "nominal-m1-seed-3",
+            "M1",
+            3,
+            12,
+            1,
+            1024,
+            1024,
+            192,
+            16,
+            64,
+            131_072,
+            &palette_hash,
+            &wad_hash,
+        ),
+        transport_entry(
+            "nominal-m2-seed-17",
+            "M2",
+            17,
+            28,
+            3,
+            2048,
+            2048,
+            256,
+            32,
+            96,
+            524_288,
+            &palette_hash,
+            &wad_hash,
+        ),
+        transport_entry(
+            "nominal-m2-seed-255",
+            "M2",
+            255,
+            28,
+            3,
+            2048,
+            2048,
+            256,
+            32,
+            96,
+            524_288,
+            &palette_hash,
+            &wad_hash,
+        ),
+        transport_entry(
+            "nominal-m2-seed-0x5555",
+            "M2",
+            0x5555555555555555,
+            28,
+            3,
+            2048,
+            2048,
+            256,
+            32,
+            96,
+            524_288,
+            &palette_hash,
+            &wad_hash,
+        ),
+        transport_entry(
+            "nominal-m2-seed-u64-max",
+            "M2",
+            u64::MAX,
+            28,
+            3,
+            2048,
+            2048,
+            256,
+            32,
+            96,
+            524_288,
+            &palette_hash,
+            &wad_hash,
+        ),
+        transport_entry(
+            "boundary-A-m1-min",
+            "M1",
+            42,
+            8,
+            0,
+            1024,
+            1024,
+            192,
+            16,
+            64,
+            131_072,
+            &palette_hash,
+            &wad_hash,
+        ),
+        transport_entry(
+            "boundary-B-m1-max",
+            "M1",
+            43,
+            16,
+            2,
+            1024,
+            1024,
+            192,
+            16,
+            64,
+            131_072,
+            &palette_hash,
+            &wad_hash,
+        ),
+        transport_entry(
+            "boundary-C-m2-min",
+            "M2",
+            44,
+            17,
+            1,
+            2048,
+            2048,
+            256,
+            32,
+            96,
+            524_288,
+            &palette_hash,
+            &wad_hash,
+        ),
+        transport_entry(
+            "boundary-D-m2-max",
+            "M2",
+            45,
+            40,
+            6,
+            2048,
+            2048,
+            256,
+            32,
+            96,
+            524_288,
+            &palette_hash,
+            &wad_hash,
+        ),
     ]
 }
 
@@ -1023,12 +1294,23 @@ fn transport_entry(
 }
 
 /// Cross-campaign comparison: normal-PVS deterministic, all-visible equal.
-fn compare_campaigns(campaign_a: &[CampaignEntry], campaign_b: &[CampaignEntry]) -> CrossCampaignComparison {
+fn compare_campaigns(
+    campaign_a: &[CampaignEntry],
+    campaign_b: &[CampaignEntry],
+) -> CrossCampaignComparison {
     let mut mismatches: Vec<String> = Vec::new();
 
     let all_present = campaign_a.len() == campaign_b.len()
-        && campaign_a.iter().all(|a| campaign_b.iter().any(|b| b.entry_id == a.entry_id && b.campaign != a.campaign))
-        && campaign_b.iter().all(|b| campaign_a.iter().any(|a| a.entry_id == b.entry_id && a.campaign != b.campaign));
+        && campaign_a.iter().all(|a| {
+            campaign_b
+                .iter()
+                .any(|b| b.entry_id == a.entry_id && b.campaign != a.campaign)
+        })
+        && campaign_b.iter().all(|b| {
+            campaign_a
+                .iter()
+                .any(|a| a.entry_id == b.entry_id && a.campaign != b.campaign)
+        });
 
     let mut normal_pvs_deterministic = true;
     let mut all_visible_equal = true;

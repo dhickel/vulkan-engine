@@ -301,7 +301,9 @@ pub(crate) fn upload_lightmap_atlas_data(
         return Err("lightmap atlas dimensions and layer count must be non-zero".to_string());
     }
     if rgba_data.is_empty() || copy_regions.is_empty() {
-        return Err("lightmap atlas upload requires non-empty compact data and regions".to_string());
+        return Err(
+            "lightmap atlas upload requires non-empty compact data and regions".to_string(),
+        );
     }
     for (index, region) in copy_regions.iter().enumerate() {
         if region.image_subresource.layer_count != 1
@@ -332,7 +334,9 @@ pub(crate) fn upload_lightmap_atlas_data(
             .checked_add(bytes)
             .ok_or_else(|| format!("lightmap copy region {index} buffer range overflow"))?;
         if end > rgba_data.len() as u64 {
-            return Err(format!("lightmap copy region {index} exceeds compact staging data"));
+            return Err(format!(
+                "lightmap copy region {index} exceeds compact staging data"
+            ));
         }
     }
 

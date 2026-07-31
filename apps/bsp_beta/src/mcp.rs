@@ -257,13 +257,16 @@ impl ToolBackend for RuntimeTools<'_> {
             BspEvidenceVisibility::NormalPvs
         };
 
-        let corpus = self.map.info(self.loop_state.camera.get_position())
+        let corpus = self
+            .map
+            .info(self.loop_state.camera.get_position())
             .get("faces")
             .and_then(|v| v.as_u64())
             .map(|f| format!("mcp-bsp-{f}-faces"))
             .unwrap_or_else(|| "mcp-bsp-unknown".to_string());
 
-        let key = self.renderer
+        let key = self
+            .renderer
             .request_bsp_frame_evidence(corpus, "mcp-stats".to_string(), visibility)
             .map_err(|e| format!("evidence request failed: {e}"))?;
         self.evidence_key = Some(key);
@@ -301,7 +304,9 @@ impl ToolBackend for RuntimeTools<'_> {
         }
 
         self.evidence_key = None;
-        Err(format!("stats report not ready after {CAPTURE_POLL_FRAMES} frames"))
+        Err(format!(
+            "stats report not ready after {CAPTURE_POLL_FRAMES} frames"
+        ))
     }
 }
 
@@ -772,7 +777,13 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             names,
-            ["set_camera", "capture", "get_info", "point_contents", "stats"]
+            [
+                "set_camera",
+                "capture",
+                "get_info",
+                "point_contents",
+                "stats"
+            ]
         );
     }
 

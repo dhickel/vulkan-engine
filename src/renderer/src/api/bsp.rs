@@ -407,10 +407,7 @@ impl CandidateStaging {
 
     /// Consume the staging and move the complete inventory into a private
     /// `BspResourceLease`. The staging is disarmed and must not be rolled back.
-    fn into_lease(
-        &mut self,
-        arena_id: u64,
-    ) -> BspResourceLease {
+    fn into_lease(&mut self, arena_id: u64) -> BspResourceLease {
         self.armed = false;
         BspResourceLease {
             arena_id,
@@ -594,7 +591,10 @@ impl PreparedBspMount {
     /// Deprecated: prefer [`PreparedBspMount::into_detached`] or
     /// renderer cancellation. This compat path discards the resource lease
     /// and must only be used by legacy callers that never uploaded GPU data.
-    #[deprecated(since = "0.14.0", note = "use into_detached() or renderer cancellation")]
+    #[deprecated(
+        since = "0.14.0",
+        note = "use into_detached() or renderer cancellation"
+    )]
     pub fn retire(self) -> DetachedBspMount {
         self.into_detached()
     }
@@ -816,25 +816,26 @@ impl PreparedBspMount {
             }};
         }
 
-        let upload_result = (|staging: &mut CandidateStaging| -> Result<(Self, BspResourceLease), String> {
-        // All demand is checked and all face geometry is merged before the first
-        // Vulkan/cache allocation. This is the safety boundary that prevents a
-        // source face count from becoming an unbounded descriptor/draw count.
-        let mut plan = guard!(
-            plan_bsp_upload(extracted),
-            staging,
-            device,
-            allocator,
-            data_cache
-        );
-        let demand = plan.demand;
-        let face_count = demand.source_face_count;
-        let pbr_texture_count = plan
-            .textures
-            .iter()
-            .filter(|texture| texture.pbr_flags != 0)
-            .count();
-        info!(
+        let upload_result =
+            (|staging: &mut CandidateStaging| -> Result<(Self, BspResourceLease), String> {
+                // All demand is checked and all face geometry is merged before the first
+                // Vulkan/cache allocation. This is the safety boundary that prevents a
+                // source face count from becoming an unbounded descriptor/draw count.
+                let mut plan = guard!(
+                    plan_bsp_upload(extracted),
+                    staging,
+                    device,
+                    allocator,
+                    data_cache
+                );
+                let demand = plan.demand;
+                let face_count = demand.source_face_count;
+                let pbr_texture_count = plan
+                    .textures
+                    .iter()
+                    .filter(|texture| texture.pbr_flags != 0)
+                    .count();
+                info!(
             "BSP upload preflight: {} renderable faces -> {} batches, {} materials, {} textures ({} PBR); geometry={} MiB, atlas={} MiB, compact staging={} MiB, estimated GPU={} MiB, leaf bucket span={}",
             demand.renderable_face_count,
             demand.batch_count,
@@ -848,901 +849,940 @@ impl PreparedBspMount {
             demand.leaf_bucket_span,
         );
 
-        if plan.batches.is_empty() {
-            // Valid empty mount: no renderable faces. Destroy the unused arena.
-            {
-                let mut surface_cache = data_cache
-                    .bsp_surface_cache
-                    .lock()
-                    .map_err(|_| "bsp_surface_cache lock poisoned".to_string())?;
-                let alloc_guard = allocator
-                    .lock()
-                    .map_err(|_| "allocator lock poisoned".to_string())?;
-                surface_cache.destroy_arena_resources(arena_id, device, &alloc_guard);
-            }
-            staging.armed = false;
-            let mount_state = BspMountState::from_extracted(extracted);
-            return PreparedBspMount::from_canonical(
-                mount_state,
-                Vec::new(),
-                extracted.leaf_membership.clone(),
-                extracted.light_descriptors.clone(),
-                Some(demand),
-                None,
-            ).map(|m| (m, BspResourceLease { arena_id, mesh_handles: Vec::new(), texture_handles: Vec::new(), material_handles: Vec::new() }));
-        }
+                if plan.batches.is_empty() {
+                    // Valid empty mount: no renderable faces. Destroy the unused arena.
+                    {
+                        let mut surface_cache = data_cache
+                            .bsp_surface_cache
+                            .lock()
+                            .map_err(|_| "bsp_surface_cache lock poisoned".to_string())?;
+                        let alloc_guard = allocator
+                            .lock()
+                            .map_err(|_| "allocator lock poisoned".to_string())?;
+                        surface_cache.destroy_arena_resources(arena_id, device, &alloc_guard);
+                    }
+                    staging.armed = false;
+                    let mount_state = BspMountState::from_extracted(extracted);
+                    return PreparedBspMount::from_canonical(
+                        mount_state,
+                        Vec::new(),
+                        extracted.leaf_membership.clone(),
+                        extracted.light_descriptors.clone(),
+                        Some(demand),
+                        None,
+                    )
+                    .map(|m| {
+                        (
+                            m,
+                            BspResourceLease {
+                                arena_id,
+                                mesh_handles: Vec::new(),
+                                texture_handles: Vec::new(),
+                                material_handles: Vec::new(),
+                            },
+                        )
+                    });
+                }
 
-        // ── 1. Upload merged batch meshes ──────────────────────────
-        let mesh_metas = plan
-            .batches
-            .iter_mut()
-            .map(|batch| {
-                let procedural = &mut batch.mesh;
-                let vertices = std::mem::take(&mut procedural.vertices)
-                    .into_iter()
-                    .map(|vertex| Vertex {
-                        position: vertex.position,
-                        uv0_x: vertex.uv0.x,
-                        uv0_y: vertex.uv0.y,
-                        normal: vertex.normal,
-                        color: vertex.color,
-                        tangent: vertex.tangent,
-                        joints: glam::UVec4::ZERO,
-                        weights: glam::Vec4::ZERO,
-                        uv1_x: vertex.uv1.x,
-                        uv1_y: vertex.uv1.y,
-                        _pad: 0,
+                // ── 1. Upload merged batch meshes ──────────────────────────
+                let mesh_metas = plan
+                    .batches
+                    .iter_mut()
+                    .map(|batch| {
+                        let procedural = &mut batch.mesh;
+                        let vertices = std::mem::take(&mut procedural.vertices)
+                            .into_iter()
+                            .map(|vertex| Vertex {
+                                position: vertex.position,
+                                uv0_x: vertex.uv0.x,
+                                uv0_y: vertex.uv0.y,
+                                normal: vertex.normal,
+                                color: vertex.color,
+                                tangent: vertex.tangent,
+                                joints: glam::UVec4::ZERO,
+                                weights: glam::Vec4::ZERO,
+                                uv1_x: vertex.uv1.x,
+                                uv1_y: vertex.uv1.y,
+                                _pad: 0,
+                            })
+                            .collect();
+                        MeshMeta {
+                            name: std::mem::take(&mut procedural.name),
+                            indices: std::mem::take(&mut procedural.indices),
+                            vertices,
+                            material_index: None,
+                            has_uv1: true,
+                        }
                     })
-                    .collect();
-                MeshMeta {
-                    name: std::mem::take(&mut procedural.name),
-                    indices: std::mem::take(&mut procedural.indices),
-                    vertices,
-                    material_index: None,
-                    has_uv1: true,
+                    .collect::<Vec<_>>();
+                let batch_meshes = {
+                    let mut mesh_cache = data_cache
+                        .mesh_cache
+                        .lock()
+                        .map_err(|_| "mesh_cache lock poisoned".to_string())?;
+                    let handles = mesh_cache.add_multi(mesh_metas);
+                    if !matches!(
+                        mesh_cache.allocate_ids(
+                            &handles,
+                            BufferPlacement::ContiguousPreferred,
+                            false
+                        ),
+                        crate::data::data_cache::LoadResult::Success(_)
+                    ) {
+                        mesh_cache.deallocate_ids(&handles);
+                        return Err(format!(
+                            "failed to upload {} merged BSP mesh batches",
+                            handles.len()
+                        ));
+                    }
+                    handles
+                };
+                staging.mesh_handles = batch_meshes.clone();
+                {
+                    let mut surface_cache = guard!(
+                        data_cache
+                            .bsp_surface_cache
+                            .lock()
+                            .map_err(|_| "bsp_surface_cache lock poisoned".to_string()),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+                    guard!(
+                        surface_cache.register_mesh_handles(arena_id, &batch_meshes),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
                 }
-            })
-            .collect::<Vec<_>>();
-        let batch_meshes = {
-            let mut mesh_cache = data_cache
-                .mesh_cache
-                .lock()
-                .map_err(|_| "mesh_cache lock poisoned".to_string())?;
-            let handles = mesh_cache.add_multi(mesh_metas);
-            if !matches!(
-                mesh_cache.allocate_ids(&handles, BufferPlacement::ContiguousPreferred, false),
-                crate::data::data_cache::LoadResult::Success(_)
-            ) {
-                mesh_cache.deallocate_ids(&handles);
-                return Err(format!(
-                    "failed to upload {} merged BSP mesh batches",
-                    handles.len()
-                ));
-            }
-            handles
-        };
-        staging.mesh_handles = batch_meshes.clone();
-        {
-            let mut surface_cache = guard!(
-                data_cache
-                    .bsp_surface_cache
-                    .lock()
-                    .map_err(|_| "bsp_surface_cache lock poisoned".to_string()),
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-            guard!(
-                surface_cache.register_mesh_handles(arena_id, &batch_meshes),
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-        }
-        let mut face_meshes = vec![MeshHandle::new(0, 0); face_count];
-        for (face_index, batch_index) in plan.face_to_batch.iter().copied().enumerate() {
-            if let Some(batch_index) = batch_index {
-                face_meshes[face_index] = batch_meshes[batch_index];
-            }
-        }
-        info!(
-            "BSP upload: {} merged mesh batches cover {} renderable faces",
-            batch_meshes.len(),
-            demand.renderable_face_count
-        );
-
-        // ── 2. Upload lightmap atlas ───────────────────────────────
-        let lightmap_upload = guard!(
-            build_lightmap_upload_data(extracted),
-            staging,
-            device,
-            allocator,
-            data_cache
-        );
-        if lightmap_upload.pixels.len() as u64 > demand.lightmap_staging_bytes {
-            let err = format!(
-                "BSP compact lightmap staging grew beyond preflight: {} > {} bytes",
-                lightmap_upload.pixels.len(),
-                demand.lightmap_staging_bytes
-            );
-            return Err(err);
-        }
-
-        let alloc_guard = guard!(
-            allocator
-                .lock()
-                .map_err(|_| "allocator lock poisoned".to_string()),
-            staging,
-            device,
-            allocator,
-            data_cache
-        );
-
-        let lightmap_image = guard!(
-            create_lightmap_atlas_image(
-                device,
-                &alloc_guard,
-                lightmap_upload.width,
-                lightmap_upload.height,
-                lightmap_upload.layer_count,
-            ),
-            staging,
-            device,
-            allocator,
-            data_cache
-        );
-
-        let lightmap_sampler_val = match create_lightmap_sampler(device) {
-            Ok(sampler) => sampler,
-            Err(error) => {
-                crate::vulkan::vk_util::destroy_image(device, &alloc_guard, lightmap_image);
-                return Err(error);
-            }
-        };
-
-        if let Err(error) = upload_lightmap_atlas_data(
-            device,
-            &alloc_guard,
-            transfer_command_pool,
-            transfer_queue,
-            lightmap_image.image,
-            lightmap_upload.width,
-            lightmap_upload.height,
-            lightmap_upload.layer_count,
-            &lightmap_upload.pixels,
-            &lightmap_upload.regions,
-        ) {
-            unsafe {
-                device.destroy_sampler(lightmap_sampler_val, None);
-            }
-            crate::vulkan::vk_util::destroy_image(device, &alloc_guard, lightmap_image);
-            return Err(error);
-        }
-
-        let lightmap_view = lightmap_image.image_view;
-        let lightmap_sampler = lightmap_sampler_val;
-
-        let atlas_gpu = BspLightmapAtlasGpu {
-            image: lightmap_image.image,
-            view: lightmap_image.image_view,
-            allocation: lightmap_image.allocation,
-            sampler: lightmap_sampler_val,
-            width: lightmap_upload.width,
-            height: lightmap_upload.height,
-            layer_count: lightmap_upload.layer_count,
-        };
-
-        {
-            let mut surface_cache = guard!(
-                data_cache
-                    .bsp_surface_cache
-                    .lock()
-                    .map_err(|_| "bsp_surface_cache lock poisoned".to_string()),
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-            guard!(
-                surface_cache.install_lightmap_atlas(arena_id, atlas_gpu),
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-        }
-        drop(alloc_guard);
-
-        // ── 3. Upload textures ─────────────────────────────────────
-        let default_white_handle = TextureHandle::new(
-            TextureCache::DEFAULT_COLOR_TEX.slot,
-            TextureCache::DEFAULT_COLOR_TEX.generation,
-        );
-        let default_black_handle = TextureHandle::new(
-            TextureCache::DEFAULT_EMISSIVE_TEX.slot,
-            TextureCache::DEFAULT_EMISSIVE_TEX.generation,
-        );
-        if plan.textures.len() != extracted.textures.len() {
-            let err = "BSP planned texture count changed after upload preflight".to_string();
-            return Err(err);
-        }
-        let mut texture_metas = Vec::with_capacity(extracted.textures.len() * 2);
-        for (texture, planned) in extracted.textures.iter().zip(&plan.textures) {
-            let mip_levels = bsp_texture_mip_levels(texture.width, texture.height);
-            texture_metas.push(TextureMeta {
-                payload: TexturePayload::Raw {
-                    bytes: texture.albedo.clone(),
-                    width: texture.width,
-                    height: texture.height,
-                    format: ash::vk::Format::R8G8B8A8_SRGB,
-                    mips_levels: mip_levels,
-                },
-                uv_index: 0,
-                sampler_info: None,
-            });
-            texture_metas.push(TextureMeta {
-                payload: TexturePayload::Raw {
-                    bytes: planned.material_data_rgba.clone(),
-                    width: texture.width,
-                    height: texture.height,
-                    format: ash::vk::Format::R8G8B8A8_UNORM,
-                    mips_levels: mip_levels,
-                },
-                uv_index: 0,
-                sampler_info: None,
-            });
-        }
-
-        let texture_handles = {
-            let mut texture_cache = guard!(
-                data_cache
-                    .texture_cache
-                    .lock()
-                    .map_err(|_| "texture_cache lock poisoned".to_string()),
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-            let handles = texture_metas
-                .into_iter()
-                .map(|meta| texture_cache.add_texture(meta))
-                .collect::<Vec<_>>();
-            if handles
-                .iter()
-                .any(|&handle| handle == TextureCache::DEFAULT_ERROR_TEX)
-            {
-                for handle in handles.iter().copied() {
-                    texture_cache.deallocate_texture(handle);
+                let mut face_meshes = vec![MeshHandle::new(0, 0); face_count];
+                for (face_index, batch_index) in plan.face_to_batch.iter().copied().enumerate() {
+                    if let Some(batch_index) = batch_index {
+                        face_meshes[face_index] = batch_meshes[batch_index];
+                    }
                 }
-                let err = "BSP texture registration fell back to the error texture".to_string();
-                return Err(err);
-            }
-            let mut required = handles.clone();
-            required.extend([default_white_handle, default_black_handle]);
-            if !texture_cache.allocate_textures(required) {
-                for handle in handles.iter().copied() {
-                    texture_cache.deallocate_texture(handle);
-                }
-                let err = "failed to upload BSP material textures".to_string();
-                return Err(err);
-            }
-            handles
-        };
-        staging.texture_handles = texture_handles.clone();
-        {
-            let mut surface_cache = data_cache
-                .bsp_surface_cache
-                .lock()
-                .map_err(|_| "bsp_surface_cache lock poisoned".to_string())?;
-            surface_cache
-                .register_texture_handles(arena_id, &texture_handles)
-                .map_err(|e| format!("failed to register BSP texture handles: {e}"))?;
-        }
-        let texture_pairs = texture_handles
-            .chunks_exact(2)
-            .map(|pair| (pair[0], pair[1]))
-            .collect::<Vec<_>>();
+                info!(
+                    "BSP upload: {} merged mesh batches cover {} renderable faces",
+                    batch_meshes.len(),
+                    demand.renderable_face_count
+                );
 
-        {
-            let texture_cache = guard!(
-                data_cache
-                    .texture_cache
-                    .lock()
-                    .map_err(|_| "texture_cache lock poisoned".to_string()),
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-            guard!(
-                texture_cache
-                    .get_loaded_texture(default_white_handle)
-                    .map_err(|error| format!("default white texture not loaded: {error:?}")),
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-            guard!(
-                texture_cache
-                    .get_loaded_texture(default_black_handle)
-                    .map_err(|error| format!("default black texture not loaded: {error:?}")),
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-        }
-
-        // ── 4. Prepare material UBO and descriptor pool (arena-scoped) ─
-        let ubo_size = std::mem::size_of::<BspSurfaceUniform>() as u64;
-        let ubo_stride = ubo_size
-            .checked_next_multiple_of(uniform_offset_alignment.max(1))
-            .ok_or_else(|| "BSP surface UBO stride overflow".to_string())?;
-        let total_ubo_size = ubo_stride
-            .checked_mul(demand.material_count as u64)
-            .ok_or_else(|| "BSP surface UBO allocation size overflow".to_string())?;
-
-        let material_set_layout = desc_layout_cache.get(VkDescType::BspMaterial);
-
-        {
-            let mut surface_cache = guard!(
-                data_cache
-                    .bsp_surface_cache
-                    .lock()
-                    .map_err(|_| "bsp_surface_cache lock poisoned".to_string()),
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-            if !surface_cache.has_material_pool(arena_id) {
-                let material_count = u32::try_from(demand.material_count)
-                    .map_err(|_| "BSP material count exceeds u32".to_string())?;
-                let pool = guard!(
-                    create_bsp_material_descriptor_pool(device, material_count),
+                // ── 2. Upload lightmap atlas ───────────────────────────────
+                let lightmap_upload = guard!(
+                    build_lightmap_upload_data(extracted),
                     staging,
                     device,
                     allocator,
                     data_cache
                 );
-                guard!(
-                    surface_cache.init_material_descriptor_pool(
-                        arena_id,
-                        material_set_layout,
-                        pool,
+                if lightmap_upload.pixels.len() as u64 > demand.lightmap_staging_bytes {
+                    let err = format!(
+                        "BSP compact lightmap staging grew beyond preflight: {} > {} bytes",
+                        lightmap_upload.pixels.len(),
+                        demand.lightmap_staging_bytes
+                    );
+                    return Err(err);
+                }
+
+                let alloc_guard = guard!(
+                    allocator
+                        .lock()
+                        .map_err(|_| "allocator lock poisoned".to_string()),
+                    staging,
+                    device,
+                    allocator,
+                    data_cache
+                );
+
+                let lightmap_image = guard!(
+                    create_lightmap_atlas_image(
+                        device,
+                        &alloc_guard,
+                        lightmap_upload.width,
+                        lightmap_upload.height,
+                        lightmap_upload.layer_count,
                     ),
                     staging,
                     device,
                     allocator,
                     data_cache
                 );
-            }
-        }
 
-        // Create shared UBO buffer for all face surface params.
-        let (ubo_buffer, mut ubo_allocation, ubo_ptr) = {
-            let alloc_guard = guard!(
-                allocator
-                    .lock()
-                    .map_err(|_| "allocator lock poisoned".to_string()),
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
+                let lightmap_sampler_val = match create_lightmap_sampler(device) {
+                    Ok(sampler) => sampler,
+                    Err(error) => {
+                        crate::vulkan::vk_util::destroy_image(device, &alloc_guard, lightmap_image);
+                        return Err(error);
+                    }
+                };
 
-            let buffer_info = ash::vk::BufferCreateInfo::default()
-                .size(total_ubo_size)
-                .usage(ash::vk::BufferUsageFlags::UNIFORM_BUFFER)
-                .sharing_mode(ash::vk::SharingMode::EXCLUSIVE);
+                if let Err(error) = upload_lightmap_atlas_data(
+                    device,
+                    &alloc_guard,
+                    transfer_command_pool,
+                    transfer_queue,
+                    lightmap_image.image,
+                    lightmap_upload.width,
+                    lightmap_upload.height,
+                    lightmap_upload.layer_count,
+                    &lightmap_upload.pixels,
+                    &lightmap_upload.regions,
+                ) {
+                    unsafe {
+                        device.destroy_sampler(lightmap_sampler_val, None);
+                    }
+                    crate::vulkan::vk_util::destroy_image(device, &alloc_guard, lightmap_image);
+                    return Err(error);
+                }
 
-            let alloc_info = vk_mem::AllocationCreateInfo {
-                usage: vk_mem::MemoryUsage::AutoPreferHost,
-                flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
-                required_flags: ash::vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | ash::vk::MemoryPropertyFlags::HOST_COHERENT,
-                ..Default::default()
-            };
+                let lightmap_view = lightmap_image.image_view;
+                let lightmap_sampler = lightmap_sampler_val;
 
-            let (buffer, mut allocation) = guard!(
-                unsafe {
-                    alloc_guard
-                        .create_buffer(&buffer_info, &alloc_info)
-                        .map_err(|e| format!("failed to create BSP UBO buffer: {e:?}"))
-                },
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
+                let atlas_gpu = BspLightmapAtlasGpu {
+                    image: lightmap_image.image,
+                    view: lightmap_image.image_view,
+                    allocation: lightmap_image.allocation,
+                    sampler: lightmap_sampler_val,
+                    width: lightmap_upload.width,
+                    height: lightmap_upload.height,
+                    layer_count: lightmap_upload.layer_count,
+                };
 
-            let ptr = guard!(
-                unsafe {
-                    alloc_guard
-                        .map_memory(&mut allocation)
-                        .map_err(|e| format!("failed to map BSP UBO memory: {e:?}"))
-                },
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
+                {
+                    let mut surface_cache = guard!(
+                        data_cache
+                            .bsp_surface_cache
+                            .lock()
+                            .map_err(|_| "bsp_surface_cache lock poisoned".to_string()),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+                    guard!(
+                        surface_cache.install_lightmap_atlas(arena_id, atlas_gpu),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+                }
+                drop(alloc_guard);
 
-            (buffer, allocation, ptr)
-        };
+                // ── 3. Upload textures ─────────────────────────────────────
+                let default_white_handle = TextureHandle::new(
+                    TextureCache::DEFAULT_COLOR_TEX.slot,
+                    TextureCache::DEFAULT_COLOR_TEX.generation,
+                );
+                let default_black_handle = TextureHandle::new(
+                    TextureCache::DEFAULT_EMISSIVE_TEX.slot,
+                    TextureCache::DEFAULT_EMISSIVE_TEX.generation,
+                );
+                if plan.textures.len() != extracted.textures.len() {
+                    let err =
+                        "BSP planned texture count changed after upload preflight".to_string();
+                    return Err(err);
+                }
+                let mut texture_metas = Vec::with_capacity(extracted.textures.len() * 2);
+                for (texture, planned) in extracted.textures.iter().zip(&plan.textures) {
+                    let mip_levels = bsp_texture_mip_levels(texture.width, texture.height);
+                    texture_metas.push(TextureMeta {
+                        payload: TexturePayload::Raw {
+                            bytes: texture.albedo.clone(),
+                            width: texture.width,
+                            height: texture.height,
+                            format: ash::vk::Format::R8G8B8A8_SRGB,
+                            mips_levels: mip_levels,
+                        },
+                        uv_index: 0,
+                        sampler_info: None,
+                    });
+                    texture_metas.push(TextureMeta {
+                        payload: TexturePayload::Raw {
+                            bytes: planned.material_data_rgba.clone(),
+                            width: texture.width,
+                            height: texture.height,
+                            format: ash::vk::Format::R8G8B8A8_UNORM,
+                            mips_levels: mip_levels,
+                        },
+                        uv_index: 0,
+                        sampler_info: None,
+                    });
+                }
 
-        // ── 5. Allocate and write material descriptors ─────────────
-        let allocated_sets = {
-            let surface_cache = guard!(
-                data_cache
-                    .bsp_surface_cache
-                    .lock()
-                    .map_err(|_| "bsp_surface_cache lock poisoned".to_string()),
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-            guard!(
-                (0..demand.material_count)
-                    .map(|material_index| {
-                        surface_cache
-                            .allocate_material_set(arena_id, device)
-                            .map_err(|error| {
-                                format!(
+                let texture_handles = {
+                    let mut texture_cache = guard!(
+                        data_cache
+                            .texture_cache
+                            .lock()
+                            .map_err(|_| "texture_cache lock poisoned".to_string()),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+                    let handles = texture_metas
+                        .into_iter()
+                        .map(|meta| texture_cache.add_texture(meta))
+                        .collect::<Vec<_>>();
+                    if handles
+                        .iter()
+                        .any(|&handle| handle == TextureCache::DEFAULT_ERROR_TEX)
+                    {
+                        for handle in handles.iter().copied() {
+                            texture_cache.deallocate_texture(handle);
+                        }
+                        let err =
+                            "BSP texture registration fell back to the error texture".to_string();
+                        return Err(err);
+                    }
+                    let mut required = handles.clone();
+                    required.extend([default_white_handle, default_black_handle]);
+                    if !texture_cache.allocate_textures(required) {
+                        for handle in handles.iter().copied() {
+                            texture_cache.deallocate_texture(handle);
+                        }
+                        let err = "failed to upload BSP material textures".to_string();
+                        return Err(err);
+                    }
+                    handles
+                };
+                staging.texture_handles = texture_handles.clone();
+                {
+                    let mut surface_cache = data_cache
+                        .bsp_surface_cache
+                        .lock()
+                        .map_err(|_| "bsp_surface_cache lock poisoned".to_string())?;
+                    surface_cache
+                        .register_texture_handles(arena_id, &texture_handles)
+                        .map_err(|e| format!("failed to register BSP texture handles: {e}"))?;
+                }
+                let texture_pairs = texture_handles
+                    .chunks_exact(2)
+                    .map(|pair| (pair[0], pair[1]))
+                    .collect::<Vec<_>>();
+
+                {
+                    let texture_cache = guard!(
+                        data_cache
+                            .texture_cache
+                            .lock()
+                            .map_err(|_| "texture_cache lock poisoned".to_string()),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+                    guard!(
+                        texture_cache
+                            .get_loaded_texture(default_white_handle)
+                            .map_err(|error| format!(
+                                "default white texture not loaded: {error:?}"
+                            )),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+                    guard!(
+                        texture_cache
+                            .get_loaded_texture(default_black_handle)
+                            .map_err(|error| format!(
+                                "default black texture not loaded: {error:?}"
+                            )),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+                }
+
+                // ── 4. Prepare material UBO and descriptor pool (arena-scoped) ─
+                let ubo_size = std::mem::size_of::<BspSurfaceUniform>() as u64;
+                let ubo_stride = ubo_size
+                    .checked_next_multiple_of(uniform_offset_alignment.max(1))
+                    .ok_or_else(|| "BSP surface UBO stride overflow".to_string())?;
+                let total_ubo_size = ubo_stride
+                    .checked_mul(demand.material_count as u64)
+                    .ok_or_else(|| "BSP surface UBO allocation size overflow".to_string())?;
+
+                let material_set_layout = desc_layout_cache.get(VkDescType::BspMaterial);
+
+                {
+                    let mut surface_cache = guard!(
+                        data_cache
+                            .bsp_surface_cache
+                            .lock()
+                            .map_err(|_| "bsp_surface_cache lock poisoned".to_string()),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+                    if !surface_cache.has_material_pool(arena_id) {
+                        let material_count = u32::try_from(demand.material_count)
+                            .map_err(|_| "BSP material count exceeds u32".to_string())?;
+                        let pool = guard!(
+                            create_bsp_material_descriptor_pool(device, material_count),
+                            staging,
+                            device,
+                            allocator,
+                            data_cache
+                        );
+                        guard!(
+                            surface_cache.init_material_descriptor_pool(
+                                arena_id,
+                                material_set_layout,
+                                pool,
+                            ),
+                            staging,
+                            device,
+                            allocator,
+                            data_cache
+                        );
+                    }
+                }
+
+                // Create shared UBO buffer for all face surface params.
+                let (ubo_buffer, mut ubo_allocation, ubo_ptr) = {
+                    let alloc_guard = guard!(
+                        allocator
+                            .lock()
+                            .map_err(|_| "allocator lock poisoned".to_string()),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+
+                    let buffer_info = ash::vk::BufferCreateInfo::default()
+                        .size(total_ubo_size)
+                        .usage(ash::vk::BufferUsageFlags::UNIFORM_BUFFER)
+                        .sharing_mode(ash::vk::SharingMode::EXCLUSIVE);
+
+                    let alloc_info = vk_mem::AllocationCreateInfo {
+                        usage: vk_mem::MemoryUsage::AutoPreferHost,
+                        flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+                        required_flags: ash::vk::MemoryPropertyFlags::HOST_VISIBLE
+                            | ash::vk::MemoryPropertyFlags::HOST_COHERENT,
+                        ..Default::default()
+                    };
+
+                    let (buffer, mut allocation) = guard!(
+                        unsafe {
+                            alloc_guard
+                                .create_buffer(&buffer_info, &alloc_info)
+                                .map_err(|e| format!("failed to create BSP UBO buffer: {e:?}"))
+                        },
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+
+                    let ptr = guard!(
+                        unsafe {
+                            alloc_guard
+                                .map_memory(&mut allocation)
+                                .map_err(|e| format!("failed to map BSP UBO memory: {e:?}"))
+                        },
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+
+                    (buffer, allocation, ptr)
+                };
+
+                // ── 5. Allocate and write material descriptors ─────────────
+                let allocated_sets = {
+                    let surface_cache = guard!(
+                        data_cache
+                            .bsp_surface_cache
+                            .lock()
+                            .map_err(|_| "bsp_surface_cache lock poisoned".to_string()),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+                    guard!(
+                        (0..demand.material_count)
+                            .map(|material_index| {
+                                surface_cache
+                                    .allocate_material_set(arena_id, device)
+                                    .map_err(|error| {
+                                        format!(
                                 "failed to allocate BSP material set {material_index}/{}: {error}",
                                 demand.material_count
                             )
+                                    })
                             })
-                    })
-                    .collect::<Result<Vec<_>, _>>(),
-                staging,
-                device,
-                allocator,
-                data_cache
-            )
-        };
-        let material_texture_bindings =
-            {
-                let texture_cache = guard!(
-                    data_cache
-                        .texture_cache
-                        .lock()
-                        .map_err(|_| "texture_cache lock poisoned".to_string()),
-                    staging,
-                    device,
-                    allocator,
-                    data_cache
-                );
-                guard!(
-                    plan.materials
-                        .iter()
-                        .map(|material| {
-                            let (albedo_handle, fullbright_handle) = material
-                                .texture_index
-                                .and_then(|index| texture_pairs.get(index).copied())
-                                .unwrap_or((default_white_handle, default_black_handle));
-                            let albedo = texture_cache.get_loaded_texture(albedo_handle).map_err(
-                                |error| format!("BSP albedo texture is not loaded: {error:?}"),
-                            )?;
-                            let fullbright = texture_cache
-                                .get_loaded_texture(fullbright_handle)
-                                .map_err(|error| {
-                                    format!("BSP fullbright texture is not loaded: {error:?}")
-                                })?;
-                            Ok::<_, String>((
-                                albedo_handle,
-                                albedo.alloc.image_view,
-                                albedo.sampler,
-                                fullbright_handle,
-                                fullbright.alloc.image_view,
-                                fullbright.sampler,
-                            ))
-                        })
-                        .collect::<Result<Vec<_>, _>>(),
-                    staging,
-                    device,
-                    allocator,
-                    data_cache
-                )
-            };
+                            .collect::<Result<Vec<_>, _>>(),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    )
+                };
+                let material_texture_bindings = {
+                    let texture_cache = guard!(
+                        data_cache
+                            .texture_cache
+                            .lock()
+                            .map_err(|_| "texture_cache lock poisoned".to_string()),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+                    guard!(
+                        plan.materials
+                            .iter()
+                            .map(|material| {
+                                let (albedo_handle, fullbright_handle) = material
+                                    .texture_index
+                                    .and_then(|index| texture_pairs.get(index).copied())
+                                    .unwrap_or((default_white_handle, default_black_handle));
+                                let albedo = texture_cache
+                                    .get_loaded_texture(albedo_handle)
+                                    .map_err(|error| {
+                                        format!("BSP albedo texture is not loaded: {error:?}")
+                                    })?;
+                                let fullbright = texture_cache
+                                    .get_loaded_texture(fullbright_handle)
+                                    .map_err(|error| {
+                                        format!("BSP fullbright texture is not loaded: {error:?}")
+                                    })?;
+                                Ok::<_, String>((
+                                    albedo_handle,
+                                    albedo.alloc.image_view,
+                                    albedo.sampler,
+                                    fullbright_handle,
+                                    fullbright.alloc.image_view,
+                                    fullbright.sampler,
+                                ))
+                            })
+                            .collect::<Result<Vec<_>, _>>(),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    )
+                };
 
-        for (material_index, ((material, &set), binding)) in plan
-            .materials
-            .iter()
-            .zip(allocated_sets.iter())
-            .zip(material_texture_bindings.iter())
-            .enumerate()
-        {
-            let ubo_offset = (material_index as u64)
-                .checked_mul(ubo_stride)
-                .ok_or_else(|| "BSP surface UBO offset overflow".to_string())?;
-            unsafe {
-                let dst = (ubo_ptr as *mut u8).add(ubo_offset as usize) as *mut BspSurfaceUniform;
-                std::ptr::write(dst, material.surface_uniform);
-            }
-            write_bsp_material_descriptor(
-                device,
-                set,
-                binding.1,
-                binding.2,
-                binding.4,
-                binding.5,
-                lightmap_view,
-                lightmap_sampler,
-                ubo_buffer,
-                ubo_offset,
-                ubo_size,
-            );
-        }
-
-        {
-            let alloc_guard = guard!(
-                allocator
-                    .lock()
-                    .map_err(|_| "allocator lock poisoned".to_string()),
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-            unsafe {
-                alloc_guard.unmap_memory(&mut ubo_allocation);
-            }
-        }
-        {
-            let mut surface_cache = guard!(
-                data_cache
-                    .bsp_surface_cache
-                    .lock()
-                    .map_err(|_| "bsp_surface_cache lock poisoned".to_string()),
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-            guard!(
-                surface_cache.install_surface_ubo(
-                    arena_id,
-                    BspSurfaceUboGpu {
-                        buffer: ubo_buffer,
-                        allocation: ubo_allocation,
-                    },
-                ),
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-        }
-
-        let material_handles = {
-            let mut surface_cache = guard!(
-                data_cache
-                    .bsp_surface_cache
-                    .lock()
-                    .map_err(|_| "bsp_surface_cache lock poisoned".to_string()),
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-            let handles: Vec<_> = plan
-                .materials
-                .iter()
-                .zip(allocated_sets.iter().copied())
-                .zip(material_texture_bindings.iter())
-                .enumerate()
-                .map(
-                    |(material_index, ((material, material_descriptor), binding))| {
-                        let pipeline = match (material.surface_class, material.is_pbr) {
-                            (bsp::materials::SurfaceClass::AlphaMask, true) => {
-                                VkPipelineType::BspPbrAlphaMask
-                            }
-                            (bsp::materials::SurfaceClass::Opaque, true) => {
-                                VkPipelineType::BspPbrOpaque
-                            }
-                            (bsp::materials::SurfaceClass::AlphaMask, false) => {
-                                VkPipelineType::BspAlphaMask
-                            }
-                            (bsp::materials::SurfaceClass::Sky, _) => VkPipelineType::BspSky,
-                            (bsp::materials::SurfaceClass::Liquid, _) => VkPipelineType::BspLiquid,
-                            _ => VkPipelineType::BspOpaque,
-                        };
-                        let ubo_offset = (material_index as u64)
-                            .checked_mul(ubo_stride)
-                            .expect("BSP surface UBO offset overflow");
-                        surface_cache.add(arena_id, BspCachedSurfaceRepr {
-                            material_descriptor,
-                            surf_ubo_alloc: crate::vulkan::vk_types::VkSubAlloc {
-                                alloc_address: 0,
-                                offset: ubo_offset,
-                                buffer: ubo_buffer,
-                                size: ubo_size,
-                                sub_buffer_index: 0,
-                            },
-                            pipeline,
-                            surface_flags: material.surface_uniform.surface_flags,
-                            albedo_tex: binding.0,
-                            fullbright_tex: Some(binding.3),
-                            lightmap_tex: default_white_handle,
-                            arena_id,
-                        })
-                    },
-                )
-                .collect();
-            handles
-        };
-        staging.material_handles = material_handles.clone();
-
-        // Validate every material through authoritative cache lookup.
-        {
-            let surface_cache = data_cache
-                .bsp_surface_cache
-                .lock()
-                .map_err(|_| "bsp_surface_cache lock poisoned".to_string())?;
-            for &handle in &material_handles {
-                surface_cache
-                    .get_with_arena(arena_id, handle)
-                    .map_err(|e| format!("BSP material validation failed: {e}"))?;
-            }
-        }
-
-        let mut face_materials = vec![None; face_count];
-        for (face_index, material_index) in plan.face_to_material.iter().copied().enumerate() {
-            if let Some(material_index) = material_index {
-                face_materials[face_index] = Some(material_handles[material_index]);
-            }
-        }
-        let batch_materials = plan
-            .batches
-            .iter()
-            .map(|batch| material_handles[batch.material_plan_index])
-            .collect::<Vec<_>>();
-        info!(
-            "BSP upload: {} shared materials registered for {} batches in arena {}",
-            material_handles.len(),
-            batch_meshes.len(),
-            arena_id,
-        );
-
-        // Test-only fault injection for GPU rollback validation.
-        if FAIL_BSP_UPLOAD_AFTER_MATERIAL_REGISTRATION.swap(
-            false,
-            std::sync::atomic::Ordering::SeqCst,
-        ) {
-            return Err("injected BSP upload failure after material registration".to_string());
-        }
-
-        // ── 6. Initialize frame-values UBO and descriptor sets (set 2) ─
-        {
-            let alloc_guard = guard!(
-                allocator
-                    .lock()
-                    .map_err(|_| "allocator lock poisoned".to_string()),
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-            let frame_values_layout = desc_layout_cache.get(VkDescType::BspFrameValues);
-
-            let ubo_size = std::mem::size_of::<BspFrameValuesUniform>() as u64;
-            let stride = ubo_size
-                .checked_next_multiple_of(uniform_offset_alignment.max(1))
-                .ok_or_else(|| "BSP frame-values UBO stride overflow".to_string())?;
-            if frame_slot_count == 0 {
-                let err = "BSP frame-values requires at least one frame slot".to_string();
-                return Err(err);
-            }
-            let total = stride
-                .checked_mul(frame_slot_count as u64)
-                .ok_or_else(|| "BSP frame-values UBO size overflow".to_string())?;
-
-            let buffer_info = ash::vk::BufferCreateInfo::default()
-                .size(total)
-                .usage(ash::vk::BufferUsageFlags::UNIFORM_BUFFER)
-                .sharing_mode(ash::vk::SharingMode::EXCLUSIVE);
-
-            let fv_alloc_info = vk_mem::AllocationCreateInfo {
-                usage: vk_mem::MemoryUsage::AutoPreferHost,
-                flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
-                required_flags: ash::vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | ash::vk::MemoryPropertyFlags::HOST_COHERENT,
-                ..Default::default()
-            };
-
-            let (fv_buffer, mut fv_allocation) = guard!(
-                unsafe {
-                    alloc_guard
-                        .create_buffer(&buffer_info, &fv_alloc_info)
-                        .map_err(|e| format!("failed to create BSP frame-values UBO: {e:?}"))
-                },
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-
-            let fv_ptr = guard!(
-                unsafe {
-                    alloc_guard
-                        .map_memory(&mut fv_allocation)
-                        .map_err(|e| format!("failed to map BSP frame-values memory: {e:?}"))
-                },
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-            let default_values = BspFrameValuesUniform::default();
-            for slot in 0..frame_slot_count {
-                unsafe {
-                    let dst = (fv_ptr as *mut u8).add((stride * slot as u64) as usize);
-                    std::ptr::copy_nonoverlapping(
-                        &default_values as *const _ as *const u8,
-                        dst,
-                        ubo_size as usize,
+                for (material_index, ((material, &set), binding)) in plan
+                    .materials
+                    .iter()
+                    .zip(allocated_sets.iter())
+                    .zip(material_texture_bindings.iter())
+                    .enumerate()
+                {
+                    let ubo_offset = (material_index as u64)
+                        .checked_mul(ubo_stride)
+                        .ok_or_else(|| "BSP surface UBO offset overflow".to_string())?;
+                    unsafe {
+                        let dst =
+                            (ubo_ptr as *mut u8).add(ubo_offset as usize) as *mut BspSurfaceUniform;
+                        std::ptr::write(dst, material.surface_uniform);
+                    }
+                    write_bsp_material_descriptor(
+                        device,
+                        set,
+                        binding.1,
+                        binding.2,
+                        binding.4,
+                        binding.5,
+                        lightmap_view,
+                        lightmap_sampler,
+                        ubo_buffer,
+                        ubo_offset,
+                        ubo_size,
                     );
                 }
-            }
-            unsafe {
-                alloc_guard.unmap_memory(&mut fv_allocation);
-            }
 
-            let pool_sizes = [ash::vk::DescriptorPoolSize::default()
-                .ty(ash::vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(frame_slot_count)];
-            let pool_info = ash::vk::DescriptorPoolCreateInfo::default()
-                .flags(ash::vk::DescriptorPoolCreateFlags::empty())
-                .max_sets(frame_slot_count)
-                .pool_sizes(&pool_sizes);
-
-            let fv_pool = guard!(
-                unsafe {
-                    device
-                        .create_descriptor_pool(&pool_info, None)
-                        .map_err(|e| format!("failed to create BSP frame-values pool: {e:?}"))
-                },
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-
-            let mut fv_descriptors = Vec::with_capacity(frame_slot_count as usize);
-            for slot in 0..frame_slot_count {
-                let alloc_info = ash::vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(fv_pool)
-                    .set_layouts(std::slice::from_ref(&frame_values_layout));
-                let sets = guard!(
+                {
+                    let alloc_guard = guard!(
+                        allocator
+                            .lock()
+                            .map_err(|_| "allocator lock poisoned".to_string()),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
                     unsafe {
-                        device
-                            .allocate_descriptor_sets(&alloc_info)
-                            .map_err(|e| format!("failed to allocate BSP frame-values set: {e:?}"))
-                    },
+                        alloc_guard.unmap_memory(&mut ubo_allocation);
+                    }
+                }
+                {
+                    let mut surface_cache = guard!(
+                        data_cache
+                            .bsp_surface_cache
+                            .lock()
+                            .map_err(|_| "bsp_surface_cache lock poisoned".to_string()),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+                    guard!(
+                        surface_cache.install_surface_ubo(
+                            arena_id,
+                            BspSurfaceUboGpu {
+                                buffer: ubo_buffer,
+                                allocation: ubo_allocation,
+                            },
+                        ),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+                }
+
+                let material_handles = {
+                    let mut surface_cache = guard!(
+                        data_cache
+                            .bsp_surface_cache
+                            .lock()
+                            .map_err(|_| "bsp_surface_cache lock poisoned".to_string()),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+                    let handles: Vec<_> = plan
+                        .materials
+                        .iter()
+                        .zip(allocated_sets.iter().copied())
+                        .zip(material_texture_bindings.iter())
+                        .enumerate()
+                        .map(
+                            |(material_index, ((material, material_descriptor), binding))| {
+                                let pipeline = match (material.surface_class, material.is_pbr) {
+                                    (bsp::materials::SurfaceClass::AlphaMask, true) => {
+                                        VkPipelineType::BspPbrAlphaMask
+                                    }
+                                    (bsp::materials::SurfaceClass::Opaque, true) => {
+                                        VkPipelineType::BspPbrOpaque
+                                    }
+                                    (bsp::materials::SurfaceClass::AlphaMask, false) => {
+                                        VkPipelineType::BspAlphaMask
+                                    }
+                                    (bsp::materials::SurfaceClass::Sky, _) => {
+                                        VkPipelineType::BspSky
+                                    }
+                                    (bsp::materials::SurfaceClass::Liquid, _) => {
+                                        VkPipelineType::BspLiquid
+                                    }
+                                    _ => VkPipelineType::BspOpaque,
+                                };
+                                let ubo_offset = (material_index as u64)
+                                    .checked_mul(ubo_stride)
+                                    .expect("BSP surface UBO offset overflow");
+                                surface_cache.add(
+                                    arena_id,
+                                    BspCachedSurfaceRepr {
+                                        material_descriptor,
+                                        surf_ubo_alloc: crate::vulkan::vk_types::VkSubAlloc {
+                                            alloc_address: 0,
+                                            offset: ubo_offset,
+                                            buffer: ubo_buffer,
+                                            size: ubo_size,
+                                            sub_buffer_index: 0,
+                                        },
+                                        pipeline,
+                                        surface_flags: material.surface_uniform.surface_flags,
+                                        albedo_tex: binding.0,
+                                        fullbright_tex: Some(binding.3),
+                                        lightmap_tex: default_white_handle,
+                                        arena_id,
+                                    },
+                                )
+                            },
+                        )
+                        .collect();
+                    handles
+                };
+                staging.material_handles = material_handles.clone();
+
+                // Validate every material through authoritative cache lookup.
+                {
+                    let surface_cache = data_cache
+                        .bsp_surface_cache
+                        .lock()
+                        .map_err(|_| "bsp_surface_cache lock poisoned".to_string())?;
+                    for &handle in &material_handles {
+                        surface_cache
+                            .get_with_arena(arena_id, handle)
+                            .map_err(|e| format!("BSP material validation failed: {e}"))?;
+                    }
+                }
+
+                let mut face_materials = vec![None; face_count];
+                for (face_index, material_index) in
+                    plan.face_to_material.iter().copied().enumerate()
+                {
+                    if let Some(material_index) = material_index {
+                        face_materials[face_index] = Some(material_handles[material_index]);
+                    }
+                }
+                let batch_materials = plan
+                    .batches
+                    .iter()
+                    .map(|batch| material_handles[batch.material_plan_index])
+                    .collect::<Vec<_>>();
+                info!(
+                    "BSP upload: {} shared materials registered for {} batches in arena {}",
+                    material_handles.len(),
+                    batch_meshes.len(),
+                    arena_id,
+                );
+
+                // Test-only fault injection for GPU rollback validation.
+                if FAIL_BSP_UPLOAD_AFTER_MATERIAL_REGISTRATION
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(
+                        "injected BSP upload failure after material registration".to_string()
+                    );
+                }
+
+                // ── 6. Initialize frame-values UBO and descriptor sets (set 2) ─
+                {
+                    let alloc_guard = guard!(
+                        allocator
+                            .lock()
+                            .map_err(|_| "allocator lock poisoned".to_string()),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+                    let frame_values_layout = desc_layout_cache.get(VkDescType::BspFrameValues);
+
+                    let ubo_size = std::mem::size_of::<BspFrameValuesUniform>() as u64;
+                    let stride = ubo_size
+                        .checked_next_multiple_of(uniform_offset_alignment.max(1))
+                        .ok_or_else(|| "BSP frame-values UBO stride overflow".to_string())?;
+                    if frame_slot_count == 0 {
+                        let err = "BSP frame-values requires at least one frame slot".to_string();
+                        return Err(err);
+                    }
+                    let total = stride
+                        .checked_mul(frame_slot_count as u64)
+                        .ok_or_else(|| "BSP frame-values UBO size overflow".to_string())?;
+
+                    let buffer_info = ash::vk::BufferCreateInfo::default()
+                        .size(total)
+                        .usage(ash::vk::BufferUsageFlags::UNIFORM_BUFFER)
+                        .sharing_mode(ash::vk::SharingMode::EXCLUSIVE);
+
+                    let fv_alloc_info = vk_mem::AllocationCreateInfo {
+                        usage: vk_mem::MemoryUsage::AutoPreferHost,
+                        flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+                        required_flags: ash::vk::MemoryPropertyFlags::HOST_VISIBLE
+                            | ash::vk::MemoryPropertyFlags::HOST_COHERENT,
+                        ..Default::default()
+                    };
+
+                    let (fv_buffer, mut fv_allocation) = guard!(
+                        unsafe {
+                            alloc_guard
+                                .create_buffer(&buffer_info, &fv_alloc_info)
+                                .map_err(|e| {
+                                    format!("failed to create BSP frame-values UBO: {e:?}")
+                                })
+                        },
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+
+                    let fv_ptr = guard!(
+                        unsafe {
+                            alloc_guard.map_memory(&mut fv_allocation).map_err(|e| {
+                                format!("failed to map BSP frame-values memory: {e:?}")
+                            })
+                        },
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+                    let default_values = BspFrameValuesUniform::default();
+                    for slot in 0..frame_slot_count {
+                        unsafe {
+                            let dst = (fv_ptr as *mut u8).add((stride * slot as u64) as usize);
+                            std::ptr::copy_nonoverlapping(
+                                &default_values as *const _ as *const u8,
+                                dst,
+                                ubo_size as usize,
+                            );
+                        }
+                    }
+                    unsafe {
+                        alloc_guard.unmap_memory(&mut fv_allocation);
+                    }
+
+                    let pool_sizes = [ash::vk::DescriptorPoolSize::default()
+                        .ty(ash::vk::DescriptorType::UNIFORM_BUFFER)
+                        .descriptor_count(frame_slot_count)];
+                    let pool_info = ash::vk::DescriptorPoolCreateInfo::default()
+                        .flags(ash::vk::DescriptorPoolCreateFlags::empty())
+                        .max_sets(frame_slot_count)
+                        .pool_sizes(&pool_sizes);
+
+                    let fv_pool = guard!(
+                        unsafe {
+                            device
+                                .create_descriptor_pool(&pool_info, None)
+                                .map_err(|e| {
+                                    format!("failed to create BSP frame-values pool: {e:?}")
+                                })
+                        },
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+
+                    let mut fv_descriptors = Vec::with_capacity(frame_slot_count as usize);
+                    for slot in 0..frame_slot_count {
+                        let alloc_info = ash::vk::DescriptorSetAllocateInfo::default()
+                            .descriptor_pool(fv_pool)
+                            .set_layouts(std::slice::from_ref(&frame_values_layout));
+                        let sets = guard!(
+                            unsafe {
+                                device.allocate_descriptor_sets(&alloc_info).map_err(|e| {
+                                    format!("failed to allocate BSP frame-values set: {e:?}")
+                                })
+                            },
+                            staging,
+                            device,
+                            allocator,
+                            data_cache
+                        );
+
+                        let ubo_info = ash::vk::DescriptorBufferInfo::default()
+                            .buffer(fv_buffer)
+                            .offset(stride * slot as u64)
+                            .range(ubo_size);
+
+                        let write = ash::vk::WriteDescriptorSet::default()
+                            .dst_set(sets[0])
+                            .dst_binding(0)
+                            .descriptor_type(ash::vk::DescriptorType::UNIFORM_BUFFER)
+                            .buffer_info(std::slice::from_ref(&ubo_info));
+
+                        unsafe {
+                            device.update_descriptor_sets(&[write], &[]);
+                        }
+
+                        fv_descriptors.push(sets[0]);
+                    }
+
+                    drop(alloc_guard);
+                    let mut surface_cache = guard!(
+                        data_cache
+                            .bsp_surface_cache
+                            .lock()
+                            .map_err(|_| "bsp_surface_cache lock poisoned".to_string()),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+                    guard!(
+                        surface_cache.install_frame_values(
+                            arena_id,
+                            BspSurfaceUboGpu {
+                                buffer: fv_buffer,
+                                allocation: fv_allocation,
+                            },
+                            fv_pool,
+                            fv_descriptors,
+                            frame_values_layout,
+                            frame_slot_count,
+                            stride,
+                        ),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+                }
+
+                // ── 7. Build canonical mounted batch records ───────────────
+                let mut mounted_batches = Vec::with_capacity(plan.batches.len());
+                if plan.batches.len() != batch_meshes.len()
+                    || plan.batches.len() != batch_materials.len()
+                {
+                    let err = format!(
+                        "batch resource count mismatch: {} planned, {} meshes, {} materials",
+                        plan.batches.len(),
+                        batch_meshes.len(),
+                        batch_materials.len()
+                    );
+                    return Err(err);
+                }
+                for index in 0..plan.batches.len() {
+                    // Bounds are retained from the pre-transfer CPU merge; they survive
+                    // mesh vertex/index transfer via `mem::take` because bounds are Copy.
+                    let bounds = plan.batches[index].bounds;
+                    let mounted = guard!(
+                        MountedBspBatch::try_new(
+                            &plan.batches[index].render_batch,
+                            batch_meshes[index],
+                            batch_materials[index],
+                            bounds,
+                        ),
+                        staging,
+                        device,
+                        allocator,
+                        data_cache
+                    );
+                    mounted_batches.push(mounted);
+                }
+
+                guard!(
+                    verify_exact_renderable_face_coverage(&mounted_batches, &plan),
                     staging,
                     device,
                     allocator,
                     data_cache
                 );
 
-                let ubo_info = ash::vk::DescriptorBufferInfo::default()
-                    .buffer(fv_buffer)
-                    .offset(stride * slot as u64)
-                    .range(ubo_size);
+                // ── 8. Build resource lease and publish canonical mount ────
+                let lease = staging.into_lease(arena_id);
+                let mut mount_state = BspMountState::from_extracted(extracted);
+                mount_state.face_meshes = face_meshes.clone();
+                mount_state.face_materials = face_materials.clone();
 
-                let write = ash::vk::WriteDescriptorSet::default()
-                    .dst_set(sets[0])
-                    .dst_binding(0)
-                    .descriptor_type(ash::vk::DescriptorType::UNIFORM_BUFFER)
-                    .buffer_info(std::slice::from_ref(&ubo_info));
-
-                unsafe {
-                    device.update_descriptor_sets(&[write], &[]);
-                }
-
-                fv_descriptors.push(sets[0]);
-            }
-
-            drop(alloc_guard);
-            let mut surface_cache = guard!(
-                data_cache
-                    .bsp_surface_cache
-                    .lock()
-                    .map_err(|_| "bsp_surface_cache lock poisoned".to_string()),
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-            guard!(
-                surface_cache.install_frame_values(
-                    arena_id,
-                    BspSurfaceUboGpu {
-                        buffer: fv_buffer,
-                        allocation: fv_allocation,
+                Ok((
+                    PreparedBspMount::from_canonical(
+                        mount_state,
+                        mounted_batches,
+                        extracted.leaf_membership.clone(),
+                        extracted.light_descriptors.clone(),
+                        Some(demand),
+                        Some(lease),
+                    )?,
+                    // The lease is already consumed into the mount above; return a
+                    // placeholder so the outer match can still track the arena.
+                    BspResourceLease {
+                        arena_id,
+                        mesh_handles: Vec::new(),
+                        texture_handles: Vec::new(),
+                        material_handles: Vec::new(),
                     },
-                    fv_pool,
-                    fv_descriptors,
-                    frame_values_layout,
-                    frame_slot_count,
-                    stride,
-                ),
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-        }
-
-        // ── 7. Build canonical mounted batch records ───────────────
-        let mut mounted_batches = Vec::with_capacity(plan.batches.len());
-        if plan.batches.len() != batch_meshes.len() || plan.batches.len() != batch_materials.len() {
-            let err = format!(
-                "batch resource count mismatch: {} planned, {} meshes, {} materials",
-                plan.batches.len(),
-                batch_meshes.len(),
-                batch_materials.len()
-            );
-            return Err(err);
-        }
-        for index in 0..plan.batches.len() {
-            // Bounds are retained from the pre-transfer CPU merge; they survive
-            // mesh vertex/index transfer via `mem::take` because bounds are Copy.
-            let bounds = plan.batches[index].bounds;
-            let mounted = guard!(
-                MountedBspBatch::try_new(
-                    &plan.batches[index].render_batch,
-                    batch_meshes[index],
-                    batch_materials[index],
-                    bounds,
-                ),
-                staging,
-                device,
-                allocator,
-                data_cache
-            );
-            mounted_batches.push(mounted);
-        }
-
-        guard!(
-            verify_exact_renderable_face_coverage(&mounted_batches, &plan),
-            staging,
-            device,
-            allocator,
-            data_cache
-        );
-
-        // ── 8. Build resource lease and publish canonical mount ────
-        let lease = staging.into_lease(arena_id);
-        let mut mount_state = BspMountState::from_extracted(extracted);
-        mount_state.face_meshes = face_meshes.clone();
-        mount_state.face_materials = face_materials.clone();
-
-        Ok((
-            PreparedBspMount::from_canonical(
-                mount_state,
-                mounted_batches,
-                extracted.leaf_membership.clone(),
-                extracted.light_descriptors.clone(),
-                Some(demand),
-                Some(lease),
-            )?,
-            // The lease is already consumed into the mount above; return a
-            // placeholder so the outer match can still track the arena.
-            BspResourceLease {
-                arena_id,
-                mesh_handles: Vec::new(),
-                texture_handles: Vec::new(),
-                material_handles: Vec::new(),
-            },
-        ))
-        })(&mut staging);
+                ))
+            })(&mut staging);
 
         match upload_result {
             Ok((mount, _lease)) => {
@@ -1843,7 +1883,9 @@ pub enum BspEvidenceVisibility {
 ///   face_count: u32 LE
 ///   source_face_indices: [u32 LE; face_count]
 #[cfg(feature = "bsp")]
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct BspCanonicalDigest(pub u64);
 
 #[cfg(feature = "bsp")]
@@ -1930,7 +1972,10 @@ pub enum BspEvidenceFailure {
         mounted_digest: BspCanonicalDigest,
     },
     /// A static-world batch was not model_index 0.
-    NonStaticModel { batch_index: usize, model_index: u32 },
+    NonStaticModel {
+        batch_index: usize,
+        model_index: u32,
+    },
     /// Stale or missing mesh at record time.
     StaleMesh { batch_index: usize },
     /// Stale or missing material at record time.
@@ -2048,7 +2093,10 @@ mod tests {
     fn canonical_digest_sensitive_to_render_class() {
         let d1 = BspCanonicalDigest::compute(0, 1, 0, &[0, 255, 255, 255], 0, &[0]);
         let d2 = BspCanonicalDigest::compute(1, 1, 0, &[0, 255, 255, 255], 0, &[0]);
-        assert_ne!(d1, d2, "different render_class must produce different digest");
+        assert_ne!(
+            d1, d2,
+            "different render_class must produce different digest"
+        );
     }
 
     #[cfg(feature = "bsp")]
@@ -2056,7 +2104,10 @@ mod tests {
     fn canonical_digest_sensitive_to_material_identity() {
         let d1 = BspCanonicalDigest::compute(0, 1, 0, &[0, 255, 255, 255], 0, &[0]);
         let d2 = BspCanonicalDigest::compute(0, 2, 0, &[0, 255, 255, 255], 0, &[0]);
-        assert_ne!(d1, d2, "different material_identity must produce different digest");
+        assert_ne!(
+            d1, d2,
+            "different material_identity must produce different digest"
+        );
     }
 
     #[cfg(feature = "bsp")]
@@ -2072,7 +2123,10 @@ mod tests {
     fn canonical_digest_sensitive_to_model_index() {
         let d1 = BspCanonicalDigest::compute(0, 1, 0, &[0, 255, 255, 255], 0, &[0]);
         let d2 = BspCanonicalDigest::compute(0, 1, 0, &[0, 255, 255, 255], 1, &[0]);
-        assert_ne!(d1, d2, "different model_index must produce different digest");
+        assert_ne!(
+            d1, d2,
+            "different model_index must produce different digest"
+        );
     }
 
     #[cfg(feature = "bsp")]
@@ -2089,7 +2143,10 @@ mod tests {
         let faces: Vec<u32> = (0..500).collect();
         let d = BspCanonicalDigest::compute(0, 1, 0, &[0, 255, 255, 255], 0, &faces);
         // Should not panic; digest is still computed with first MAX_DIGEST_FACES
-        assert_ne!(d.0, 0, "digest should be non-zero even with truncated faces");
+        assert_ne!(
+            d.0, 0,
+            "digest should be non-zero even with truncated faces"
+        );
     }
 
     #[cfg(feature = "bsp")]
@@ -2139,8 +2196,8 @@ mod tests {
 
     #[cfg(feature = "bsp")]
     fn material_fixture_extracted() -> bsp::extract::ExtractedBsp {
-        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../bsp/tests/fixtures");
+        let fixtures =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../bsp/tests/fixtures");
         let bsp_path = fixtures.join("compiled/dungeon-materials-bsp2.bsp");
         let palette_path = fixtures.join("palettes/project_palette.lmp");
         let palette_bytes = std::fs::read(&palette_path).expect("read fixture palette");
@@ -2184,23 +2241,22 @@ mod tests {
 
         eprintln!(
             "BSP rollback GPU test working directory: {}",
-            std::env::current_dir().expect("working directory").display()
+            std::env::current_dir()
+                .expect("working directory")
+                .display()
         );
-        let mut renderer = crate::api::renderer::Renderer::new_headless(
-            crate::api::config::RendererConfig {
+        let mut renderer =
+            crate::api::renderer::Renderer::new_headless(crate::api::config::RendererConfig {
                 app_name: "bsp-upload-rollback-fault".to_string(),
                 headless: true,
                 validation_layer: false,
                 preload_startup_scene: false,
                 ..Default::default()
-            },
-        )
-        .expect("headless renderer");
+            })
+            .expect("headless renderer");
 
-        FAIL_BSP_UPLOAD_AFTER_MATERIAL_REGISTRATION.store(
-            true,
-            std::sync::atomic::Ordering::SeqCst,
-        );
+        FAIL_BSP_UPLOAD_AFTER_MATERIAL_REGISTRATION
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let error = renderer
             .prepare_bsp_mount(&extracted)
             .expect_err("injected upload failure must propagate");

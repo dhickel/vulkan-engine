@@ -78,12 +78,7 @@ impl ObjectId {
 
     /// Test-only constructor for unit tests.
     #[cfg(test)]
-    pub(crate) fn test(
-        provenance_id: u64,
-        kind: ObjectKind,
-        slot: u32,
-        generation: u32,
-    ) -> Self {
+    pub(crate) fn test(provenance_id: u64, kind: ObjectKind, slot: u32, generation: u32) -> Self {
         Self {
             provenance: SceneRuntimeId::test(provenance_id),
             kind,
@@ -163,9 +158,7 @@ pub enum ObjectError {
     /// A persistent [`SceneObjectId`] was used more than once.
     DuplicatePersistentId(SceneObjectId),
     /// The generation counter for a slot has exhausted all values.
-    GenerationExhausted {
-        slot: u32,
-    },
+    GenerationExhausted { slot: u32 },
 }
 
 impl std::fmt::Display for ObjectError {

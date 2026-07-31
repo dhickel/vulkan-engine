@@ -33,9 +33,19 @@ fn minimal_bsp_bytes() -> Vec<u8> {
     let lumps: [(u32, u32); 15] = [
         (entity_offset, entity_size),
         (plane_offset, plane_size),
-        (0, 0), (0, 0), (0, 0), (0, 0), (0, 0),
-        (0, 0), (0, 0), (0, 0), (0, 0), (0, 0),
-        (0, 0), (0, 0), (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
     ];
     for (off, sz) in &lumps {
         data.extend_from_slice(&off.to_le_bytes());
@@ -65,9 +75,19 @@ fn light_bsp_bytes() -> Vec<u8> {
     let lumps: [(u32, u32); 15] = [
         (entity_offset, entity_size),
         (plane_offset, plane_size),
-        (0, 0), (0, 0), (0, 0), (0, 0), (0, 0),
-        (0, 0), (0, 0), (0, 0), (0, 0), (0, 0),
-        (0, 0), (0, 0), (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
     ];
     for (off, sz) in &lumps {
         data.extend_from_slice(&off.to_le_bytes());
@@ -173,10 +193,7 @@ impl AppBridge for RecordingBridge {
     fn validate(&self, _prepared: &dyn PreparedBridgeState) -> Result<(), String> {
         Ok(())
     }
-    fn activate(
-        &mut self,
-        _prepared: &mut dyn PreparedBridgeState,
-    ) -> Box<dyn ActiveBridgeState> {
+    fn activate(&mut self, _prepared: &mut dyn PreparedBridgeState) -> Box<dyn ActiveBridgeState> {
         self.activate_called = true;
         Box::new(RecordingActive {
             name: self.name.clone(),
@@ -209,10 +226,7 @@ impl AppBridge for FailingPrepareBridge {
     fn validate(&self, _prepared: &dyn PreparedBridgeState) -> Result<(), String> {
         Ok(())
     }
-    fn activate(
-        &mut self,
-        _prepared: &mut dyn PreparedBridgeState,
-    ) -> Box<dyn ActiveBridgeState> {
+    fn activate(&mut self, _prepared: &mut dyn PreparedBridgeState) -> Box<dyn ActiveBridgeState> {
         Box::new(RecordingActive {
             name: "failing-prepare".into(),
         })
@@ -243,10 +257,7 @@ impl AppBridge for FailingValidateBridge {
     fn validate(&self, _prepared: &dyn PreparedBridgeState) -> Result<(), String> {
         Err("intentional validation failure".to_string())
     }
-    fn activate(
-        &mut self,
-        _prepared: &mut dyn PreparedBridgeState,
-    ) -> Box<dyn ActiveBridgeState> {
+    fn activate(&mut self, _prepared: &mut dyn PreparedBridgeState) -> Box<dyn ActiveBridgeState> {
         Box::new(RecordingActive {
             name: "failing-validate".into(),
         })
@@ -277,10 +288,7 @@ impl AppBridge for PanicActivateBridge {
     fn validate(&self, _prepared: &dyn PreparedBridgeState) -> Result<(), String> {
         Ok(())
     }
-    fn activate(
-        &mut self,
-        _prepared: &mut dyn PreparedBridgeState,
-    ) -> Box<dyn ActiveBridgeState> {
+    fn activate(&mut self, _prepared: &mut dyn PreparedBridgeState) -> Box<dyn ActiveBridgeState> {
         panic!("intentional activation panic")
     }
     fn teardown(&mut self, _active: &mut dyn ActiveBridgeState) -> Result<(), String> {
@@ -309,10 +317,7 @@ impl AppBridge for PanicRollbackBridge {
     fn validate(&self, _prepared: &dyn PreparedBridgeState) -> Result<(), String> {
         Ok(())
     }
-    fn activate(
-        &mut self,
-        _prepared: &mut dyn PreparedBridgeState,
-    ) -> Box<dyn ActiveBridgeState> {
+    fn activate(&mut self, _prepared: &mut dyn PreparedBridgeState) -> Box<dyn ActiveBridgeState> {
         Box::new(RecordingActive {
             name: "panic-rollback".into(),
         })
@@ -345,10 +350,7 @@ impl AppBridge for FailingTeardownBridge {
     fn validate(&self, _prepared: &dyn PreparedBridgeState) -> Result<(), String> {
         Ok(())
     }
-    fn activate(
-        &mut self,
-        _prepared: &mut dyn PreparedBridgeState,
-    ) -> Box<dyn ActiveBridgeState> {
+    fn activate(&mut self, _prepared: &mut dyn PreparedBridgeState) -> Box<dyn ActiveBridgeState> {
         Box::new(RecordingActive {
             name: "failing-teardown".into(),
         })

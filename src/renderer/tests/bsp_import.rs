@@ -308,13 +308,11 @@ fn pbr_companion_face_produces_pbr_lightmapped_desc() {
         0
     );
     assert_ne!(
-        desc.surface_params.surface_flags
-            & renderer::api::bsp::bsp_surface_flags::SURF_PBR_NORMAL,
+        desc.surface_params.surface_flags & renderer::api::bsp::bsp_surface_flags::SURF_PBR_NORMAL,
         0
     );
     assert_ne!(
-        desc.surface_params.surface_flags
-            & renderer::api::bsp::bsp_surface_flags::SURF_PBR_GLOSS,
+        desc.surface_params.surface_flags & renderer::api::bsp::bsp_surface_flags::SURF_PBR_GLOSS,
         0
     );
     assert_ne!(
@@ -377,19 +375,18 @@ fn build_face_meshes_skips_invalid_faces() {
 
 #[test]
 fn phase03_material_fixture_load_and_describe() {
-    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../bsp/tests/fixtures");
+    let fixture_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../bsp/tests/fixtures");
     let bsp_data = std::fs::read(fixture_path.join("compiled/dungeon-materials-bsp2.bsp"))
         .expect("read dungeon-materials-bsp2.bsp");
-    let palette_data = std::fs::read(fixture_path.join("palettes/project_palette.lmp"))
-        .expect("read palette");
+    let palette_data =
+        std::fs::read(fixture_path.join("palettes/project_palette.lmp")).expect("read palette");
 
     let options = bsp::LoadOptions {
         palette: Some(palette_data),
         ..Default::default()
     };
-    let world = bsp::BspLoader::load(&bsp_data, &options)
-        .expect("load dungeon-materials-bsp2");
+    let world = bsp::BspLoader::load(&bsp_data, &options).expect("load dungeon-materials-bsp2");
 
     let palette = bsp::resources::decode_palette(
         &std::fs::read(fixture_path.join("palettes/project_palette.lmp")).unwrap(),
@@ -434,13 +431,15 @@ fn phase03_material_fixture_load_and_describe() {
         .iter()
         .filter(|d| {
             d.as_ref().is_some_and(|desc| {
-                desc.surface_params.surface_flags
-                    & renderer::api::bsp::bsp_surface_flags::SURF_PBR
+                desc.surface_params.surface_flags & renderer::api::bsp::bsp_surface_flags::SURF_PBR
                     != 0
             })
         })
         .count();
-    assert!(pbr_count > 0, "at least one PBR surface expected, got {pbr_count}");
+    assert!(
+        pbr_count > 0,
+        "at least one PBR surface expected, got {pbr_count}"
+    );
 
     // Verify faces and light descriptors exist
     assert!(!extracted.face_geometries.is_empty());

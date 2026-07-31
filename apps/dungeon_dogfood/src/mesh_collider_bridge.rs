@@ -112,7 +112,10 @@ impl std::fmt::Display for BridgeError {
         match self {
             Self::NoColliderRecipe => write!(f, "None policy does not allocate a recipe"),
             Self::RecipeAlreadyExists { slot, generation } => {
-                write!(f, "recipe already exists: slot {slot} generation {generation}")
+                write!(
+                    f,
+                    "recipe already exists: slot {slot} generation {generation}"
+                )
             }
             Self::RecipeNotFound { slot, generation } => {
                 write!(f, "recipe not found: slot {slot} generation {generation}")
@@ -121,7 +124,10 @@ impl std::fmt::Display for BridgeError {
                 write!(f, "recipe generation exhausted for slot {slot}")
             }
             Self::InvalidIndices { index_count } => {
-                write!(f, "invalid indices: count {index_count} not a multiple of 3")
+                write!(
+                    f,
+                    "invalid indices: count {index_count} not a multiple of 3"
+                )
             }
             Self::NonFinitePositions => write!(f, "non-finite positions in DTO"),
             Self::TrimeshOnNonStaticBody => {
@@ -252,15 +258,15 @@ impl RecipeStore {
             .generation
             .checked_add(1)
             .ok_or(BridgeError::GenerationExhausted { slot: handle.slot })?;
-        let recipe = slot.recipe.take().expect("live mesh map must reference a recipe");
+        let recipe = slot
+            .recipe
+            .take()
+            .expect("live mesh map must reference a recipe");
         slot.generation = next_generation;
         slot.retiring = true;
         self.mesh_to_handle.remove(&key);
-        self.retirement.enqueue(
-            RetirementClass::ColliderRecipe,
-            retire_after,
-            recipe,
-        );
+        self.retirement
+            .enqueue(RetirementClass::ColliderRecipe, retire_after, recipe);
         Ok(Some(handle))
     }
 
@@ -556,10 +562,8 @@ impl MeshColliderBridge {
             glam::Quat::from_array(body_pose.rotation),
             glam::Vec3::from_array(body_pose.translation),
         );
-        let instance_pose = glam::Mat4::from_rotation_translation(
-            decomposed.rotation,
-            decomposed.translation,
-        );
+        let instance_pose =
+            glam::Mat4::from_rotation_translation(decomposed.rotation, decomposed.translation);
         let collider_from_body = body_world.inverse() * instance_pose;
         let (_, collider_rotation, collider_translation) =
             collider_from_body.to_scale_rotation_translation();
@@ -665,7 +669,10 @@ impl Default for MeshColliderBridge {
 // ---------------------------------------------------------------------------
 
 /// Validate a DTO against a policy before recipe creation.
-fn validate_dto_for_policy(dto: &MeshGeometryDto, policy: ColliderPolicy) -> Result<(), BridgeError> {
+fn validate_dto_for_policy(
+    dto: &MeshGeometryDto,
+    policy: ColliderPolicy,
+) -> Result<(), BridgeError> {
     let shape = match policy {
         ColliderPolicy::None => return Ok(()),
         ColliderPolicy::StaticTrimesh => {
@@ -770,13 +777,7 @@ fn build_scaled_shape(
             let scaled_positions: Vec<[f32; 3]> = recipe
                 .positions
                 .iter()
-                .map(|p| {
-                    [
-                        p[0] * scale.x,
-                        p[1] * scale.y,
-                        p[2] * scale.z,
-                    ]
-                })
+                .map(|p| [p[0] * scale.x, p[1] * scale.y, p[2] * scale.z])
                 .collect();
 
             let indices: Vec<[u32; 3]> = recipe
@@ -794,13 +795,7 @@ fn build_scaled_shape(
             let points: Vec<[f32; 3]> = recipe
                 .positions
                 .iter()
-                .map(|p| {
-                    [
-                        p[0] * scale.x,
-                        p[1] * scale.y,
-                        p[2] * scale.z,
-                    ]
-                })
+                .map(|p| [p[0] * scale.x, p[1] * scale.y, p[2] * scale.z])
                 .collect();
 
             Ok(ColliderShape::ConvexHull { points })
@@ -948,7 +943,9 @@ mod tests {
     fn duplicate_recipe_rejected() {
         let mut bridge = MeshColliderBridge::new();
         let dto = make_dto(10, 0, floor_positions(), floor_indices());
-        bridge.register_recipe(&dto, ColliderPolicy::StaticTrimesh).unwrap();
+        bridge
+            .register_recipe(&dto, ColliderPolicy::StaticTrimesh)
+            .unwrap();
         let err = bridge
             .register_recipe(&dto, ColliderPolicy::StaticTrimesh)
             .unwrap_err();
@@ -973,7 +970,9 @@ mod tests {
     fn recipe_for_mesh_by_generation() {
         let mut bridge = MeshColliderBridge::new();
         let dto = make_dto(10, 0, floor_positions(), floor_indices());
-        bridge.register_recipe(&dto, ColliderPolicy::StaticTrimesh).unwrap();
+        bridge
+            .register_recipe(&dto, ColliderPolicy::StaticTrimesh)
+            .unwrap();
         assert!(bridge.recipe_for_mesh(MeshHandle::new(10, 0)).is_ok());
     }
 
@@ -981,10 +980,10 @@ mod tests {
     fn stale_mesh_generation_rejected() {
         let mut bridge = MeshColliderBridge::new();
         let dto = make_dto(10, 0, floor_positions(), floor_indices());
-        bridge.register_recipe(&dto, ColliderPolicy::StaticTrimesh).unwrap();
-        let err = bridge
-            .recipe_for_mesh(MeshHandle::new(10, 1))
-            .unwrap_err();
+        bridge
+            .register_recipe(&dto, ColliderPolicy::StaticTrimesh)
+            .unwrap();
+        let err = bridge.recipe_for_mesh(MeshHandle::new(10, 1)).unwrap_err();
         assert!(matches!(err, BridgeError::RecipeNotFound { .. }));
     }
 
@@ -992,7 +991,9 @@ mod tests {
     fn unload_removes_recipe() {
         let mut bridge = MeshColliderBridge::new();
         let dto = make_dto(10, 0, floor_positions(), floor_indices());
-        bridge.register_recipe(&dto, ColliderPolicy::StaticTrimesh).unwrap();
+        bridge
+            .register_recipe(&dto, ColliderPolicy::StaticTrimesh)
+            .unwrap();
         let removed = bridge
             .unload_recipe(MeshHandle::new(10, 0), FrameSerial::new(3))
             .unwrap();
@@ -1013,9 +1014,7 @@ mod tests {
     fn cancelled_recipe_does_not_appear() {
         // Queued cancellation produces no recipe. Simulate: never register.
         let bridge = MeshColliderBridge::new();
-        assert!(bridge
-            .recipe_for_mesh(MeshHandle::new(10, 0))
-            .is_err());
+        assert!(bridge.recipe_for_mesh(MeshHandle::new(10, 0)).is_err());
         assert!(bridge.is_empty());
     }
 
@@ -1177,7 +1176,8 @@ mod tests {
             .unwrap();
 
         let scale = glam::Vec3::new(2.0, 2.0, 2.0);
-        let m = Mat4::from_scale_rotation_translation(scale, glam::Quat::IDENTITY, glam::Vec3::ZERO);
+        let m =
+            Mat4::from_scale_rotation_translation(scale, glam::Quat::IDENTITY, glam::Vec3::ZERO);
         let (body, collider) = bridge
             .instantiate_collider(
                 recipe_handle,
@@ -1269,7 +1269,10 @@ mod tests {
             bridge.world.step(1.0 / 60.0).unwrap();
         }
         let contacts = bridge.world.last_contact_records();
-        assert!(!contacts.is_empty(), "contact should be detected after sphere falls onto trimesh floor");
+        assert!(
+            !contacts.is_empty(),
+            "contact should be detected after sphere falls onto trimesh floor"
+        );
     }
 
     #[test]
@@ -1278,9 +1281,11 @@ mod tests {
         let body_id = PhysicsBodyId::new("body.dynamic");
         let node_id = SceneNodeId::new(42, 0);
 
-        bridge
-            .body_node_map
-            .insert(body_id.clone(), node_id, Mat4::from_scale(glam::Vec3::splat(2.0)));
+        bridge.body_node_map.insert(
+            body_id.clone(),
+            node_id,
+            Mat4::from_scale(glam::Vec3::splat(2.0)),
+        );
         assert_eq!(bridge.body_node_map.get(&body_id), Some(node_id));
         bridge.body_node_map.remove(&body_id);
         assert_eq!(bridge.body_node_map.get(&body_id), None);
@@ -1294,9 +1299,7 @@ mod tests {
             .register_deferred_recipe(&dto, ColliderPolicy::StaticTrimesh)
             .unwrap();
 
-        assert!(bridge
-            .unload_recipe(dto.mesh, FrameSerial::new(5))
-            .unwrap());
+        assert!(bridge.unload_recipe(dto.mesh, FrameSerial::new(5)).unwrap());
         assert!(bridge.recipe_by_handle(handle).is_err());
         assert_eq!(bridge.pending_retirement_count(), 1);
         assert_eq!(bridge.reap_retired(FrameSerial::new(4)).unwrap(), 0);

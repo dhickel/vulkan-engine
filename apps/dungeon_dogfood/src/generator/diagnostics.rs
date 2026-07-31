@@ -124,7 +124,9 @@ mod tests {
             &diagnostics.generator_identity,
         ] {
             assert_eq!(value.len(), 64);
-            assert!(value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+            assert!(value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
         }
     }
 

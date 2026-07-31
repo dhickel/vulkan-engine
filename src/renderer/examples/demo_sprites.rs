@@ -33,13 +33,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sprites = SpriteRenderer::new();
 
     // A red square at (50, 50), 64×64 pixels
-    sprites.push_colored(Vec2::new(50.0, 50.0), Vec2::new(64.0, 64.0), [1.0, 0.0, 0.0, 1.0]);
+    sprites.push_colored(
+        Vec2::new(50.0, 50.0),
+        Vec2::new(64.0, 64.0),
+        [1.0, 0.0, 0.0, 1.0],
+    );
 
     // A green square at (150, 50)
-    sprites.push_colored(Vec2::new(150.0, 50.0), Vec2::new(64.0, 64.0), [0.0, 1.0, 0.0, 1.0]);
+    sprites.push_colored(
+        Vec2::new(150.0, 50.0),
+        Vec2::new(64.0, 64.0),
+        [0.0, 1.0, 0.0, 1.0],
+    );
 
     // A blue square at (100, 150)
-    sprites.push_colored(Vec2::new(100.0, 150.0), Vec2::new(64.0, 64.0), [0.0, 0.0, 1.0, 1.0]);
+    sprites.push_colored(
+        Vec2::new(100.0, 150.0),
+        Vec2::new(64.0, 64.0),
+        [0.0, 0.0, 1.0, 1.0],
+    );
 
     // A rotated yellow square in the center
     sprites.push_sprite(
@@ -71,11 +83,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     renderer.set_frame_extensions(extensions);
 
     // Use an identity 3D camera since we only care about the sprite layer.
-    let camera_view = CameraView::from_matrices(
-        glam::Mat4::IDENTITY,
-        glam::Mat4::IDENTITY,
-        glam::Vec3::ZERO,
-    );
+    let camera_view =
+        CameraView::from_matrices(glam::Mat4::IDENTITY, glam::Mat4::IDENTITY, glam::Vec3::ZERO);
 
     let outcome = renderer.render_scene_headless_with_view(&mut scene, camera_view)?;
 

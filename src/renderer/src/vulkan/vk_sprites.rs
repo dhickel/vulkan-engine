@@ -253,7 +253,9 @@ impl VkSprites {
             self.vertex_buffers[slot] = Some(new_buffer);
         }
 
-        let buffer = self.vertex_buffers[slot].as_mut().expect("buffer allocated above");
+        let buffer = self.vertex_buffers[slot]
+            .as_mut()
+            .expect("buffer allocated above");
         let addr_info = vk::BufferDeviceAddressInfo::default().buffer(buffer.buffer);
         self.vertex_buffer_address = unsafe { device.get_buffer_device_address(&addr_info) };
 

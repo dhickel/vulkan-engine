@@ -141,7 +141,6 @@ impl PvsState {
             valid: false,
         }
     }
-
 }
 
 /// Result of a camera leaf lookup.
@@ -267,11 +266,7 @@ pub(crate) fn camera_pvs_with_visleaf_count(
 
     let cam_quake = engine_to_quake_space(*cam_point, scale);
     let cam = camera_leaf_index(&cam_quake, nodes, leaves, planes);
-    if cam.in_solid
-        || cam.outside
-        || cam.leaf_index == 0
-        || cam.leaf_index > visleaf_count
-    {
+    if cam.in_solid || cam.outside || cam.leaf_index == 0 || cam.leaf_index > visleaf_count {
         return None;
     }
 
@@ -298,10 +293,7 @@ fn engine_to_quake_space(v: Vec3, scale: f32) -> Vec3 {
 ///
 /// This uses the markfaces lump: each leaf has a range of markfaces, and each
 /// markface references a face index.
-pub fn build_leaf_membership(
-    leaves: &[lumps::Leaf],
-    markfaces: &[u32],
-) -> Vec<Vec<u32>> {
+pub fn build_leaf_membership(leaves: &[lumps::Leaf], markfaces: &[u32]) -> Vec<Vec<u32>> {
     let visleaf_count = leaves.len().saturating_sub(1) as u32;
     build_leaf_membership_with_visleaf_count(leaves, markfaces, visleaf_count)
 }
@@ -389,7 +381,10 @@ pub fn is_leaf_sealed(
             if (fi as usize) < faces.len() {
                 let face = &faces[fi as usize];
                 if (face.texinfo_id as usize) < face_texinfo_flags.len() {
-                    if face_texinfo_flags[face.texinfo_id as usize] & crate::materials::tex_flags::SURF_SKY != 0 {
+                    if face_texinfo_flags[face.texinfo_id as usize]
+                        & crate::materials::tex_flags::SURF_SKY
+                        != 0
+                    {
                         sky_exposed = true;
                     }
                 }
@@ -547,10 +542,7 @@ mod tests {
             face_id: 0,
             face_num: 0,
         }];
-        let leaves = vec![
-            make_test_leaf(0, 0, 0, 0),
-            make_test_leaf(0, 0, 0, 0),
-        ];
+        let leaves = vec![make_test_leaf(0, 0, 0, 0), make_test_leaf(0, 0, 0, 0)];
 
         // Exactly on the plane → front child (leaf 0)
         let cam = camera_leaf_index(&Vec3::new(0.0, 0.0, 0.0), &nodes, &leaves, &planes);

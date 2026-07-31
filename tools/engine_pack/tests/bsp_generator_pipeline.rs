@@ -68,11 +68,10 @@ fn compile_generated_map(
         .map_err(|msg| compiler::CompilerError::InvalidProfile(msg))?;
 
     let work_dir = staging.join(".compile-work");
-    std::fs::create_dir_all(&work_dir)
-        .map_err(|e| compiler::CompilerError::Io {
-            message: format!("create work dir: {}", work_dir.display()),
-            source: e,
-        })?;
+    std::fs::create_dir_all(&work_dir).map_err(|e| compiler::CompilerError::Io {
+        message: format!("create work dir: {}", work_dir.display()),
+        source: e,
+    })?;
 
     let result = compiler::compile_map(
         map_path,
@@ -102,9 +101,8 @@ fn full_pipeline_generate_compile_validate() {
     let staging = unique_tmp("full-pipeline");
 
     // 1. Generate .map
-    let (map_text, meta) =
-        bsp_generator::generate(0, bsp_generator::DungeonConfig::nominal_m1())
-            .expect("generate must succeed");
+    let (map_text, meta) = bsp_generator::generate(0, bsp_generator::DungeonConfig::nominal_m1())
+        .expect("generate must succeed");
 
     assert!(!map_text.is_empty(), "generated .map must be nonempty");
     assert!(meta.room_count >= 8, "M1 must have >= 8 rooms");
@@ -171,10 +169,7 @@ fn full_pipeline_generate_compile_validate() {
     // 7. Budget validation: face count < 2000, entity count < 50
     let face_count = world.faces.len();
     let entity_count = world.entities.len();
-    assert!(
-        face_count < 2000,
-        "face count {face_count} must be < 2000"
-    );
+    assert!(face_count < 2000, "face count {face_count} must be < 2000");
     assert!(
         entity_count < 50,
         "entity count {entity_count} must be < 50"
@@ -243,9 +238,8 @@ fn compile_bsp_cli_publishes_no_staging_marker() {
         .canonicalize()
         .expect("canonical palette path");
     let wad = wad_path().canonicalize().expect("canonical WAD path");
-    let (map_text, _) =
-        bsp_generator::generate(0, bsp_generator::DungeonConfig::nominal_m1())
-            .expect("generate must succeed");
+    let (map_text, _) = bsp_generator::generate(0, bsp_generator::DungeonConfig::nominal_m1())
+        .expect("generate must succeed");
     std::fs::write(&map_path, map_text).expect("write map");
 
     let output = Command::new(env!("CARGO_BIN_EXE_engine_pack"))
@@ -295,9 +289,8 @@ fn duplicate_compilation_is_reproducible() {
     }
 
     // Generate once
-    let (map_text, _meta) =
-        bsp_generator::generate(0, bsp_generator::DungeonConfig::nominal_m1())
-            .expect("generate must succeed");
+    let (map_text, _meta) = bsp_generator::generate(0, bsp_generator::DungeonConfig::nominal_m1())
+        .expect("generate must succeed");
 
     let staging1 = unique_tmp("repro-1");
     let staging2 = unique_tmp("repro-2");
@@ -307,14 +300,18 @@ fn duplicate_compilation_is_reproducible() {
     std::fs::write(&map_path1, &map_text).expect("write map1");
     std::fs::write(&map_path2, &map_text).expect("write map2");
 
-    let (bsp1, _, _) =
-        compile_generated_map(&staging1, &map_path1, &tool_dir).expect("compile 1");
-    let (bsp2, _, _) =
-        compile_generated_map(&staging2, &map_path2, &tool_dir).expect("compile 2");
+    let (bsp1, _, _) = compile_generated_map(&staging1, &map_path1, &tool_dir).expect("compile 1");
+    let (bsp2, _, _) = compile_generated_map(&staging2, &map_path2, &tool_dir).expect("compile 2");
 
-    assert_eq!(bsp1, bsp2, "duplicate compilations must produce byte-identical BSP");
+    assert_eq!(
+        bsp1, bsp2,
+        "duplicate compilations must produce byte-identical BSP"
+    );
 
-    eprintln!("PASS: duplicate compilations produced identical {} bytes", bsp1.len());
+    eprintln!(
+        "PASS: duplicate compilations produced identical {} bytes",
+        bsp1.len()
+    );
 
     let _ = std::fs::remove_dir_all(&staging1);
     let _ = std::fs::remove_dir_all(&staging2);
@@ -330,9 +327,8 @@ fn sealed_map_no_pointfile() {
         return;
     }
 
-    let (map_text, _meta) =
-        bsp_generator::generate(0, bsp_generator::DungeonConfig::nominal_m1())
-            .expect("generate must succeed");
+    let (map_text, _meta) = bsp_generator::generate(0, bsp_generator::DungeonConfig::nominal_m1())
+        .expect("generate must succeed");
 
     let staging = unique_tmp("sealed");
     let map_path = staging.join("generated.map");
@@ -372,12 +368,13 @@ fn sealed_map_no_pointfile() {
 
 #[test]
 fn profile_and_tool_hashes_recorded() {
-    let profile = compiler::parse_compiler_profile(PROFILE_TOML)
-        .expect("profile must parse");
+    let profile = compiler::parse_compiler_profile(PROFILE_TOML).expect("profile must parse");
     assert_eq!(profile.name, "ericw-q1-bsp2-generated");
     assert_eq!(profile.compiler_identity, "ericw-tools");
 
-    let hashes = profile.expected_hashes.as_ref()
+    let hashes = profile
+        .expected_hashes
+        .as_ref()
         .expect("profile must have expected hashes");
     assert_eq!(hashes.qbsp_sha256.len(), 64);
     assert_eq!(hashes.vis_sha256.len(), 64);
@@ -428,9 +425,8 @@ fn generated_map_within_budgets() {
         return;
     }
 
-    let (map_text, meta) =
-        bsp_generator::generate(0, bsp_generator::DungeonConfig::nominal_m1())
-            .expect("generate must succeed");
+    let (map_text, meta) = bsp_generator::generate(0, bsp_generator::DungeonConfig::nominal_m1())
+        .expect("generate must succeed");
 
     let staging = unique_tmp("budget");
     let map_path = staging.join("generated.map");
@@ -488,14 +484,16 @@ fn generated_map_within_budgets() {
 
 #[test]
 fn generator_metadata_consistent_with_compiled_output() {
-    let (map_text, meta) =
-        bsp_generator::generate(0, bsp_generator::DungeonConfig::nominal_m1())
-            .expect("generate must succeed");
+    let (map_text, meta) = bsp_generator::generate(0, bsp_generator::DungeonConfig::nominal_m1())
+        .expect("generate must succeed");
 
     // Verify metadata bounds are consistent
     assert!(meta.room_count >= 8);
     assert!(meta.room_count <= 16);
-    assert!(meta.corridor_count > 0, "must have corridors connecting rooms");
+    assert!(
+        meta.corridor_count > 0,
+        "must have corridors connecting rooms"
+    );
 
     // Verify entity count estimate is reasonable
     let entity_est = meta.entity_count;

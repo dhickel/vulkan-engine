@@ -474,7 +474,10 @@ fn strict_import_coordinator_prepare_generated_bsp() {
             // If strict import succeeds (all lightmap data present), verify integrity
             assert!(prepare.face_count > 0, "strict import must have faces");
             assert!(prepare.entity_count > 0, "strict import must have entities");
-            assert!(prepare.batch_count > 0, "strict import must produce batches");
+            assert!(
+                prepare.batch_count > 0,
+                "strict import must produce batches"
+            );
             eprintln!(
                 "Strict import prepare OK: {} faces, {} entities, {} batches, {} lights",
                 prepare.face_count, prepare.entity_count, prepare.batch_count, prepare.light_count

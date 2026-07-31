@@ -117,18 +117,15 @@ pub(super) fn reconstruct_movement_graph(
         stage: ErrorStage::Ir,
         operation: "mv_reconstruct_width_convert",
     })?;
-    let height = u16::try_from(level.height).map_err(|_| {
-        GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Ir,
-            operation: "mv_reconstruct_height_convert",
-        }
+    let height = u16::try_from(level.height).map_err(|_| GeneratorError::ArithmeticOverflow {
+        stage: ErrorStage::Ir,
+        operation: "mv_reconstruct_height_convert",
     })?;
-    let layers = u16::try_from(level.layer_count()).map_err(|_| {
-        GeneratorError::ArithmeticOverflow {
+    let layers =
+        u16::try_from(level.layer_count()).map_err(|_| GeneratorError::ArithmeticOverflow {
             stage: ErrorStage::Ir,
             operation: "mv_reconstruct_layers_convert",
-        }
-    })?;
+        })?;
 
     // Collect walkable cells.
     let mut nodes = Vec::new();
@@ -234,8 +231,12 @@ pub(super) fn reconstruct_movement_graph(
         };
         if let (Some(&i), Some(&j)) = (node_index.get(&crest), node_index.get(&landing)) {
             let metadata = MovementEdgeMetadata {
-                source_region: node_regions.get(&crest).and_then(|ids| ids.first().copied()),
-                target_region: node_regions.get(&landing).and_then(|ids| ids.first().copied()),
+                source_region: node_regions
+                    .get(&crest)
+                    .and_then(|ids| ids.first().copied()),
+                target_region: node_regions
+                    .get(&landing)
+                    .and_then(|ids| ids.first().copied()),
                 edge_type: MovementEdgeType::Vertical {
                     lower_anchor,
                     direction: ramp.direction,
@@ -278,18 +279,15 @@ pub(super) fn validate_structural(
         stage: ErrorStage::Ir,
         operation: "struct_width_convert",
     })?;
-    let height = u16::try_from(level.height).map_err(|_| {
-        GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Ir,
-            operation: "struct_height_convert",
-        }
+    let height = u16::try_from(level.height).map_err(|_| GeneratorError::ArithmeticOverflow {
+        stage: ErrorStage::Ir,
+        operation: "struct_height_convert",
     })?;
-    let layers = u16::try_from(level.layer_count()).map_err(|_| {
-        GeneratorError::ArithmeticOverflow {
+    let layers =
+        u16::try_from(level.layer_count()).map_err(|_| GeneratorError::ArithmeticOverflow {
             stage: ErrorStage::Ir,
             operation: "struct_layers_convert",
-        }
-    })?;
+        })?;
 
     if width != config.width() || height != config.height() || layers != config.layers().2 {
         errors.push(validation_error(
@@ -324,7 +322,10 @@ pub(super) fn validate_structural(
             if bottom != Tile::Wall {
                 errors.push(validation_error(
                     "structural",
-                    format!("border_not_wall l={layer} x={x} y={} tile={bottom:?}", height - 1),
+                    format!(
+                        "border_not_wall l={layer} x={x} y={} tile={bottom:?}",
+                        height - 1
+                    ),
                 ));
             }
         }
@@ -344,7 +345,10 @@ pub(super) fn validate_structural(
             if right != Tile::Wall {
                 errors.push(validation_error(
                     "structural",
-                    format!("border_not_wall l={layer} x={} y={y} tile={right:?}", width - 1),
+                    format!(
+                        "border_not_wall l={layer} x={} y={y} tile={right:?}",
+                        width - 1
+                    ),
                 ));
             }
         }
@@ -383,14 +387,11 @@ pub(super) fn validate_structural(
             ));
         }
         for &(ol, ox, oy) in &ramp.opening_cells {
-            let open_tile =
-                level.tile_at_3d(usize::from(ol), usize::from(ox), usize::from(oy));
+            let open_tile = level.tile_at_3d(usize::from(ol), usize::from(ox), usize::from(oy));
             if open_tile != Tile::Void {
                 errors.push(validation_error(
                     "structural",
-                    format!(
-                        "ramp_opening_not_void l={ol} x={ox} y={oy} tile={open_tile:?}"
-                    ),
+                    format!("ramp_opening_not_void l={ol} x={ox} y={oy} tile={open_tile:?}"),
                 ));
             }
         }
@@ -402,9 +403,13 @@ pub(super) fn validate_structural(
             for x in 0..width {
                 let tile = level.tile_at_3d(usize::from(layer), usize::from(x), usize::from(y));
                 match tile {
-                    Tile::Wall | Tile::Floor | Tile::Void
-                    | Tile::RampNorth(_) | Tile::RampEast(_)
-                    | Tile::RampSouth(_) | Tile::RampWest(_) => {}
+                    Tile::Wall
+                    | Tile::Floor
+                    | Tile::Void
+                    | Tile::RampNorth(_)
+                    | Tile::RampEast(_)
+                    | Tile::RampSouth(_)
+                    | Tile::RampWest(_) => {}
                 }
             }
         }
@@ -421,11 +426,8 @@ pub(super) fn validate_structural(
                 if dy >= height || dx >= width {
                     continue;
                 }
-                let tile = level.tile_at_3d(
-                    usize::from(region.layer),
-                    usize::from(dx),
-                    usize::from(dy),
-                );
+                let tile =
+                    level.tile_at_3d(usize::from(region.layer), usize::from(dx), usize::from(dy));
                 if tile == Tile::Floor || layout_tile_is_ramp(tile) {
                     region_has_floor = true;
                 }
@@ -452,7 +454,8 @@ pub(super) fn validate_structural(
                     "structural",
                     format!(
                         "transition_{}_ramp_cell_not_ramp cell={} tile={tile:?}",
-                        transition.id.raw(), cell,
+                        transition.id.raw(),
+                        cell,
                     ),
                 ));
             }
@@ -468,7 +471,8 @@ pub(super) fn validate_structural(
                     "structural",
                     format!(
                         "transition_{}_opening_not_void cell={} tile={tile:?}",
-                        transition.id.raw(), cell,
+                        transition.id.raw(),
+                        cell,
                     ),
                 ));
             }
@@ -484,7 +488,8 @@ pub(super) fn validate_structural(
                     "structural",
                     format!(
                         "transition_{}_landing_not_floor cell={} tile={tile:?}",
-                        transition.id.raw(), cell,
+                        transition.id.raw(),
+                        cell,
                     ),
                 ));
             }
@@ -500,7 +505,8 @@ pub(super) fn validate_structural(
                     "structural",
                     format!(
                         "transition_{}_headroom_not_void cell={} tile={tile:?}",
-                        transition.id.raw(), cell,
+                        transition.id.raw(),
+                        cell,
                     ),
                 ));
             }
@@ -549,11 +555,16 @@ pub(super) fn validate_connectivity(
         return Ok(errors);
     }
     let spawn_region = spawn_regions[0];
-    let spawn_idx = movement.nodes.iter().enumerate().find_map(|(index, node)| {
-        node_in_region(*node, spawn_region).then_some(index)
-    });
+    let spawn_idx = movement
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| node_in_region(*node, spawn_region).then_some(index));
     let Some(spawn_idx) = spawn_idx else {
-        errors.push(validation_error("connectivity", "spawn_region_not_walkable".into()));
+        errors.push(validation_error(
+            "connectivity",
+            "spawn_region_not_walkable".into(),
+        ));
         return Ok(errors);
     };
 
@@ -571,10 +582,8 @@ pub(super) fn validate_connectivity(
         }
     }
 
-    let reachable_nodes: BTreeSet<MovementNode> = reachable
-        .iter()
-        .map(|&i| movement.nodes[i])
-        .collect();
+    let reachable_nodes: BTreeSet<MovementNode> =
+        reachable.iter().map(|&i| movement.nodes[i]).collect();
 
     // Check every required region has at least one reachable cell.
     for region in &topology.regions {
@@ -645,14 +654,8 @@ pub(super) fn validate_topology(
             continue;
         }
         // Find source and target region sockets.
-        let source_region = topology
-            .regions
-            .iter()
-            .find(|r| r.id == edge.source_region);
-        let target_region = topology
-            .regions
-            .iter()
-            .find(|r| r.id == edge.target_region);
+        let source_region = topology.regions.iter().find(|r| r.id == edge.source_region);
+        let target_region = topology.regions.iter().find(|r| r.id == edge.target_region);
 
         let (Some(sr), Some(tr)) = (source_region, target_region) else {
             errors.push(validation_error(
@@ -746,9 +749,10 @@ pub(super) fn validate_topology(
         let matched = inferred.iter().any(|ramp| {
             ramp.ramp_cells.into_iter().collect::<BTreeSet<_>>() == reserved_ramp
                 && ramp.opening_cells.into_iter().collect::<BTreeSet<_>>() == reserved_opening
-                && transition.landing_cells.iter().any(|cell| {
-                    (cell.layer, cell.x, cell.y) == ramp.upper_landing
-                })
+                && transition
+                    .landing_cells
+                    .iter()
+                    .any(|cell| (cell.layer, cell.x, cell.y) == ramp.upper_landing)
         });
         if !matched {
             errors.push(validation_error(
@@ -762,29 +766,69 @@ pub(super) fn validate_topology(
     // tile-derived connectivity and owned witnesses above must independently
     // pass before these configured bounds can be accepted.
     let config = &topology.config;
-    check_metric_range(&mut errors, "region_count", topology.regions.len() as u64,
-        u64::from(config.region_min()), u64::from(config.region_max()));
-    check_metric_range(&mut errors, "required_route", topology.route_distance,
-        u64::from(config.required_route_min()), u64::from(config.required_route_max()));
-    check_metric_range(&mut errors, "branch_depth", u64::from(topology.max_branch_depth),
-        u64::from(config.branch_depth_min()), u64::from(config.branch_depth_max()));
-    check_metric_range(&mut errors, "dead_end_count", u64::from(topology.dead_end_count),
-        u64::from(config.intentional_dead_ends_min()), u64::from(config.intentional_dead_ends_max()));
-    check_metric_range(&mut errors, "crossing_count", u64::from(topology.crossing_count),
-        0, u64::from(config.crossings_max()));
+    check_metric_range(
+        &mut errors,
+        "region_count",
+        topology.regions.len() as u64,
+        u64::from(config.region_min()),
+        u64::from(config.region_max()),
+    );
+    check_metric_range(
+        &mut errors,
+        "required_route",
+        topology.route_distance,
+        u64::from(config.required_route_min()),
+        u64::from(config.required_route_max()),
+    );
+    check_metric_range(
+        &mut errors,
+        "branch_depth",
+        u64::from(topology.max_branch_depth),
+        u64::from(config.branch_depth_min()),
+        u64::from(config.branch_depth_max()),
+    );
+    check_metric_range(
+        &mut errors,
+        "dead_end_count",
+        u64::from(topology.dead_end_count),
+        u64::from(config.intentional_dead_ends_min()),
+        u64::from(config.intentional_dead_ends_max()),
+    );
+    check_metric_range(
+        &mut errors,
+        "crossing_count",
+        u64::from(topology.crossing_count),
+        0,
+        u64::from(config.crossings_max()),
+    );
     if topology.articulation_count > config.articulation_max() {
-        errors.push(validation_error("topology", format!(
-            "articulation_count={} exceeds max={}", topology.articulation_count, config.articulation_max()
-        )));
+        errors.push(validation_error(
+            "topology",
+            format!(
+                "articulation_count={} exceeds max={}",
+                topology.articulation_count,
+                config.articulation_max()
+            ),
+        ));
     }
     if topology.per_layer_cycles.len() != usize::from(config.layers().2) {
-        errors.push(validation_error("topology", format!(
-            "cycle_layer_count={} expected={}", topology.per_layer_cycles.len(), config.layers().2
-        )));
+        errors.push(validation_error(
+            "topology",
+            format!(
+                "cycle_layer_count={} expected={}",
+                topology.per_layer_cycles.len(),
+                config.layers().2
+            ),
+        ));
     }
     for (layer, &cycles) in topology.per_layer_cycles.iter().enumerate() {
-        check_metric_range(&mut errors, &format!("cycles_layer_{layer}"), u64::from(cycles),
-            u64::from(config.per_layer_cycles_min()), u64::from(config.per_layer_cycles_max()));
+        check_metric_range(
+            &mut errors,
+            &format!("cycles_layer_{layer}"),
+            u64::from(cycles),
+            u64::from(config.per_layer_cycles_min()),
+            u64::from(config.per_layer_cycles_max()),
+        );
     }
 
     // Component count: number of connected components.
@@ -887,11 +931,7 @@ fn trim_to_walkable_route<'a>(
     route: &'a [(u16, u16, u16)],
 ) -> Option<&'a [(u16, u16, u16)]> {
     let is_walkable = |(layer, x, y): &(u16, u16, u16)| {
-        tile_is_walkable(level.tile_at_3d(
-            usize::from(*layer),
-            usize::from(*x),
-            usize::from(*y),
-        ))
+        tile_is_walkable(level.tile_at_3d(usize::from(*layer), usize::from(*x), usize::from(*y)))
     };
     let first = route.iter().position(is_walkable)?;
     let last = route.iter().rposition(is_walkable)?;
@@ -905,7 +945,10 @@ fn probe_tile_route(
     context: String,
 ) -> Result<(), GeneratorError> {
     let Some(&first) = route.first() else {
-        return Err(validation_error("movement_probe", format!("{context}: empty route")));
+        return Err(validation_error(
+            "movement_probe",
+            format!("{context}: empty route"),
+        ));
     };
     let mut previous = first;
     let mut start = tile_to_world_coord(level, first);
@@ -970,13 +1013,14 @@ fn probe_movement(
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn validate_level_storage(level: &ParsedLevel) -> Result<(), GeneratorError> {
-    let expected = level
-        .width
-        .checked_mul(level.height)
-        .ok_or(GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Ir,
-            operation: "movement_level_area",
-        })?;
+    let expected =
+        level
+            .width
+            .checked_mul(level.height)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Ir,
+                operation: "movement_level_area",
+            })?;
     if level.width == 0
         || level.height == 0
         || level.layers.is_empty()
@@ -1001,7 +1045,11 @@ fn node_in_region(node: MovementNode, region: &PlacedRegion) -> bool {
 fn tile_is_walkable(tile: Tile) -> bool {
     matches!(
         tile,
-        Tile::Floor | Tile::RampNorth(_) | Tile::RampEast(_) | Tile::RampSouth(_) | Tile::RampWest(_)
+        Tile::Floor
+            | Tile::RampNorth(_)
+            | Tile::RampEast(_)
+            | Tile::RampSouth(_)
+            | Tile::RampWest(_)
     )
 }
 
@@ -1018,7 +1066,10 @@ fn validate_edge_witness(
     target: &PlacedRegion,
     movement: &MovementGraph,
 ) -> Result<(), String> {
-    let first = edge.path_witness.first().ok_or_else(|| "empty".to_owned())?;
+    let first = edge
+        .path_witness
+        .first()
+        .ok_or_else(|| "empty".to_owned())?;
     let last = edge.path_witness.last().ok_or_else(|| "empty".to_owned())?;
     let first_node = MovementNode::from_coord(first.layer, first.x, first.y);
     let last_node = MovementNode::from_coord(last.layer, last.x, last.y);
@@ -1053,11 +1104,8 @@ fn validate_edge_witness(
         .rposition(|cell| index.contains_key(&MovementNode::from_coord(cell.layer, cell.x, cell.y)))
         .ok_or_else(|| "no_walkable_connector".to_owned())?;
     let connector = &edge.path_witness[first_walkable..=last_walkable];
-    let connector_start = MovementNode::from_coord(
-        connector[0].layer,
-        connector[0].x,
-        connector[0].y,
-    );
+    let connector_start =
+        MovementNode::from_coord(connector[0].layer, connector[0].x, connector[0].y);
     let connector_end = MovementNode::from_coord(
         connector[connector.len() - 1].layer,
         connector[connector.len() - 1].x,
@@ -1154,15 +1202,11 @@ fn connected_components(movement: &MovementGraph) -> Vec<BTreeSet<usize>> {
     components
 }
 
-fn tile_to_world_coord(
-    level: &ParsedLevel,
-    (layer, x, y): (u16, u16, u16),
-) -> (f32, f32, f32) {
+fn tile_to_world_coord(level: &ParsedLevel, (layer, x, y): (u16, u16, u16)) -> (f32, f32, f32) {
     let world = crate::layout::tile_to_world(usize::from(x), usize::from(y));
     let layer_floor = f32::from(layer) * crate::collision::WALL_HEIGHT;
     let tile = level.tile_at_3d(usize::from(layer), usize::from(x), usize::from(y));
-    let ground = crate::collision::ramp_height(tile, 0.5, 0.5, layer_floor)
-        .unwrap_or(layer_floor);
+    let ground = crate::collision::ramp_height(tile, 0.5, 0.5, layer_floor).unwrap_or(layer_floor);
     (
         world.x + crate::layout::TILE_SIZE * 0.5,
         ground + crate::player::PLAYER_EYE_HEIGHT,
@@ -1249,9 +1293,7 @@ mod tests {
             dead_end_count: 0,
             articulation_count: 0,
             crossing_count: 0,
-            config: GeneratorConfig::custom(64, 64, 2)
-                .normalize()
-                .unwrap(),
+            config: GeneratorConfig::custom(64, 64, 2).normalize().unwrap(),
         }
     }
 
@@ -1274,7 +1316,9 @@ mod tests {
         let (movement, inferred) = reconstruct_movement_graph(&level, &topology).unwrap();
         let errors = validate_structural(&level, &topology, &movement, &inferred).unwrap();
         // The dummy topology config says 64x64 but level is 5x5 — dimension mismatch.
-        assert!(errors.iter().any(|e| e.to_string().contains("dimension_mismatch")));
+        assert!(errors
+            .iter()
+            .any(|e| e.to_string().contains("dimension_mismatch")));
     }
 
     #[test]
@@ -1285,6 +1329,11 @@ mod tests {
         let errors = validate_connectivity(&level, &topology, &movement).unwrap();
         // Spawn region is reachable; dimension mismatch is separate.
         // The level spawn (1,1) is walkable; flood should find all walkable cells.
-        assert!(errors.is_empty() || errors.iter().all(|e| !e.to_string().contains("unreachable")));
+        assert!(
+            errors.is_empty()
+                || errors
+                    .iter()
+                    .all(|e| !e.to_string().contains("unreachable"))
+        );
     }
 }

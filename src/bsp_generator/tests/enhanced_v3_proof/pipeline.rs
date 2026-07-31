@@ -104,11 +104,39 @@ pub fn run_canonical_pipeline(
     Ok((result.map_text, result.metadata))
 }
 
+/// Run a corpus entry through the pipeline.
+///
+/// This is used by the corpus executor. It reuses the same one-way pipeline
+/// as every integrated proof run but does not return the full `PipelineResult`.
+pub fn run_corpus_pipeline(
+    config: &ProofConfig,
+    seed: V3Seed,
+) -> Result<(String, ProofMetadata), ContractError> {
+    run_canonical_pipeline(config, seed)
+}
+
 /// Make the canonical integrated .map fixture for the sparse preset.
 pub fn make_canonical_fixture() -> (String, ProofMetadata) {
     let config = ProofConfig::new(Preset::Sparse, 2048).expect("valid config");
     let seed = V3Seed::new(0);
     run_canonical_pipeline(&config, seed).expect("canonical proof pipeline")
+}
+
+/// Make the dense-rich fixture for M2 budget evidence.
+///
+/// Uses the Rich preset at XY=2048 (M2 bond), exercising all approved
+/// capabilities within M2 budget ceilings.
+pub fn make_rich_fixture() -> (String, ProofMetadata) {
+    let config = ProofConfig::new(Preset::Rich, 2048).expect("valid rich config");
+    let seed = V3Seed::new(2);
+    run_canonical_pipeline(&config, seed).expect("rich proof pipeline")
+}
+
+/// Make the moderate fixture for corpus completeness.
+pub fn make_moderate_fixture() -> (String, ProofMetadata) {
+    let config = ProofConfig::new(Preset::Moderate, 2048).expect("valid moderate config");
+    let seed = V3Seed::new(1);
+    run_canonical_pipeline(&config, seed).expect("moderate proof pipeline")
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────

@@ -101,11 +101,7 @@ impl MeshLodGroup {
     ///
     /// Without hysteresis, the level with the largest `enter_threshold` that
     /// is ≤ the projected radius is selected.
-    pub fn select_level(
-        &self,
-        projected_radius: f32,
-        current_level: Option<usize>,
-    ) -> usize {
+    pub fn select_level(&self, projected_radius: f32, current_level: Option<usize>) -> usize {
         debug_assert!(!self.levels.is_empty());
 
         if let Some(cur) = current_level {
@@ -489,8 +485,7 @@ mod tests {
 
     #[test]
     fn authored_fixture_contains_three_distinct_valid_levels() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/lod");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lod");
         let mut counts = Vec::new();
         for name in ["high", "medium", "low"] {
             let gltf = gltf::Gltf::open(root.join(format!("{name}.gltf")))

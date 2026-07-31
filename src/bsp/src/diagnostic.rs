@@ -238,12 +238,17 @@ impl DiagnosticCode {
             BspxLumpOverlap | BspxDuplicateName => StructuralCorruption,
             ColoredLightConflict => UnsupportedCompatibility,
 
-            MiptexCorrupt | TextureAllocationExceeded | AtlasPageOverflow
-            | LightmapStyleTruncated | ExtractionInvariantViolation
-            | EntityModelOutOfBounds | ConvexReconstructionFailed
+            MiptexCorrupt
+            | TextureAllocationExceeded
+            | AtlasPageOverflow
+            | LightmapStyleTruncated
+            | ExtractionInvariantViolation
+            | EntityModelOutOfBounds
+            | ConvexReconstructionFailed
             | MissingCollisionData => StructuralCorruption,
-            AnimationSequenceGap | AnimationDimensionMismatch
-            | AnimationCaseCollision => AuthoringQuality,
+            AnimationSequenceGap | AnimationDimensionMismatch | AnimationCaseCollision => {
+                AuthoringQuality
+            }
             IdentityAmbiguous => AuthoringQuality,
         }
     }
@@ -279,9 +284,13 @@ impl DiagnosticCode {
             | EntityCountExceeded
             | TextureCountExceeded
             | WadEntryCountExceeded
-            | MiptexCorrupt | TextureAllocationExceeded | AtlasPageOverflow
-            | LightmapStyleTruncated | ExtractionInvariantViolation
-            | EntityModelOutOfBounds | MissingCollisionData => Error,
+            | MiptexCorrupt
+            | TextureAllocationExceeded
+            | AtlasPageOverflow
+            | LightmapStyleTruncated
+            | ExtractionInvariantViolation
+            | EntityModelOutOfBounds
+            | MissingCollisionData => Error,
             ConvexReconstructionFailed => Warning,
 
             // Security — always Error
@@ -318,8 +327,7 @@ impl DiagnosticCode {
             // Authoring quality
             EntityClasslessWithKeys => Warning,
             EntityDuplicateKey | EntityEmpty => Info,
-            AnimationSequenceGap | AnimationDimensionMismatch
-            | AnimationCaseCollision => Warning,
+            AnimationSequenceGap | AnimationDimensionMismatch | AnimationCaseCollision => Warning,
             IdentityAmbiguous => Info,
         }
     }
@@ -354,9 +362,13 @@ impl DiagnosticCode {
             | EntityCountExceeded
             | TextureCountExceeded
             | WadEntryCountExceeded
-            | MiptexCorrupt | TextureAllocationExceeded | AtlasPageOverflow
-            | LightmapStyleTruncated | ExtractionInvariantViolation
-            | EntityModelOutOfBounds | ConvexReconstructionFailed
+            | MiptexCorrupt
+            | TextureAllocationExceeded
+            | AtlasPageOverflow
+            | LightmapStyleTruncated
+            | ExtractionInvariantViolation
+            | EntityModelOutOfBounds
+            | ConvexReconstructionFailed
             | MissingCollisionData => Error,
 
             SecurityPathTraversal | SecuritySymlinkEscape | SecurityDeviceFile => Error,
@@ -392,8 +404,7 @@ impl DiagnosticCode {
 
             // Authoring quality — Warning in strict
             EntityDuplicateKey | EntityEmpty | EntityClasslessWithKeys => Warning,
-            AnimationSequenceGap | AnimationDimensionMismatch
-            | AnimationCaseCollision => Warning,
+            AnimationSequenceGap | AnimationDimensionMismatch | AnimationCaseCollision => Warning,
             IdentityAmbiguous => Warning,
         }
     }

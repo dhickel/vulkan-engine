@@ -18,10 +18,10 @@
 use std::collections::HashMap;
 
 use crate::scene::SceneNodeId;
+use crate::vulkan::vk_sprites::SpriteInstance;
 use glam::Mat4;
 #[cfg(feature = "debug-draw")]
 use glam::Vec3;
-use crate::vulkan::vk_sprites::SpriteInstance;
 
 /// Immutable per-frame extension payload consumed by the renderer.
 ///

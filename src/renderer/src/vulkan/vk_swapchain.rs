@@ -382,10 +382,7 @@ impl SwapchainOwner {
                     .ok_or_else(|| "current lifecycle state has no swapchain handle".to_string())
             }
             other => {
-                warn!(
-                    "SwapchainOwner::retire_current rejected state {:?}",
-                    other
-                );
+                warn!("SwapchainOwner::retire_current rejected state {:?}", other);
                 self.state = other;
                 Err("only a current swapchain can be retired".to_string())
             }
@@ -435,8 +432,7 @@ impl SwapchainOwner {
                 _ => {}
             }
             unsafe {
-                sc.swapchain_loader
-                    .destroy_swapchain(sc.swapchain, None);
+                sc.swapchain_loader.destroy_swapchain(sc.swapchain, None);
             }
         }
         self.state = SwapchainState::Absent;
@@ -451,8 +447,7 @@ impl SwapchainOwner {
     ) {
         info!("Destroying retired swapchain handle {:?}", old.swapchain);
         unsafe {
-            old.swapchain_loader
-                .destroy_swapchain(old.swapchain, None);
+            old.swapchain_loader.destroy_swapchain(old.swapchain, None);
         }
     }
 }
@@ -664,7 +659,10 @@ mod tests {
 
     #[test]
     fn classify_acquire_not_ready() {
-        assert_eq!(classify_acquire(Err(vk::Result::NOT_READY)), AcquireClass::Retry);
+        assert_eq!(
+            classify_acquire(Err(vk::Result::NOT_READY)),
+            AcquireClass::Retry
+        );
     }
 
     #[test]
@@ -789,9 +787,15 @@ mod tests {
         }
 
         // DeferredZeroExtent and Installed are distinct
-        assert!(matches!(RebuildClass::DeferredZeroExtent, RebuildClass::DeferredZeroExtent));
+        assert!(matches!(
+            RebuildClass::DeferredZeroExtent,
+            RebuildClass::DeferredZeroExtent
+        ));
         assert!(matches!(RebuildClass::Installed, RebuildClass::Installed));
-        assert!(matches!(RebuildClass::SurfaceLost, RebuildClass::SurfaceLost));
+        assert!(matches!(
+            RebuildClass::SurfaceLost,
+            RebuildClass::SurfaceLost
+        ));
         assert!(matches!(RebuildClass::DeviceLost, RebuildClass::DeviceLost));
     }
 
@@ -899,8 +903,7 @@ mod tests {
             width: 4000,
             height: 3000,
         };
-        let extent_large =
-            crate::vulkan::vk_init::select_sc_extent(&capabilities, requested_large);
+        let extent_large = crate::vulkan::vk_init::select_sc_extent(&capabilities, requested_large);
         assert_eq!(extent_large.width, 3840); // clamped to max
         assert_eq!(extent_large.height, 2160); // clamped to max
     }
@@ -960,12 +963,10 @@ mod tests {
 
     #[test]
     fn select_sc_surface_format_fallback_to_first() {
-        let formats = vec![
-            vk::SurfaceFormatKHR {
-                format: vk::Format::R8G8B8A8_UNORM,
-                color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
-            },
-        ];
+        let formats = vec![vk::SurfaceFormatKHR {
+            format: vk::Format::R8G8B8A8_UNORM,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        }];
         let (found, selected) = crate::vulkan::vk_init::select_sc_surface_format(
             &formats,
             vk::Format::B8G8R8A8_UNORM,
@@ -1005,7 +1006,10 @@ mod tests {
                     width: u32::MAX,
                     height: u32::MAX,
                 },
-                min_image_extent: vk::Extent2D { width: 1, height: 1 },
+                min_image_extent: vk::Extent2D {
+                    width: 1,
+                    height: 1,
+                },
                 max_image_extent: vk::Extent2D {
                     width: 4096,
                     height: 4096,
@@ -1031,7 +1035,10 @@ mod tests {
         };
         let plan = crate::vulkan::vk_init::build_swapchain_create_plan(
             &support_with(format, 4),
-            vk::Extent2D { width: 900, height: 700 },
+            vk::Extent2D {
+                width: 900,
+                height: 700,
+            },
             Some(3),
             None,
             Some(vk::PresentModeKHR::MAILBOX),
@@ -1040,7 +1047,13 @@ mod tests {
         .unwrap();
         assert_eq!(plan.surface_format, format);
         assert_eq!(plan.image_count, 4);
-        assert_eq!(plan.extent, vk::Extent2D { width: 900, height: 700 });
+        assert_eq!(
+            plan.extent,
+            vk::Extent2D {
+                width: 900,
+                height: 700
+            }
+        );
         assert_eq!(plan.pre_transform, vk::SurfaceTransformFlagsKHR::ROTATE_90);
         assert_eq!(
             plan.composite_alpha,
@@ -1059,7 +1072,10 @@ mod tests {
         support.capabilities.supported_usage_flags = vk::ImageUsageFlags::COLOR_ATTACHMENT;
         assert!(crate::vulkan::vk_init::build_swapchain_create_plan(
             &support,
-            vk::Extent2D { width: 640, height: 480 },
+            vk::Extent2D {
+                width: 640,
+                height: 480
+            },
             None,
             None,
             None,

@@ -724,9 +724,7 @@ fn door_state_survives_mutable_behavior_round_trip() {
 
 #[test]
 fn mutable_behavior_validation_rejects_invalid_phase() {
-    use bsp_runtime::source_link::{
-        CanonicalFloat, MutableBehaviorState, SerializedDoorState,
-    };
+    use bsp_runtime::source_link::{CanonicalFloat, MutableBehaviorState, SerializedDoorState};
     let mut state = MutableBehaviorState::default();
     state.doors.push(SerializedDoorState {
         entity_index: 1,
@@ -740,9 +738,7 @@ fn mutable_behavior_validation_rejects_invalid_phase() {
 
 #[test]
 fn mutable_behavior_validation_rejects_non_finite_float() {
-    use bsp_runtime::source_link::{
-        CanonicalFloat, MutableBehaviorState, SerializedDoorState,
-    };
+    use bsp_runtime::source_link::{CanonicalFloat, MutableBehaviorState, SerializedDoorState};
     let mut state = MutableBehaviorState::default();
     state.doors.push(SerializedDoorState {
         entity_index: 1,
@@ -756,9 +752,7 @@ fn mutable_behavior_validation_rejects_non_finite_float() {
 
 #[test]
 fn mutable_behavior_validation_rejects_negative_timer() {
-    use bsp_runtime::source_link::{
-        CanonicalFloat, MutableBehaviorState, SerializedDoorState,
-    };
+    use bsp_runtime::source_link::{CanonicalFloat, MutableBehaviorState, SerializedDoorState};
     let mut state = MutableBehaviorState::default();
     state.doors.push(SerializedDoorState {
         entity_index: 1,
@@ -788,7 +782,9 @@ fn active_source_link_unchanged_after_candidate_rollback() {
     let mut scene = Scene::new();
 
     // Commit a mount
-    let prepare = coordinator.prepare(&bsp_bytes, None, "maps/active").unwrap();
+    let prepare = coordinator
+        .prepare(&bsp_bytes, None, "maps/active")
+        .unwrap();
     coordinator
         .commit_with_mount(prepare.token, &mut scene, empty_mount())
         .unwrap();
@@ -796,7 +792,9 @@ fn active_source_link_unchanged_after_candidate_rollback() {
     let link_before = coordinator.source_link().unwrap().clone();
 
     // Prepare a new candidate, then roll it back
-    let _prepare2 = coordinator.prepare(&bsp_bytes, None, "maps/candidate").unwrap();
+    let _prepare2 = coordinator
+        .prepare(&bsp_bytes, None, "maps/candidate")
+        .unwrap();
     coordinator.rollback().unwrap();
 
     // Active source link must be unchanged
@@ -812,7 +810,9 @@ fn scene_source_link_preserved_across_failed_restore() {
     let mut scene = Scene::new();
 
     coordinator
-        .reload(&bsp_bytes, None, "maps/active", &mut scene, |_| empty_mount())
+        .reload(&bsp_bytes, None, "maps/active", &mut scene, |_| {
+            empty_mount()
+        })
         .unwrap();
 
     let scene_link_before = scene.bsp_source_link().unwrap().clone();
@@ -824,13 +824,9 @@ fn scene_source_link_preserved_across_failed_restore() {
     envelope.bsp_source.content_hash = "sha256:deadbeef".into();
 
     // Restore should fail — scene must be unchanged
-    let result = coordinator.restore_from_persistence(
-        &envelope,
-        &bsp_bytes,
-        None,
-        &mut scene,
-        |_| empty_mount(),
-    );
+    let result =
+        coordinator
+            .restore_from_persistence(&envelope, &bsp_bytes, None, &mut scene, |_| empty_mount());
     assert!(result.is_err());
 
     let scene_link_after = scene.bsp_source_link().unwrap();
@@ -844,15 +840,14 @@ fn candidate_cleared_after_bridge_prepare_failure() {
     let mut scene = Scene::new();
 
     coordinator
-        .reload(&bsp_bytes, None, "maps/active", &mut scene, |_| empty_mount())
+        .reload(&bsp_bytes, None, "maps/active", &mut scene, |_| {
+            empty_mount()
+        })
         .unwrap();
     assert!(coordinator.is_active());
 
     // Register a failing bridge and try to prepare
-    coordinator.register_bridge(
-        "failing-prepare",
-        Box::new(PrepareFailingBridge),
-    );
+    coordinator.register_bridge("failing-prepare", Box::new(PrepareFailingBridge));
     let result = coordinator.prepare(&bsp_bytes, None, "maps/new");
     assert!(result.is_err());
 
@@ -863,25 +858,37 @@ fn candidate_cleared_after_bridge_prepare_failure() {
 }
 
 use bsp_runtime::bridge::{
-    ActiveBridgeState, AppBridge, BehaviorEntityRecipe, EntityCollisionRecipe,
-    LightEntityRecipe, PreparedBridgeState, WorldCollisionRecipe,
+    ActiveBridgeState, AppBridge, BehaviorEntityRecipe, EntityCollisionRecipe, LightEntityRecipe,
+    PreparedBridgeState, WorldCollisionRecipe,
 };
 
 /// Dummy prepared state for failing bridges.
 #[derive(Debug)]
 struct SimplePrepared(String);
 impl PreparedBridgeState for SimplePrepared {
-    fn registration_name(&self) -> &str { &self.0 }
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn registration_name(&self) -> &str {
+        &self.0
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 /// Dummy active state for failing bridges.
 #[derive(Debug)]
 struct SimpleActive(String);
 impl ActiveBridgeState for SimpleActive {
-    fn registration_name(&self) -> &str { &self.0 }
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn registration_name(&self) -> &str {
+        &self.0
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 /// A bridge that fails on prepare.
@@ -948,7 +955,9 @@ fn candidate_cleared_after_bridge_validate_failure_with_active_mount() {
 
     // Establish an active mount
     coordinator
-        .reload(&bsp_bytes, None, "maps/active", &mut scene, |_| empty_mount())
+        .reload(&bsp_bytes, None, "maps/active", &mut scene, |_| {
+            empty_mount()
+        })
         .unwrap();
     assert!(coordinator.is_active());
     let ret_before = coordinator.retirement_diagnostics();
@@ -980,7 +989,9 @@ fn retirement_count_unchanged_when_candidate_rolls_back_with_active_mount() {
     let mut scene = Scene::new();
 
     coordinator
-        .reload(&bsp_bytes, None, "maps/active", &mut scene, |_| empty_mount())
+        .reload(&bsp_bytes, None, "maps/active", &mut scene, |_| {
+            empty_mount()
+        })
         .unwrap();
 
     let ret_before = coordinator.retirement_diagnostics();

@@ -42,13 +42,33 @@ const OUTCOME_EXHAUSTED: u8 = 0x01;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayError {
-    Truncated { expected: usize, actual: usize },
-    TrailingBytes { consumed: usize, remaining: usize },
-    InvalidTag { position: usize, tag: u8 },
-    OversizedLength { position: usize, length: usize, maximum: usize },
-    DecodeUtf8 { position: usize },
-    UnsupportedSchema { expected: u32, actual: u32 },
-    DecodeSemantics { reason: String },
+    Truncated {
+        expected: usize,
+        actual: usize,
+    },
+    TrailingBytes {
+        consumed: usize,
+        remaining: usize,
+    },
+    InvalidTag {
+        position: usize,
+        tag: u8,
+    },
+    OversizedLength {
+        position: usize,
+        length: usize,
+        maximum: usize,
+    },
+    DecodeUtf8 {
+        position: usize,
+    },
+    UnsupportedSchema {
+        expected: u32,
+        actual: u32,
+    },
+    DecodeSemantics {
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for ReplayError {
@@ -57,13 +77,23 @@ impl std::fmt::Display for ReplayError {
             Self::Truncated { expected, actual } => {
                 write!(f, "truncated: expected {expected} bytes, got {actual}")
             }
-            Self::TrailingBytes { consumed, remaining } => {
-                write!(f, "trailing bytes: consumed {consumed}, remaining {remaining}")
+            Self::TrailingBytes {
+                consumed,
+                remaining,
+            } => {
+                write!(
+                    f,
+                    "trailing bytes: consumed {consumed}, remaining {remaining}"
+                )
             }
             Self::InvalidTag { position, tag } => {
                 write!(f, "invalid tag 0x{tag:02x} at position {position}")
             }
-            Self::OversizedLength { position, length, maximum } => {
+            Self::OversizedLength {
+                position,
+                length,
+                maximum,
+            } => {
                 write!(
                     f,
                     "oversized length {length} (max {maximum}) at position {position}"
@@ -404,14 +434,7 @@ impl ReplayOutcome {
                     reason: r2,
                     diagnostics_bytes: d2,
                 },
-            ) => {
-                s1 == s2
-                    && a1 == a2
-                    && i1 == i2
-                    && st1 == st2
-                    && r1 == r2
-                    && d1 == d2
-            }
+            ) => s1 == s2 && a1 == a2 && i1 == i2 && st1 == st2 && r1 == r2 && d1 == d2,
             _ => false,
         }
     }
@@ -669,14 +692,12 @@ impl<'a> ReplayDecoder<'a> {
         let attempt_index = attempt_index.ok_or_else(|| ReplayError::DecodeSemantics {
             reason: "missing attempt_index".into(),
         })?;
-        let attempt_identity =
-            attempt_identity.ok_or_else(|| ReplayError::DecodeSemantics {
-                reason: "missing attempt_identity".into(),
-            })?;
-        let diagnostics_bytes =
-            diagnostics_bytes.ok_or_else(|| ReplayError::DecodeSemantics {
-                reason: "missing diagnostics".into(),
-            })?;
+        let attempt_identity = attempt_identity.ok_or_else(|| ReplayError::DecodeSemantics {
+            reason: "missing attempt_identity".into(),
+        })?;
+        let diagnostics_bytes = diagnostics_bytes.ok_or_else(|| ReplayError::DecodeSemantics {
+            reason: "missing diagnostics".into(),
+        })?;
 
         if let (Some(stage), Some(reason)) = (exhausted_stage, exhausted_reason) {
             Ok(ReplayOutcome::Exhausted {
@@ -699,9 +720,10 @@ impl<'a> ReplayDecoder<'a> {
             })?;
             let topology_region_count = topology_region_count.unwrap_or(0);
             let topology_edge_count = topology_edge_count.unwrap_or(0);
-            let topology_metrics = topology_metrics.ok_or_else(|| ReplayError::DecodeSemantics {
-                reason: "missing topology_metrics".into(),
-            })?;
+            let topology_metrics =
+                topology_metrics.ok_or_else(|| ReplayError::DecodeSemantics {
+                    reason: "missing topology_metrics".into(),
+                })?;
             Ok(ReplayOutcome::Success {
                 seed,
                 attempt_index,
@@ -757,10 +779,10 @@ mod tests {
         bytes.extend_from_slice(&2u32.to_be_bytes()); // model_count
         bytes.extend_from_slice(&1u32.to_be_bytes()); // static_body_count
         bytes.extend_from_slice(&1u32.to_be_bytes()); // total_body_count
-        // capture_views
+                                                      // capture_views
         bytes.push(TAG_CAPTURE_VIEWS);
         bytes.extend_from_slice(&1u32.to_be_bytes()); // count
-        // eye
+                                                      // eye
         bytes.extend_from_slice(&1.0f32.to_bits().to_be_bytes());
         bytes.extend_from_slice(&2.0f32.to_bits().to_be_bytes());
         bytes.extend_from_slice(&3.0f32.to_bits().to_be_bytes());
@@ -892,7 +914,10 @@ mod tests {
     fn reject_truncated_input() {
         let bytes = vec![TAG_SCHEMA, 0x00, 0x00]; // truncated after schema tag
         let decoder = ReplayDecoder::new(&bytes);
-        assert!(matches!(decoder.decode(), Err(ReplayError::Truncated { .. })));
+        assert!(matches!(
+            decoder.decode(),
+            Err(ReplayError::Truncated { .. })
+        ));
     }
 
     #[test]
@@ -914,7 +939,10 @@ mod tests {
         bytes.extend_from_slice(&1u32.to_be_bytes());
         bytes.push(0xFF); // invalid tag
         let decoder = ReplayDecoder::new(&bytes);
-        assert!(matches!(decoder.decode(), Err(ReplayError::InvalidTag { .. })));
+        assert!(matches!(
+            decoder.decode(),
+            Err(ReplayError::InvalidTag { .. })
+        ));
     }
 
     #[test]

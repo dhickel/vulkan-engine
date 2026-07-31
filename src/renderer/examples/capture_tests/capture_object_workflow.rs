@@ -10,9 +10,9 @@ mod common;
 use glam::{Mat4, Vec3, Vec4};
 use renderer::{
     object::{
-        ObjectKind,
         query::{EditorProxyPolicy, ObjectQueryFilter, VolumeQuery},
         selection::Selection,
+        ObjectKind,
     },
     prelude::{PbrMaterialDesc, PointLight, Scene},
     EditorCamera, Ray,
@@ -102,21 +102,15 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
 
     // Ground plane
     let ground = scene.create_node_default(Some(root)).expect("ground");
-    scene
-        .set_node_name(ground, "Ground")
-        .expect("ground name");
+    scene.set_node_name(ground, "Ground").expect("ground name");
     scene
         .set_transform(ground, Mat4::from_scale(Vec3::splat(5.0)))
         .expect("ground transform");
-    scene
-        .add_mesh(ground, plane_handle)
-        .expect("ground mesh");
+    scene.add_mesh(ground, plane_handle).expect("ground mesh");
 
     // Cube at left
     let cube_node = scene.create_node_default(Some(root)).expect("cube");
-    scene
-        .set_node_name(cube_node, "Cube")
-        .expect("cube name");
+    scene.set_node_name(cube_node, "Cube").expect("cube name");
     scene
         .set_transform(
             cube_node,
@@ -127,9 +121,7 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
             ),
         )
         .expect("cube transform");
-    scene
-        .add_mesh(cube_node, cube_handle)
-        .expect("cube mesh");
+    scene.add_mesh(cube_node, cube_handle).expect("cube mesh");
 
     // Sphere at right
     let sphere_node = scene.create_node_default(Some(root)).expect("sphere");
@@ -169,32 +161,27 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
     let hits = scene.raycast_all(&ray_center).expect("valid ray");
     println!("raycast_all: {} hits", hits.len());
     for h in &hits {
-        println!(
-            "  {:?} dist={:.2} proxy={}",
-            h.kind, h.distance, h.is_proxy
-        );
+        println!("  {:?} dist={:.2} proxy={}", h.kind, h.distance, h.is_proxy);
     }
 
     // Volume query: AABB region around the sphere
-    let query_aabb = renderer::Aabb::from_min_max(
-        Vec3::new(1.0, 0.0, -2.0),
-        Vec3::new(3.0, 2.0, 0.0),
-    );
+    let query_aabb =
+        renderer::Aabb::from_min_max(Vec3::new(1.0, 0.0, -2.0), Vec3::new(3.0, 2.0, 0.0));
     let vol_query = VolumeQuery::aabb(query_aabb);
     let vol_hits = scene.query_volume(&vol_query);
     println!("volume query: {} hits", vol_hits.len());
     for h in &vol_hits {
-        println!(
-            "  {:?} bounded={}",
-            h.kind, h.is_bounded
-        );
+        println!("  {:?} bounded={}", h.kind, h.is_bounded);
     }
 
     // Volume query with filter: nodes only
-    let filtered_query = VolumeQuery::aabb(query_aabb)
-        .with_filter(ObjectQueryFilter::kinds([ObjectKind::Node]));
+    let filtered_query =
+        VolumeQuery::aabb(query_aabb).with_filter(ObjectQueryFilter::kinds([ObjectKind::Node]));
     let filtered_hits = scene.query_volume(&filtered_query);
-    println!("filtered volume query (nodes only): {} hits", filtered_hits.len());
+    println!(
+        "filtered volume query (nodes only): {} hits",
+        filtered_hits.len()
+    );
 
     // ── Phase 07: Editor pick ───────────────────────────────────────────
     let pick_ray = Ray {
@@ -202,7 +189,11 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
         direction: Vec3::new(0.0, 0.0, -1.0),
     };
     match scene.editor_pick(&pick_ray, EditorProxyPolicy::NodesOnly) {
-        Ok(Some(pick)) => println!("editor_pick: {:?} hit={}", pick.object.kind(), pick.hit.is_some()),
+        Ok(Some(pick)) => println!(
+            "editor_pick: {:?} hit={}",
+            pick.object.kind(),
+            pick.hit.is_some()
+        ),
         other => println!("editor_pick: no hit or error ({other:?})"),
     }
 
@@ -216,7 +207,11 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
     sel.add(root_oid).unwrap();
     sel.add(cube_oid).unwrap();
     sel.add(sphere_oid).unwrap();
-    println!("selection: {} items, primary={:?}", sel.len(), sel.primary());
+    println!(
+        "selection: {} items, primary={:?}",
+        sel.len(),
+        sel.primary()
+    );
 
     // Toggle off the sphere
     let toggled = sel.toggle(sphere_oid).unwrap();
@@ -240,10 +235,8 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
     );
 
     // Focus on a known bounds region
-    let focus_aabb = renderer::Aabb::from_min_max(
-        Vec3::new(-2.0, 0.0, -2.0),
-        Vec3::new(2.0, 2.0, 0.0),
-    );
+    let focus_aabb =
+        renderer::Aabb::from_min_max(Vec3::new(-2.0, 0.0, -2.0), Vec3::new(2.0, 2.0, 0.0));
     editor_cam.focus_on(&focus_aabb).expect("focus_on");
     println!(
         "editor_camera after focus_on: target={:?} radius={:.2}",

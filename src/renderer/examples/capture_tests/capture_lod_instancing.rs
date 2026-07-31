@@ -9,9 +9,9 @@
 
 mod common;
 
+use common::*;
 use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use renderer::prelude::{PbrMaterialDesc, PointLight, ProceduralMeshData, ProceduralVertex, Scene};
-use common::*;
 
 fn main() {
     let args = parse_capture_test_args();
@@ -66,15 +66,23 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
     // ---- Meshes ----
     let cube_red = build_cube_mesh_with_mat("lod_red_cube", Some(opaque_red));
     let cube_red_mesh = assets.upload_procedural_mesh(cube_red).expect("cube red");
-    let cube_red_bounds = assets.mesh_scene_bounds(cube_red_mesh).expect("cube red bounds");
+    let cube_red_bounds = assets
+        .mesh_scene_bounds(cube_red_mesh)
+        .expect("cube red bounds");
 
     let cube_blue = build_cube_mesh_with_mat("lod_blue_cube", Some(opaque_blue));
     let cube_blue_mesh = assets.upload_procedural_mesh(cube_blue).expect("cube blue");
-    let cube_blue_bounds = assets.mesh_scene_bounds(cube_blue_mesh).expect("cube blue bounds");
+    let cube_blue_bounds = assets
+        .mesh_scene_bounds(cube_blue_mesh)
+        .expect("cube blue bounds");
 
     let cube_green = build_cube_mesh_with_mat("lod_green_cube", Some(opaque_green));
-    let cube_green_mesh = assets.upload_procedural_mesh(cube_green).expect("cube green");
-    let cube_green_bounds = assets.mesh_scene_bounds(cube_green_mesh).expect("cube green bounds");
+    let cube_green_mesh = assets
+        .upload_procedural_mesh(cube_green)
+        .expect("cube green");
+    let cube_green_bounds = assets
+        .mesh_scene_bounds(cube_green_mesh)
+        .expect("cube green bounds");
 
     // ---- Control draws (singleton, always present) ----
     let control_node = scene
@@ -151,28 +159,66 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
     scene
 }
 
-fn build_cube_mesh_with_mat(name: &str, material: Option<renderer::prelude::MaterialHandle>) -> ProceduralMeshData {
+fn build_cube_mesh_with_mat(
+    name: &str,
+    material: Option<renderer::prelude::MaterialHandle>,
+) -> ProceduralMeshData {
     let s = 0.5;
     let positions: [Vec3; 24] = [
-        Vec3::new( s, -s, -s), Vec3::new( s, -s,  s), Vec3::new( s,  s,  s), Vec3::new( s,  s, -s),
-        Vec3::new(-s, -s,  s), Vec3::new(-s, -s, -s), Vec3::new(-s,  s, -s), Vec3::new(-s,  s,  s),
-        Vec3::new(-s,  s, -s), Vec3::new( s,  s, -s), Vec3::new( s,  s,  s), Vec3::new(-s,  s,  s),
-        Vec3::new(-s, -s,  s), Vec3::new( s, -s,  s), Vec3::new( s, -s, -s), Vec3::new(-s, -s, -s),
-        Vec3::new(-s, -s,  s), Vec3::new(-s,  s,  s), Vec3::new( s,  s,  s), Vec3::new( s, -s,  s),
-        Vec3::new( s, -s, -s), Vec3::new( s,  s, -s), Vec3::new(-s,  s, -s), Vec3::new(-s, -s, -s),
+        Vec3::new(s, -s, -s),
+        Vec3::new(s, -s, s),
+        Vec3::new(s, s, s),
+        Vec3::new(s, s, -s),
+        Vec3::new(-s, -s, s),
+        Vec3::new(-s, -s, -s),
+        Vec3::new(-s, s, -s),
+        Vec3::new(-s, s, s),
+        Vec3::new(-s, s, -s),
+        Vec3::new(s, s, -s),
+        Vec3::new(s, s, s),
+        Vec3::new(-s, s, s),
+        Vec3::new(-s, -s, s),
+        Vec3::new(s, -s, s),
+        Vec3::new(s, -s, -s),
+        Vec3::new(-s, -s, -s),
+        Vec3::new(-s, -s, s),
+        Vec3::new(-s, s, s),
+        Vec3::new(s, s, s),
+        Vec3::new(s, -s, s),
+        Vec3::new(s, -s, -s),
+        Vec3::new(s, s, -s),
+        Vec3::new(-s, s, -s),
+        Vec3::new(-s, -s, -s),
     ];
     let normals: [Vec3; 24] = [
-        Vec3::X, Vec3::X, Vec3::X, Vec3::X,
-        Vec3::NEG_X, Vec3::NEG_X, Vec3::NEG_X, Vec3::NEG_X,
-        Vec3::Y, Vec3::Y, Vec3::Y, Vec3::Y,
-        Vec3::NEG_Y, Vec3::NEG_Y, Vec3::NEG_Y, Vec3::NEG_Y,
-        Vec3::Z, Vec3::Z, Vec3::Z, Vec3::Z,
-        Vec3::NEG_Z, Vec3::NEG_Z, Vec3::NEG_Z, Vec3::NEG_Z,
+        Vec3::X,
+        Vec3::X,
+        Vec3::X,
+        Vec3::X,
+        Vec3::NEG_X,
+        Vec3::NEG_X,
+        Vec3::NEG_X,
+        Vec3::NEG_X,
+        Vec3::Y,
+        Vec3::Y,
+        Vec3::Y,
+        Vec3::Y,
+        Vec3::NEG_Y,
+        Vec3::NEG_Y,
+        Vec3::NEG_Y,
+        Vec3::NEG_Y,
+        Vec3::Z,
+        Vec3::Z,
+        Vec3::Z,
+        Vec3::Z,
+        Vec3::NEG_Z,
+        Vec3::NEG_Z,
+        Vec3::NEG_Z,
+        Vec3::NEG_Z,
     ];
     let indices: Vec<u32> = vec![
-        0,1,2, 0,2,3,  4,5,6, 4,6,7,
-        8,9,10, 8,10,11,  12,13,14, 12,14,15,
-        16,17,18, 16,18,19,  20,21,22, 20,22,23,
+        0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7, 8, 9, 10, 8, 10, 11, 12, 13, 14, 12, 14, 15, 16, 17,
+        18, 16, 18, 19, 20, 21, 22, 20, 22, 23,
     ];
     let vertices: Vec<ProceduralVertex> = positions
         .iter()
@@ -192,13 +238,16 @@ fn build_cube_mesh_with_mat(name: &str, material: Option<renderer::prelude::Mate
     }
 }
 
-fn build_plane_mesh(name: &str, material: Option<renderer::prelude::MaterialHandle>) -> ProceduralMeshData {
+fn build_plane_mesh(
+    name: &str,
+    material: Option<renderer::prelude::MaterialHandle>,
+) -> ProceduralMeshData {
     let s = 0.5;
     let positions = [
         Vec3::new(-s, 0.0, -s),
-        Vec3::new( s, 0.0, -s),
-        Vec3::new( s, 0.0,  s),
-        Vec3::new(-s, 0.0,  s),
+        Vec3::new(s, 0.0, -s),
+        Vec3::new(s, 0.0, s),
+        Vec3::new(-s, 0.0, s),
     ];
     let normal = Vec3::Y;
     let vertices: Vec<ProceduralVertex> = positions

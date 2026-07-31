@@ -608,7 +608,8 @@ fn compile_bsp_cmd(args: &[String]) -> CliResult<String> {
 // ---------------------------------------------------------------------------
 
 /// Default compiler profile bundled with engine_pack.
-const DEFAULT_BSP2_PROFILE: &str = include_str!("../../bsp_authoring/ericw-q1-bsp2-generated-profile.toml");
+const DEFAULT_BSP2_PROFILE: &str =
+    include_str!("../../bsp_authoring/ericw-q1-bsp2-generated-profile.toml");
 
 /// Resolve the Enhanced v2 CC0 Dungeon theme directory without parent traversal.
 fn cc0_dungeon_v2_dir() -> CliResult<PathBuf> {
@@ -640,9 +641,9 @@ fn enhanced_dungeon_cmd(args: &[String]) -> CliResult<String> {
     let parsed = parsed.into_result().map_err(CliError::Usage)?;
 
     let seed_str = require_option("--seed", &parsed)?;
-    let seed: u64 = seed_str.parse().map_err(|_| {
-        CliError::Usage(format!("invalid --seed value: '{seed_str}'"))
-    })?;
+    let seed: u64 = seed_str
+        .parse()
+        .map_err(|_| CliError::Usage(format!("invalid --seed value: '{seed_str}'")))?;
 
     let out_dir = PathBuf::from(require_option("--out", &parsed)?);
     let tool_path = parsed
@@ -684,15 +685,12 @@ fn enhanced_dungeon_cmd(args: &[String]) -> CliResult<String> {
         bsp_generator::enhanced::config::ENHANCED_TREAD_DEFAULT,
         2048,
     )
-    .map_err(|err| {
-        CliError::Usage(format!("invalid enhanced config: {err}"))
-    })?;
+    .map_err(|err| CliError::Usage(format!("invalid enhanced config: {err}")))?;
 
     // ── Read or use default profile ───────────────────────────────
     let profile_content = if let Some(profile_path) = parsed.singleton_value("--profile") {
-        std::fs::read_to_string(&profile_path).map_err(|err| {
-            io_error("enhanced-dungeon.profile", Path::new(&profile_path), err)
-        })?
+        std::fs::read_to_string(&profile_path)
+            .map_err(|err| io_error("enhanced-dungeon.profile", Path::new(&profile_path), err))?
     } else {
         DEFAULT_BSP2_PROFILE.to_string()
     };
@@ -737,8 +735,8 @@ fn enhanced_dungeon_cmd(args: &[String]) -> CliResult<String> {
 
     let result = (|| -> CliResult<String> {
         // 1. Generate enhanced map
-        let (map_text, meta) = bsp_generator::generate_enhanced(seed, config.clone())
-            .map_err(|err| {
+        let (map_text, meta) =
+            bsp_generator::generate_enhanced(seed, config.clone()).map_err(|err| {
                 CliError::Validation(internal_error(
                     "enhanced-dungeon.generate",
                     format!("generation failed: {err}"),
@@ -815,11 +813,8 @@ fn enhanced_dungeon_cmd(args: &[String]) -> CliResult<String> {
             &palette_bytes,
         )?;
         require_complete_enhanced_pbr_closure(&staged_pbr)?;
-        let selected_wad_basenames: Vec<String> = staged_pbr
-            .required_wad_basenames
-            .iter()
-            .cloned()
-            .collect();
+        let selected_wad_basenames: Vec<String> =
+            staged_pbr.required_wad_basenames.iter().cloned().collect();
 
         // 9. Validate the complete staged closure through isolated strict authorization
         validate_staged_authorized_import(
@@ -1218,10 +1213,12 @@ fn require_complete_enhanced_pbr_closure(staged: &StagedPbrClosure) -> CliResult
     let expected = staged
         .eligible_identities
         .iter()
-        .flat_map(|identity| [
-            format!("{identity}_norm.png"),
-            format!("{identity}_gloss.png"),
-        ])
+        .flat_map(|identity| {
+            [
+                format!("{identity}_norm.png"),
+                format!("{identity}_gloss.png"),
+            ]
+        })
         .collect::<std::collections::BTreeSet<_>>();
     if staged.staged_companions == expected {
         return Ok(());

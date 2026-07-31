@@ -29,8 +29,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 fn bsp_fixtures_dir() -> std::path::PathBuf {
     // Resolve relative to workspace root: apps/bsp_beta/../../src/bsp/tests/fixtures
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../src/bsp/tests/fixtures")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/bsp/tests/fixtures")
 }
 
 fn compiled_dir() -> std::path::PathBuf {
@@ -66,8 +65,19 @@ fn minimal_bsp_bytes() -> Vec<u8> {
     let lumps: [(u32, u32); 15] = [
         (entity_offset, entity_size),
         (plane_offset, plane_size),
-        (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0),
-        (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
     ];
     for (off, sz) in &lumps {
         data.extend_from_slice(&off.to_le_bytes());
@@ -151,14 +161,18 @@ fn performance_parse_microfixture() {
     .expect("parse");
     let parse_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-    let mut record = PerformanceRecord::new("parse_microfixture", "perf-parse-micro", "microfixture");
+    let mut record =
+        PerformanceRecord::new("parse_microfixture", "perf-parse-micro", "microfixture");
     record.parse_ms = parse_ms;
     record.bsp_bytes = bsp_size;
     record.entity_count = world.entities.len();
     record.total_ms = parse_ms;
 
     // Structural parse budget only — not a class claim
-    assert!(parse_ms < 50.0, "microfixture parse exceeded {parse_ms:.2} ms");
+    assert!(
+        parse_ms < 50.0,
+        "microfixture parse exceeded {parse_ms:.2} ms"
+    );
 
     eprintln!(
         "{}",
@@ -196,7 +210,10 @@ fn performance_parse_m1_class() {
     record.entity_count = world.entities.len();
     record.total_ms = parse_ms;
 
-    assert!(parse_ms < 50.0, "M1 parse {parse_ms:.2} ms exceeds 50 ms budget");
+    assert!(
+        parse_ms < 50.0,
+        "M1 parse {parse_ms:.2} ms exceeds 50 ms budget"
+    );
     assert!(world.faces.len() > 0, "M1 must have visible faces");
     assert!(
         world.faces.len() < 2000,
@@ -245,8 +262,14 @@ fn performance_extract_m1_class() {
     record.batch_count = extracted.render_batches.len();
     record.total_ms = extract_ms;
 
-    assert!(extract_ms < 100.0, "M1 extract {extract_ms:.2} ms exceeds 100 ms budget");
-    assert!(extracted.render_batches.len() < 100, "M1 batches must be < 100");
+    assert!(
+        extract_ms < 100.0,
+        "M1 extract {extract_ms:.2} ms exceeds 100 ms budget"
+    );
+    assert!(
+        extracted.render_batches.len() < 100,
+        "M1 batches must be < 100"
+    );
 
     eprintln!(
         "{}",
@@ -266,22 +289,33 @@ fn performance_reload_m1_class() {
             source_identity: "perf-reload-m1-v0".into(),
             ..Default::default()
         },
-    ).expect("parse M1");
+    )
+    .expect("parse M1");
 
     let mut coordinator = BspCoordinator::new();
     let mut scene = Scene::new();
-    coordinator.prepare_from_world(world.clone(), Some(0.0254), "perf-reload-m1-v0").unwrap();
+    coordinator
+        .prepare_from_world(world.clone(), Some(0.0254), "perf-reload-m1-v0")
+        .unwrap();
 
     let start = Instant::now();
-    coordinator.prepare_from_world(world, Some(0.0254), "perf-reload-m1-v1").unwrap();
+    coordinator
+        .prepare_from_world(world, Some(0.0254), "perf-reload-m1-v1")
+        .unwrap();
     let reload_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     let mut record = PerformanceRecord::new("reload_m1_class", "dungeon-m1-bsp2", "M1");
     record.reload_ms = reload_ms;
     record.bsp_bytes = bsp_data.len();
     record.total_ms = reload_ms;
-    assert!(reload_ms < 400.0, "M1 reload {reload_ms:.2} ms exceeds 400 ms budget");
-    eprintln!("{}", serde_json::to_string_pretty(&record).unwrap_or_default());
+    assert!(
+        reload_ms < 400.0,
+        "M1 reload {reload_ms:.2} ms exceeds 400 ms budget"
+    );
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(&record).unwrap_or_default()
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -314,7 +348,10 @@ fn performance_parse_m2_class() {
     record.entity_count = world.entities.len();
     record.total_ms = parse_ms;
 
-    assert!(parse_ms < 200.0, "M2 parse {parse_ms:.2} ms exceeds 200 ms budget");
+    assert!(
+        parse_ms < 200.0,
+        "M2 parse {parse_ms:.2} ms exceeds 200 ms budget"
+    );
     assert!(world.faces.len() > 0, "M2 must have visible faces");
     assert!(
         world.faces.len() < 10000,
@@ -363,8 +400,14 @@ fn performance_extract_m2_class() {
     record.batch_count = extracted.render_batches.len();
     record.total_ms = extract_ms;
 
-    assert!(extract_ms < 200.0, "M2 extract {extract_ms:.2} ms exceeds 200 ms budget");
-    assert!(extracted.render_batches.len() < 500, "M2 batches must be < 500");
+    assert!(
+        extract_ms < 200.0,
+        "M2 extract {extract_ms:.2} ms exceeds 200 ms budget"
+    );
+    assert!(
+        extracted.render_batches.len() < 500,
+        "M2 batches must be < 500"
+    );
 
     eprintln!(
         "{}",
@@ -384,22 +427,33 @@ fn performance_reload_m2_class() {
             source_identity: "perf-reload-m2-v0".into(),
             ..Default::default()
         },
-    ).expect("parse M2");
+    )
+    .expect("parse M2");
 
     let mut coordinator = BspCoordinator::new();
     let mut scene = Scene::new();
-    coordinator.prepare_from_world(world.clone(), Some(0.0254), "perf-reload-m2-v0").unwrap();
+    coordinator
+        .prepare_from_world(world.clone(), Some(0.0254), "perf-reload-m2-v0")
+        .unwrap();
 
     let start = Instant::now();
-    coordinator.prepare_from_world(world, Some(0.0254), "perf-reload-m2-v1").unwrap();
+    coordinator
+        .prepare_from_world(world, Some(0.0254), "perf-reload-m2-v1")
+        .unwrap();
     let reload_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     let mut record = PerformanceRecord::new("reload_m2_class", "dungeon-m2-bsp2", "M2");
     record.reload_ms = reload_ms;
     record.bsp_bytes = bsp_data.len();
     record.total_ms = reload_ms;
-    assert!(reload_ms < 800.0, "M2 reload {reload_ms:.2} ms exceeds 800 ms budget");
-    eprintln!("{}", serde_json::to_string_pretty(&record).unwrap_or_default());
+    assert!(
+        reload_ms < 800.0,
+        "M2 reload {reload_ms:.2} ms exceeds 800 ms budget"
+    );
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(&record).unwrap_or_default()
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -420,18 +474,25 @@ fn performance_coordinator_prepare_m1_class() {
             source_identity: "perf-coord-m1".into(),
             ..Default::default()
         },
-    ).expect("parse M1");
+    )
+    .expect("parse M1");
 
     let t0 = Instant::now();
     let mut coordinator = BspCoordinator::new();
     coordinator.register_bridge("physics", Box::new(PhysicsBridge::new()));
     coordinator.register_bridge("runtime", Box::new(RuntimeBridge::new()));
-    let prepare = coordinator.prepare_from_world(world, Some(0.0254), "perf-coord-m1").unwrap();
+    let prepare = coordinator
+        .prepare_from_world(world, Some(0.0254), "perf-coord-m1")
+        .unwrap();
     let prepare_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-    coordinator.set_renderer_mount_ready(prepare.token, empty_mount()).unwrap();
+    coordinator
+        .set_renderer_mount_ready(prepare.token, empty_mount())
+        .unwrap();
     let mut scene = Scene::new();
-    coordinator.validate_for_scene(prepare.token, &mut scene).unwrap();
+    coordinator
+        .validate_for_scene(prepare.token, &mut scene)
+        .unwrap();
 
     let mut record = PerformanceRecord::new("coordinator_prepare_m1", "dungeon-m1-bsp2", "M1");
     record.total_ms = prepare_ms;
@@ -439,9 +500,15 @@ fn performance_coordinator_prepare_m1_class() {
     record.face_count = prepare.face_count;
     record.entity_count = prepare.entity_count;
     record.batch_count = prepare.batch_count;
-    assert!(prepare_ms < 200.0, "M1 coordinator prepare {prepare_ms:.2} ms exceeded 200 ms");
+    assert!(
+        prepare_ms < 200.0,
+        "M1 coordinator prepare {prepare_ms:.2} ms exceeded 200 ms"
+    );
     assert!(prepare.face_count > 0, "M1 must have faces");
-    eprintln!("{}", serde_json::to_string_pretty(&record).unwrap_or_default());
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(&record).unwrap_or_default()
+    );
 }
 
 /// CPU prepare path for M2 — validates the coordinator prepare pipeline.
@@ -457,18 +524,25 @@ fn performance_coordinator_prepare_m2_class() {
             source_identity: "perf-coord-m2".into(),
             ..Default::default()
         },
-    ).expect("parse M2");
+    )
+    .expect("parse M2");
 
     let t0 = Instant::now();
     let mut coordinator = BspCoordinator::new();
     coordinator.register_bridge("physics", Box::new(PhysicsBridge::new()));
     coordinator.register_bridge("runtime", Box::new(RuntimeBridge::new()));
-    let prepare = coordinator.prepare_from_world(world, Some(0.0254), "perf-coord-m2").unwrap();
+    let prepare = coordinator
+        .prepare_from_world(world, Some(0.0254), "perf-coord-m2")
+        .unwrap();
     let prepare_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-    coordinator.set_renderer_mount_ready(prepare.token, empty_mount()).unwrap();
+    coordinator
+        .set_renderer_mount_ready(prepare.token, empty_mount())
+        .unwrap();
     let mut scene = Scene::new();
-    coordinator.validate_for_scene(prepare.token, &mut scene).unwrap();
+    coordinator
+        .validate_for_scene(prepare.token, &mut scene)
+        .unwrap();
 
     let mut record = PerformanceRecord::new("coordinator_prepare_m2", "dungeon-m2-bsp2", "M2");
     record.total_ms = prepare_ms;
@@ -476,9 +550,15 @@ fn performance_coordinator_prepare_m2_class() {
     record.face_count = prepare.face_count;
     record.entity_count = prepare.entity_count;
     record.batch_count = prepare.batch_count;
-    assert!(prepare_ms < 500.0, "M2 coordinator prepare {prepare_ms:.2} ms exceeded 500 ms");
+    assert!(
+        prepare_ms < 500.0,
+        "M2 coordinator prepare {prepare_ms:.2} ms exceeded 500 ms"
+    );
     assert!(prepare.face_count > 0, "M2 must have faces");
-    eprintln!("{}", serde_json::to_string_pretty(&record).unwrap_or_default());
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(&record).unwrap_or_default()
+    );
 }
 
 /// GPU mount test for M1 — requires Vulkan-capable environment.
@@ -534,12 +614,22 @@ fn corpus_budget_measurement() {
     // When GPU unavailable, every entry is NOT_RUN with environment evidence
     if !gpu_available {
         for (name, class) in frozen_corpus_ids() {
-            budget_entries.push(BudgetEntry::not_run(&name, &class, &hardware_class, "GPU environment unavailable"));
+            budget_entries.push(BudgetEntry::not_run(
+                &name,
+                &class,
+                &hardware_class,
+                "GPU environment unavailable",
+            ));
         }
     } else {
         eprintln!("GPU measurements not yet instrumented — recording NOT_RUN");
         for (name, class) in frozen_corpus_ids() {
-            budget_entries.push(BudgetEntry::not_run(&name, &class, &hardware_class, "GPU measurement path not instrumented"));
+            budget_entries.push(BudgetEntry::not_run(
+                &name,
+                &class,
+                &hardware_class,
+                "GPU measurement path not instrumented",
+            ));
         }
     }
 

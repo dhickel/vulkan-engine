@@ -353,7 +353,10 @@ fn evidence_request_lifecycle_rejects_duplicate() {
 
     // Taking with wrong key returns MissingReport.
     let status = renderer.take_bsp_frame_evidence(renderer::api::bsp::BspEvidenceRequestKey(999));
-    assert!(matches!(status, renderer::api::bsp::BspEvidenceStatus::MissingReport));
+    assert!(matches!(
+        status,
+        renderer::api::bsp::BspEvidenceStatus::MissingReport
+    ));
 
     // Take the real key — if we haven't rendered, it should be Pending or MissingReport.
     let _ = renderer.take_bsp_frame_evidence(key1);
@@ -393,7 +396,10 @@ fn evidence_take_without_mount_returns_rejected() {
     match status {
         renderer::api::bsp::BspEvidenceStatus::RejectedNoMount => {}
         renderer::api::bsp::BspEvidenceStatus::Sealed(report) => {
-            assert!(!report.eligible, "report without mount should not be eligible");
+            assert!(
+                !report.eligible,
+                "report without mount should not be eligible"
+            );
         }
         other => {
             panic!("expected RejectedNoMount or Sealed(ineligible), got: {other:?}");

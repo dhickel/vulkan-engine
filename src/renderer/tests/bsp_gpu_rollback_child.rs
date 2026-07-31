@@ -41,21 +41,18 @@ fn run_rollback_child(fault: &str) -> (i32, String, String) {
 #[test]
 #[ignore = "launched as a child by the rollback fault suite"]
 fn rollback_child_entry() {
-    let fault =
-        std::env::var("BSP_ROLLBACK_FAULT").unwrap_or_else(|_| FAULT_NONE.to_string());
+    let fault = std::env::var("BSP_ROLLBACK_FAULT").unwrap_or_else(|_| FAULT_NONE.to_string());
 
     eprintln!("[child] rollback child starting with fault={fault}");
 
     let result = (|| -> Result<(), String> {
-        let mut renderer = Renderer::new_headless(
-            RendererConfig {
-                app_name: format!("bsp-rollback-child-{fault}"),
-                headless: true,
-                validation_layer: false,
-                preload_startup_scene: false,
-                ..Default::default()
-            },
-        )
+        let mut renderer = Renderer::new_headless(RendererConfig {
+            app_name: format!("bsp-rollback-child-{fault}"),
+            headless: true,
+            validation_layer: false,
+            preload_startup_scene: false,
+            ..Default::default()
+        })
         .map_err(|e| format!("child renderer init: {e}"))?;
 
         // Use the material fixture from the existing test infrastructure.
@@ -80,8 +77,7 @@ fn rollback_child_entry() {
                 match result {
                     Err(e) => {
                         let msg = e.to_string();
-                        if msg.contains("injected BSP upload failure after material registration")
-                        {
+                        if msg.contains("injected BSP upload failure after material registration") {
                             eprintln!("[child] got expected typed error");
                             // Arena A's resources should still be intact.
                             // Upload arena A again to prove it.
@@ -113,8 +109,7 @@ fn rollback_child_entry() {
 
 /// Load the material fixture BSP for arena coexistence tests.
 fn material_fixture() -> bsp::extract::ExtractedBsp {
-    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../bsp/tests/fixtures");
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../bsp/tests/fixtures");
     let bsp_path = fixtures.join("compiled/dungeon-materials-bsp2.bsp");
     let palette_path = fixtures.join("palettes/project_palette.lmp");
     let palette_bytes = std::fs::read(&palette_path).expect("read fixture palette");
@@ -161,5 +156,8 @@ fn rollback_after_material_registration_exits_clean() {
 #[ignore = "requires a Vulkan-capable GPU"]
 fn arena_a_survives_after_b_failure() {
     let (code, _stdout, stderr) = run_rollback_child(FAULT_POST_MATERIAL);
-    assert_eq!(code, 0, "child should exit 0 after A survives B failure\nstderr:\n{stderr}");
+    assert_eq!(
+        code, 0,
+        "child should exit 0 after A survives B failure\nstderr:\n{stderr}"
+    );
 }

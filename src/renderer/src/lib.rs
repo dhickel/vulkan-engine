@@ -52,6 +52,8 @@ pub use api::{
     BoundsUnknownReason,
     BoxedRenderHook,
     CameraView,
+    // Error root
+    CommandError,
     // Debug
     DebugRuntimeMode,
     // Lighting
@@ -80,8 +82,6 @@ pub use api::{
     // Core runtime
     Renderer,
     RendererConfig,
-    // Error root
-    CommandError,
     RendererError,
     RendererInputRouting,
     RendererInputSuppression,
@@ -101,8 +101,8 @@ pub use debug_draw::DebugDrawState;
 
 pub use animation::AnimationPlayer;
 pub use data::camera::{
-    Aabb, AabbRayHit, Camera, EditorCamera, EditorProjection, FPSController, Frustum,
-    OrbitCamera, OrbitController, Ray,
+    Aabb, AabbRayHit, Camera, EditorCamera, EditorProjection, FPSController, Frustum, OrbitCamera,
+    OrbitController, Ray,
 };
 pub use object::selection::SelectionChange;
 pub use object::{ObjectLifecycleOutcome, ObjectMutationOutcome, ObjectSummary};
@@ -111,8 +111,8 @@ pub use scene::command::{
     SceneNodeRemap, SetTransformCommand,
 };
 pub use scene::object_commands::{
-    AttachComponentCommand, DuplicateObjectsCommand, RemoveComponentCommand,
-    RemoveObjectsCommand, ReplaceComponentStateCommand, SetComponentPropertyCommand,
-    SetObjectParentCommand, SetObjectTransformCommand,
+    AttachComponentCommand, DuplicateObjectsCommand, RemoveComponentCommand, RemoveObjectsCommand,
+    ReplaceComponentStateCommand, SetComponentPropertyCommand, SetObjectParentCommand,
+    SetObjectTransformCommand,
 };
 pub use scene::scene_world::SceneWorld;

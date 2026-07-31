@@ -277,10 +277,7 @@ impl AudioEngine {
     /// The clip must be mono (1 channel); multi-channel clips return an error
     /// without side effects. The returned [`SpatialPlaybackHandle`] provides
     /// independent left/right gain control via shared atomic state.
-    pub fn play_spatial_mono(
-        &self,
-        clip: &AudioClip,
-    ) -> Result<SpatialPlaybackHandle, AudioError> {
+    pub fn play_spatial_mono(&self, clip: &AudioClip) -> Result<SpatialPlaybackHandle, AudioError> {
         let source = clip.decoder()?;
         if source.channels() != 1 {
             return Err(AudioError::Playback {
@@ -294,8 +291,7 @@ impl AudioEngine {
         let gains = StdArc::new(spatial::AtomicSpatialGains::new(
             spatial::SpatialGain::CENTER,
         ));
-        let spatial_source =
-            spatial::SpatialSource::new(source, StdArc::clone(&gains));
+        let spatial_source = spatial::SpatialSource::new(source, StdArc::clone(&gains));
         let sink = Sink::try_new(&self.stream_handle).map_err(|err| AudioError::Playback {
             clip_id: clip.id().clone(),
             message: err.to_string(),
@@ -381,11 +377,8 @@ impl SpatialPlaybackHandle {
         spatial_blend: f32,
     ) {
         let spatial_gains = spatial::spatialize(listener, source, attenuation);
-        let blended = spatial::blend_gains(
-            spatial::SpatialGain::CENTER,
-            spatial_gains,
-            spatial_blend,
-        );
+        let blended =
+            spatial::blend_gains(spatial::SpatialGain::CENTER, spatial_gains, spatial_blend);
         self.gains.set(blended);
     }
 

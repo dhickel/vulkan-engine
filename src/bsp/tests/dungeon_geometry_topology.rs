@@ -8,8 +8,8 @@
 //!  - large faces don't cause subdivision issues (face count within bounds)
 //!  - unequal ceilings produce correct clip hulls (non-empty clipnodes)
 
-use bsp::*;
 use bsp::coords::QuakeToEngine;
+use bsp::*;
 use glam::Vec3;
 use std::path::Path;
 
@@ -184,7 +184,10 @@ fn topology_t_junction_has_vis() {
         &world.leaves,
         &world.planes,
     );
-    assert!(pvs.is_some(), "camera inside sealed T-junction must have PVS");
+    assert!(
+        pvs.is_some(),
+        "camera inside sealed T-junction must have PVS"
+    );
     assert!(pvs.unwrap().valid);
 }
 
@@ -202,7 +205,10 @@ fn topology_x_junction_has_vis() {
         &world.leaves,
         &world.planes,
     );
-    assert!(pvs.is_some(), "camera inside sealed X-junction must have PVS");
+    assert!(
+        pvs.is_some(),
+        "camera inside sealed X-junction must have PVS"
+    );
     assert!(pvs.unwrap().valid);
 }
 
@@ -220,7 +226,10 @@ fn topology_l_junction_has_vis() {
         &world.leaves,
         &world.planes,
     );
-    assert!(pvs.is_some(), "camera inside sealed L-junction must have PVS");
+    assert!(
+        pvs.is_some(),
+        "camera inside sealed L-junction must have PVS"
+    );
     assert!(pvs.unwrap().valid);
 }
 
@@ -295,10 +304,7 @@ fn topology_intentional_leak_empty_vis() {
     // visibility for an unsealed map).
     // Depending on compiler behavior, VIS data may be empty or the PVS
     // state may be corrupt/empty.
-    let pvs_state = PvsState::new(
-        world.leaves.len().saturating_sub(1) as u32,
-        &world.vis_data,
-    );
+    let pvs_state = PvsState::new(world.leaves.len().saturating_sub(1) as u32, &world.vis_data);
     // Either VIS is empty (corrupt) or has zero leaves
     assert!(
         pvs_state.corrupt || world.vis_data.is_empty(),
@@ -409,10 +415,7 @@ fn topology_unequal_ceiling_height_transition() {
 #[test]
 fn topology_pvs_bit_counts_match_leaf_counts() {
     let world = load_bsp2_fixture("dungeon-junction-straight-bsp2");
-    let state = PvsState::new(
-        world.leaves.len().saturating_sub(1) as u32,
-        &world.vis_data,
-    );
+    let state = PvsState::new(world.leaves.len().saturating_sub(1) as u32, &world.vis_data);
     assert!(!state.corrupt);
     // pvs_bytes must be (num_leaves + 7) / 8
     assert_eq!(
@@ -446,12 +449,7 @@ fn topology_point_contents_empty_in_room() {
     // Convert info_player_start Quake position (-192, 0, 0) to engine space
     let qte = QuakeToEngine::default();
     let eng_pos = qte.position_vec3(Vec3::new(-192.0, 0.0, 0.0));
-    let result = queries::point_contents(
-        eng_pos,
-        &world.nodes,
-        &world.leaves,
-        &world.planes,
-    );
+    let result = queries::point_contents(eng_pos, &world.nodes, &world.leaves, &world.planes);
     assert!(
         !result.is_solid(),
         "camera inside room must not be in solid"
@@ -468,12 +466,7 @@ fn topology_point_contents_solid_in_wall() {
     // Point inside the shared center wall at Quake x=8 should be solid
     let qte = QuakeToEngine::default();
     let eng_pos = qte.position_vec3(Vec3::new(8.0, 0.0, 0.0));
-    let result = queries::point_contents(
-        eng_pos,
-        &world.nodes,
-        &world.leaves,
-        &world.planes,
-    );
+    let result = queries::point_contents(eng_pos, &world.nodes, &world.leaves, &world.planes);
     assert!(
         result.is_solid(),
         "point in shared wall must be solid, got {result:?}"
