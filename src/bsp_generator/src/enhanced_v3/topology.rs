@@ -247,7 +247,7 @@ mod tests {
         let topology =
             build_topology(&config, &footprints, &layout, V3Seed::new(0), &mut alloc).unwrap();
 
-        assert_eq!(topology.rooms.len(), 3);
+        assert_eq!(topology.rooms.len(), config.preset.min_rooms() as usize);
         assert_eq!(topology.portals.len(), 1);
         assert_eq!(topology.routes.len(), 1);
         assert_eq!(topology.transitions.len(), 1);

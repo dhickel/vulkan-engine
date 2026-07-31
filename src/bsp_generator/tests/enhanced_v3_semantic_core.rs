@@ -215,11 +215,7 @@ fn footprints_build_for_all_presets() {
         let mut alloc = V3IdAllocator::new();
         let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
 
-        match preset {
-            V3Preset::Sparse => assert_eq!(footprints.len(), 3),
-            V3Preset::Moderate => assert_eq!(footprints.len(), 4),
-            V3Preset::Rich => assert_eq!(footprints.len(), 6),
-        }
+        assert_eq!(footprints.len(), preset.min_rooms() as usize);
     }
 }
 
@@ -258,10 +254,20 @@ fn footprints_layer_assignment() {
     let mut alloc = V3IdAllocator::new();
     let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
 
-    assert_eq!(footprints[0].layer, 0);
-    assert_eq!(footprints[0].floor_z, 0);
-    assert_eq!(footprints[2].layer, 1);
-    assert_eq!(footprints[2].floor_z, 192);
+    let lower = footprints
+        .iter()
+        .filter(|footprint| footprint.layer == 0)
+        .count();
+    let upper = footprints.len() - lower;
+    assert!(lower.abs_diff(upper) <= 1);
+    assert!(footprints
+        .iter()
+        .filter(|footprint| footprint.layer == 0)
+        .all(|footprint| footprint.floor_z == 0));
+    assert!(footprints
+        .iter()
+        .filter(|footprint| footprint.layer == 1)
+        .all(|footprint| footprint.floor_z == 192));
 }
 
 // ── Topology tests ─────────────────────────────────────────────────────────

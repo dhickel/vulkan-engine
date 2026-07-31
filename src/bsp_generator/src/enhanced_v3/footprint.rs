@@ -4,10 +4,44 @@
 //! lattice polygons validated against the V3 contract. Surface, edge, and
 //! corner IDs are stable and never encode iteration position.
 
-use super::config::{self, V3Config, V3Preset, CONSTRUCTION_QUANTUM};
+use super::config::{self, V3Config, CONSTRUCTION_QUANTUM};
 use super::error::V3Error;
 use super::ids::{CornerId, RoomId, SurfaceId, V3IdAllocator};
-use super::rng::V3Seed;
+use super::rng::{self, V3Seed};
+
+// ── Placement constants ────────────────────────────────────────────────────
+
+/// Minimum room outer span in Quake units (112 = 7 quanta).
+const MIN_OUTER_SPAN: i32 = 112;
+
+/// Maximum room outer span in Quake units (256 = 16 quanta).
+const MAX_OUTER_SPAN: i32 = 256;
+
+/// Minimum outer span in quanta.
+const MIN_SPAN_Q: i32 = MIN_OUTER_SPAN / CONSTRUCTION_QUANTUM; // 7
+
+/// Maximum outer span in quanta.
+const MAX_SPAN_Q: i32 = MAX_OUTER_SPAN / CONSTRUCTION_QUANTUM; // 16
+
+/// Every non-empty subset of the four corners.  The constructor accepts all
+/// patterns, including an all-corner octagon.
+const CHAMFER_PATTERNS: &[&[(i32, i32)]] = &[
+    &[(-1, -1)],
+    &[(1, -1)],
+    &[(1, 1)],
+    &[(-1, 1)],
+    &[(-1, -1), (1, -1)],
+    &[(-1, -1), (1, 1)],
+    &[(-1, -1), (-1, 1)],
+    &[(1, -1), (1, 1)],
+    &[(1, -1), (-1, 1)],
+    &[(1, 1), (-1, 1)],
+    &[(-1, -1), (1, -1), (1, 1)],
+    &[(-1, -1), (1, -1), (-1, 1)],
+    &[(-1, -1), (1, 1), (-1, 1)],
+    &[(1, -1), (1, 1), (-1, 1)],
+    &[(-1, -1), (1, -1), (1, 1), (-1, 1)],
+];
 
 // ── Footprint descriptor ─────────────────────────────────────────────────
 
@@ -122,43 +156,7 @@ impl Footprint {
             });
         }
 
-        let mut vertices = Vec::new();
-        let sw_chamfered = chamfer_corners.contains(&(-1, -1));
-        let se_chamfered = chamfer_corners.contains(&(1, -1));
-        let ne_chamfered = chamfer_corners.contains(&(1, 1));
-        let nw_chamfered = chamfer_corners.contains(&(-1, 1));
-
-        if sw_chamfered {
-            vertices.push((x0 + chamfer_size, y0));
-            vertices.push((x0, y0 + chamfer_size));
-        } else {
-            vertices.push((x0, y0));
-        }
-        if se_chamfered {
-            vertices.push((x1 - chamfer_size, y0));
-            vertices.push((x1, y0 + chamfer_size));
-        } else {
-            vertices.push((x1, y0));
-        }
-        if ne_chamfered {
-            vertices.push((x1, y1 - chamfer_size));
-            vertices.push((x1 - chamfer_size, y1));
-        } else {
-            vertices.push((x1, y1));
-        }
-        if nw_chamfered {
-            vertices.push((x0 + chamfer_size, y1));
-            vertices.push((x0, y1 - chamfer_size));
-        } else {
-            vertices.push((x0, y1));
-        }
-
-        if vertices.len() < 4 {
-            return Err(V3Error::InvalidFootprint {
-                detail: "chamfered footprint has fewer than 4 vertices".into(),
-            });
-        }
-
+        let vertices = chamfered_vertices(shell, chamfer_corners, chamfer_size)?;
         validate_edges(&vertices)?;
 
         let n = vertices.len();
@@ -252,23 +250,6 @@ fn validate_edges(vertices: &[(i32, i32)]) -> Result<(), V3Error> {
 
 // ── Footprint builder from config ──────────────────────────────────────────
 
-/// Build deterministic footprints and room layout from config.
-pub fn build_footprints(
-    config: &V3Config,
-    seed: V3Seed,
-    alloc: &mut V3IdAllocator,
-) -> Result<(Vec<Footprint>, FootprintLayout), V3Error> {
-    let extent = config.xy_extent as i32;
-    let q = CONSTRUCTION_QUANTUM;
-    let _stage_seed = seed.stage_seed(super::rng::tags::PLACEMENT);
-
-    match config.preset {
-        V3Preset::Sparse => build_sparse(extent, q, alloc),
-        V3Preset::Moderate => build_moderate(extent, q, alloc),
-        V3Preset::Rich => build_rich(extent, q, alloc),
-    }
-}
-
 /// Layout relationship between rooms.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FootprintLayout {
@@ -278,304 +259,868 @@ pub struct FootprintLayout {
     pub transition_upper: usize,
 }
 
-fn build_sparse(
-    extent: i32,
-    q: i32,
+/// Build deterministic footprints and room layout from config.
+///
+/// Uses the frozen v3 placement seed stream to generate a seeded,
+/// deterministic, varied, non-overlapping set of room footprints
+/// satisfying the preset room minimums. Every preset includes
+/// genuinely chamfered footprints.
+pub fn build_footprints(
+    config: &V3Config,
+    seed: V3Seed,
     alloc: &mut V3IdAllocator,
 ) -> Result<(Vec<Footprint>, FootprintLayout), V3Error> {
-    let ec = extent / q;
-    let rw = 10;
-    let rd = 10;
-    let x0 = ((ec - rw) / 2) * q;
-    let y0 = ((ec - rd) / 4) * q;
+    let extent = config.xy_extent as i32;
+    let q = CONSTRUCTION_QUANTUM;
+    let target = config.preset.min_rooms() as usize;
+    let extent_q = extent / q;
+    let (columns, rows) = placement_grid(target);
+    let slot_width_q = extent_q / columns;
+    let slot_depth_q = extent_q / rows;
 
-    let r0_id = alloc.next_room()?;
-    let primary = Footprint::rectangular(
-        r0_id,
-        0,
-        config::LOWER_FLOOR_Z,
-        (x0, y0, x0 + rw * q, y0 + rd * q),
-        alloc,
-    )?;
-    primary.validate_convex()?;
+    // A full rectangular slot is reserved for each room, rather than only the
+    // cells whose centers are inside a chamfered polygon. This deliberately
+    // leaves no occupancy holes at clipped corners and makes overlap proof a
+    // simple interval proof independent of a hash-table traversal.
+    if slot_width_q < MIN_SPAN_Q || slot_depth_q < MIN_SPAN_Q {
+        return Err(V3Error::InvalidFootprint {
+            detail: format!(
+                "extent {extent} cannot reserve {target} rooms with minimum span {MIN_OUTER_SPAN}"
+            ),
+        });
+    }
 
-    let sw = 8;
-    let sd = 8;
-    let sx0 = x0 + rw * q + 3 * q;
-    let sy0 = y0 + q;
+    let mut footprints = Vec::with_capacity(target);
+    let lower_target = (target + 1) / 2;
+    for room_index in 0..target {
+        // The lower-layer prefix reserves the first two adjacent slots for
+        // the legacy primary/secondary portal shim. Counts remain balanced.
+        let layer = u8::from(room_index >= lower_target);
+        let floor_z = if layer == 0 {
+            config::LOWER_FLOOR_Z
+        } else {
+            config::UPPER_FLOOR_Z
+        };
+        let key = format!("room/{room_index:04}");
+        let [u0, u1, u2, u3] = seed
+            .candidate_seed(rng::tags::PLACEMENT, key.as_bytes())
+            .u64s();
+        let column = (room_index % columns as usize) as i32;
+        let row = (room_index / columns as usize) as i32;
+        let max_width_q = slot_width_q.min(MAX_SPAN_Q);
+        let max_depth_q = slot_depth_q.min(MAX_SPAN_Q);
+        let primary_max_width_q = max_width_q - 1;
+        // The existing reservation boundary centers room zero on the quantum
+        // grid. Preserve that compatibility invariant while still selecting
+        // its span from the placement stream.
+        let w_q = if room_index == 0 {
+            seeded_even_span(u0, primary_max_width_q)
+        } else {
+            MIN_SPAN_Q + (u0 % (max_width_q - MIN_SPAN_Q + 1) as u64) as i32
+        };
+        let d_q = if room_index == 0 {
+            // A 128-unit depth keeps the inherited spawn center aligned and
+            // inside the adjacent secondary room's minimum 112-unit span.
+            MIN_SPAN_Q + 1
+        } else {
+            MIN_SPAN_Q + (u1 % (max_depth_q - MIN_SPAN_Q + 1) as u64) as i32
+        };
+        let x_gap_q = slot_width_q - w_q;
+        let y_gap_q = slot_depth_q - d_q;
+        let (x_offset_q, y_offset_q) = match room_index {
+            // Join the first two lower rooms at a shared cardinal wall so the
+            // unchanged Phase 01 topology compatibility layout has a real
+            // portal target, not merely a valid pair of indices.
+            0 => (x_gap_q - 1, 0),
+            1 => (0, 0),
+            _ => (
+                (u2 % (x_gap_q + 1) as u64) as i32,
+                (u3 % (y_gap_q + 1) as u64) as i32,
+            ),
+        };
+        let x0 = (column * slot_width_q + x_offset_q) * q;
+        let y0 = (row * slot_depth_q + y_offset_q) * q;
+        let shell = (x0, y0, x0 + w_q * q, y0 + d_q * q);
 
-    let r1_id = alloc.next_room()?;
-    let secondary = Footprint::rectangular(
-        r1_id,
-        0,
-        config::LOWER_FLOOR_Z,
-        (sx0, sy0, sx0 + sw * q, sy0 + sd * q),
-        alloc,
-    )?;
-    secondary.validate_convex()?;
+        // At least two thirds of room indices are chamfered. A 16-unit
+        // chamfer always fits the minimum 112-unit room; a 32-unit chamfer is
+        // used only when its two edges fit the selected spans.
+        let chamfer_q = if (u3 >> 8) & 1 == 0 && w_q >= 4 && d_q >= 4 {
+            2
+        } else {
+            1
+        };
+        let chamfer_size = chamfer_q * q;
+        let vertices = if room_index % 3 == 0 {
+            rect_vertices(shell)
+        } else {
+            let pattern = CHAMFER_PATTERNS[(u3 >> 16) as usize % CHAMFER_PATTERNS.len()];
+            chamfered_vertices(shell, pattern, chamfer_size)?
+        };
+        validate_edges(&vertices)?;
 
-    let uw = 6;
-    let ud = 6;
-    let ux0 = x0 + 2 * q;
-    let uy0 = y0 + rd * q + 2 * q;
+        let room_id = alloc.next_room()?;
+        let mut surface_ids = Vec::with_capacity(vertices.len());
+        let mut corner_ids = Vec::with_capacity(vertices.len());
+        for _ in 0..vertices.len() {
+            surface_ids.push(alloc.next_surface()?);
+            corner_ids.push(alloc.next_corner()?);
+        }
+        let footprint = Footprint {
+            vertices,
+            surface_ids,
+            corner_ids,
+            aabb: shell,
+            room_id,
+            layer,
+            floor_z,
+        };
+        footprint.validate_convex()?;
+        footprints.push(footprint);
+    }
 
-    let r2_id = alloc.next_room()?;
-    let upper = Footprint::rectangular(
-        r2_id,
-        1,
-        config::UPPER_FLOOR_Z,
-        (ux0, uy0, ux0 + uw * q, uy0 + ud * q),
-        alloc,
-    )?;
-    upper.validate_convex()?;
+    let lower_count = lower_target;
+    let upper_count = target - lower_target;
 
-    let footprints = vec![primary, secondary, upper];
-    let layout = FootprintLayout {
-        primary: 0,
-        secondary: 1,
-        transition_lower: 0,
-        transition_upper: 2,
+    // Slots reserve complete shell AABBs, so this exact positive-area test
+    // also proves that chamfered corners cannot admit an occupancy hole.
+    for (index, footprint) in footprints.iter().enumerate() {
+        for other in &footprints[..index] {
+            if aabbs_overlap(footprint.aabb, other.aabb) {
+                return Err(V3Error::TopologyInvariant {
+                    detail: format!(
+                        "projected room overlap between {} and {}",
+                        other.room_id, footprint.room_id
+                    ),
+                });
+            }
+        }
+    }
+
+    // ── Verify layer balance ──────────────────────────────────────
+    let diff = if lower_count > upper_count {
+        lower_count - upper_count
+    } else {
+        upper_count - lower_count
     };
+    if diff > 1 {
+        return Err(V3Error::TopologyInvariant {
+            detail: format!(
+                "layer membership not balanced: lower={lower_count}, upper={upper_count}, diff={diff}"
+            ),
+        });
+    }
+
+    // ── Verify every room is within bounds ────────────────────────
+    for fp in &footprints {
+        let (x0, y0, x1, y1) = fp.aabb;
+        if x0 < 0 || y0 < 0 || x1 > extent || y1 > extent {
+            return Err(V3Error::RoomOutOfBounds {
+                room_id: fp.room_id.raw(),
+                extent: extent as u32,
+            });
+        }
+        let w = x1 - x0;
+        let d = y1 - y0;
+        if w < MIN_OUTER_SPAN || w > MAX_OUTER_SPAN || d < MIN_OUTER_SPAN || d > MAX_OUTER_SPAN {
+            return Err(V3Error::InvalidFootprint {
+                detail: format!(
+                    "room {} span {w}×{d} outside [{MIN_OUTER_SPAN}..{MAX_OUTER_SPAN}]",
+                    fp.room_id
+                ),
+            });
+        }
+    }
+
+    // ── Build FootprintLayout for downstream compatibility ─────────
+    let layout = build_layout_from_footprints(&footprints, lower_count, upper_count)?;
 
     Ok((footprints, layout))
 }
 
-fn build_moderate(
-    extent: i32,
-    q: i32,
-    alloc: &mut V3IdAllocator,
-) -> Result<(Vec<Footprint>, FootprintLayout), V3Error> {
-    let ec = extent / q;
-    let rw = 12;
-    let rd = 10;
-    let x0 = ((ec - rw) / 2) * q;
-    let y0 = 1 * q;
+// ── Polygon and reservation helpers ────────────────────────────────────────
 
-    let r0_id = alloc.next_room()?;
-    let primary = Footprint::rectangular(
-        r0_id,
-        0,
-        config::LOWER_FLOOR_Z,
-        (x0, y0, x0 + rw * q, y0 + rd * q),
-        alloc,
-    )?;
-    primary.validate_convex()?;
-
-    let sw = 8;
-    let sd = 8;
-    let sx0 = x0 + rw * q + 2 * q;
-    let sy0 = y0 + q;
-    let r1_id = alloc.next_room()?;
-    let secondary = Footprint::rectangular(
-        r1_id,
-        0,
-        config::LOWER_FLOOR_Z,
-        (sx0, sy0, sx0 + sw * q, sy0 + sd * q),
-        alloc,
-    )?;
-    secondary.validate_convex()?;
-
-    let uw = 6;
-    let ud = 6;
-    let ux0 = x0 + q;
-    let uy0 = y0 + rd * q + 2 * q;
-
-    let r2_id = alloc.next_room()?;
-    let upper1 = Footprint::rectangular(
-        r2_id,
-        1,
-        config::UPPER_FLOOR_Z,
-        (ux0, uy0, ux0 + uw * q, uy0 + ud * q),
-        alloc,
-    )?;
-    upper1.validate_convex()?;
-
-    let u2x0 = ux0 + uw * q + 2 * q;
-    let r3_id = alloc.next_room()?;
-    let upper2 = Footprint::rectangular(
-        r3_id,
-        1,
-        config::UPPER_FLOOR_Z,
-        (u2x0, uy0, u2x0 + uw * q, uy0 + ud * q),
-        alloc,
-    )?;
-    upper2.validate_convex()?;
-
-    let footprints = vec![primary, secondary, upper1, upper2];
-    let layout = FootprintLayout {
-        primary: 0,
-        secondary: 1,
-        transition_lower: 0,
-        transition_upper: 2,
-    };
-
-    Ok((footprints, layout))
+/// Compute rectangular footprint vertices from shell.
+fn rect_vertices(shell: (i32, i32, i32, i32)) -> Vec<(i32, i32)> {
+    let (x0, y0, x1, y1) = shell;
+    vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
 }
 
-fn build_rich(
-    extent: i32,
-    q: i32,
-    alloc: &mut V3IdAllocator,
-) -> Result<(Vec<Footprint>, FootprintLayout), V3Error> {
-    let ec = extent / q;
-    let rw = 14;
-    let rd = 12;
-    let x0 = ((ec - rw) / 2) * q;
-    let y0 = 1 * q;
+/// Compute a CCW chamfered polygon. The southwest corner's second vertex is
+/// emitted last so its diagonal closes the loop; this preserves valid edges
+/// for every corner combination, including the all-corner octagon.
+fn chamfered_vertices(
+    shell: (i32, i32, i32, i32),
+    chamfer_corners: &[(i32, i32)],
+    chamfer_size: i32,
+) -> Result<Vec<(i32, i32)>, V3Error> {
+    let (x0, y0, x1, y1) = shell;
+    let width = x1 - x0;
+    let depth = y1 - y0;
+    if chamfer_size <= 0 || 2 * chamfer_size > width || 2 * chamfer_size > depth {
+        return Err(V3Error::InvalidFootprint {
+            detail: format!("chamfer {chamfer_size} too large for shell {width}×{depth}"),
+        });
+    }
 
-    let r0_id = alloc.next_room()?;
-    let primary = Footprint::rectangular(
-        r0_id,
-        0,
-        config::LOWER_FLOOR_Z,
-        (x0, y0, x0 + rw * q, y0 + rd * q),
-        alloc,
-    )?;
-    primary.validate_convex()?;
+    let sw = chamfer_corners.contains(&(-1, -1));
+    let se = chamfer_corners.contains(&(1, -1));
+    let ne = chamfer_corners.contains(&(1, 1));
+    let nw = chamfer_corners.contains(&(-1, 1));
+    let mut vertices = Vec::with_capacity(8);
+    vertices.push(if sw {
+        (x0 + chamfer_size, y0)
+    } else {
+        (x0, y0)
+    });
+    if se {
+        vertices.extend([(x1 - chamfer_size, y0), (x1, y0 + chamfer_size)]);
+    } else {
+        vertices.push((x1, y0));
+    }
+    if ne {
+        vertices.extend([(x1, y1 - chamfer_size), (x1 - chamfer_size, y1)]);
+    } else {
+        vertices.push((x1, y1));
+    }
+    if nw {
+        vertices.extend([(x0 + chamfer_size, y1), (x0, y1 - chamfer_size)]);
+    } else {
+        vertices.push((x0, y1));
+    }
+    if sw {
+        vertices.push((x0, y0 + chamfer_size));
+    }
+    Ok(vertices)
+}
 
-    let sw = 8;
-    let sd = 6;
-    let sx0 = x0 + rw * q + q;
-    let sy0 = y0 + q;
-    let r1_id = alloc.next_room()?;
-    let secondary = Footprint::rectangular(
-        r1_id,
-        0,
-        config::LOWER_FLOOR_Z,
-        (sx0, sy0, sx0 + sw * q, sy0 + sd * q),
-        alloc,
-    )?;
-    secondary.validate_convex()?;
-
-    let tw = 6;
-    let td = 5;
-    let tx0 = sx0;
-    let ty0 = sy0 + sd * q + q;
-    let r2_id = alloc.next_room()?;
-    let third = Footprint::rectangular(
-        r2_id,
-        0,
-        config::LOWER_FLOOR_Z,
-        (tx0, ty0, tx0 + tw * q, ty0 + td * q),
-        alloc,
-    )?;
-    third.validate_convex()?;
-
-    let uw = 8;
-    let ud = 6;
-    let ux0 = x0;
-    let uy0 = y0 + rd * q + 2 * q;
-    let r3_id = alloc.next_room()?;
-    let upper1 = Footprint::rectangular(
-        r3_id,
-        1,
-        config::UPPER_FLOOR_Z,
-        (ux0, uy0, ux0 + uw * q, uy0 + ud * q),
-        alloc,
-    )?;
-    upper1.validate_convex()?;
-
-    let u2x0 = ux0 + uw * q + q;
-    let r4_id = alloc.next_room()?;
-    let upper2 = Footprint::rectangular(
-        r4_id,
-        1,
-        config::UPPER_FLOOR_Z,
-        (u2x0, uy0, u2x0 + uw * q, uy0 + ud * q),
-        alloc,
-    )?;
-    upper2.validate_convex()?;
-
-    let ow = 6;
-    let od = 5;
-    let ox0 = ux0 + q;
-    let oy0 = uy0 + ud * q + q;
-    let r5_id = alloc.next_room()?;
-    let oct = Footprint::rectangular(
-        r5_id,
-        1,
-        config::UPPER_FLOOR_Z,
-        (ox0, oy0, ox0 + ow * q, oy0 + od * q),
-        alloc,
-    )?;
-    oct.validate_convex()?;
-
-    let footprints = vec![primary, secondary, third, upper1, upper2, oct];
-    let layout = FootprintLayout {
-        primary: 0,
-        secondary: 1,
-        transition_lower: 0,
-        transition_upper: 3,
+/// Pick an even quantum span in the valid range for the legacy spawn host.
+fn seeded_even_span(random: u64, maximum: i32) -> i32 {
+    let first = if MIN_SPAN_Q % 2 == 0 {
+        MIN_SPAN_Q
+    } else {
+        MIN_SPAN_Q + 1
     };
+    let count = (maximum - first) / 2 + 1;
+    first + 2 * (random % count as u64) as i32
+}
 
-    Ok((footprints, layout))
+/// Return a compact near-square grid that reserves one full slot per room.
+fn placement_grid(target: usize) -> (i32, i32) {
+    let mut columns = 1usize;
+    while columns * columns < target {
+        columns += 1;
+    }
+    let columns = columns as i32;
+    let rows = (target as i32 + columns - 1) / columns;
+    (columns, rows)
+}
+
+fn aabbs_overlap(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {
+    a.0 < b.2 && a.2 > b.0 && a.1 < b.3 && a.3 > b.1
+}
+
+// ── FootprintLayout construction ───────────────────────────────────────────
+
+/// Build a `FootprintLayout` from the placed footprints for downstream
+/// transitional compatibility.
+///
+/// Selects a large lower primary, another lower secondary, and valid
+/// transition indices for compatibility with the Phase 02 topology
+/// replacement.
+fn build_layout_from_footprints(
+    footprints: &[Footprint],
+    lower_count: usize,
+    upper_count: usize,
+) -> Result<FootprintLayout, V3Error> {
+    if lower_count < 2 {
+        return Err(V3Error::TopologyInvariant {
+            detail: format!("need at least 2 lower rooms for layout, got {lower_count}"),
+        });
+    }
+    if upper_count == 0 {
+        return Err(V3Error::TopologyInvariant {
+            detail: "need at least 1 upper room for layout".into(),
+        });
+    }
+
+    // Order by position, then stable ID. This gives the fixed Phase 01
+    // topology shim an eastward lower-layer route and a non-zero northward
+    // transition span without depending on random placement order.
+    let mut lower_indices: Vec<usize> = footprints
+        .iter()
+        .enumerate()
+        .filter(|(_, footprint)| footprint.layer == 0)
+        .map(|(index, _)| index)
+        .collect();
+    lower_indices.sort_by_key(|&index| {
+        let footprint = &footprints[index];
+        (footprint.aabb.1, footprint.aabb.0, footprint.room_id)
+    });
+    let primary = lower_indices[0];
+    let secondary = lower_indices
+        .iter()
+        .copied()
+        .find(|&index| footprints[index].aabb.0 >= footprints[primary].aabb.2)
+        .unwrap_or(lower_indices[1]);
+    let transition_upper = footprints
+        .iter()
+        .enumerate()
+        .filter(|(_, footprint)| {
+            footprint.layer == 1 && footprint.aabb.1 > footprints[primary].aabb.3
+        })
+        .min_by_key(|(_, footprint)| (footprint.aabb.1, footprint.aabb.0, footprint.room_id))
+        .map(|(index, _)| index)
+        .ok_or_else(|| V3Error::TopologyInvariant {
+            detail: "no upper room lies north of the transition host".into(),
+        })?;
+
+    Ok(FootprintLayout {
+        primary,
+        secondary,
+        transition_lower: primary,
+        transition_upper,
+    })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
+    use super::config::V3Preset;
     use super::*;
 
+    // ── Basic placement tests ──────────────────────────────────────
+
     #[test]
-    fn sparse_footprints_build() {
-        let config = V3Config::nominal_sparse();
-        let mut alloc = V3IdAllocator::new();
-        let (footprints, layout) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
-
-        assert_eq!(footprints.len(), 3);
-        assert_eq!(layout.primary, 0);
-        assert_eq!(layout.secondary, 1);
-
-        assert_eq!(footprints[0].layer, 0);
-        assert_eq!(footprints[1].layer, 0);
-        assert_eq!(footprints[2].layer, 1);
+    fn sparse_placement_minimum_12_rooms() {
+        for &extent in &[1024, 2048, 3072] {
+            let config = V3Config::new(0, V3Preset::Sparse, extent).unwrap();
+            let mut alloc = V3IdAllocator::new();
+            let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
+            assert_eq!(footprints.len(), 12, "Sparse at {extent}");
+        }
     }
 
     #[test]
-    fn moderate_footprints_build() {
-        let config = V3Config::nominal_moderate();
-        let mut alloc = V3IdAllocator::new();
-        let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
-        assert_eq!(footprints.len(), 4);
+    fn moderate_placement_minimum_20_rooms() {
+        for &extent in &[1024, 2048, 3072] {
+            let config = V3Config::new(0, V3Preset::Moderate, extent).unwrap();
+            let mut alloc = V3IdAllocator::new();
+            let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
+            assert_eq!(footprints.len(), 20, "Moderate at {extent}");
+        }
     }
 
     #[test]
-    fn rich_footprints_build() {
-        let config = V3Config::nominal_rich();
+    fn rich_placement_minimum_28_rooms() {
+        for &extent in &[1024, 2048, 3072] {
+            let config = V3Config::new(0, V3Preset::Rich, extent).unwrap();
+            let mut alloc = V3IdAllocator::new();
+            let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
+            assert_eq!(footprints.len(), 28, "Rich at {extent}");
+        }
+    }
+
+    // ── Exact room count tests ─────────────────────────────────────
+
+    #[test]
+    fn sparse_exact_12_rooms() {
+        let config = V3Config::new(0, V3Preset::Sparse, 2048).unwrap();
         let mut alloc = V3IdAllocator::new();
         let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
-        assert_eq!(footprints.len(), 6);
+        assert_eq!(footprints.len(), 12);
     }
 
     #[test]
-    fn footprint_edges_all_approved() {
-        let config = V3Config::nominal_rich();
+    fn moderate_exact_20_rooms() {
+        let config = V3Config::new(0, V3Preset::Moderate, 2048).unwrap();
         let mut alloc = V3IdAllocator::new();
         let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
+        assert_eq!(footprints.len(), 20);
+    }
 
-        for fp in &footprints {
-            for &(a, b) in &fp.edges() {
-                let dx = (b.0 - a.0).unsigned_abs();
-                let dy = (b.1 - a.1).unsigned_abs();
+    #[test]
+    fn rich_exact_28_rooms() {
+        let config = V3Config::new(0, V3Preset::Rich, 3072).unwrap();
+        let mut alloc = V3IdAllocator::new();
+        let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
+        assert_eq!(footprints.len(), 28);
+    }
+
+    // ── Span verification ──────────────────────────────────────────
+
+    #[test]
+    fn all_room_spans_within_range() {
+        for (preset, extent) in &[
+            (V3Preset::Sparse, 2048),
+            (V3Preset::Moderate, 2048),
+            (V3Preset::Rich, 3072),
+        ] {
+            let config = V3Config::new(0, *preset, *extent).unwrap();
+            let mut alloc = V3IdAllocator::new();
+            let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
+            for fp in &footprints {
+                let w = fp.aabb.2 - fp.aabb.0;
+                let d = fp.aabb.3 - fp.aabb.1;
                 assert!(
-                    dx == 0 || dy == 0 || dx == dy,
-                    "unapproved edge in footprint {:?}",
+                    w >= MIN_OUTER_SPAN && w <= MAX_OUTER_SPAN,
+                    "room {} width {w} outside [{MIN_OUTER_SPAN}..{MAX_OUTER_SPAN}]",
+                    fp.room_id
+                );
+                assert!(
+                    d >= MIN_OUTER_SPAN && d <= MAX_OUTER_SPAN,
+                    "room {} depth {d} outside [{MIN_OUTER_SPAN}..{MAX_OUTER_SPAN}]",
                     fp.room_id
                 );
             }
         }
     }
 
+    // ── Bounds test ────────────────────────────────────────────────
+
     #[test]
-    fn footprint_convex_valid() {
-        let config = V3Config::nominal_sparse();
-        let mut alloc = V3IdAllocator::new();
-        let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
-        for fp in &footprints {
-            fp.validate_convex().unwrap();
+    fn all_rooms_within_xy_extent() {
+        for (preset, extent) in &[
+            (V3Preset::Sparse, 1024),
+            (V3Preset::Moderate, 2048),
+            (V3Preset::Rich, 3072),
+        ] {
+            let config = V3Config::new(0, *preset, *extent).unwrap();
+            let mut alloc = V3IdAllocator::new();
+            let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
+            let ext = *extent as i32;
+            for fp in &footprints {
+                assert!(fp.aabb.0 >= 0, "room {} x0={} < 0", fp.room_id, fp.aabb.0);
+                assert!(fp.aabb.1 >= 0, "room {} y0={} < 0", fp.room_id, fp.aabb.1);
+                assert!(
+                    fp.aabb.2 <= ext,
+                    "room {} x1={} > {ext}",
+                    fp.room_id,
+                    fp.aabb.2
+                );
+                assert!(
+                    fp.aabb.3 <= ext,
+                    "room {} y1={} > {ext}",
+                    fp.room_id,
+                    fp.aabb.3
+                );
+            }
         }
     }
+
+    // ── Non-overlap test ───────────────────────────────────────────
+
+    #[test]
+    fn no_room_overlap() {
+        for (preset, extent) in &[
+            (V3Preset::Sparse, 1024),
+            (V3Preset::Moderate, 2048),
+            (V3Preset::Rich, 3072),
+        ] {
+            let config = V3Config::new(0, *preset, *extent).unwrap();
+            let mut alloc = V3IdAllocator::new();
+            let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
+
+            for i in 0..footprints.len() {
+                for j in (i + 1)..footprints.len() {
+                    let a = &footprints[i];
+                    let b = &footprints[j];
+
+                    assert!(
+                        !aabbs_overlap(a.aabb, b.aabb),
+                        "overlap between room {} and room {} at {extent} preset {preset:?}",
+                        a.room_id,
+                        b.room_id
+                    );
+                }
+            }
+        }
+    }
+
+    // ── Layer balance test ─────────────────────────────────────────
+
+    #[test]
+    fn layers_balanced() {
+        for (preset, extent) in &[
+            (V3Preset::Sparse, 2048),
+            (V3Preset::Moderate, 2048),
+            (V3Preset::Rich, 3072),
+        ] {
+            let config = V3Config::new(0, *preset, *extent).unwrap();
+            let mut alloc = V3IdAllocator::new();
+            let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
+
+            let lower: Vec<_> = footprints.iter().filter(|fp| fp.layer == 0).collect();
+            let upper: Vec<_> = footprints.iter().filter(|fp| fp.layer == 1).collect();
+            let diff = if lower.len() > upper.len() {
+                lower.len() - upper.len()
+            } else {
+                upper.len() - lower.len()
+            };
+            assert!(
+                diff <= 1,
+                "preset {preset:?} at {extent}: lower={}, upper={}, diff={diff}",
+                lower.len(),
+                upper.len()
+            );
+        }
+    }
+
+    // ── Chamfer presence test ──────────────────────────────────────
+
+    #[test]
+    fn chamfered_rooms_present() {
+        for (preset, extent) in &[
+            (V3Preset::Sparse, 2048),
+            (V3Preset::Moderate, 2048),
+            (V3Preset::Rich, 3072),
+        ] {
+            let config = V3Config::new(0, *preset, *extent).unwrap();
+            let mut alloc = V3IdAllocator::new();
+            let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
+
+            let chamfered_count = footprints.iter().filter(|fp| fp.vertices.len() > 4).count();
+            let total = footprints.len();
+
+            assert!(
+                chamfered_count > 0,
+                "preset {preset:?} at {extent}: no chamfered rooms in {total} rooms"
+            );
+
+            // Meaningful fraction: at least 25% chamfered
+            let fraction = chamfered_count as f64 / total as f64;
+            assert!(
+                fraction >= 0.25,
+                "preset {preset:?} at {extent}: only {chamfered_count}/{total} chamfered ({fraction:.1})"
+            );
+        }
+    }
+
+    // ── Edge direction test ────────────────────────────────────────
+
+    #[test]
+    fn all_edges_cardinal_or_45() {
+        for (preset, extent) in &[
+            (V3Preset::Sparse, 2048),
+            (V3Preset::Moderate, 2048),
+            (V3Preset::Rich, 3072),
+        ] {
+            let config = V3Config::new(0, *preset, *extent).unwrap();
+            let mut alloc = V3IdAllocator::new();
+            let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
+
+            for fp in &footprints {
+                for &(a, b) in &fp.edges() {
+                    let dx = (b.0 - a.0).unsigned_abs();
+                    let dy = (b.1 - a.1).unsigned_abs();
+                    assert!(
+                        dx == 0 || dy == 0 || dx == dy,
+                        "unapproved edge ({a:?}→{b:?}) in room {}",
+                        fp.room_id
+                    );
+                }
+            }
+        }
+    }
+
+    // ── Convexity test ─────────────────────────────────────────────
+
+    #[test]
+    fn all_footprints_convex() {
+        for (preset, extent) in &[
+            (V3Preset::Sparse, 2048),
+            (V3Preset::Moderate, 2048),
+            (V3Preset::Rich, 3072),
+        ] {
+            let config = V3Config::new(0, *preset, *extent).unwrap();
+            let mut alloc = V3IdAllocator::new();
+            let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
+            for fp in &footprints {
+                fp.validate_convex().unwrap();
+            }
+        }
+    }
+
+    // ── Determinism test ───────────────────────────────────────────
+
+    #[test]
+    fn deterministic_replay() {
+        for (preset, extent) in &[
+            (V3Preset::Sparse, 2048),
+            (V3Preset::Moderate, 2048),
+            (V3Preset::Rich, 3072),
+        ] {
+            let config = V3Config::new(99, *preset, *extent).unwrap();
+
+            let mut alloc1 = V3IdAllocator::new();
+            let (fp1, layout1) = build_footprints(&config, V3Seed::new(99), &mut alloc1).unwrap();
+
+            let mut alloc2 = V3IdAllocator::new();
+            let (fp2, layout2) = build_footprints(&config, V3Seed::new(99), &mut alloc2).unwrap();
+
+            assert_eq!(fp1, fp2);
+            assert_eq!(layout1, layout2);
+        }
+    }
+
+    // ── Seed difference test ───────────────────────────────────────
+
+    #[test]
+    fn different_seeds_produce_different_placement() {
+        for (preset, extent) in &[
+            (V3Preset::Sparse, 2048),
+            (V3Preset::Moderate, 2048),
+            (V3Preset::Rich, 3072),
+        ] {
+            let seed_a = 0u64;
+            let seed_b = 42u64;
+
+            let cfg_a = V3Config::new(seed_a, *preset, *extent).unwrap();
+            let cfg_b = V3Config::new(seed_b, *preset, *extent).unwrap();
+
+            let mut alloc_a = V3IdAllocator::new();
+            let (fp_a, _) = build_footprints(&cfg_a, V3Seed::new(seed_a), &mut alloc_a).unwrap();
+
+            let mut alloc_b = V3IdAllocator::new();
+            let (fp_b, _) = build_footprints(&cfg_b, V3Seed::new(seed_b), &mut alloc_b).unwrap();
+
+            // Build a deterministic signature of the placement
+            let sig_a: Vec<(i32, i32, i32, i32, u8)> = fp_a
+                .iter()
+                .map(|fp| (fp.aabb.0, fp.aabb.1, fp.aabb.2, fp.aabb.3, fp.layer))
+                .collect();
+            let sig_b: Vec<(i32, i32, i32, i32, u8)> = fp_b
+                .iter()
+                .map(|fp| (fp.aabb.0, fp.aabb.1, fp.aabb.2, fp.aabb.3, fp.layer))
+                .collect();
+
+            assert_ne!(
+                sig_a, sig_b,
+                "seeds {seed_a} and {seed_b} produced identical placement for {preset:?} at {extent}"
+            );
+        }
+    }
+
+    // ── All requested seeds succeed ────────────────────────────────
+
+    #[test]
+    fn seeds_0_42_99_255_all_presets_and_valid_extents_succeed() {
+        for &seed_val in &[0u64, 42, 99, 255] {
+            for preset in [V3Preset::Sparse, V3Preset::Moderate, V3Preset::Rich] {
+                for &extent in &[1024, 2048, 3072] {
+                    let config = V3Config::new(seed_val, preset, extent).unwrap();
+                    let mut alloc = V3IdAllocator::new();
+                    let (footprints, layout) =
+                        build_footprints(&config, V3Seed::new(seed_val), &mut alloc).unwrap();
+                    let mut replay_alloc = V3IdAllocator::new();
+                    let (replay, replay_layout) =
+                        build_footprints(&config, V3Seed::new(seed_val), &mut replay_alloc)
+                            .unwrap();
+                    assert_eq!(footprints, replay);
+                    assert_eq!(layout, replay_layout);
+                    assert_eq!(footprints.len(), preset.min_rooms() as usize);
+                    assert!(layout.primary < footprints.len());
+                    assert!(layout.secondary < footprints.len());
+                    assert!(layout.transition_lower < footprints.len());
+                    assert!(layout.transition_upper < footprints.len());
+                    let primary = &footprints[layout.primary];
+                    let secondary = &footprints[layout.secondary];
+                    let transition_lower = &footprints[layout.transition_lower];
+                    let transition_upper = &footprints[layout.transition_upper];
+                    assert_eq!(primary.layer, 0);
+                    assert_eq!(secondary.layer, 0);
+                    assert_eq!(transition_lower.layer, 0);
+                    assert_eq!(transition_upper.layer, 1);
+                    assert!(primary.aabb.2 < secondary.aabb.0);
+                    let portal_y = (primary.aabb.1 + primary.aabb.3) / 2;
+                    assert!(secondary.aabb.1 <= portal_y && portal_y <= secondary.aabb.3);
+                    assert!(transition_lower.aabb.3 < transition_upper.aabb.1);
+                    for (index, footprint) in footprints.iter().enumerate() {
+                        footprint.validate_convex().unwrap();
+                        let (x0, y0, x1, y1) = footprint.aabb;
+                        assert!(x0 >= 0 && y0 >= 0 && x1 <= extent as i32 && y1 <= extent as i32);
+                        assert!((MIN_OUTER_SPAN..=MAX_OUTER_SPAN).contains(&(x1 - x0)));
+                        assert!((MIN_OUTER_SPAN..=MAX_OUTER_SPAN).contains(&(y1 - y0)));
+                        for (from, to) in footprint.edges() {
+                            let dx = (to.0 - from.0).unsigned_abs();
+                            let dy = (to.1 - from.1).unsigned_abs();
+                            assert!(dx == 0 || dy == 0 || dx == dy);
+                        }
+                        for &(x, y) in &footprint.vertices {
+                            assert_eq!(x % CONSTRUCTION_QUANTUM, 0);
+                            assert_eq!(y % CONSTRUCTION_QUANTUM, 0);
+                        }
+                        for other in &footprints[..index] {
+                            assert!(!aabbs_overlap(footprint.aabb, other.aabb));
+                        }
+                    }
+                    let mut sizes: Vec<_> = footprints
+                        .iter()
+                        .map(|footprint| {
+                            (
+                                footprint.aabb.2 - footprint.aabb.0,
+                                footprint.aabb.3 - footprint.aabb.1,
+                            )
+                        })
+                        .collect();
+                    sizes.sort_unstable();
+                    sizes.dedup();
+                    assert!(
+                        sizes.len() >= 3,
+                        "insufficient room-size variation: {sizes:?}"
+                    );
+                    assert!(footprints
+                        .iter()
+                        .any(|footprint| footprint.vertices.len() > 4));
+                    let lower = footprints
+                        .iter()
+                        .filter(|footprint| footprint.layer == 0)
+                        .count();
+                    let upper = footprints.len() - lower;
+                    assert!(lower.abs_diff(upper) <= 1);
+                }
+            }
+        }
+    }
+
+    // ── Boundary extent test ───────────────────────────────────────
+
+    #[test]
+    fn sparse_at_1024_succeeds() {
+        let config = V3Config::new(0, V3Preset::Sparse, 1024).unwrap();
+        let mut alloc = V3IdAllocator::new();
+        let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
+        assert_eq!(footprints.len(), 12);
+        for fp in &footprints {
+            assert!(fp.aabb.2 <= 1024);
+            assert!(fp.aabb.3 <= 1024);
+        }
+    }
+
+    #[test]
+    fn sparse_at_3072_succeeds() {
+        let config = V3Config::new(0, V3Preset::Sparse, 3072).unwrap();
+        let mut alloc = V3IdAllocator::new();
+        let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
+        assert_eq!(footprints.len(), 12);
+        for fp in &footprints {
+            assert!(fp.aabb.2 <= 3072);
+            assert!(fp.aabb.3 <= 3072);
+        }
+    }
+
+    #[test]
+    fn rich_at_3072_succeeds() {
+        let config = V3Config::new(255, V3Preset::Rich, 3072).unwrap();
+        let mut alloc = V3IdAllocator::new();
+        let (footprints, _) = build_footprints(&config, V3Seed::new(255), &mut alloc).unwrap();
+        assert_eq!(footprints.len(), 28);
+    }
+
+    // ── FootprintLayout validity ───────────────────────────────────
+
+    #[test]
+    fn layout_indices_are_valid() {
+        for (preset, extent) in &[
+            (V3Preset::Sparse, 2048),
+            (V3Preset::Moderate, 2048),
+            (V3Preset::Rich, 3072),
+        ] {
+            let config = V3Config::new(0, *preset, *extent).unwrap();
+            let mut alloc = V3IdAllocator::new();
+            let (footprints, layout) =
+                build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
+
+            let n = footprints.len();
+            assert!(layout.primary < n, "primary index out of bounds");
+            assert!(layout.secondary < n, "secondary index out of bounds");
+            assert!(
+                layout.transition_lower < n,
+                "transition_lower index out of bounds"
+            );
+            assert!(
+                layout.transition_upper < n,
+                "transition_upper index out of bounds"
+            );
+
+            // Primary and secondary must be on lower layer
+            assert_eq!(
+                footprints[layout.primary].layer, 0,
+                "primary must be lower layer"
+            );
+            assert_eq!(
+                footprints[layout.secondary].layer, 0,
+                "secondary must be lower layer"
+            );
+            // Transition lower must be on lower layer
+            assert_eq!(
+                footprints[layout.transition_lower].layer, 0,
+                "transition_lower must be lower layer"
+            );
+            // Transition upper must be on upper layer
+            assert_eq!(
+                footprints[layout.transition_upper].layer, 1,
+                "transition_upper must be upper layer"
+            );
+        }
+    }
+
+    // ── Quantum alignment test ─────────────────────────────────────
+
+    #[test]
+    fn all_positions_quantum_aligned() {
+        let config = V3Config::new(0, V3Preset::Rich, 3072).unwrap();
+        let mut alloc = V3IdAllocator::new();
+        let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
+
+        let q = CONSTRUCTION_QUANTUM;
+        for fp in &footprints {
+            for &(vx, vy) in &fp.vertices {
+                assert_eq!(
+                    vx % q,
+                    0,
+                    "vertex x={vx} not quantum-aligned in room {}",
+                    fp.room_id
+                );
+                assert_eq!(
+                    vy % q,
+                    0,
+                    "vertex y={vy} not quantum-aligned in room {}",
+                    fp.room_id
+                );
+            }
+        }
+    }
+
+    // ── Multiple room sizes test ───────────────────────────────────
+
+    #[test]
+    fn multiple_room_sizes_present() {
+        for (preset, extent) in &[
+            (V3Preset::Sparse, 2048),
+            (V3Preset::Moderate, 2048),
+            (V3Preset::Rich, 3072),
+        ] {
+            let config = V3Config::new(42, *preset, *extent).unwrap();
+            let mut alloc = V3IdAllocator::new();
+            let (footprints, _) = build_footprints(&config, V3Seed::new(42), &mut alloc).unwrap();
+
+            let mut sizes: Vec<(i32, i32)> = footprints
+                .iter()
+                .map(|fp| (fp.aabb.2 - fp.aabb.0, fp.aabb.3 - fp.aabb.1))
+                .collect();
+            sizes.sort_unstable();
+            sizes.dedup();
+            assert!(
+                sizes.len() >= 3,
+                "preset {preset:?} at {extent}: only {} distinct room sizes ({sizes:?})",
+                sizes.len()
+            );
+        }
+    }
+
+    // ── Legacy Footprint constructor tests (preserved) ─────────────
 
     #[test]
     fn chamfered_footprint_has_stable_ids() {
@@ -609,5 +1154,30 @@ mod tests {
         assert_eq!(fp.vertices.len(), 4);
         assert_eq!(fp.surface_ids.len(), 4);
         assert_eq!(fp.corner_ids.len(), 4);
+    }
+
+    #[test]
+    fn footprint_convex_valid() {
+        // Test with a known rectangular footprint
+        let mut alloc = V3IdAllocator::new();
+        let fp = Footprint::rectangular(RoomId(0), 0, 0, (0, 0, 128, 128), &mut alloc).unwrap();
+        fp.validate_convex().unwrap();
+    }
+
+    #[test]
+    fn every_chamfer_pattern_is_ccw_convex_with_approved_edges() {
+        for &corners in CHAMFER_PATTERNS {
+            let mut alloc = V3IdAllocator::new();
+            let footprint =
+                Footprint::chamfered(RoomId(0), 0, 0, (0, 0, 192, 192), corners, 16, &mut alloc)
+                    .unwrap();
+            assert_eq!(footprint.vertices.len(), 4 + corners.len());
+            footprint.validate_convex().unwrap();
+            for (from, to) in footprint.edges() {
+                let dx = (to.0 - from.0).unsigned_abs();
+                let dy = (to.1 - from.1).unsigned_abs();
+                assert!(dx == 0 || dy == 0 || dx == dy);
+            }
+        }
     }
 }
