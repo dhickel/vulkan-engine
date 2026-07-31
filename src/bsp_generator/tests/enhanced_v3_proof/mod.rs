@@ -5,7 +5,14 @@
 
 pub mod assembly;
 pub mod contract;
+pub mod emission;
+pub mod footprint;
 pub mod geometry;
 pub mod ir;
+pub mod metadata;
+pub mod pipeline;
 pub mod planner;
+pub mod portal;
+pub mod prefab;
 pub mod seed;
+pub mod topology;

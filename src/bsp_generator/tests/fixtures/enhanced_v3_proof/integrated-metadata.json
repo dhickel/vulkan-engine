@@ -1,0 +1,145 @@
+{
+  "schema": "enhanced-v3-proof-metadata/v3",
+  "preset": "sparse",
+  "xy_extent": 2048,
+  "construction_quantum": 16,
+  "room_count": 3,
+  "portal_count": 1,
+  "route_count": 1,
+  "transition_count": 1,
+  "surface_count": 3,
+  "instance_count": 2,
+  "simplified_count": 0,
+  "rejected_count": 0,
+  "grammar_families": [
+    "portal_chamber"
+  ],
+  "estimated_total_faces": 240,
+  "estimated_total_entities": 3,
+  "identity_satisfied": true,
+  "spawn_origin": [
+    1024,
+    544,
+    56
+  ],
+  "spawn_yaw": 90,
+  "light_origins": [
+    [
+      1024,
+      544,
+      144
+    ],
+    [
+      1216,
+      544,
+      144
+    ],
+    [
+      1024,
+      704,
+      336
+    ]
+  ],
+  "rooms": [
+    {
+      "id": "room/0000",
+      "layer": 0,
+      "shell": [
+        944,
+        464,
+        1104,
+        624
+      ],
+      "floor_z": 0,
+      "dims": [
+        160,
+        160,
+        176
+      ]
+    },
+    {
+      "id": "room/0001",
+      "layer": 0,
+      "shell": [
+        1152,
+        480,
+        1280,
+        608
+      ],
+      "floor_z": 0,
+      "dims": [
+        128,
+        128,
+        176
+      ]
+    },
+    {
+      "id": "room/0002",
+      "layer": 1,
+      "shell": [
+        976,
+        656,
+        1072,
+        752
+      ],
+      "floor_z": 192,
+      "dims": [
+        96,
+        96,
+        176
+      ]
+    }
+  ],
+  "portals": [
+    {
+      "id": "portal/0000",
+      "source_room": "room/0000",
+      "target_room": "room/0001",
+      "wall": "east",
+      "width": 64,
+      "height": 80
+    }
+  ],
+  "instances": [
+    {
+      "id": "instance/0000",
+      "feature_id": "feature/0000",
+      "room_id": "room/0000",
+      "volume": [
+        976,
+        496,
+        16,
+        1072,
+        592,
+        96
+      ],
+      "support_kind": "floor",
+      "estimated_faces": 120
+    },
+    {
+      "id": "instance/0001",
+      "feature_id": "feature/0001",
+      "room_id": "room/0001",
+      "volume": [
+        1184,
+        512,
+        16,
+        1248,
+        576,
+        96
+      ],
+      "support_kind": "floor",
+      "estimated_faces": 120
+    }
+  ],
+  "support_edges": [
+    {
+      "dependent": "instance/0000",
+      "parent": "surface:surface/0012"
+    },
+    {
+      "dependent": "instance/0001",
+      "parent": "surface:surface/0013"
+    }
+  ]
+}
