@@ -47,13 +47,15 @@ pub fn plan_composition(
     preset: &str,
     room_count: u32,
 ) -> Result<PlanOutcome, V3Error> {
-    // Determine minimum families based on preset
-    let min_families = match preset {
-        "sparse" => 1u32,
-        "moderate" => 2,
-        "rich" => 3,
-        _ => 1,
+    // The Phase 02 topology contract fixes route count from room count and
+    // preset loop surplus, so planning need not expose an extra public input.
+    let (min_families, target_loops) = match preset {
+        "sparse" => (1u32, 0),
+        "moderate" => (2, 2),
+        "rich" => (3, 4),
+        _ => (1, 0),
     };
+    let route_count = room_count.saturating_sub(2) + target_loops;
 
     // Select grammar families deterministically
     let all_families: Vec<&str> = vec![
@@ -84,7 +86,9 @@ pub fn plan_composition(
         rejected: Vec::new(),
         support_edges: Vec::new(),
         identity_satisfied,
-        estimated_total_faces: (room_count * 6 * 6) + 72, // rooms × 6 faces × 6 brushes + entities
+        // Conservative face estimate: each room ≈ 8 brushes (floor/ceiling + split walls),
+        // each route ≈ 6 brushes (floor/ceiling/walls/caps), × 6 faces each.
+        estimated_total_faces: ((room_count * 8) + (route_count * 8)) * 6 + 72,
         estimated_total_entities: 1 + room_count + room_count, // spawn + light per room + other
     })
 }

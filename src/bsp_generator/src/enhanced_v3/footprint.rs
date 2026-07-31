@@ -290,11 +290,21 @@ pub fn build_footprints(
         });
     }
 
-    let mut footprints = Vec::with_capacity(target);
     let lower_target = (target + 1) / 2;
+
+    // ── Pass 1: compute per-room dimensions from seed ──────────────
+    struct RoomDim {
+        room_index: usize,
+        w_q: i32,
+        d_q: i32,
+        column: i32,
+        row: i32,
+        layer: u8,
+        floor_z: i32,
+        u3_chamfer_bits: u64,
+    }
+    let mut room_dims: Vec<RoomDim> = Vec::with_capacity(target);
     for room_index in 0..target {
-        // The lower-layer prefix reserves the first two adjacent slots for
-        // the legacy primary/secondary portal shim. Counts remain balanced.
         let layer = u8::from(room_index >= lower_target);
         let floor_z = if layer == 0 {
             config::LOWER_FLOOR_Z
@@ -302,55 +312,96 @@ pub fn build_footprints(
             config::UPPER_FLOOR_Z
         };
         let key = format!("room/{room_index:04}");
-        let [u0, u1, u2, u3] = seed
+        let [u0, u1, _u2, u3] = seed
             .candidate_seed(rng::tags::PLACEMENT, key.as_bytes())
             .u64s();
         let column = (room_index % columns as usize) as i32;
         let row = (room_index / columns as usize) as i32;
-        let max_width_q = slot_width_q.min(MAX_SPAN_Q);
-        let max_depth_q = slot_depth_q.min(MAX_SPAN_Q);
-        let primary_max_width_q = max_width_q - 1;
-        // The existing reservation boundary centers room zero on the quantum
-        // grid. Preserve that compatibility invariant while still selecting
-        // its span from the placement stream.
+        // Leave a quantum on both sides of each fixed slot origin. The
+        // resulting two-quantum slot slack guarantees a positive route gap
+        // between adjacent columns and rows.
+        let max_width_q = (slot_width_q - 2).min(MAX_SPAN_Q);
+        let max_depth_q = (slot_depth_q - 2).min(MAX_SPAN_Q);
+        let primary_max_width_q = max_width_q;
         let w_q = if room_index == 0 {
             seeded_even_span(u0, primary_max_width_q)
         } else {
             MIN_SPAN_Q + (u0 % (max_width_q - MIN_SPAN_Q + 1) as u64) as i32
         };
         let d_q = if room_index == 0 {
-            // A 128-unit depth keeps the inherited spawn center aligned and
-            // inside the adjacent secondary room's minimum 112-unit span.
             MIN_SPAN_Q + 1
         } else {
             MIN_SPAN_Q + (u1 % (max_depth_q - MIN_SPAN_Q + 1) as u64) as i32
         };
-        let x_gap_q = slot_width_q - w_q;
-        let y_gap_q = slot_depth_q - d_q;
-        let (x_offset_q, y_offset_q) = match room_index {
-            // Join the first two lower rooms at a shared cardinal wall so the
-            // unchanged Phase 01 topology compatibility layout has a real
-            // portal target, not merely a valid pair of indices.
-            0 => (x_gap_q - 1, 0),
-            1 => (0, 0),
-            _ => (
-                (u2 % (x_gap_q + 1) as u64) as i32,
-                (u3 % (y_gap_q + 1) as u64) as i32,
-            ),
-        };
+        room_dims.push(RoomDim {
+            room_index,
+            w_q,
+            d_q,
+            column,
+            row,
+            layer,
+            floor_z,
+            u3_chamfer_bits: u3,
+        });
+    }
+
+    // ── Pass 2: reserve fixed slot origins ───────────────────────
+    use std::collections::BTreeMap;
+    let mut col_min_gap: BTreeMap<i32, i32> = BTreeMap::new();
+    let mut row_min_gap: BTreeMap<i32, i32> = BTreeMap::new();
+    for d in &room_dims {
+        let x_gap = slot_width_q - d.w_q;
+        let y_gap = slot_depth_q - d.d_q;
+        col_min_gap
+            .entry(d.column)
+            .and_modify(|v| *v = (*v).min(x_gap))
+            .or_insert(x_gap);
+        row_min_gap
+            .entry(d.row)
+            .and_modify(|v| *v = (*v).min(y_gap))
+            .or_insert(y_gap);
+    }
+
+    let mut col_offsets: BTreeMap<i32, i32> = BTreeMap::new();
+    let mut row_offsets: BTreeMap<i32, i32> = BTreeMap::new();
+    for (&col, _) in &col_min_gap {
+        col_offsets.insert(col, 0);
+    }
+    for (&row, _) in &row_min_gap {
+        row_offsets.insert(row, 0);
+    }
+
+    // ── Pass 3: place rooms with aligned offsets ──────────────────
+    let mut footprints = Vec::with_capacity(target);
+    for d in &room_dims {
+        let column = d.column;
+        let row = d.row;
+        let w_q = d.w_q;
+        let d_q = d.d_q;
+        let u3 = d.u3_chamfer_bits;
+        let layer = d.layer;
+        let floor_z = d.floor_z;
+
+        let x_offset_q = col_offsets[&column];
+        let y_offset_q = row_offsets[&row];
+
         let x0 = (column * slot_width_q + x_offset_q) * q;
         let y0 = (row * slot_depth_q + y_offset_q) * q;
         let shell = (x0, y0, x0 + w_q * q, y0 + d_q * q);
 
         // At least two thirds of room indices are chamfered. A 16-unit
-        // chamfer always fits the minimum 112-unit room; a 32-unit chamfer is
-        // used only when its two edges fit the selected spans.
-        let chamfer_q = if (u3 >> 8) & 1 == 0 && w_q >= 4 && d_q >= 4 {
+        // chamfer always fits the minimum 112-unit room. A 32-unit chamfer
+        // is permitted only when it still leaves a
+        // 64-unit cardinal wall segment on every affected side. Smaller
+        // rooms use the 16-unit chamfer so topology can always own a real
+        // 64×80 cardinal aperture rather than an AABB-only endpoint.
+        let chamfer_q = if (u3 >> 8) & 1 == 0 && w_q >= 8 && d_q >= 8 {
             2
         } else {
             1
         };
         let chamfer_size = chamfer_q * q;
+        let room_index = d.room_index;
         let vertices = if room_index % 3 == 0 {
             rect_vertices(shell)
         } else {

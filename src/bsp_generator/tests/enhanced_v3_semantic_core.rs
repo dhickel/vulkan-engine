@@ -503,6 +503,51 @@ fn composition_plan_within_face_budget() {
 // ── End-to-end generation tests ────────────────────────────────────────────
 
 #[test]
+fn phase_02_pipeline_matrix_is_total_and_structurally_counted() {
+    for preset in [V3Preset::Sparse, V3Preset::Moderate, V3Preset::Rich] {
+        for extent in [1024, 2048, 3072] {
+            let mut seed_outputs = std::collections::BTreeSet::new();
+            for seed in [0, 42, 99, 255] {
+                let config = V3Config::new(seed, preset, extent).unwrap();
+                let mut alloc = V3IdAllocator::new();
+                let (footprints, layout) =
+                    build_footprints(&config, V3Seed::new(seed), &mut alloc).unwrap();
+                let topology =
+                    build_topology(&config, &footprints, &layout, V3Seed::new(seed), &mut alloc)
+                        .unwrap();
+                let output = run_pipeline(&config).unwrap();
+                let metadata = &output.metadata;
+
+                assert_eq!(metadata.room_count(), preset.min_rooms());
+                assert_eq!(
+                    metadata.route_count(),
+                    preset.min_rooms() - 2 + preset.target_loops()
+                );
+                assert_eq!(metadata.portal_count(), metadata.route_count());
+                assert_eq!(metadata.transition_count(), 1);
+                assert_eq!(topology.routes.len() as u32, metadata.route_count());
+                assert_eq!(topology.portals.len() as u32, metadata.portal_count());
+                assert_eq!(
+                    topology.transitions.len() as u32,
+                    metadata.transition_count()
+                );
+                let (sx, sy, sz) = metadata.spawn_origin();
+                assert_eq!(sx % CONSTRUCTION_QUANTUM, 0);
+                assert_eq!(sy % CONSTRUCTION_QUANTUM, 0);
+                assert_eq!(sz % CONSTRUCTION_QUANTUM, 0);
+                assert!(output.map_text.contains("worldspawn"));
+                assert!(output.map_text.contains("info_player_start"));
+                seed_outputs.insert(output.map_text);
+            }
+            assert!(
+                seed_outputs.len() > 1,
+                "seed did not influence full pipeline for {preset:?} at {extent}"
+            );
+        }
+    }
+}
+
+#[test]
 fn generate_v3_sparse_produces_valid_map() {
     let config = V3Config::nominal_sparse();
     let map = generate_v3(&config).unwrap();

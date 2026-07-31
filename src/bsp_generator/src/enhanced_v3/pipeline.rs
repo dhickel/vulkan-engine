@@ -26,7 +26,9 @@ use super::emission;
 use super::error::V3Error;
 use super::footprint::build_footprints;
 use super::geometry::{ConvexBrush, FaceRole};
-use super::ids::{CommittedPortal, CommittedRoom, CommittedTopology, RoomId, V3IdAllocator};
+use super::ids::{
+    CommittedPortal, CommittedRoom, CommittedTopology, QuantumVolume, RoomId, V3IdAllocator,
+};
 use super::intent::plan_composition;
 use super::metadata::EnhancedV3Metadata;
 use super::reservation::{Reservation, ReservationSet};
@@ -80,7 +82,7 @@ pub fn run_pipeline(config: &V3Config) -> Result<V3PipelineOutput, V3Error> {
 
     // 5. Build assembly from topology
     let (assembly, spawn_origin, light_origins) =
-        build_assembly_from_topology(&topology, &protected_reservations, seed)?;
+        build_assembly_from_topology(&topology, &spawn_volume, &protected_reservations, seed)?;
 
     // 6. Plan composition (grammar families)
     let plan = plan_composition(
@@ -919,6 +921,7 @@ fn build_contact_interfaces(mut bounds: Vec<BrushBounds>) -> Vec<Interface> {
 /// Build a validated assembly from the committed topology.
 fn build_assembly_from_topology(
     topology: &CommittedTopology,
+    spawn_volume: &QuantumVolume,
     reservations: &ReservationSet,
     _seed: V3Seed,
 ) -> Result<(Assembly, (i32, i32, i32), Vec<(i32, i32, i32)>), V3Error> {
@@ -984,16 +987,11 @@ fn build_assembly_from_topology(
     brushes.sort_by(|left, right| left.id.cmp(&right.id));
     let assembly = Assembly::new(brushes, interfaces, protected_volumes)?;
 
-    // Spawn origin: center of first room
-    let spawn_room = topology
-        .rooms
-        .first()
-        .ok_or_else(|| V3Error::TopologyInvariant {
-            detail: "no rooms for spawn".into(),
-        })?;
-    let spawn_x = (spawn_room.shell.0 + spawn_room.shell.2) / 2;
-    let spawn_y = (spawn_room.shell.1 + spawn_room.shell.3) / 2;
-    let spawn_z = spawn_room.floor_z + CONSTRUCTION_QUANTUM + HEADROOM / 2;
+    // Spawn origin shares the reservation's XY center and uses a
+    // quantum-aligned standing height inside its clear 80-unit volume.
+    let spawn_x = (spawn_volume.x0 + spawn_volume.x1) / 2;
+    let spawn_y = (spawn_volume.y0 + spawn_volume.y1) / 2;
+    let spawn_z = spawn_volume.z0 + 2 * CONSTRUCTION_QUANTUM;
     let spawn_origin = (spawn_x, spawn_y, spawn_z);
 
     // Light origins: center of each room near ceiling
@@ -1039,7 +1037,7 @@ mod tests {
                 .unwrap();
         }
         let (assembly, _, _) =
-            build_assembly_from_topology(&topology, &reservations, seed).unwrap();
+            build_assembly_from_topology(&topology, &spawn_volume, &reservations, seed).unwrap();
         (topology, assembly)
     }
 
