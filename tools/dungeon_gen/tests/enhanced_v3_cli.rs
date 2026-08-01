@@ -203,10 +203,112 @@ fn cli_m3_rejects_invalid_preset_and_extent() {
 #[test]
 fn cli_m1_m2_reject_m3_only_flags() {
     for class in ["m1", "m2"] {
-        for (flag, value) in [("--preset", "sparse"), ("--extent", "2048")] {
+        for (flag, value) in [
+            ("--preset", "sparse"),
+            ("--extent", "2048"),
+            ("--rooms", "20"),
+            ("--corridors", "25"),
+            ("--loops", "3"),
+            ("--vertical-edges", "2"),
+            ("--arch-type", "segmented"),
+            ("--room-span-min", "112"),
+            ("--room-span-max", "192"),
+            ("--grammar-families", "column-grove"),
+            ("--grammar-mode", "single"),
+            ("--features", "pillars"),
+            ("--feature-density", "0.5"),
+            ("--minlight", "32"),
+            ("--light-count", "4"),
+        ] {
             let output = invoke(&["--class".into(), class.into(), flag.into(), value.into()]);
             assert!(!output.status.success(), "{class} accepted m3-only {flag}");
         }
+        for flag in ["--chamfer", "--no-chamfer", "--stairs", "--no-stairs"] {
+            let output = invoke(&["--class".into(), class.into(), flag.into()]);
+            assert!(!output.status.success(), "{class} accepted m3-only {flag}");
+        }
+    }
+}
+
+#[test]
+fn cli_m3_accepts_every_explorer_knob() {
+    let args: Vec<String> = [
+        "--class",
+        "m3",
+        "--seed",
+        "42",
+        "--preset",
+        "moderate",
+        "--extent",
+        "2048",
+        "--rooms",
+        "20",
+        "--corridors",
+        "25",
+        "--loops",
+        "3",
+        "--vertical-edges",
+        "2",
+        "--no-chamfer",
+        "--arch-type",
+        "segmented",
+        "--stairs",
+        "--room-span-min",
+        "112",
+        "--room-span-max",
+        "192",
+        "--grammar-families",
+        "monolithic-chamber",
+        "--grammar-mode",
+        "single",
+        "--features",
+        "monoliths",
+        "--feature-density",
+        "0.25",
+        "--minlight",
+        "32",
+        "--light-count",
+        "4",
+        "--out",
+        "/dev/stdout",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    let output = invoke(&args);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let map = String::from_utf8(output.stdout).unwrap();
+    assert!(map.contains("\"_minlight\" \"32\""));
+    assert_eq!(map.matches("\"classname\" \"light\"").count(), 4);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(summary_value(&stderr, "rooms"), 20);
+    assert_eq!(summary_value(&stderr, "corridors"), 25);
+}
+
+#[test]
+fn cli_m3_rejects_invalid_explorer_values() {
+    for args in [
+        vec!["--rooms", "2"],
+        vec!["--rooms", "20", "--loops", "3", "--corridors", "20"],
+        vec!["--no-stairs", "--vertical-edges", "1"],
+        vec!["--arch-type", "round"],
+        vec!["--grammar-mode", "perlin"],
+        vec!["--grammar-families", "unknown"],
+        vec!["--features", "torches"],
+        vec!["--feature-density", "1.1"],
+        vec!["--minlight", "256"],
+    ] {
+        let mut command = vec!["--class".to_string(), "m3".to_string()];
+        command.extend(args.into_iter().map(str::to_string));
+        let output = invoke(&command);
+        assert!(
+            !output.status.success(),
+            "accepted invalid command: {command:?}"
+        );
     }
 }
 
@@ -235,7 +337,28 @@ fn cli_help_and_unknown_class_report_the_production_interface() {
     let help = invoke(&["--help".into()]);
     assert!(help.status.success());
     let help = String::from_utf8_lossy(&help.stderr);
-    for required in ["m1", "m2", "m3", "--preset", "--extent"] {
+    for required in [
+        "m1",
+        "m2",
+        "m3",
+        "--preset",
+        "--extent",
+        "--rooms",
+        "--corridors",
+        "--loops",
+        "--vertical-edges",
+        "--chamfer",
+        "--arch-type",
+        "--stairs",
+        "--room-span-min",
+        "--room-span-max",
+        "--grammar-families",
+        "--grammar-mode",
+        "--features",
+        "--feature-density",
+        "--minlight",
+        "--light-count",
+    ] {
         assert!(help.contains(required), "help lacks {required}: {help}");
     }
 
