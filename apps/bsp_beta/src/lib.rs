@@ -14,6 +14,7 @@
 //!   targets, light styles).
 
 pub mod generation;
+pub mod m3_gui;
 pub mod physics_bridge;
 pub mod player_navigation;
 pub mod runtime_bridge;
