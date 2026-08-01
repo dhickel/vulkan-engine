@@ -9,7 +9,6 @@ struct M3Options {
     rooms: Option<u32>,
     corridors: Option<u32>,
     loops: Option<u32>,
-    layers: Option<u32>,
     vertical_edges: Option<u32>,
     chamfer: Option<bool>,
     arch_type: Option<String>,
@@ -32,7 +31,6 @@ impl M3Options {
             self.rooms.as_ref().map(|_| "--rooms"),
             self.corridors.as_ref().map(|_| "--corridors"),
             self.loops.as_ref().map(|_| "--loops"),
-            self.layers.as_ref().map(|_| "--layers"),
             self.vertical_edges.as_ref().map(|_| "--vertical-edges"),
             self.chamfer.as_ref().map(|_| "--chamfer/--no-chamfer"),
             self.arch_type.as_ref().map(|_| "--arch-type"),
@@ -66,7 +64,6 @@ impl M3Options {
         config.rooms = self.rooms;
         config.corridors = self.corridors;
         config.loops = self.loops;
-        config.layers = self.layers;
         config.vertical_edges = self.vertical_edges;
         if let Some(chamfer) = self.chamfer {
             config.chamfer = chamfer;
@@ -129,7 +126,6 @@ fn run() -> Result<(), String> {
             "--rooms" => m3.rooms = Some(parse_u32(&mut args, "--rooms")?),
             "--corridors" => m3.corridors = Some(parse_u32(&mut args, "--corridors")?),
             "--loops" => m3.loops = Some(parse_u32(&mut args, "--loops")?),
-            "--layers" => m3.layers = Some(parse_u32(&mut args, "--layers")?),
             "--vertical-edges" => {
                 m3.vertical_edges = Some(parse_u32(&mut args, "--vertical-edges")?)
             }
@@ -315,7 +311,6 @@ fn print_usage() {
     eprintln!("  --rooms <3..40>                    Exact room count");
     eprintln!("  --corridors <n>                    Exact physical corridor segments");
     eprintln!("  --loops <0..6>                     Exact same-layer graph loops");
-    eprintln!("  --layers <2>                       Affirm the frozen two-layer V3 layout");
     eprintln!("  --vertical-edges <0..3>            Exact stair connections");
     eprintln!("  --chamfer | --no-chamfer           Enable/disable seeded chamfers");
     eprintln!("  --arch-type none|pointed|segmented Portal surround");

@@ -17,7 +17,6 @@ fn compatibility_constructor_resolves_existing_defaults() {
     assert_eq!(sparse.effective_loops(), 0);
     assert_eq!(sparse.effective_route_count(), 10);
     assert_eq!(sparse.effective_corridors(), 10);
-    assert_eq!(sparse.effective_layers(), 2);
     assert_eq!(sparse.effective_vertical_edges(), 1);
     assert_eq!(sparse.effective_room_span_min(), 112);
     assert_eq!(sparse.effective_room_span_max(), 256);
@@ -30,36 +29,6 @@ fn compatibility_constructor_resolves_existing_defaults() {
     assert_eq!(sparse.feature_density, 0.5);
     assert_eq!(sparse.minlight, 16);
     assert!(!sparse.has_overrides());
-}
-
-#[test]
-fn layers_override_can_only_affirm_the_frozen_two_layer_layout() {
-    let default = V3Config::new(7, V3Preset::Sparse, 2048).unwrap();
-    let mut explicit = default.clone();
-    explicit.layers = Some(2);
-
-    explicit.validate().unwrap();
-    assert_eq!(explicit.effective_layers(), 2);
-    assert!(explicit.has_overrides());
-    assert_ne!(explicit, default);
-    let default_output = run_pipeline(&default).unwrap();
-    let explicit_output = run_pipeline(&explicit).unwrap();
-    assert_eq!(explicit_output.map_text, default_output.map_text);
-    assert_eq!(explicit_output.metadata, default_output.metadata);
-
-    for layers in [0, 1, 3, u32::MAX] {
-        explicit.layers = Some(layers);
-        let error = explicit.validate().unwrap_err();
-        assert!(matches!(
-            error,
-            bsp_generator::enhanced_v3::V3Error::ConfigOutOfRange {
-                field: "layers",
-                min: 2,
-                max: 2,
-                ..
-            }
-        ));
-    }
 }
 
 #[test]
@@ -172,15 +141,10 @@ fn invalid_override_combinations_are_rejected() {
 
     config.rooms = Some(20);
     config.loops = Some(3);
-    config.layers = Some(2);
     config.corridors = Some(20);
     assert!(config.validate().is_err());
 
     config.corridors = Some(25);
-    config.layers = Some(1);
-    assert!(config.validate().is_err());
-
-    config.layers = Some(2);
     config.stairs = false;
     config.vertical_edges = Some(1);
     assert!(config.validate().is_err());

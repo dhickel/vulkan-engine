@@ -438,7 +438,6 @@ fn v3_config_json(config: &V3Config) -> serde_json::Value {
                     "rooms": config.rooms,
                     "corridors": config.corridors,
                     "loops": config.loops,
-                    "layers": config.layers,
                     "vertical_edges": config.vertical_edges,
                     "chamfer": config.chamfer,
                     "arch_type": config.arch_type.tag(),
@@ -484,14 +483,6 @@ fn v3_config_override_table(config: &V3Config) -> toml::Table {
     table.insert(
         "loops_explicit".into(),
         Value::Boolean(config.loops.is_some()),
-    );
-    table.insert(
-        "layers".into(),
-        Value::Integer(config.effective_layers() as i64),
-    );
-    table.insert(
-        "layers_explicit".into(),
-        Value::Boolean(config.layers.is_some()),
     );
     table.insert(
         "vertical_edges".into(),

@@ -355,7 +355,7 @@ dungeon_gen --class m3 --seed 99 --preset rich --extent 3072
 
 # Explorer overrides, including the sealed segmented surround
 dungeon_gen --class m3 --seed 42 --preset moderate --rooms 20 \
-  --corridors 25 --loops 3 --layers 2 --arch-type segmented --minlight 32 --light-count 4
+  --corridors 25 --loops 3 --arch-type segmented --minlight 32 --light-count 4
 
 # Publish through engine_pack with a preset
 engine_pack enhanced-dungeon-v3 --seed 42 --preset moderate --out /tmp/pkg
@@ -421,7 +421,6 @@ public fields are explorer overrides and must pass `validate()` after mutation.
 | `rooms` | preset count | 3–40 |
 | `corridors` | one segment per route | exact constructible segment count |
 | `loops` | preset target | 0–6 |
-| `layers` | 2 | exactly 2; records the frozen two-layer V3 layout |
 | `vertical_edges` | 1 | 0–3 |
 | `chamfer` | `true` | boolean |
 | `arch_type` | `Pointed` | `None`, `Pointed`, `Segmented` |
