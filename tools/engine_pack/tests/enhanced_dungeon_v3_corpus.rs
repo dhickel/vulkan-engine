@@ -17,7 +17,6 @@
 use bsp::BspLoader;
 use bsp_generator::enhanced_v3::{self, V3Config, V3Preset};
 use engine_pack::enhanced_dungeon_v3::build_v3_package;
-use engine_pack::fs_tx;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -89,56 +88,49 @@ struct PackageEntryEvidence {
     metadata_sha256: Option<String>,
     bsp_faces: Option<u32>,
     bsp_entities: Option<u32>,
+    #[serde(default)]
+    static_batches: Option<u32>,
     budget_pass: bool,
     errors: Vec<String>,
 }
 
-// ── BSP count parser ─────────────────────────────────────────────────────
-
-fn parse_bsp_counts(bsp_bytes: &[u8]) -> (Option<u32>, Option<u32>) {
-    if bsp_bytes.len() < 4 + 136 {
-        return (None, None);
+/// Strictly load and extract a compiled package. BSP face/entity counts and
+/// static batches all come from the same validated representation.
+fn strict_compiled_measurement(
+    bsp_bytes: &[u8],
+    lit_bytes: &[u8],
+    palette_bytes: &[u8],
+    wad_name: String,
+    wad_bytes: Vec<u8>,
+) -> Result<(u32, u32, u32), String> {
+    let world = BspLoader::load(
+        bsp_bytes,
+        &bsp::LoadOptions {
+            strict: true,
+            palette: Some(palette_bytes.to_vec()),
+            lit_data: Some(lit_bytes.to_vec()),
+            wad_archives: vec![(wad_name.clone(), wad_bytes.clone())],
+            source_identity: "enhanced-v3-package-corpus".to_string(),
+            ..Default::default()
+        },
+    )
+    .map_err(|report| format!("strict load for batch measurement: {report}"))?;
+    if !world.diagnostics.is_empty() {
+        return Err(format!("strict load diagnostics: {:?}", world.diagnostics));
     }
-    if &bsp_bytes[0..4] != b"BSP2" {
-        return (None, None);
-    }
-
-    let get_lump_len = |idx: usize| -> Option<u32> {
-        let base = 4 + idx * 8;
-        if base + 8 > bsp_bytes.len() {
-            return None;
-        }
-        let len = u32::from_le_bytes(bsp_bytes[base + 4..base + 8].try_into().ok()?);
-        Some(len)
-    };
-
-    let get_lump_offset = |idx: usize| -> Option<u32> {
-        let base = 4 + idx * 8;
-        if base + 4 > bsp_bytes.len() {
-            return None;
-        }
-        let off = u32::from_le_bytes(bsp_bytes[base..base + 4].try_into().ok()?);
-        Some(off)
-    };
-
-    // Lump 7 = faces (20 bytes each in BSP2)
-    let face_count = get_lump_len(7).map(|len| if len > 0 { len / 20 } else { 0 });
-
-    // Lump 14 = entities: count '{'
-    let entity_count = get_lump_len(14).and_then(|len| {
-        if len == 0 {
-            return Some(0);
-        }
-        let off = get_lump_offset(14)? as usize;
-        let end = off + len as usize;
-        if end > bsp_bytes.len() {
-            return Some(0);
-        }
-        let s = std::str::from_utf8(&bsp_bytes[off..end]).ok()?;
-        Some(s.lines().filter(|l| l.trim() == "{").count() as u32)
-    });
-
-    (face_count, entity_count)
+    let faces = u32::try_from(world.faces.len()).map_err(|_| "face count exceeds u32")?;
+    let entities = u32::try_from(world.entities.len()).map_err(|_| "entity count exceeds u32")?;
+    let extracted = bsp::extract::extract(bsp::BspExtractionRequest {
+        world,
+        palette: Some(bsp::resources::decode_palette(palette_bytes)),
+        wad_archives: vec![(wad_name, wad_bytes)],
+        strict: true,
+        ..Default::default()
+    })
+    .map_err(|report| format!("strict extraction for batch measurement: {report}"))?;
+    let static_batches = u32::try_from(extracted.render_batches.len())
+        .map_err(|_| "static batch count exceeds u32".to_string())?;
+    Ok((faces, entities, static_batches))
 }
 
 // ── Test: build and validate all corpus packages ─────────────────────────
@@ -173,9 +165,10 @@ fn build_all_corpus_packages() {
 
         let source_faces = output.metadata.actual_faces();
         let source_entities = output.metadata.actual_entities();
-        let source_brushes = output.metadata.actual_brushes();
 
-        // Verify source budgets
+        // Source budgets are faces and entities. Source brush count is not a
+        // renderer batch count; static batches are measured below from strict
+        // extraction of the compiled publication.
         assert!(
             source_faces < 10000,
             "{id}: source faces {source_faces} exceeds 10000"
@@ -184,100 +177,123 @@ fn build_all_corpus_packages() {
             source_entities < 300,
             "{id}: source entities {source_entities} exceeds 300"
         );
-        assert!(
-            source_brushes < 500,
-            "{id}: source brushes {source_brushes} exceeds 500 batch ceiling"
-        );
 
         // If compiler available, do full publication
-        let (published, bsp_hash, lit_hash, bsp_faces, bsp_entities) = if compiler_available {
-            let out_dir = tempfile::TempDir::new().expect("tempdir");
-            let tool_path = ericw_tools_dir();
-            let name = &id;
+        let (published, bsp_hash, lit_hash, bsp_faces, bsp_entities, static_batches) =
+            if compiler_available {
+                let out_dir = tempfile::TempDir::new().expect("tempdir");
+                let tool_path = ericw_tools_dir();
+                let name = &id;
 
-            match build_v3_package(
-                seed,
-                preset,
-                extent,
-                out_dir.path(),
-                Some(&tool_path),
-                name,
-                None,
-            ) {
-                Ok(result) => {
-                    let target = match &result {
-                        engine_pack::BuildV3Result::Published { target, .. } => target.clone(),
-                        engine_pack::BuildV3Result::Unchanged { target, .. } => target.clone(),
-                    };
+                match build_v3_package(
+                    seed,
+                    preset,
+                    extent,
+                    &out_dir.path().join("package"),
+                    Some(&tool_path),
+                    name,
+                    None,
+                ) {
+                    Ok(result) => {
+                        let target = match &result {
+                            engine_pack::BuildV3Result::Published { target, .. } => target.clone(),
+                            engine_pack::BuildV3Result::Unchanged { target, .. } => target.clone(),
+                        };
 
-                    // Strict-validate the published closure
-                    let bsp_path = target.join(format!("{name}.bsp"));
-                    let lit_path = target.join(format!("{name}.lit"));
-                    let map_path = target.join(format!("{name}.map"));
-                    let metadata_path = target.join("metadata.json");
-                    let manifest_path = target.join(format!("{name}.manifest.toml"));
-                    let wad_file = target.join("cc0_dungeon_v2.wad");
-                    let palette_file = target.join("palette.lmp");
+                        // Strict-validate the published closure
+                        let bsp_path = target.join(format!("{name}.bsp"));
+                        let lit_path = target.join(format!("{name}.lit"));
+                        let map_path = target.join(format!("{name}.map"));
+                        let metadata_path = target.join("metadata.json");
+                        let manifest_path = target.join(format!("{name}.manifest.toml"));
+                        let wad_file = target.join("cc0_dungeon_v2.wad");
+                        let palette_file = target.join("palette.lmp");
 
-                    // All required files present
-                    let mut missing = Vec::new();
-                    for (path, label) in &[
-                        (&bsp_path, ".bsp"),
-                        (&lit_path, ".lit"),
-                        (&map_path, ".map"),
-                        (&metadata_path, "metadata.json"),
-                        (&manifest_path, ".manifest.toml"),
-                        (&wad_file, "WAD"),
-                        (&palette_file, "palette.lmp"),
-                    ] {
-                        if !path.exists() {
-                            missing.push(*label);
+                        // All required files present
+                        let mut missing = Vec::new();
+                        for (path, label) in &[
+                            (&bsp_path, ".bsp"),
+                            (&lit_path, ".lit"),
+                            (&map_path, ".map"),
+                            (&metadata_path, "metadata.json"),
+                            (&manifest_path, ".manifest.toml"),
+                            (&wad_file, "WAD"),
+                            (&palette_file, "palette.lmp"),
+                        ] {
+                            if !path.exists() {
+                                missing.push(*label);
+                            }
                         }
+                        assert!(
+                            missing.is_empty(),
+                            "{id}: missing published files: {missing:?}"
+                        );
+
+                        // BSP2 magic
+                        let bsp_bytes = std::fs::read(&bsp_path).expect("read bsp");
+                        assert!(
+                            bsp_bytes.len() >= 4 && &bsp_bytes[0..4] == b"BSP2",
+                            "{id}: BSP2 magic invalid"
+                        );
+
+                        // QLIT magic
+                        let lit_bytes = std::fs::read(&lit_path).expect("read lit");
+                        assert!(
+                            lit_bytes.len() >= 4 && &lit_bytes[0..4] == b"QLIT",
+                            "{id}: QLIT magic invalid"
+                        );
+
+                        let bsp_h = sha256_hex(&bsp_bytes);
+                        let lit_h = sha256_hex(&lit_bytes);
+
+                        let palette_bytes = std::fs::read(&palette_file).expect("read palette");
+                        let wad_bytes = std::fs::read(&wad_file).expect("read WAD");
+                        let wad_name = wad_file
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .expect("WAD basename")
+                            .to_string();
+                        let (faces, entities, static_batches) = strict_compiled_measurement(
+                            &bsp_bytes,
+                            &lit_bytes,
+                            &palette_bytes,
+                            wad_name,
+                            wad_bytes,
+                        )
+                        .unwrap_or_else(|error| panic!("{id}: {error}"));
+
+                        // Budget checks
+                        assert!(faces < 10000, "{id}: compiled faces {faces} exceeds 10000");
+                        assert!(
+                            entities < 300,
+                            "{id}: compiled entities {entities} exceeds 300"
+                        );
+                        assert!(
+                            static_batches < 500,
+                            "{id}: strict extracted static batches {static_batches} exceeds 500"
+                        );
+
+                        (
+                            true,
+                            Some(bsp_h),
+                            Some(lit_h),
+                            Some(faces),
+                            Some(entities),
+                            Some(static_batches),
+                        )
                     }
-                    assert!(
-                        missing.is_empty(),
-                        "{id}: missing published files: {missing:?}"
-                    );
-
-                    // BSP2 magic
-                    let bsp_bytes = std::fs::read(&bsp_path).expect("read bsp");
-                    assert!(
-                        bsp_bytes.len() >= 4 && &bsp_bytes[0..4] == b"BSP2",
-                        "{id}: BSP2 magic invalid"
-                    );
-
-                    // QLIT magic
-                    let lit_bytes = std::fs::read(&lit_path).expect("read lit");
-                    assert!(
-                        lit_bytes.len() >= 4 && &lit_bytes[0..4] == b"QLIT",
-                        "{id}: QLIT magic invalid"
-                    );
-
-                    let bsp_h = sha256_hex(&bsp_bytes);
-                    let lit_h = sha256_hex(&lit_bytes);
-
-                    let (fc, ec) = parse_bsp_counts(&bsp_bytes);
-
-                    // Budget checks
-                    if let Some(fc) = fc {
-                        assert!(fc < 10000, "{id}: compiled faces {fc} exceeds 10000");
+                    Err(e) => {
+                        errors.push(format!("publication failed: {e:?}"));
+                        (false, None, None, None, None, None)
                     }
-                    if let Some(ec) = ec {
-                        assert!(ec < 300, "{id}: compiled entities {ec} exceeds 300");
-                    }
-
-                    (true, Some(bsp_h), Some(lit_h), fc, ec)
                 }
-                Err(e) => {
-                    errors.push(format!("publication failed: {e:?}"));
-                    (false, None, None, None, None)
-                }
-            }
-        } else {
-            (false, None, None, None, None)
-        };
+            } else {
+                (false, None, None, None, None, None)
+            };
 
-        let budget_pass = source_faces < 10000 && source_entities < 300 && source_brushes < 500;
+        let budget_pass = source_faces < 10000
+            && source_entities < 300
+            && static_batches.is_some_and(|count| count < 500);
 
         evidence.entries.insert(
             id.clone(),
@@ -293,6 +309,7 @@ fn build_all_corpus_packages() {
                 metadata_sha256: Some(meta_sha256),
                 bsp_faces,
                 bsp_entities,
+                static_batches,
                 budget_pass,
                 errors,
             },
@@ -312,7 +329,7 @@ fn build_all_corpus_packages() {
         evidence.entries.len()
     );
 
-    for (_, entry) in &evidence.entries {
+    for entry in evidence.entries.values() {
         let status = if entry.published {
             "PUBLISHED"
         } else if evidence.compiler_available {
@@ -321,8 +338,21 @@ fn build_all_corpus_packages() {
             "COMPILER_UNAVAILABLE"
         };
         println!(
-            "  {}: {} (faces={:?}, entities={:?})",
-            entry.id, status, entry.bsp_faces, entry.bsp_entities
+            "  {}: {} (faces={:?}, entities={:?}, static_batches={:?})",
+            entry.id, status, entry.bsp_faces, entry.bsp_entities, entry.static_batches
+        );
+    }
+
+    if compiler_available {
+        let failures = evidence
+            .entries
+            .values()
+            .filter(|entry| !entry.published || !entry.budget_pass || !entry.errors.is_empty())
+            .map(|entry| format!("{}: {:?}", entry.id, entry.errors))
+            .collect::<Vec<_>>();
+        assert!(
+            failures.is_empty(),
+            "corpus publication, strict extraction, or budget validation failed: {failures:?}"
         );
     }
 }
@@ -337,13 +367,10 @@ fn source_budget_validation() {
 
         let faces = output.metadata.actual_faces();
         let entities = output.metadata.actual_entities();
-        let brushes = output.metadata.actual_brushes();
-
         let id = format!("v3-{}-seed-{}", preset.tag(), seed);
 
         assert!(faces < 10000, "{id}: faces {faces} >= 10000");
         assert!(entities < 300, "{id}: entities {entities} >= 300");
-        assert!(brushes < 500, "{id}: brushes {brushes} >= 500");
     }
 }
 
