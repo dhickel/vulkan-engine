@@ -1,210 +1,198 @@
 {
-  "timestamp": "1785506644",
+  "timestamp": "1785613237",
   "compiler_available": true,
   "entries": {
-    "v3-moderate-seed-4": {
-      "id": "v3-moderate-seed-4",
-      "seed": 4,
+    "v3-moderate-seed-0": {
+      "id": "v3-moderate-seed-0",
+      "seed": 0,
       "preset": "moderate",
       "extent": 2048,
-      "published": false,
-      "bsp_sha256": null,
-      "lit_sha256": null,
-      "map_sha256": "eb507a7b0258aa456b55d91b9e3de25a6d2dd2e62a298980240b3ebd439e7dd9",
-      "metadata_sha256": "9b8c56fba266b112da80d5d85b796c1cae3aa71a8c9da0b62b68656d038ddbca",
-      "bsp_faces": null,
-      "bsp_entities": null,
+      "published": true,
+      "bsp_sha256": "bddab063f811898f9771ff424de07445d61975736ac4c12ec7d5d13f3cb16db1",
+      "lit_sha256": "ed3347b5dff88fa0cfa04c0616d8869396fcd71163bc700eacdadfc084180b8c",
+      "map_sha256": "68283a728a6e4a7bc72e088eb02baab32a1b61e6d9c2af10db23e935e1bf754d",
+      "metadata_sha256": "4c025f38421f379e90799f82fc1c6b49fa082f3f512df0da6ec47c054fda1730",
+      "bsp_faces": 3932,
+      "bsp_entities": 22,
+      "static_batches": 4,
       "budget_pass": true,
-      "errors": [
-        "publication failed: IncompleteDestination { target: \"/tmp/.tmpY887gE\", reason: \"no manifest found at existing destination\" }"
-      ]
+      "errors": []
     },
-    "v3-moderate-seed-5": {
-      "id": "v3-moderate-seed-5",
-      "seed": 5,
+    "v3-moderate-seed-255": {
+      "id": "v3-moderate-seed-255",
+      "seed": 255,
       "preset": "moderate",
       "extent": 2048,
-      "published": false,
-      "bsp_sha256": null,
-      "lit_sha256": null,
-      "map_sha256": "eb507a7b0258aa456b55d91b9e3de25a6d2dd2e62a298980240b3ebd439e7dd9",
-      "metadata_sha256": "fcbfd607a86a244ec346a5f6f1c239aa30ca1e191cb63180c7cea76827daca59",
-      "bsp_faces": null,
-      "bsp_entities": null,
+      "published": true,
+      "bsp_sha256": "82a5760453977e910901e4555a4ac055801524a0d2b5c8ffbc48a15f8845d31c",
+      "lit_sha256": "ba4831257306687f3438322d75934071002cbc789bc2a02a7170a11834149d9c",
+      "map_sha256": "f6cc66daf8e6f5d2ee7c12c1acff90a4590417c648eb8e2eb036a119cb62d6af",
+      "metadata_sha256": "9c49a70564c749063d23d8c821c6c2b87428b53e39ced45301d5cd77a6a1ebfb",
+      "bsp_faces": 3608,
+      "bsp_entities": 22,
+      "static_batches": 4,
       "budget_pass": true,
-      "errors": [
-        "publication failed: IncompleteDestination { target: \"/tmp/.tmpOiKQ9O\", reason: \"no manifest found at existing destination\" }"
-      ]
+      "errors": []
     },
-    "v3-moderate-seed-6": {
-      "id": "v3-moderate-seed-6",
-      "seed": 6,
+    "v3-moderate-seed-42": {
+      "id": "v3-moderate-seed-42",
+      "seed": 42,
       "preset": "moderate",
       "extent": 2048,
-      "published": false,
-      "bsp_sha256": null,
-      "lit_sha256": null,
-      "map_sha256": "eb507a7b0258aa456b55d91b9e3de25a6d2dd2e62a298980240b3ebd439e7dd9",
-      "metadata_sha256": "68012697d4ca79172dc1bb9be9b0275f02fe07c90b1f0e07b8c8045280faee37",
-      "bsp_faces": null,
-      "bsp_entities": null,
+      "published": true,
+      "bsp_sha256": "1ee474de9ebc315a3c90477cf509764d1e67f32e33d280d1c8aac5bba0df9547",
+      "lit_sha256": "b14604b1699f044f0a0e31d65a9f5c524a6a5aedea71b46e7b92b51a70749cfb",
+      "map_sha256": "85cdcd7caa80dc4fbd9bc8d12d1089ef50278f6e689de89519c1a384dacb6d66",
+      "metadata_sha256": "40fc43337173d49140cb68de5097a4ab7dec9baa21d87195f461ac9e2b77f2b1",
+      "bsp_faces": 4057,
+      "bsp_entities": 22,
+      "static_batches": 4,
       "budget_pass": true,
-      "errors": [
-        "publication failed: IncompleteDestination { target: \"/tmp/.tmpjhgTvt\", reason: \"no manifest found at existing destination\" }"
-      ]
+      "errors": []
     },
-    "v3-moderate-seed-7": {
-      "id": "v3-moderate-seed-7",
-      "seed": 7,
+    "v3-moderate-seed-99": {
+      "id": "v3-moderate-seed-99",
+      "seed": 99,
       "preset": "moderate",
       "extent": 2048,
-      "published": false,
-      "bsp_sha256": null,
-      "lit_sha256": null,
-      "map_sha256": "eb507a7b0258aa456b55d91b9e3de25a6d2dd2e62a298980240b3ebd439e7dd9",
-      "metadata_sha256": "f61980979d6176dc201462796ef59682872ed478733d633ce2cbd89514e1bbfc",
-      "bsp_faces": null,
-      "bsp_entities": null,
+      "published": true,
+      "bsp_sha256": "7737924358ea1cf55a051d554708dc341d35b149625cc7b25fe52ddd780fd9c1",
+      "lit_sha256": "06f9ca5845ec43a17c3759ac53791222ef58544103acf30baf7459336235d507",
+      "map_sha256": "7ff03faf1755ca320a3a9cd22163ea775cca6bc1f51d9907915d5be0639e61b7",
+      "metadata_sha256": "5e6b2f6c6cf33001d69489ec5bbba79444c611da156c5073a0f587b6c6318d73",
+      "bsp_faces": 4079,
+      "bsp_entities": 22,
+      "static_batches": 4,
       "budget_pass": true,
-      "errors": [
-        "publication failed: IncompleteDestination { target: \"/tmp/.tmphf54NJ\", reason: \"no manifest found at existing destination\" }"
-      ]
+      "errors": []
     },
-    "v3-rich-seed-10": {
-      "id": "v3-rich-seed-10",
-      "seed": 10,
+    "v3-rich-seed-0": {
+      "id": "v3-rich-seed-0",
+      "seed": 0,
       "preset": "rich",
       "extent": 3072,
-      "published": false,
-      "bsp_sha256": null,
-      "lit_sha256": null,
-      "map_sha256": "1d630387a53bf690d7a532c792c8cf08b31e18422ad8efdeebeb9ec5d99dc0d1",
-      "metadata_sha256": "4e0a7b7901810368fd7bd116f62a75985e987058441b7a080d04d805cf463fd1",
-      "bsp_faces": null,
-      "bsp_entities": null,
+      "published": true,
+      "bsp_sha256": "800b99f665f753734554a867e764c311df0a48cb488919e8d4702fd2be71db2e",
+      "lit_sha256": "2bab2bba3d3e73cef846f683071e879736a67fc1823d79b6b478cebe4b7abdfc",
+      "map_sha256": "878fd2734457fa5c056b9273d1ff4c0331aad4c165b0ed72872655bb87b532bc",
+      "metadata_sha256": "69ce2f8c6d67a052174c4f5a9f2199a73a2c1f098e1f07614bde8395292ebe03",
+      "bsp_faces": 6164,
+      "bsp_entities": 30,
+      "static_batches": 4,
       "budget_pass": true,
-      "errors": [
-        "publication failed: IncompleteDestination { target: \"/tmp/.tmp7ZR3CY\", reason: \"no manifest found at existing destination\" }"
-      ]
+      "errors": []
     },
-    "v3-rich-seed-11": {
-      "id": "v3-rich-seed-11",
-      "seed": 11,
+    "v3-rich-seed-255": {
+      "id": "v3-rich-seed-255",
+      "seed": 255,
       "preset": "rich",
       "extent": 3072,
-      "published": false,
-      "bsp_sha256": null,
-      "lit_sha256": null,
-      "map_sha256": "1d630387a53bf690d7a532c792c8cf08b31e18422ad8efdeebeb9ec5d99dc0d1",
-      "metadata_sha256": "be35c6f38ad3d0a509778c56fefbecd5635fe70b46cd8269dc4ab550114de837",
-      "bsp_faces": null,
-      "bsp_entities": null,
+      "published": true,
+      "bsp_sha256": "223b16f45adebf6c55b6f76532182e5132b87d2cccf5fe95f942f5df6f3f03fc",
+      "lit_sha256": "b9b478d243b05234baedd3a509d9402f0cbb9f2bdc2918c55aef283ff7311280",
+      "map_sha256": "f27a96e4791e34abc07518601245c2e14c3d3ad590b35cc392c6ab104c3df637",
+      "metadata_sha256": "8f4fb204cca04ff641fa679ea4df36b0f14ba0cf197890b6b77477ae72b722b1",
+      "bsp_faces": 6333,
+      "bsp_entities": 30,
+      "static_batches": 4,
       "budget_pass": true,
-      "errors": [
-        "publication failed: IncompleteDestination { target: \"/tmp/.tmp6JASPB\", reason: \"no manifest found at existing destination\" }"
-      ]
+      "errors": []
     },
-    "v3-rich-seed-8": {
-      "id": "v3-rich-seed-8",
-      "seed": 8,
+    "v3-rich-seed-42": {
+      "id": "v3-rich-seed-42",
+      "seed": 42,
       "preset": "rich",
       "extent": 3072,
-      "published": false,
-      "bsp_sha256": null,
-      "lit_sha256": null,
-      "map_sha256": "1d630387a53bf690d7a532c792c8cf08b31e18422ad8efdeebeb9ec5d99dc0d1",
-      "metadata_sha256": "82f8d9672738e0a6491c6a471f161fcf9f8404e571ecd00ff5b002d2505ff070",
-      "bsp_faces": null,
-      "bsp_entities": null,
+      "published": true,
+      "bsp_sha256": "c28752c1be51dfdf3688f4c7af1d4fc5b38b588dbb124ac215c1d7ae1ff9a6ec",
+      "lit_sha256": "44f59f0d532f8335561639e8ba46ddd192e0b39a0ead5eef6acb092ece196dab",
+      "map_sha256": "ef9315d3bfae415be097fb823583afcdd6d1408ea1ab9f60bc2bf561b6181bf2",
+      "metadata_sha256": "ce88f0420e11a2f54bc9eed8c8375ea3d8b9e62511ddb0cd7b9b510b0b8cc60e",
+      "bsp_faces": 6714,
+      "bsp_entities": 30,
+      "static_batches": 4,
       "budget_pass": true,
-      "errors": [
-        "publication failed: IncompleteDestination { target: \"/tmp/.tmpkG5vjV\", reason: \"no manifest found at existing destination\" }"
-      ]
+      "errors": []
     },
-    "v3-rich-seed-9": {
-      "id": "v3-rich-seed-9",
-      "seed": 9,
+    "v3-rich-seed-99": {
+      "id": "v3-rich-seed-99",
+      "seed": 99,
       "preset": "rich",
       "extent": 3072,
-      "published": false,
-      "bsp_sha256": null,
-      "lit_sha256": null,
-      "map_sha256": "1d630387a53bf690d7a532c792c8cf08b31e18422ad8efdeebeb9ec5d99dc0d1",
-      "metadata_sha256": "00f3dd6f37f76e8b3aacc705a6ad8edc51f2504c8a470a957e6d99a3ccfa72d3",
-      "bsp_faces": null,
-      "bsp_entities": null,
+      "published": true,
+      "bsp_sha256": "a9f3def805e3638f9f0ca3945eee853a37e888e20114c3acf07fcc1e37f32ee1",
+      "lit_sha256": "4527b579af4108db4f9ba48b8165a94ce692876dc3f60c430209c706908526b1",
+      "map_sha256": "d729dcccc16a07b1c08b3766584a77a7853e854e09a8ed5684e358e6d724c032",
+      "metadata_sha256": "334e3557cae673cf62e0464a5bd6df433d044651343bc1ad33005dee4ff7a546",
+      "bsp_faces": 6800,
+      "bsp_entities": 30,
+      "static_batches": 4,
       "budget_pass": true,
-      "errors": [
-        "publication failed: IncompleteDestination { target: \"/tmp/.tmpslLxrn\", reason: \"no manifest found at existing destination\" }"
-      ]
+      "errors": []
     },
     "v3-sparse-seed-0": {
       "id": "v3-sparse-seed-0",
       "seed": 0,
       "preset": "sparse",
       "extent": 2048,
-      "published": false,
-      "bsp_sha256": null,
-      "lit_sha256": null,
-      "map_sha256": "47cbb65243b5bfa594a22e77cc0587b0020fe1ee9d78d2891555b1c70ae28751",
-      "metadata_sha256": "3ce4f361096a78c18033cb891e24a205ce49f21321981bc3fcab31f951dbbe4a",
-      "bsp_faces": null,
-      "bsp_entities": null,
+      "published": true,
+      "bsp_sha256": "172245b581f54d73d026dd0806fc56a0ba53e6f561bf9153437a5e60bae607b0",
+      "lit_sha256": "9c334f0b520c83085d818accd2dd85fdae5a84f2b3be3a62e6070585ad3c3946",
+      "map_sha256": "de1a15491ffeb4d3aaa2f1e833198b9f133faf561ffaa845fda47db242be7ccd",
+      "metadata_sha256": "adab2deaa412f015063bc957c0e8f175477df3217370dd88f7ab73a93984cdba",
+      "bsp_faces": 2799,
+      "bsp_entities": 14,
+      "static_batches": 4,
       "budget_pass": true,
-      "errors": [
-        "publication failed: IncompleteDestination { target: \"/tmp/.tmpbypg2B\", reason: \"no manifest found at existing destination\" }"
-      ]
+      "errors": []
     },
-    "v3-sparse-seed-1": {
-      "id": "v3-sparse-seed-1",
-      "seed": 1,
+    "v3-sparse-seed-255": {
+      "id": "v3-sparse-seed-255",
+      "seed": 255,
       "preset": "sparse",
       "extent": 2048,
-      "published": false,
-      "bsp_sha256": null,
-      "lit_sha256": null,
-      "map_sha256": "47cbb65243b5bfa594a22e77cc0587b0020fe1ee9d78d2891555b1c70ae28751",
-      "metadata_sha256": "dcc376119845aed83ec52ca6d014650eded0643d3cdb2bf68c1e6ed6d9a79ece",
-      "bsp_faces": null,
-      "bsp_entities": null,
+      "published": true,
+      "bsp_sha256": "0f5235b94a8c53c2211e7ff008802642f75f361d46910e70ad01a142abfee596",
+      "lit_sha256": "5cc5ed33eefe466f7917f10a5e4be9802ab6a7c32662d8f87bc4c5cf1415a3da",
+      "map_sha256": "015d52a17c3d748b804c6f433953a6ba9be3750775faf4699fb506adeff4ffbf",
+      "metadata_sha256": "28a77122d193de9c743f62dbb95716775a9d2b4e26e2a355133c03a681259c59",
+      "bsp_faces": 2521,
+      "bsp_entities": 14,
+      "static_batches": 4,
       "budget_pass": true,
-      "errors": [
-        "publication failed: IncompleteDestination { target: \"/tmp/.tmpo9Joe8\", reason: \"no manifest found at existing destination\" }"
-      ]
+      "errors": []
     },
-    "v3-sparse-seed-2": {
-      "id": "v3-sparse-seed-2",
-      "seed": 2,
+    "v3-sparse-seed-42": {
+      "id": "v3-sparse-seed-42",
+      "seed": 42,
       "preset": "sparse",
       "extent": 2048,
-      "published": false,
-      "bsp_sha256": null,
-      "lit_sha256": null,
-      "map_sha256": "47cbb65243b5bfa594a22e77cc0587b0020fe1ee9d78d2891555b1c70ae28751",
-      "metadata_sha256": "eca89b0281830cf0c1b919283c6f46abcea673f42b3dbc4e7367aa8cef1de0db",
-      "bsp_faces": null,
-      "bsp_entities": null,
+      "published": true,
+      "bsp_sha256": "aca7aa3064a1a044479284daf35ba4cd8f496ec235fa52477e2d0325a05312d3",
+      "lit_sha256": "42690dfdbd644b5ee0660d70519cc982c20e24437492ba59f8b228a5d05aff2a",
+      "map_sha256": "8f43a8ea036d494a44d480d49d0150661ce9091c54f8dbcbe6483548c4e37534",
+      "metadata_sha256": "4c22eca65ad2438c5f78933b690f6f05831a198c0574ae5143cffdefbc46631d",
+      "bsp_faces": 2677,
+      "bsp_entities": 14,
+      "static_batches": 4,
       "budget_pass": true,
-      "errors": [
-        "publication failed: IncompleteDestination { target: \"/tmp/.tmpQ2Jjqn\", reason: \"no manifest found at existing destination\" }"
-      ]
+      "errors": []
     },
-    "v3-sparse-seed-3": {
-      "id": "v3-sparse-seed-3",
-      "seed": 3,
+    "v3-sparse-seed-99": {
+      "id": "v3-sparse-seed-99",
+      "seed": 99,
       "preset": "sparse",
       "extent": 2048,
-      "published": false,
-      "bsp_sha256": null,
-      "lit_sha256": null,
-      "map_sha256": "47cbb65243b5bfa594a22e77cc0587b0020fe1ee9d78d2891555b1c70ae28751",
-      "metadata_sha256": "29ca938a991f67613fc9ab9c5b4def38318662fb3d5d2a7318e78bab7218d875",
-      "bsp_faces": null,
-      "bsp_entities": null,
+      "published": true,
+      "bsp_sha256": "d0ae612a724deceda4eb8c76e9d6f0a8f94e836b4cd1031fa0b3b8309c18d7e9",
+      "lit_sha256": "fa5e14cd9d0486b59242b85c9ff168bac375a969a02b7493ca25eee1dc7f5929",
+      "map_sha256": "d575d38c8be33c67bfea1d1735ca06b3bf07efcadd72f6ef440b18f1520e8342",
+      "metadata_sha256": "8576f161a8815cc1547d63407b2febabf60b05522fd7657f2793a7e2bdeb8914",
+      "bsp_faces": 2998,
+      "bsp_entities": 14,
+      "static_batches": 4,
       "budget_pass": true,
-      "errors": [
-        "publication failed: IncompleteDestination { target: \"/tmp/.tmp5uShQC\", reason: \"no manifest found at existing destination\" }"
-      ]
+      "errors": []
     }
   }
 }

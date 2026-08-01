@@ -240,6 +240,18 @@ fn corridor_clear_of_third_rooms(
         return false;
     }
 
+    // The emitted corridor is the clear envelope expanded by one wall
+    // thickness on the cross axis (floor/ceiling/wall brushes occupy the
+    // wall shell). A corridor whose shell positively overlaps a third
+    // room's AABB would emit brushes inside that room's shell — including
+    // its corner posts and walls — producing positive-volume overlaps at
+    // assembly validation. Touching (zero-area contact) is permitted.
+    let wall = CONSTRUCTION_QUANTUM as i32;
+    let (shell_x0, shell_x1, shell_y0, shell_y1) = match source_dir {
+        Dir::East | Dir::West => (cor_x0, cor_x1, cor_y0 - wall, cor_y1 + wall),
+        Dir::North | Dir::South => (cor_x0 - wall, cor_x1 + wall, cor_y0, cor_y1),
+    };
+
     // Check against every other room.
     for (idx, fp) in footprints.iter().enumerate() {
         if idx == source_idx || idx == target_idx {
@@ -251,8 +263,8 @@ fn corridor_clear_of_third_rooms(
             continue;
         }
         let (rx0, ry0, rx1, ry1) = fp.aabb;
-        // Positive overlap check.
-        if cor_x0 < rx1 && cor_x1 > rx0 && cor_y0 < ry1 && cor_y1 > ry0 {
+        // Positive overlap check against the emitted shell.
+        if shell_x0 < rx1 && shell_x1 > rx0 && shell_y0 < ry1 && shell_y1 > ry0 {
             return false;
         }
     }
@@ -352,6 +364,112 @@ fn build_candidate_edges(footprints: &[Footprint], seed: V3Seed) -> Vec<Candidat
     });
 
     edges
+}
+
+// ── Route envelope geometry ────────────────────────────────────────────────
+
+/// Axis-aligned envelope rectangle for a candidate edge, mirroring the
+/// committed-route envelope formula (straight clear corridor from source
+/// wall to target wall, centered on the cross-axis overlap).
+fn edge_envelope(
+    edge: &CandidateEdge,
+    source: &Footprint,
+    target: &Footprint,
+) -> (i32, i32, i32, i32) {
+    let q = CONSTRUCTION_QUANTUM;
+    let half = (ROUTE_WIDTH / 2) as i32;
+    let cross_center = ((edge.overlap.0 + edge.overlap.1) / 2 / q) * q;
+    match edge.source_dir {
+        Dir::East => (
+            source.aabb.2 - half,
+            cross_center - half,
+            target.aabb.0 + half,
+            cross_center + half,
+        ),
+        Dir::West => (
+            target.aabb.2 - half,
+            cross_center - half,
+            source.aabb.0 + half,
+            cross_center + half,
+        ),
+        Dir::North => (
+            cross_center - half,
+            target.aabb.3 - half,
+            cross_center + half,
+            source.aabb.1 + half,
+        ),
+        Dir::South => (
+            cross_center - half,
+            source.aabb.3 - half,
+            cross_center + half,
+            target.aabb.1 + half,
+        ),
+    }
+}
+
+/// Strict interior overlap: two corridors crossing or overlapping along a
+/// lane produce a positive-area envelope intersection, which would make
+/// their emitted floor/ceiling/wall brushes overlap. Touching edges
+/// (zero-area contact) are permitted.
+fn envelopes_overlap_positive(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {
+    a.0 < b.2 && b.0 < a.2 && a.1 < b.3 && b.1 < a.3
+}
+
+/// Emitted-shell rectangle for a candidate edge: the main axis trimmed
+/// wall-to-wall (matching `trim_route_envelope`) and the cross axis
+/// expanded by one wall thickness (matching the floor/ceiling/wall brush
+/// shell). Route brushes overlap another route's brushes exactly when two
+/// such shells overlap positively on the same layer.
+fn route_shell(
+    edge: &CandidateEdge,
+    source: &Footprint,
+    target: &Footprint,
+) -> (i32, i32, i32, i32) {
+    let wall = CONSTRUCTION_QUANTUM as i32;
+    let envelope = edge_envelope(edge, source, target);
+    let (ex0, ey0, ex1, ey1) = envelope;
+    match edge.source_dir {
+        Dir::East => (
+            ex0.max(source.aabb.2),
+            ey0 - wall,
+            ex1.min(target.aabb.0),
+            ey1 + wall,
+        ),
+        Dir::West => (
+            ex0.max(target.aabb.2),
+            ey0 - wall,
+            ex1.min(source.aabb.0),
+            ey1 + wall,
+        ),
+        Dir::North => (
+            ex0 - wall,
+            ey0.max(target.aabb.3),
+            ex1 + wall,
+            ey1.min(source.aabb.1),
+        ),
+        Dir::South => (
+            ex0 - wall,
+            ey0.max(source.aabb.3),
+            ex1 + wall,
+            ey1.min(target.aabb.1),
+        ),
+    }
+}
+
+/// Exact emission overlap: two candidate edges' emitted route brushes
+/// positively overlap on the same layer iff their trimmed shells overlap.
+/// Envelope crossings that the wall-to-wall trim resolves are not overlaps.
+fn routes_emit_overlapping_brushes(
+    a: &CandidateEdge,
+    b: &CandidateEdge,
+    footprints: &[Footprint],
+) -> bool {
+    if footprints[a.source_idx].layer != footprints[b.source_idx].layer {
+        return false;
+    }
+    let shell_a = route_shell(a, &footprints[a.source_idx], &footprints[a.target_idx]);
+    let shell_b = route_shell(b, &footprints[b.source_idx], &footprints[b.target_idx]);
+    envelopes_overlap_positive(shell_a, shell_b)
 }
 
 // ── Union-Find ─────────────────────────────────────────────────────────────
@@ -564,10 +682,48 @@ pub fn build_topology(
             .map(|(local, &global)| (global, local))
             .collect();
         let mut uf = UnionFind::new(lower_indices.len());
+        // Committed edges whose emitted corridor brushes must not overlap
+        // newly considered edges.
+        let mut committed_edges: Vec<&CandidateEdge> = Vec::new();
+        // Edges that would connect new components but whose emitted corridor
+        // brushes would overlap an already-committed route. Deferred so
+        // connectivity can be satisfied by non-overlapping alternatives
+        // first.
+        let mut deferred: Vec<&CandidateEdge> = Vec::new();
         for edge in &lower_edges {
             let li = idx_map[&edge.source_idx];
             let lj = idx_map[&edge.target_idx];
-            if uf.union(li, lj) {
+            if uf.find(li) == uf.find(lj) {
+                continue;
+            }
+            if committed_edges
+                .iter()
+                .any(|committed| routes_emit_overlapping_brushes(edge, committed, footprints))
+            {
+                deferred.push(edge);
+                continue;
+            }
+            uf.union(li, lj);
+            committed_edges.push(edge);
+            selected_lower_edges.push(edge);
+            selected_edges.push(edge);
+            if selected_lower_edges.len() == lower_indices.len() - 1 {
+                break;
+            }
+        }
+        // Connectivity takes priority over decoration: accept deferred
+        // overlapping edges only when the tree would otherwise be
+        // incomplete. Assembly validation rejects the package if such an
+        // edge is ever truly required.
+        if selected_lower_edges.len() != lower_indices.len() - 1 {
+            for edge in deferred {
+                let li = idx_map[&edge.source_idx];
+                let lj = idx_map[&edge.target_idx];
+                if uf.find(li) == uf.find(lj) {
+                    continue;
+                }
+                uf.union(li, lj);
+                committed_edges.push(edge);
                 selected_lower_edges.push(edge);
                 selected_edges.push(edge);
                 if selected_lower_edges.len() == lower_indices.len() - 1 {
@@ -595,10 +751,38 @@ pub fn build_topology(
             .map(|(local, &global)| (global, local))
             .collect();
         let mut uf = UnionFind::new(upper_indices.len());
+        let mut committed_edges: Vec<&CandidateEdge> = Vec::new();
+        let mut deferred: Vec<&CandidateEdge> = Vec::new();
         for edge in &upper_edges {
             let li = idx_map[&edge.source_idx];
             let lj = idx_map[&edge.target_idx];
-            if uf.union(li, lj) {
+            if uf.find(li) == uf.find(lj) {
+                continue;
+            }
+            if committed_edges
+                .iter()
+                .any(|committed| routes_emit_overlapping_brushes(edge, committed, footprints))
+            {
+                deferred.push(edge);
+                continue;
+            }
+            uf.union(li, lj);
+            committed_edges.push(edge);
+            selected_upper_edges.push(edge);
+            selected_edges.push(edge);
+            if selected_upper_edges.len() == upper_indices.len() - 1 {
+                break;
+            }
+        }
+        if selected_upper_edges.len() != upper_indices.len() - 1 {
+            for edge in deferred {
+                let li = idx_map[&edge.source_idx];
+                let lj = idx_map[&edge.target_idx];
+                if uf.find(li) == uf.find(lj) {
+                    continue;
+                }
+                uf.union(li, lj);
+                committed_edges.push(edge);
                 selected_upper_edges.push(edge);
                 selected_edges.push(edge);
                 if selected_upper_edges.len() == upper_indices.len() - 1 {
@@ -635,7 +819,11 @@ pub fn build_topology(
             .collect();
 
         // Candidates are already rank-ordered; lower then upper is a stable
-        // layer partition, not an unordered collection traversal.
+        // layer partition, not an unordered collection traversal. Loop
+        // corridors must not overlap committed routes' emitted brushes:
+        // a crossing loop would emit overlapping floor/ceiling/wall brushes
+        // at the junction, so skip overlapping candidates deterministically.
+        let mut committed_edges: Vec<&CandidateEdge> = selected_edges.clone();
         for edge in lower_edges.iter().chain(upper_edges.iter()) {
             if loops_added == target_loops {
                 break;
@@ -647,6 +835,25 @@ pub fn build_topology(
             if !selected_keys.insert(key) {
                 continue;
             }
+            // Loop corridors must respect the same shell clearance as tree
+            // edges: a shell overlapping a third room's AABB would emit
+            // brushes inside that room's shell.
+            if !corridor_clear_of_third_rooms(
+                footprints,
+                edge.source_idx,
+                edge.target_idx,
+                edge.source_dir,
+                edge.overlap,
+            ) {
+                continue;
+            }
+            if committed_edges
+                .iter()
+                .any(|committed| routes_emit_overlapping_brushes(edge, committed, footprints))
+            {
+                continue;
+            }
+            committed_edges.push(edge);
             selected_edges.push(edge);
             loops_added += 1;
         }
@@ -1956,6 +2163,120 @@ mod tests {
     }
 
     // ── Route no-third-room overlap ───────────────────────────────────
+
+    #[test]
+    // ── Route shells never overlap a third room ───────────────────────
+    #[test]
+    fn route_shell_never_overlaps_third_room_or_another_route() {
+        // The emitted corridor is the envelope expanded by one wall
+        // thickness on the cross axis. A shell overlapping a third room's
+        // AABB or another committed route's shell would emit overlapping
+        // brushes (corner posts, walls, ceilings) and fail assembly
+        // validation. Regression: seeds 7 (moderate) and 77 (rich) both
+        // produced positive-volume overlaps before the constrained
+        // selection.
+        for (preset, extent) in &[
+            (super::super::config::V3Preset::Sparse, 2048u32),
+            (super::super::config::V3Preset::Moderate, 2048),
+            (super::super::config::V3Preset::Rich, 3072),
+        ] {
+            for seed in [0u64, 7, 42, 77, 99, 255] {
+                let (topology, footprints, _) = build_topology_for(*preset, seed, *extent);
+                let fp_by_id: BTreeMap<_, &Footprint> =
+                    footprints.iter().map(|fp| (fp.room_id, fp)).collect();
+                let wall = super::super::config::CONSTRUCTION_QUANTUM as i32;
+
+                // Authoritative route direction from the source-wall portal
+                // created for the same edge.
+                let dir_by_rooms: BTreeMap<(u32, u32), &str> = topology
+                    .portals
+                    .iter()
+                    .filter_map(|portal| {
+                        let target = portal.target_room?;
+                        Some((
+                            (portal.source_room.raw(), target.raw()),
+                            portal.wall.as_str(),
+                        ))
+                    })
+                    .collect();
+
+                let shells: Vec<(i32, i32, i32, i32)> = topology
+                    .routes
+                    .iter()
+                    .map(|route| {
+                        let (ex0, ey0, ex1, ey1) = route.envelopes[0];
+                        let key = (route.source_room.raw(), route.target_room.raw());
+                        let dir = dir_by_rooms.get(&key).copied().unwrap_or("east");
+                        let src = fp_by_id[&route.source_room].aabb;
+                        let tgt = fp_by_id[&route.target_room].aabb;
+                        // Match emission: the main axis is trimmed wall-to-wall
+                        // (trim_route_envelope), then the cross axis is
+                        // expanded by one wall thickness (the brush shell).
+                        match dir {
+                            "north" => {
+                                let y0 = ey0.max(tgt.3);
+                                let y1 = ey1.min(src.1);
+                                (ex0 - wall, y0, ex1 + wall, y1)
+                            }
+                            "south" => {
+                                let y0 = ey0.max(src.3);
+                                let y1 = ey1.min(tgt.1);
+                                (ex0 - wall, y0, ex1 + wall, y1)
+                            }
+                            "east" => {
+                                let x0 = ex0.max(src.2);
+                                let x1 = ex1.min(tgt.0);
+                                (x0, ey0 - wall, x1, ey1 + wall)
+                            }
+                            _ => {
+                                // west
+                                let x0 = ex0.max(tgt.2);
+                                let x1 = ex1.min(src.0);
+                                (x0, ey0 - wall, x1, ey1 + wall)
+                            }
+                        }
+                    })
+                    .collect();
+
+                for (route, &(sx0, sy0, sx1, sy1)) in topology.routes.iter().zip(&shells) {
+                    for fp in &footprints {
+                        if fp.room_id == route.source_room || fp.room_id == route.target_room {
+                            continue;
+                        }
+                        if fp.layer != fp_by_id[&route.source_room].layer {
+                            continue;
+                        }
+                        let (rx0, ry0, rx1, ry1) = fp.aabb;
+                        assert!(
+                            !(sx0 < rx1 && sx1 > rx0 && sy0 < ry1 && sy1 > ry0),
+                            "route {} shell {sx0},{sy0},{sx1},{sy1} overlaps room {} for {:?} seed {seed}",
+                            route.id,
+                            fp.room_id,
+                            preset
+                        );
+                    }
+                }
+
+                // Route-vs-route shells only collide when both routes are on
+                // the same layer; different layers are 192 units apart in Z.
+                for (i, a) in shells.iter().enumerate() {
+                    let layer_a = fp_by_id[&topology.routes[i].source_room].layer;
+                    for (j, b) in shells.iter().enumerate().skip(i + 1) {
+                        if layer_a != fp_by_id[&topology.routes[j].source_room].layer {
+                            continue;
+                        }
+                        assert!(
+                            !(a.0 < b.2 && b.0 < a.2 && a.1 < b.3 && b.1 < a.3),
+                            "route shells {i} and {j} overlap for {:?} seed {seed}",
+                            preset
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Route envelopes never pass through a third room ──────────────
 
     #[test]
     fn route_envelope_does_not_intersect_third_room() {

@@ -423,39 +423,56 @@ fn terraced_shrine(room: &CommittedRoom) -> Option<Vec<FeatureDraft>> {
     ])
 }
 
-fn monolithic_chamber(room: &CommittedRoom, detail_rank: u64) -> Option<Vec<FeatureDraft>> {
+fn monolithic_chamber(room: &CommittedRoom, detail_rank: u64) -> Option<Vec<Vec<FeatureDraft>>> {
     let (x0, y0, z0, x1, y1, z1) = room_interior(room)?;
     let q = CONSTRUCTION_QUANTUM;
     if x1 - x0 < 64 || y1 - y0 < 48 || z1 - z0 < 4 * q {
         return None;
     }
     let height = 4 * q;
+    // One candidate group per corner; the placement loop falls through to
+    // the next corner when the ranked choice is blocked by portal or
+    // protected-volume clearance.
     let corners = [
         (x0, y0, "northwest"),
         (x1 - 2 * q, y0, "northeast"),
         (x0, y1 - 2 * q, "southwest"),
         (x1 - 2 * q, y1 - 2 * q, "southeast"),
     ];
-    let (mx, my, corner) = corners[(detail_rank as usize) % corners.len()];
-    Some(vec![FeatureDraft {
-        volume: QuantumVolume::new(mx, my, z0, mx + 2 * q, my + 2 * q, z0 + height)?,
-        support: DraftSupport::Surface(SupportSurfaceKind::Floor),
-        tags: tags("monolithic-chamber", "monolith", corner),
-    }])
+    let rotated = (0..4).map(|offset| corners[(detail_rank as usize + offset) % corners.len()]);
+    Some(
+        rotated
+            .filter_map(|(mx, my, corner)| {
+                QuantumVolume::new(mx, my, z0, mx + 2 * q, my + 2 * q, z0 + height).map(|volume| {
+                    vec![FeatureDraft {
+                        volume,
+                        support: DraftSupport::Surface(SupportSurfaceKind::Floor),
+                        tags: tags("monolithic-chamber", "monolith", corner),
+                    }]
+                })
+            })
+            .collect(),
+    )
 }
 
+/// Candidate draft groups for a room. The placement loop tries each group
+/// in order and commits the first whose drafts are all clear of protected
+/// volumes, portals, transitions, and accepted features. Families that have
+/// a single shape return one group; families with deterministic alternatives
+/// (e.g. monolith corner choice) return one group per alternative so a
+/// clearance-blocked variant can fall through to the next.
 fn drafts_for(
     family: &str,
     room: &CommittedRoom,
     detail_rank: u64,
     rich: bool,
-) -> Option<Vec<FeatureDraft>> {
+) -> Option<Vec<Vec<FeatureDraft>>> {
     match family {
-        "portal-chamber" => portal_chamber(room),
-        "buttressed-hall" => buttressed_hall(room),
-        "column-grove" => column_grove(room, rich, detail_rank),
-        "fractured-vault" => fractured_vault(room),
-        "terraced-shrine" => terraced_shrine(room),
+        "portal-chamber" => portal_chamber(room).map(|drafts| vec![drafts]),
+        "buttressed-hall" => buttressed_hall(room).map(|drafts| vec![drafts]),
+        "column-grove" => column_grove(room, rich, detail_rank).map(|drafts| vec![drafts]),
+        "fractured-vault" => fractured_vault(room).map(|drafts| vec![drafts]),
+        "terraced-shrine" => terraced_shrine(room).map(|drafts| vec![drafts]),
         "monolithic-chamber" => monolithic_chamber(room, detail_rank),
         _ => None,
     }
@@ -566,18 +583,28 @@ pub fn plan_composition(
                 .ok_or_else(|| V3Error::TopologyInvariant {
                     detail: format!("candidate room {room_id} disappeared"),
                 })?;
-            let Some(drafts) = drafts_for(family, room, detail_rank, preset == "rich") else {
+            let Some(candidate_groups) = drafts_for(family, room, detail_rank, preset == "rich")
+            else {
                 continue;
             };
-            if !drafts
-                .iter()
-                .all(|draft| feature_is_clear(draft, room, topology, &protected, &instances))
-            {
-                continue;
+            // Try each deterministic candidate group in order; commit the
+            // first whose drafts are all clear.
+            let mut committed: Option<Vec<FeatureDraft>> = None;
+            for drafts in &candidate_groups {
+                if drafts
+                    .iter()
+                    .all(|draft| feature_is_clear(draft, room, topology, &protected, &instances))
+                {
+                    committed = Some(drafts.clone());
+                    break;
+                }
             }
+            let Some(drafts) = committed else {
+                continue;
+            };
 
             let first_instance = instances.len();
-            for draft in drafts {
+            for draft in &drafts {
                 let support = match draft.support {
                     DraftSupport::Surface(kind) => match kind {
                         SupportSurfaceKind::Floor => {
@@ -612,7 +639,7 @@ pub fn plan_composition(
                     room_id,
                     volume: draft.volume,
                     support: Some(support),
-                    tags: draft.tags,
+                    tags: draft.tags.clone(),
                     // A box has six authored faces; this deliberately leaves a
                     // large deterministic allowance for compiler splitting.
                     estimated_faces: 24,

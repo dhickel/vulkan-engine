@@ -25,20 +25,17 @@ use std::path::{Path, PathBuf};
 // ── Corpus entries ────────────────────────────────────────────────────────
 
 fn corpus_entries() -> Vec<(u64, V3Preset, u32)> {
-    vec![
-        (0, V3Preset::Sparse, 2048),
-        (1, V3Preset::Sparse, 2048),
-        (2, V3Preset::Sparse, 2048),
-        (3, V3Preset::Sparse, 2048),
-        (4, V3Preset::Moderate, 2048),
-        (5, V3Preset::Moderate, 2048),
-        (6, V3Preset::Moderate, 2048),
-        (7, V3Preset::Moderate, 2048),
-        (8, V3Preset::Rich, 3072),
-        (9, V3Preset::Rich, 3072),
-        (10, V3Preset::Rich, 3072),
-        (11, V3Preset::Rich, 3072),
-    ]
+    // Authoritative EnhancedV3 corpus: Sparse/Moderate/Rich × seeds
+    // 0/42/99/255; Sparse+Moderate at 2048, Rich at 3072 (specification
+    // bsp-dungeon-generation.md, settled decision 7).
+    let seeds = [0u64, 42, 99, 255];
+    let mut entries = Vec::new();
+    for &seed in &seeds {
+        entries.push((seed, V3Preset::Sparse, 2048));
+        entries.push((seed, V3Preset::Moderate, 2048));
+        entries.push((seed, V3Preset::Rich, 3072));
+    }
+    entries
 }
 
 // ── Paths ─────────────────────────────────────────────────────────────────

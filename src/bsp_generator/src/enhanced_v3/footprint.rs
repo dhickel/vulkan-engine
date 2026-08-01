@@ -290,8 +290,14 @@ pub fn build_footprints(
         0
     };
     let room_band_q = (extent_q - transition_lane_q) / 2;
-    let (columns, layer_rows) =
-        placement_grid(layer_target, max_span_q, min_span_q, extent_q, room_band_q);
+    let (columns, layer_rows) = placement_grid(
+        layer_target,
+        max_span_q,
+        min_span_q,
+        extent_q,
+        room_band_q,
+        config.effective_vertical_edges() as i32,
+    );
     let upper_band_origin_q = room_band_q + transition_lane_q;
     let slot_width_q = extent_q / columns;
     let slot_depth_q = room_band_q / layer_rows;
@@ -447,9 +453,14 @@ pub fn build_footprints(
             } else {
                 CHAMFER_PATTERNS
             };
-            // Small rooms: 20% rectangular (so grammar families that need
-            // straight walls always have candidates).
-            let idx = if !large_enough_for_octagon {
+            // Deterministic rectangle reservation: every 5th room stays
+            // rectangular so grammar families that require straight walls
+            // (buttressed-hall) always have candidates regardless of seed.
+            // Remaining rooms draw chamfer patterns; small rooms additionally
+            // keep the seed-derived 20% rectangle draw for variety.
+            let idx = if room_index % 5 == 0 {
+                usize::MAX // reserved rectangle
+            } else if !large_enough_for_octagon {
                 if (u3 >> 16) % 5 == 0 {
                     usize::MAX // 20% rectangular
                 } else {
@@ -735,6 +746,7 @@ fn placement_grid(
     span_min_q: i32,
     extent_q: i32,
     room_band_q: i32,
+    vertical_edges: i32,
 ) -> (i32, i32) {
     // Try column counts, preferring fewer rows for routing headroom.
     let min_columns = 2i32;
@@ -744,7 +756,17 @@ fn placement_grid(
         let slot_width_q = extent_q / columns;
         let slot_depth_q = room_band_q / rows;
         if slot_width_q - 2 >= span_max_q && slot_depth_q - 1 >= span_min_q {
-            return (columns, rows);
+            // Stair capacity: every stair lane needs a host room in the last
+            // lower row (south wall toward the band gap) and in the first
+            // upper row (north wall toward the band gap). With a dense
+            // two-column layout only two such lanes exist, which caps
+            // vertical connectivity; widen the grid when the requested
+            // stair count needs more host rooms on both rows.
+            let last_row = layer_target as i32 - (rows - 1) * columns;
+            let first_row = columns.min(layer_target as i32);
+            if last_row >= vertical_edges && first_row >= vertical_edges {
+                return (columns, rows);
+            }
         }
     }
     // Fallback: max columns to minimize depth pressure.
