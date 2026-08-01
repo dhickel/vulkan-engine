@@ -375,7 +375,89 @@ The following open issues block the BSP beta gate. All are documented in `.inter
 - Descriptor ABI guards: `src/renderer/tests/descriptor_abi.rs`
 - App entrypoint: `apps/bsp_beta/src/main.rs`
 
-## 19. See Also
+## 19. EnhancedV3 M3Gui Runtime Integration
+
+### 19.1 Scope
+
+The `bsp_beta --m3-generate` windowed explorer mode includes a fully
+integrated in-game GUI for editing EnhancedV3 generation parameters and
+triggering asynchronous regeneration with live BSP replacement.
+
+### 19.2 Architecture
+
+- **Shared model**: `Rc<RefCell<M3Gui>>` held by the event-loop closure and
+  borrowed by the registered imgui callback on each frame.
+- **App UI registration**: An `AppUiCallback` is registered with the renderer
+  via `Renderer::register_app_ui` only while a menu is open. Opening refuses
+  to disturb any pre-existing app UI; registration failure leaves the menu in
+  `None` mode with gameplay/cursor state unchanged. A Keyboard↔Mouse switch
+  retains the owned callback, while close unregisters only the owned ID. The
+  callback calls `M3Gui::render_imgui` for overlay drawing.
+- **Mode state**: `GuiMode::None | Keyboard | Mouse` stored on the shared
+  model. Mode transitions call `Renderer::refresh_cursor_capture` after
+  every registration change.
+
+### 19.3 Input Routing
+
+Gameplay and GUI input routing operates in three modes before normal
+app-input queueing through the renderer's `route_platform_input`:
+
+| mode | keyboard | mouse | device motion/wheel | gameplay input |
+|------|----------|-------|---------------------|----------------|
+| `None` | normal `route_platform_input_to_app` + gen hotkeys | normal | normal | enabled |
+| `Keyboard` | routed to `M3Gui::handle_keyboard_input` | discarded | discarded | disabled (gated) |
+| `Mouse` | discarded (except Escape close) | routed to `M3Gui::handle_mouse_input` + `scroll_by` | consumed | disabled (gated) |
+
+F1 and F2 are intercepted before any routing; they never reach the renderer's
+built-in debug panels. Initial presses only (no repeats, no releases).
+
+Mouse-mode hitboxes use the latest `WindowEvent::CursorMoved.position`, never
+`Window::inner_position()` (which is a screen coordinate). The physical cursor
+position and resize viewport are converted by the current positive scale factor
+(including factors below 1) into the logical imgui display coordinate system;
+resize and scale-factor events refresh the GUI viewport immediately. Enter/leave
+clear the cached hit-test position until `CursorMoved` supplies a new one. While a
+menu is open, enter/leave still call `Renderer::route_platform_input` for
+renderer-owned cursor policy (including Wayland constraint state), but their
+returned input route is deliberately not queued to app gameplay.
+
+### 19.4 Synthetic Release Queueing
+
+On any `None → Menu` mode transition, synthetic release events are queued
+for gameplay keyboard bindings (W/S/A/D/Space/ShiftLeft) and common mouse
+buttons (Left/Right/Middle). This prevents held keys and accumulated
+mouse-look from leaking into gameplay when the menu opens or closes. The
+`AppLoopState::gameplay_input_enabled` gate pauses FPS controller updates
+while a menu is open.
+
+### 19.5 Asynchronous Regeneration
+
+- GUI actions (`Generate`, `Apply & Close`) snapshot the current `GenConfig`
+  and enqueue work through the existing `GenWorker`, which calls
+  `build_v3_package_from_config` on a dedicated thread.
+- The `last_request` atomic tracks the latest request ID. Stale results are
+  discarded; only the latest-wins result can mount.
+- The existing atomic path is preserved: `authorize_generated_package` →
+  coordinator `prepare` → renderer mount → `validate_for_scene` → `commit`
+  replacement → detached retirement handoff.
+
+### 19.6 Close-Intent Tracking
+
+- `Apply & Close` records the enqueued request ID as a close intent.
+- The menu closes only after a **successful** commit for that exact request ID.
+- An ordinary `Generate` cancels any pending close intent.
+- A failed or stale result clears its corresponding close intent without
+  closing the menu.
+
+### 19.7 Generated Indication
+
+- On successful commit, `M3Gui::flash_generated()` sets an internal timer;
+  `render_imgui` displays a "Generated" text overlay for two seconds.
+- After Apply & Close, a separate 2-second window-title toast shows
+  "Generated!" while input returns to gameplay immediately. The normal
+  title is restored after the deadline.
+
+## 20. See Also
 
 - [BSP Acceptance Spec](../../.internal-dev/specifications/bsp-acceptance.md)
 - [BSP Compatibility Spec](../../.internal-dev/specifications/bsp-compatibility.md)

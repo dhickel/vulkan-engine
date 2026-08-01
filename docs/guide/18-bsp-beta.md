@@ -139,10 +139,76 @@ cargo run -p bsp_beta -- --m3-generate --headless
 cargo run -p bsp_beta -- --m3-generate --ericw-tools /path/to/ericw/bin
 ```
 
-In a window, non-repeating F5 increments the seed, F6 cycles preset/extent,
-F7 toggles chamfer, F8 cycles Pointed/Segmented/None, F9 toggles stairs, and
-Ctrl+R rebuilds the unchanged configuration. Compilation runs off the render
-thread; queued requests coalesce and every build uses a distinct package path.
+#### In-Game GUI (F1 / F2)
+
+In a live window (`--m3-generate` without `--headless` or `--mcp`), press
+**F1** to open the in-game EnhancedV3 GUI in Keyboard mode or **F2** to open
+it in Mouse mode. Press the same key again to close the menu. The two modes
+are mutually exclusive — pressing the other hotkey while a menu is open
+switches modes without ever allowing both simultaneously. F1 and F2 are
+globally consumed by the GUI and never forwarded to built-in renderer panels
+or gameplay.
+
+**Keyboard mode** (F1):
+- Arrow keys / Tab navigate fields; Enter / Space activate; digits begin
+  numeric editing; Backspace deletes the current digit (and leaves an empty edit); Escape closes the menu.
+- All mouse input (buttons, wheel, cursor motion) is discarded. Device-level
+  mouse motion and wheel are consumed.
+- No keyboard or mouse events reach gameplay.
+
+**Mouse mode** (F2):
+- Left-click fields, +/- steppers, checkboxes, dropdowns, and action buttons.
+  Mouse wheel scrolls the panel when content overflows.
+- Other keyboard input is discarded except Escape (which closes the menu); the global F1/F2 controls still switch or close menu modes.
+- Device-level mouse motion and wheel are consumed.
+
+**Input guard**: On any transition into a menu, synthetic release events are
+queued for all gameplay keyboard bindings (W/S/A/D/Space/ShiftLeft) and
+common mouse buttons. The FPS camera controller is gated while a menu is
+open. On close, the gameplay input gate is restored without synthesizing
+press events, sealing held-key and accumulated-look leakage.
+
+**Cursor coordinates**: Mouse hitboxes use the latest `WindowEvent::CursorMoved`
+position, converted from physical to logical coordinates by the window scale
+factor (including factors below 1). They never use the window's screen position;
+viewport state is refreshed on resize and scale-factor changes. Enter/leave clears
+the cached hit-test position until a new move arrives; those events still update
+renderer cursor policy but are never queued to gameplay.
+
+#### Menu Actions
+
+| action | behavior |
+|--------|----------|
+| **Generate** | Snapshots the current full `GenConfig` and enqueues an asynchronous EnhancedV3 generation through `engine_pack`. The menu stays open. If a prior apply-close intent was pending, it is cancelled (latest action owns close intent). |
+| **Apply & Close** | Same as Generate, but records the enqueued request ID as a close intent. The menu closes only after that specific request completes successfully and the live BSP mount is atomically replaced. On failure the menu stays open with an actionable status. |
+| **Escape** | Closes the menu immediately without generating. |
+
+#### Regeneration Lifecycle
+
+- Generation runs off the render thread via `GenWorker`. Every request owns
+  a distinct package directory. Queued requests coalesce to latest-wins.
+- On successful commit: the old BSP mount is detached for fence-aware
+  retirement, the new mount is published atomically, the GUI flashes a
+  visible "Generated" indicator for two seconds, and the window title shows
+  the active config. The old world remains active on any failure.
+- After Apply & Close succeeds: the menu closes, input returns to gameplay
+  immediately, and a 2-second "Generated!" title-bar toast appears before
+  restoring the normal title.
+
+#### Explorer Hotkeys (No Menu Open)
+
+When no menu is open, the following hotkeys mutate the shared GUI config
+and immediately enqueue regeneration:
+
+- **F5**: increment seed
+- **F6**: cycle preset (Sparse → Moderate → Rich) and extent
+- **F7**: toggle chamfer
+- **F8**: cycle arch type (Pointed → Segmented → None)
+- **F9**: toggle stairs
+- **Ctrl+R**: regenerate with unchanged config
+
+These hotkeys are discarded while either menu is open; they mutate the same
+shared config, never a divergent second config.
 
 For deterministic renderer-owned captures:
 

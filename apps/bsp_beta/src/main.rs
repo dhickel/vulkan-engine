@@ -13,11 +13,14 @@
 mod cli;
 mod mcp;
 
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use bsp_beta::generation::{self, GenConfig, GenWorker};
+use bsp_beta::m3_gui::{Action as M3Action, GuiAction, GuiMode, M3Gui};
 use bsp_beta::physics_bridge::PhysicsBridge;
 use bsp_beta::runtime_bridge::RuntimeBridge;
 use bsp_beta::scene_sync::{sync_snapshot_to_scene, EntityNodeMap};
@@ -40,10 +43,11 @@ use renderer::api::config::RendererConfig;
 use renderer::api::{CaptureTarget, FrameCaptureRequest, FrameCaptureStatus, FrameRenderOutcome};
 use renderer::{Renderer, Scene};
 use thiserror::Error;
-use winit::event::{Event, WindowEvent};
+use winit::dpi::PhysicalPosition;
+use winit::event::{ElementState, Event, MouseButton, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::keyboard::KeyCode;
-use winit::window::WindowBuilder;
+use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
+use winit::window::{Window, WindowBuilder};
 
 const APP_WINDOW_TITLE: &str = "BSP Beta — Phase 05";
 const FIXED_DT: f32 = 1.0 / 60.0;
@@ -1014,166 +1018,226 @@ fn teardown_retire_and_reap(
     teardown_and_retire_all(coordinator, renderer, scene).map_err(AppError::BridgeProof)
 }
 
-/// Windowed generated explorer. The startup package was already built,
-/// strictly authorized, and staged by `run`; headless and MCP use the same
-/// established runners rather than shadow copies of their proof behavior.
-fn run_m3_generate_windowed(
-    coordinator: &mut BspCoordinator,
-    generated: &GeneratedLaunch,
-    scale: f32,
-) -> Result<(), AppError> {
-    let mut gen_config = GenConfig::default_config();
-    let event_loop = match EventLoop::new() {
-        Ok(event_loop) => event_loop,
-        Err(error) => {
-            rollback_staged_without_renderer(coordinator);
-            return Err(AppError::EventLoop(error));
-        }
+// ─── m3-generate input routing & helpers ───────────────────────────────
+
+const M3_APP_UI_ID: &str = "bsp-beta-m3-gui";
+const GENERATED_TOAST_SECS: f32 = 2.0;
+
+/// Queue synthetic release events for gameplay bindings so held keys and
+/// accumulated mouse-look do not leak into gameplay when a menu opens.
+fn queue_gameplay_releases(input: &mut InputSystem) {
+    for code in [
+        KeyCode::KeyW,
+        KeyCode::KeyS,
+        KeyCode::KeyA,
+        KeyCode::KeyD,
+        KeyCode::Space,
+        KeyCode::ShiftLeft,
+    ] {
+        input.queue_event(engine::input::InputEvent::Key {
+            code,
+            state: ElementState::Released,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+    }
+    // Release common mouse buttons too
+    for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+        input.queue_event(engine::input::InputEvent::MouseButton {
+            button,
+            state: ElementState::Released,
+            modifiers: ModifiersState::empty(),
+        });
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum M3RegistrationChange {
+    None,
+    Register,
+    UnregisterOwned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct M3Transition {
+    next: GuiMode,
+    registration: M3RegistrationChange,
+    queue_releases: bool,
+}
+
+/// Production transition planner. Opening refuses a foreign app UI, mode
+/// switches retain the owned callback, and close repairs local state even if
+/// the callback was unexpectedly removed.
+fn plan_m3_transition(
+    current: GuiMode,
+    target: GuiMode,
+    registration_owned: bool,
+    renderer_has_app_ui: bool,
+) -> Result<M3Transition, String> {
+    let next = if current == target {
+        GuiMode::None
+    } else {
+        target
     };
-    let window = match WindowBuilder::new()
-        .with_title(format!(
-            "BSP Beta — m3-generate | {}",
-            gen_config.describe()
-        ))
-        .with_inner_size(winit::dpi::LogicalSize::new(1280, 720))
-        .build(&event_loop)
-    {
-        Ok(window) => window,
-        Err(error) => {
-            rollback_staged_without_renderer(coordinator);
-            return Err(AppError::Window(error));
-        }
-    };
-    let mut renderer = match Renderer::new(
-        RendererConfig {
-            app_name: "bsp_beta".to_string(),
-            window_width: 1280,
-            window_height: 720,
-            ..RendererConfig::default()
-        },
-        &window,
+    let registration = match (
+        next != GuiMode::None,
+        registration_owned,
+        renderer_has_app_ui,
     ) {
-        Ok(renderer) => renderer,
-        Err(error) => {
-            rollback_staged_without_renderer(coordinator);
-            return Err(AppError::RendererInit(error));
+        (false, true, _) => M3RegistrationChange::UnregisterOwned,
+        (false, false, _) => M3RegistrationChange::None,
+        (true, true, true) => M3RegistrationChange::None,
+        (true, _, false) => M3RegistrationChange::Register,
+        (true, false, true) => {
+            return Err("cannot open M3 GUI while another app UI is registered".into())
         }
     };
-    let mut scene = Scene::new();
-    let initial = mount_staged_candidate(
-        coordinator,
-        &mut renderer,
-        &mut scene,
-        Vec3::new(0.0, 2.0, 5.0),
-    )
-    .map_err(AppError::BridgeProof)?;
-    let mut loop_state = AppLoopState::new(Camera::new(initial.spawn), ModelMappings::default());
-    apply_mounted_app_state(&mut loop_state, initial);
-    install_app_fps_input(&mut loop_state.input);
+    Ok(M3Transition {
+        next,
+        registration,
+        queue_releases: current == GuiMode::None && next != GuiMode::None,
+    })
+}
 
-    let worker = GenWorker::spawn();
-    let tools_dir = generated.tools_dir.clone();
-    let package_root = generated.package_root.clone();
-    let last_request = std::sync::atomic::AtomicU64::new(0);
-    let mut ctrl_held = false;
-    let mut torn_down = false;
-    window.request_redraw();
+fn commit_m3_transition_state(
+    transition: M3Transition,
+    mode: &mut GuiMode,
+    input: &mut InputSystem,
+    gameplay_input_enabled: &mut bool,
+) {
+    *mode = transition.next;
+    if transition.queue_releases {
+        queue_gameplay_releases(input);
+    }
+    *gameplay_input_enabled = transition.next == GuiMode::None;
+}
 
-    event_loop.run(move |event, elwt| {
-        elwt.set_control_flow(ControlFlow::Poll);
-        let mut shutdown = |coordinator: &mut BspCoordinator,
-                            renderer: &mut Renderer,
-                            scene: &mut Scene| {
-            if !torn_down {
-                torn_down = true;
-                if let Err(error) = teardown_retire_and_reap(coordinator, renderer, scene) {
-                    log::error!("BSP teardown handoff failed: {error}");
-                }
-            }
-        };
-        if let Err(error) = engine::input::route_platform_input_to_app(
-            &mut renderer, &window, &mut loop_state.input, &event,
-        ) {
-            log::error!("Platform input routing failed: {error}");
-            shutdown(coordinator, &mut renderer, &mut scene);
-            elwt.exit();
-            return;
-        }
-        if let Event::WindowEvent { event: WindowEvent::ModifiersChanged(modifiers), .. } = &event {
-            ctrl_held = modifiers.state().control_key();
-        }
-        let regen = match &event {
-            Event::WindowEvent { event: WindowEvent::KeyboardInput { event, .. }, .. }
-                if event.state.is_pressed() && !event.repeat => match event.physical_key {
-                    winit::keyboard::PhysicalKey::Code(key) => handle_gen_hotkey(key, ctrl_held, &mut gen_config),
-                    _ => false,
+#[derive(Default)]
+struct M3UiRegistration {
+    id: Option<renderer::api::DebugViewId>,
+}
+
+fn set_gui_status(gui: &Rc<RefCell<M3Gui>>, status: impl Into<String>) {
+    if let Ok(mut gui) = gui.try_borrow_mut() {
+        gui.status = Some(status.into());
+    }
+}
+
+/// Apply a planned menu transition atomically. A failed open changes neither
+/// mode nor gameplay gate and never removes another app's UI callback.
+fn apply_m3_mode_transition(
+    renderer: &mut Renderer,
+    window: &Window,
+    gui: &Rc<RefCell<M3Gui>>,
+    loop_state: &mut AppLoopState,
+    registration: &mut M3UiRegistration,
+    target_mode: GuiMode,
+) -> Result<(), String> {
+    // Keep this guard through the renderer mutation. Once registration changes,
+    // the remaining GUI/input state commit is infallible and cannot be blocked
+    // by a RefCell borrow that would leave the two sides inconsistent.
+    let mut gui_state = gui
+        .try_borrow_mut()
+        .map_err(|_| "M3 GUI is busy rendering; retry the mode hotkey".to_string())?;
+    let transition = plan_m3_transition(
+        gui_state.mode,
+        target_mode,
+        registration.id.is_some(),
+        renderer.has_app_ui(),
+    )?;
+
+    enum PreparedRegistrationMutation {
+        None,
+        Register(renderer::api::AppUiCallback),
+        UnregisterOwned(renderer::api::DebugViewId),
+    }
+    let registration_mutation = match transition.registration {
+        M3RegistrationChange::None => PreparedRegistrationMutation::None,
+        M3RegistrationChange::Register => {
+            let gui_clone = gui.clone();
+            let callback = Box::new(
+                move |ui: &imgui::Ui, ctx: &renderer::prelude::DebugUiFrameContext| {
+                    if let Ok(mut gui) = gui_clone.try_borrow_mut() {
+                        gui.render_imgui(ui, ctx);
+                    }
                 },
-            _ => false,
-        };
-        if regen {
-            window.set_title(&format!("BSP Beta — m3-generate [pending] | {}", gen_config.describe()));
-            let id = worker.enqueue(gen_config.clone(), tools_dir.clone(), &package_root);
-            last_request.store(id, Ordering::Relaxed);
+            ) as renderer::api::AppUiCallback;
+            PreparedRegistrationMutation::Register(callback)
         }
-        while let Some(result) = worker.poll_result() {
-            let latest = last_request.load(Ordering::Relaxed);
-            if result.id != latest {
-                log::info!("discarding stale generation result {} (latest {})", result.id, latest);
-                let _ = std::fs::remove_dir_all(&result.package_dir);
-            } else if result.success {
-                match commit_generated_package(&result.package_dir, coordinator, &mut renderer, &mut scene, scale) {
-                    Ok(mounted) => {
-                        apply_mounted_app_state(&mut loop_state, mounted);
-                        window.set_title(&format!("BSP Beta — m3-generate | {}", result.config.describe()));
-                    }
-                    Err(error) => {
-                        log::error!("generated replacement failed; previous world remains active: {error}");
-                        window.set_title(&format!("BSP Beta — m3-generate [failed] | {}", result.config.describe()));
-                        let _ = std::fs::remove_dir_all(&result.package_dir);
-                    }
-                }
-            } else {
-                log::error!("generation {} failed: {}", result.id, result.error.unwrap_or_else(|| "unknown failure".into()));
-                window.set_title(&format!("BSP Beta — m3-generate [failed] | {}", result.config.describe()));
-                let _ = std::fs::remove_dir_all(&result.package_dir);
+        M3RegistrationChange::UnregisterOwned => PreparedRegistrationMutation::UnregisterOwned(
+            registration
+                .id
+                .clone()
+                .ok_or_else(|| "M3 GUI registration ownership was lost".to_string())?,
+        ),
+    };
+
+    match registration_mutation {
+        PreparedRegistrationMutation::None => {}
+        PreparedRegistrationMutation::Register(callback) => {
+            let id = renderer
+                .register_app_ui(M3_APP_UI_ID, callback)
+                .map_err(|error| format!("could not register M3 GUI: {error}"))?;
+            registration.id = Some(id);
+        }
+        PreparedRegistrationMutation::UnregisterOwned(id) => {
+            if !renderer.unregister_app_ui(&id) {
+                log::warn!("M3 GUI callback {id} was already absent while closing");
             }
+            registration.id = None;
         }
-        if let Err(error) = drain_and_retire(coordinator, &mut renderer) {
-            log::error!("BSP retirement handoff failed: {error}");
-        }
-        match event {
-            Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
-                WindowEvent::CloseRequested => {
-                    shutdown(coordinator, &mut renderer, &mut scene);
-                    elwt.exit();
-                }
-                WindowEvent::Resized(size) => if let Err(error) = renderer.resize(size.width, size.height) {
-                    log::error!("Resize failed: {error}");
-                    shutdown(coordinator, &mut renderer, &mut scene);
-                    elwt.exit();
-                },
-                WindowEvent::RedrawRequested => {
-                    let size = window.inner_size();
-                    match render_app_frame(&mut renderer, &mut scene, &mut loop_state, size.width, size.height, false) {
-                        Ok(FrameRenderOutcome::Rendered | FrameRenderOutcome::SkippedAcquireUnavailable |
-                           FrameRenderOutcome::SkippedResizePending | FrameRenderOutcome::SubmittedNotPresented |
-                           FrameRenderOutcome::PresentedSuboptimal) => window.request_redraw(),
-                        Err(error) => {
-                            log::error!("Render failed: {error}");
-                            shutdown(coordinator, &mut renderer, &mut scene);
-                            elwt.exit();
-                        }
-                    }
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-    }).map_err(AppError::EventLoop)?;
+    }
+
+    commit_m3_transition_state(
+        transition,
+        &mut gui_state.mode,
+        &mut loop_state.input,
+        &mut loop_state.gameplay_input_enabled,
+    );
+    drop(gui_state);
+    if let Err(error) = renderer.refresh_cursor_capture(window) {
+        log::error!("M3 cursor capture refresh failed: {error}");
+    }
     Ok(())
 }
 
-/// Handle a generation hotkey press. Returns true if regeneration is needed.
+/// Normalize and validate the exact immutable snapshot sent to the worker.
+fn normalized_generation_snapshot(mut config: GenConfig) -> Result<GenConfig, String> {
+    config.normalize();
+    config
+        .to_v3_config()
+        .map_err(|error| format!("invalid generation request: {error}"))?;
+    Ok(config)
+}
+
+fn update_close_intent(intent: &mut Option<u64>, request_id: u64, apply_and_close: bool) {
+    *intent = apply_and_close.then_some(request_id);
+}
+
+/// Enqueue a validated full-config snapshot and update latest-wins state.
+fn enqueue_m3_generation(
+    config: GenConfig,
+    is_apply_close: bool,
+    worker: &GenWorker,
+    tools_dir: &std::path::Path,
+    package_root: &std::path::Path,
+    last_request: &std::sync::atomic::AtomicU64,
+    close_intent: &mut Option<u64>,
+    window: &Window,
+) -> Result<GenConfig, String> {
+    let config = normalized_generation_snapshot(config)?;
+    window.set_title(&format!(
+        "BSP Beta — m3-generate [pending] | {}",
+        config.describe()
+    ));
+    let id = worker.enqueue(config.clone(), tools_dir.to_path_buf(), package_root);
+    last_request.store(id, Ordering::Relaxed);
+    update_close_intent(close_intent, id, is_apply_close);
+    Ok(config)
+}
+
+/// Handle a generation hotkey press (F5–F9, Ctrl+R). Mutates the shared GUI
+/// config. Returns true if regeneration should be enqueued.
 fn handle_gen_hotkey(
     physical_key: winit::keyboard::KeyCode,
     ctrl_held: bool,
@@ -1211,6 +1275,11 @@ fn handle_gen_hotkey(
         }
         KeyCode::F9 => {
             config.stairs = !config.stairs;
+            // An explicit previous vertical-edge override must agree with the
+            // stairs toggle before the worker receives its snapshot.
+            if !config.stairs {
+                config.vertical_edges = Some(0);
+            }
             log::info!("F9: stairs toggled to {} — regenerating", config.stairs);
             true
         }
@@ -1223,6 +1292,737 @@ fn handle_gen_hotkey(
         }
         _ => false,
     }
+}
+
+/// Process a [`GuiAction`] into a validated asynchronous request.
+fn process_m3_gui_action(
+    action: GuiAction,
+    worker: &GenWorker,
+    tools_dir: &std::path::Path,
+    package_root: &std::path::Path,
+    last_request: &std::sync::atomic::AtomicU64,
+    close_intent: &mut Option<u64>,
+    window: &Window,
+) -> Result<Option<GenConfig>, String> {
+    match action {
+        GuiAction::Generate(config) => enqueue_m3_generation(
+            config,
+            false,
+            worker,
+            tools_dir,
+            package_root,
+            last_request,
+            close_intent,
+            window,
+        )
+        .map(Some),
+        GuiAction::ApplyAndClose(config) => enqueue_m3_generation(
+            config,
+            true,
+            worker,
+            tools_dir,
+            package_root,
+            last_request,
+            close_intent,
+            window,
+        )
+        .map(Some),
+        GuiAction::Close | GuiAction::None => Ok(None),
+    }
+}
+
+/// Convert physical winit coordinates into the logical imgui coordinate space.
+/// Winit scale factors may be below one, so only reject invalid values.
+fn logical_scale_factor(scale_factor: f64) -> f64 {
+    if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    }
+}
+
+fn logical_cursor_from_physical(pos: PhysicalPosition<f64>, scale_factor: f64) -> (f32, f32) {
+    let scale = logical_scale_factor(scale_factor) as f32;
+    (pos.x as f32 / scale, pos.y as f32 / scale)
+}
+
+fn logical_viewport_from_physical(width: u32, height: u32, scale_factor: f64) -> (u32, u32) {
+    let scale = logical_scale_factor(scale_factor);
+    (
+        (width as f64 / scale).round() as u32,
+        (height as f64 / scale).round() as u32,
+    )
+}
+
+/// Winit reports wheel-up as positive Y, while increasing GUI scroll moves
+/// toward later content. Negate it so wheel-up moves toward the panel top.
+fn scroll_delta_to_gui_lines(delta: &winit::event::MouseScrollDelta) -> f32 {
+    match delta {
+        winit::event::MouseScrollDelta::LineDelta(_, y) => -*y,
+        winit::event::MouseScrollDelta::PixelDelta(pos) => -(pos.y as f32 / 120.0),
+    }
+}
+
+fn m3_mode_hotkey(event: &Event<()>) -> Option<GuiMode> {
+    let Event::WindowEvent {
+        event: WindowEvent::KeyboardInput { event, .. },
+        ..
+    } = event
+    else {
+        return None;
+    };
+    match event.physical_key {
+        PhysicalKey::Code(key) => mode_hotkey_from_key(key, event.state, event.repeat),
+        _ => None,
+    }
+}
+
+fn mode_hotkey_from_key(key: KeyCode, state: ElementState, repeat: bool) -> Option<GuiMode> {
+    (state == ElementState::Pressed && !repeat)
+        .then(|| match key {
+            KeyCode::F1 => Some(GuiMode::Keyboard),
+            KeyCode::F2 => Some(GuiMode::Mouse),
+            _ => None,
+        })
+        .flatten()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum M3InputClass {
+    Keyboard,
+    Mouse,
+    RawMouse,
+    Lifecycle,
+}
+
+fn m3_input_class(event: &Event<()>) -> M3InputClass {
+    match event {
+        Event::WindowEvent {
+            event: WindowEvent::KeyboardInput { .. },
+            ..
+        } => M3InputClass::Keyboard,
+        Event::WindowEvent {
+            event:
+                WindowEvent::CursorMoved { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::CursorEntered { .. }
+                | WindowEvent::CursorLeft { .. },
+            ..
+        } => M3InputClass::Mouse,
+        Event::DeviceEvent { .. } => M3InputClass::RawMouse,
+        _ => M3InputClass::Lifecycle,
+    }
+}
+
+/// Open M3 modes never permit keyboard, pointer, or raw mouse input through
+/// the gameplay route. Lifecycle events intentionally remain available.
+fn m3_blocks_gameplay_input(mode: GuiMode, class: M3InputClass) -> bool {
+    mode != GuiMode::None && class != M3InputClass::Lifecycle
+}
+
+/// Cursor enter/leave are not gameplay input, but renderer cursor policy must
+/// see them (notably to preserve Wayland pointer-constraint ownership).
+fn is_m3_cursor_focus_event(event: &WindowEvent) -> bool {
+    matches!(
+        event,
+        WindowEvent::CursorEntered { .. } | WindowEvent::CursorLeft { .. }
+    )
+}
+
+fn initial_physical_key(event: &Event<()>) -> Option<KeyCode> {
+    let Event::WindowEvent {
+        event: WindowEvent::KeyboardInput { event, .. },
+        ..
+    } = event
+    else {
+        return None;
+    };
+    (event.state == ElementState::Pressed && !event.repeat)
+        .then(|| match event.physical_key {
+            PhysicalKey::Code(key) => Some(key),
+            _ => None,
+        })
+        .flatten()
+}
+
+/// Build a validated hotkey snapshot without mutating the shared GUI draft.
+/// The draft is replaced only after the request was accepted by the worker.
+fn hotkey_generation_snapshot(
+    key: KeyCode,
+    ctrl_held: bool,
+    draft: &GenConfig,
+) -> Result<Option<GenConfig>, String> {
+    let mut snapshot = draft.clone();
+    if !handle_gen_hotkey(key, ctrl_held, &mut snapshot) {
+        return Ok(None);
+    }
+    normalized_generation_snapshot(snapshot).map(Some)
+}
+
+fn handle_m3_action(
+    action: GuiAction,
+    mode: GuiMode,
+    renderer: &mut Renderer,
+    window: &Window,
+    gui: &Rc<RefCell<M3Gui>>,
+    loop_state: &mut AppLoopState,
+    registration: &mut M3UiRegistration,
+    worker: &GenWorker,
+    tools_dir: &std::path::Path,
+    package_root: &std::path::Path,
+    last_request: &std::sync::atomic::AtomicU64,
+    close_intent: &mut Option<u64>,
+    last_title_desc: &mut String,
+) {
+    if action == GuiAction::Close {
+        if let Err(error) =
+            apply_m3_mode_transition(renderer, window, gui, loop_state, registration, mode)
+        {
+            set_gui_status(gui, error);
+        }
+    } else if action != GuiAction::None {
+        match process_m3_gui_action(
+            action,
+            worker,
+            tools_dir,
+            package_root,
+            last_request,
+            close_intent,
+            window,
+        ) {
+            Ok(Some(config)) => {
+                *last_title_desc = config.describe();
+                set_gui_status(gui, "Generation pending.");
+            }
+            Ok(None) => {}
+            Err(error) => set_gui_status(gui, error),
+        }
+    }
+}
+
+/// Windowed generated explorer with full M3Gui integration.
+/// The startup package was already built, strictly authorized, and staged by
+/// `run`; headless and MCP use the same established runners.
+fn run_m3_generate_windowed(
+    coordinator: &mut BspCoordinator,
+    generated: &GeneratedLaunch,
+    scale: f32,
+) -> Result<(), AppError> {
+    let event_loop = match EventLoop::new() {
+        Ok(event_loop) => event_loop,
+        Err(error) => {
+            rollback_staged_without_renderer(coordinator);
+            return Err(AppError::EventLoop(error));
+        }
+    };
+    let default_cfg = GenConfig::default_config();
+    let window = match WindowBuilder::new()
+        .with_title(format!(
+            "BSP Beta — m3-generate | {}",
+            default_cfg.describe()
+        ))
+        .with_inner_size(winit::dpi::LogicalSize::new(1280, 720))
+        .build(&event_loop)
+    {
+        Ok(window) => window,
+        Err(error) => {
+            rollback_staged_without_renderer(coordinator);
+            return Err(AppError::Window(error));
+        }
+    };
+    let mut renderer = match Renderer::new(
+        RendererConfig {
+            app_name: "bsp_beta".to_string(),
+            window_width: 1280,
+            window_height: 720,
+            ..RendererConfig::default()
+        },
+        &window,
+    ) {
+        Ok(renderer) => renderer,
+        Err(error) => {
+            rollback_staged_without_renderer(coordinator);
+            return Err(AppError::RendererInit(error));
+        }
+    };
+    let mut scene = Scene::new();
+    let initial = mount_staged_candidate(
+        coordinator,
+        &mut renderer,
+        &mut scene,
+        Vec3::new(0.0, 2.0, 5.0),
+    )
+    .map_err(AppError::BridgeProof)?;
+    let mut loop_state = AppLoopState::new(Camera::new(initial.spawn), ModelMappings::default());
+    apply_mounted_app_state(&mut loop_state, initial);
+    install_app_fps_input(&mut loop_state.input);
+
+    // ── M3 GUI setup ──────────────────────────────────────────────────
+    let gui: Rc<RefCell<M3Gui>> = Rc::new(RefCell::new(M3Gui::new()));
+    loop_state.gameplay_input_enabled = true;
+
+    let worker = GenWorker::spawn();
+    let tools_dir = generated.tools_dir.clone();
+    let package_root = generated.package_root.clone();
+    let last_request = std::sync::atomic::AtomicU64::new(0);
+    let mut close_intent = None;
+    let mut registration = M3UiRegistration::default();
+    let mut cursor_position = None;
+    let mut ctrl_held = false;
+    let mut torn_down = false;
+    let mut title_toast_deadline = None;
+    let mut last_title_desc = default_cfg.describe();
+
+    window.request_redraw();
+
+    event_loop
+        .run(move |event, elwt| {
+            elwt.set_control_flow(ControlFlow::Poll);
+
+            let mut shutdown =
+                |coordinator: &mut BspCoordinator, renderer: &mut Renderer, scene: &mut Scene| {
+                    if !torn_down {
+                        torn_down = true;
+                        if let Err(error) = teardown_retire_and_reap(coordinator, renderer, scene) {
+                            log::error!("BSP teardown handoff failed: {error}");
+                        }
+                    }
+                };
+
+            // F1/F2 are globally intercepted before renderer routing. Do not
+            // return here: close/resize/redraw still need their lifecycle pass.
+            let mode_control = match &event {
+                Event::WindowEvent { window_id, .. } if *window_id == window.id() => {
+                    m3_mode_hotkey(&event)
+                }
+                _ => None,
+            };
+            if let Some(target) = mode_control {
+                // A position from before a mode transition cannot authorize a
+                // click in the newly opened/switching mouse menu.
+                cursor_position = None;
+                if let Err(error) = apply_m3_mode_transition(
+                    &mut renderer,
+                    &window,
+                    &gui,
+                    &mut loop_state,
+                    &mut registration,
+                    target,
+                ) {
+                    log::error!("M3 mode transition failed: {error}");
+                    set_gui_status(&gui, error);
+                }
+            } else {
+                if let Event::WindowEvent {
+                    event: WindowEvent::ModifiersChanged(modifiers),
+                    window_id,
+                } = &event
+                {
+                    if *window_id == window.id() {
+                        ctrl_held = modifiers.state().control_key();
+                    }
+                }
+
+                let mode = match gui.try_borrow() {
+                    Ok(gui) => gui.mode,
+                    Err(_) => {
+                        // RefCell contention must fail closed: treating an
+                        // unknown mode as None would leak this event to gameplay.
+                        log::warn!("M3 GUI mode was busy; suppressing input for this event");
+                        GuiMode::Keyboard
+                    }
+                };
+                let blocks_gameplay = m3_blocks_gameplay_input(mode, m3_input_class(&event));
+                if mode != GuiMode::None {
+                    if let Event::WindowEvent {
+                        event: window_event,
+                        window_id,
+                    } = &event
+                    {
+                        if *window_id == window.id() && is_m3_cursor_focus_event(window_event) {
+                            // Preserve renderer-owned cursor policy without using
+                            // route_platform_input_to_app, which would queue this
+                            // focus event to gameplay.
+                            if let Err(error) = renderer.route_platform_input(&window, &event) {
+                                log::error!("Platform cursor routing failed: {error}");
+                                shutdown(coordinator, &mut renderer, &mut scene);
+                                elwt.exit();
+                                return;
+                            }
+                            cursor_position = None;
+                        }
+                    }
+                }
+                match mode {
+                    GuiMode::None if !blocks_gameplay => {
+                        if let Err(error) = engine::input::route_platform_input_to_app(
+                            &mut renderer,
+                            &window,
+                            &mut loop_state.input,
+                            &event,
+                        ) {
+                            log::error!("Platform input routing failed: {error}");
+                            shutdown(coordinator, &mut renderer, &mut scene);
+                            elwt.exit();
+                            return;
+                        }
+                        if let Some(key) = initial_physical_key(&event) {
+                            let snapshot = match gui.try_borrow() {
+                                Ok(gui) => hotkey_generation_snapshot(key, ctrl_held, &gui.config),
+                                Err(_) => Err("M3 GUI is busy; hotkey was not applied".into()),
+                            };
+                            match snapshot {
+                                Ok(Some(snapshot)) => match enqueue_m3_generation(
+                                    snapshot,
+                                    false,
+                                    &worker,
+                                    &tools_dir,
+                                    &package_root,
+                                    &last_request,
+                                    &mut close_intent,
+                                    &window,
+                                ) {
+                                    Ok(config) => {
+                                        if let Ok(mut gui) = gui.try_borrow_mut() {
+                                            gui.config = config.clone();
+                                        }
+                                        last_title_desc = config.describe();
+                                        set_gui_status(&gui, "Generation pending.");
+                                    }
+                                    Err(error) => set_gui_status(&gui, error),
+                                },
+                                Ok(None) => {}
+                                Err(error) => {
+                                    set_gui_status(&gui, format!("Cannot generate: {error}"))
+                                }
+                            }
+                        }
+                    }
+                    GuiMode::None => {}
+                    GuiMode::Keyboard => {
+                        // Every keyboard event belongs to M3Gui; all pointer and raw
+                        // mouse events are consumed without renderer/gameplay routing.
+                        if let Event::WindowEvent {
+                            event:
+                                WindowEvent::KeyboardInput {
+                                    event: key_event, ..
+                                },
+                            window_id,
+                        } = &event
+                        {
+                            if *window_id == window.id() {
+                                if let PhysicalKey::Code(key) = key_event.physical_key {
+                                    let action = match key_event.state {
+                                        ElementState::Pressed if !key_event.repeat => {
+                                            M3Action::Press
+                                        }
+                                        ElementState::Pressed => M3Action::Repeat,
+                                        ElementState::Released => M3Action::Release,
+                                    };
+                                    let result = gui
+                                        .try_borrow_mut()
+                                        .map(|mut gui| gui.handle_keyboard_input(key, action))
+                                        .unwrap_or(GuiAction::None);
+                                    handle_m3_action(
+                                        result,
+                                        GuiMode::Keyboard,
+                                        &mut renderer,
+                                        &window,
+                                        &gui,
+                                        &mut loop_state,
+                                        &mut registration,
+                                        &worker,
+                                        &tools_dir,
+                                        &package_root,
+                                        &last_request,
+                                        &mut close_intent,
+                                        &mut last_title_desc,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    GuiMode::Mouse => match &event {
+                        Event::WindowEvent {
+                            event: WindowEvent::CursorMoved { position, .. },
+                            window_id,
+                        } if *window_id == window.id() => {
+                            cursor_position = Some(logical_cursor_from_physical(
+                                *position,
+                                window.scale_factor(),
+                            ));
+                        }
+                        Event::WindowEvent {
+                            event:
+                                WindowEvent::CursorEntered { .. } | WindowEvent::CursorLeft { .. },
+                            window_id,
+                        } if *window_id == window.id() => {
+                            // Wait for a fresh viewport-relative CursorMoved event
+                            // before accepting another click.
+                            cursor_position = None;
+                        }
+                        Event::WindowEvent {
+                            event: WindowEvent::MouseInput { state, button, .. },
+                            window_id,
+                        } if *window_id == window.id() => {
+                            if let Some((x, y)) = cursor_position {
+                                let action = if *state == ElementState::Pressed {
+                                    M3Action::Press
+                                } else {
+                                    M3Action::Release
+                                };
+                                let result = gui
+                                    .try_borrow_mut()
+                                    .map(|mut gui| gui.handle_mouse_input(x, y, *button, action))
+                                    .unwrap_or(GuiAction::None);
+                                handle_m3_action(
+                                    result,
+                                    GuiMode::Mouse,
+                                    &mut renderer,
+                                    &window,
+                                    &gui,
+                                    &mut loop_state,
+                                    &mut registration,
+                                    &worker,
+                                    &tools_dir,
+                                    &package_root,
+                                    &last_request,
+                                    &mut close_intent,
+                                    &mut last_title_desc,
+                                );
+                            }
+                        }
+                        Event::WindowEvent {
+                            event: WindowEvent::MouseWheel { delta, .. },
+                            window_id,
+                        } if *window_id == window.id() => {
+                            if let Ok(mut gui) = gui.try_borrow_mut() {
+                                gui.scroll_by(scroll_delta_to_gui_lines(delta));
+                            }
+                        }
+                        Event::WindowEvent {
+                            event:
+                                WindowEvent::KeyboardInput {
+                                    event: key_event, ..
+                                },
+                            window_id,
+                        } if *window_id == window.id()
+                            && key_event.state == ElementState::Pressed
+                            && !key_event.repeat
+                            && matches!(
+                                key_event.physical_key,
+                                PhysicalKey::Code(KeyCode::Escape)
+                            ) =>
+                        {
+                            cursor_position = None;
+                            if let Err(error) = apply_m3_mode_transition(
+                                &mut renderer,
+                                &window,
+                                &gui,
+                                &mut loop_state,
+                                &mut registration,
+                                GuiMode::Mouse,
+                            ) {
+                                set_gui_status(&gui, error);
+                            }
+                        }
+                        _ => {}
+                    },
+                }
+            }
+
+            // Process every completed result. Only the latest request may
+            // publish; failures retain both the old mount and an open menu.
+            while let Some(result) = worker.poll_result() {
+                let latest = last_request.load(Ordering::Relaxed);
+                if result.id != latest {
+                    log::info!(
+                        "discarding stale generation result {} (latest {})",
+                        result.id,
+                        latest
+                    );
+                    let _ = std::fs::remove_dir_all(&result.package_dir);
+                    if close_intent == Some(result.id) {
+                        close_intent = None;
+                    }
+                    continue;
+                }
+
+                if !result.success {
+                    let error = result
+                        .error
+                        .unwrap_or_else(|| "unknown worker failure".into());
+                    log::error!("generation {} failed: {error}", result.id);
+                    window.set_title(&format!(
+                        "BSP Beta — m3-generate [failed] | {}",
+                        result.config.describe()
+                    ));
+                    set_gui_status(&gui, format!("Generation failed: {error}"));
+                    let _ = std::fs::remove_dir_all(&result.package_dir);
+                    if close_intent == Some(result.id) {
+                        close_intent = None;
+                    }
+                    continue;
+                }
+
+                match commit_generated_package(
+                    &result.package_dir,
+                    coordinator,
+                    &mut renderer,
+                    &mut scene,
+                    scale,
+                ) {
+                    Ok(mounted) => {
+                        apply_mounted_app_state(&mut loop_state, mounted);
+                        if let Ok(mut gui) = gui.try_borrow_mut() {
+                            gui.flash_generated();
+                            gui.status = Some("Generated.".into());
+                        }
+                        let apply_close = close_intent == Some(result.id);
+                        close_intent = None;
+                        let desc = result.config.describe();
+                        last_title_desc = desc.clone();
+                        window.set_title(&format!("BSP Beta — m3-generate | {desc}"));
+                        if apply_close {
+                            // Copy the mode out of RefCell before the transition
+                            // call so the call site has an explicit guard-drop
+                            // boundary and cannot regress to passing a live guard.
+                            let current_mode = match gui.try_borrow() {
+                                Ok(gui) => Some(gui.mode),
+                                Err(_) => {
+                                    set_gui_status(
+                                        &gui,
+                                        "Generated, but the busy M3 GUI could not be closed.",
+                                    );
+                                    None
+                                }
+                            };
+                            if let Some(current_mode) = current_mode {
+                                if let Err(error) = apply_m3_mode_transition(
+                                    &mut renderer,
+                                    &window,
+                                    &gui,
+                                    &mut loop_state,
+                                    &mut registration,
+                                    current_mode,
+                                ) {
+                                    // A successful mount must not leave a stale close intent;
+                                    // retain the menu and surface the ownership error instead.
+                                    set_gui_status(
+                                        &gui,
+                                        format!("Generated, but could not close menu: {error}"),
+                                    );
+                                } else {
+                                    title_toast_deadline = Some(
+                                        Instant::now()
+                                            + Duration::from_secs_f32(GENERATED_TOAST_SECS),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        log::error!(
+                            "generated replacement failed; previous world remains active: {error}"
+                        );
+                        window.set_title(&format!(
+                            "BSP Beta — m3-generate [failed] | {}",
+                            result.config.describe()
+                        ));
+                        set_gui_status(
+                            &gui,
+                            format!("Generation failed; previous world remains active: {error}"),
+                        );
+                        let _ = std::fs::remove_dir_all(&result.package_dir);
+                        if close_intent == Some(result.id) {
+                            close_intent = None;
+                        }
+                    }
+                }
+            }
+
+            // ── 5. Drain retirements ──────────────────────────────────────
+            if let Err(error) = drain_and_retire(coordinator, &mut renderer) {
+                log::error!("BSP retirement handoff failed: {error}");
+            }
+
+            if let Some(deadline) = title_toast_deadline {
+                if Instant::now() < deadline {
+                    window.set_title("BSP Beta — m3-generate | Generated!");
+                } else {
+                    title_toast_deadline = None;
+                    window.set_title(&format!("BSP Beta — m3-generate | {last_title_desc}"));
+                }
+            }
+
+            // ── 7. Window events ──────────────────────────────────────────
+            match event {
+                Event::WindowEvent { event, window_id } if window_id == window.id() => {
+                    match event {
+                        WindowEvent::CloseRequested => {
+                            shutdown(coordinator, &mut renderer, &mut scene);
+                            elwt.exit();
+                        }
+                        WindowEvent::Resized(size) => {
+                            let (width, height) = logical_viewport_from_physical(
+                                size.width,
+                                size.height,
+                                window.scale_factor(),
+                            );
+                            if let Ok(mut gui) = gui.try_borrow_mut() {
+                                gui.set_viewport(width, height);
+                            }
+                            if let Err(error) = renderer.resize(size.width, size.height) {
+                                log::error!("Resize failed: {error}");
+                                shutdown(coordinator, &mut renderer, &mut scene);
+                                elwt.exit();
+                            }
+                        }
+                        WindowEvent::ScaleFactorChanged { .. } => {
+                            let size = window.inner_size();
+                            let (width, height) = logical_viewport_from_physical(
+                                size.width,
+                                size.height,
+                                window.scale_factor(),
+                            );
+                            if let Ok(mut gui) = gui.try_borrow_mut() {
+                                gui.set_viewport(width, height);
+                            }
+                        }
+                        WindowEvent::RedrawRequested => {
+                            let size = window.inner_size();
+                            match render_app_frame(
+                                &mut renderer,
+                                &mut scene,
+                                &mut loop_state,
+                                size.width,
+                                size.height,
+                                false,
+                            ) {
+                                Ok(
+                                    FrameRenderOutcome::Rendered
+                                    | FrameRenderOutcome::SkippedAcquireUnavailable
+                                    | FrameRenderOutcome::SkippedResizePending
+                                    | FrameRenderOutcome::SubmittedNotPresented
+                                    | FrameRenderOutcome::PresentedSuboptimal,
+                                ) => window.request_redraw(),
+                                Err(error) => {
+                                    log::error!("Render failed: {error}");
+                                    shutdown(coordinator, &mut renderer, &mut scene);
+                                    elwt.exit();
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        })
+        .map_err(AppError::EventLoop)?;
+
+    Ok(())
 }
 
 // ─── Headless mode ─────────────────────────────────────────────────────
@@ -1642,6 +2442,8 @@ struct AppLoopState {
     entity_source_models: std::collections::HashMap<u32, String>,
     /// Scene node map for snapshot-driven external/inline nodes.
     entity_node_map: EntityNodeMap,
+    /// When false, FPS controller update and gameplay input are skipped.
+    pub gameplay_input_enabled: bool,
 }
 
 impl AppLoopState {
@@ -1664,6 +2466,7 @@ impl AppLoopState {
             entity_classnames: std::collections::HashMap::new(),
             entity_source_models: std::collections::HashMap::new(),
             entity_node_map: EntityNodeMap::default(),
+            gameplay_input_enabled: true,
         }
     }
 }
@@ -1691,11 +2494,13 @@ fn render_app_frame(
     } else {
         begin_report.frame.delta_seconds.min(FIXED_DT)
     };
-    state.fps_controller.update_from_snapshot(
-        state.input.snapshot(),
-        simulated_dt,
-        &mut state.camera,
-    );
+    if state.gameplay_input_enabled {
+        state.fps_controller.update_from_snapshot(
+            state.input.snapshot(),
+            simulated_dt,
+            &mut state.camera,
+        );
+    }
 
     if !fixed_update.dropped_time.is_zero() {
         log::warn!(
@@ -1807,5 +2612,213 @@ mod acceptance_camera_tests {
 
         let (_, pitch) = camera_angles_for_direction(Vec3::Y);
         assert_near(pitch, std::f32::consts::FRAC_PI_2);
+    }
+}
+
+#[cfg(test)]
+mod m3_integration_tests {
+    use super::*;
+    use winit::event::MouseScrollDelta;
+
+    #[test]
+    fn mode_planner_keeps_registration_on_switch_and_gates_gameplay() {
+        let open = plan_m3_transition(GuiMode::None, GuiMode::Keyboard, false, false).unwrap();
+        assert_eq!(open.next, GuiMode::Keyboard);
+        assert_eq!(open.registration, M3RegistrationChange::Register);
+        assert!(open.queue_releases);
+        let switch = plan_m3_transition(GuiMode::Keyboard, GuiMode::Mouse, true, true).unwrap();
+        assert_eq!(switch.next, GuiMode::Mouse);
+        assert_eq!(switch.registration, M3RegistrationChange::None);
+        assert!(!switch.queue_releases);
+        let close = plan_m3_transition(GuiMode::Mouse, GuiMode::Mouse, true, true).unwrap();
+        assert_eq!(close.next, GuiMode::None);
+        assert_eq!(close.registration, M3RegistrationChange::UnregisterOwned);
+        assert!(!close.queue_releases);
+    }
+
+    #[test]
+    fn transition_planner_rejects_foreign_ui_before_opening() {
+        let error = plan_m3_transition(GuiMode::None, GuiMode::Keyboard, false, true)
+            .expect_err("a foreign app UI must block M3 registration");
+        assert!(error.contains("another app UI"));
+    }
+
+    #[test]
+    fn close_repairs_mode_and_gate_when_owned_callback_is_already_absent() {
+        let transition = plan_m3_transition(GuiMode::Mouse, GuiMode::Mouse, false, true).unwrap();
+        assert_eq!(transition.registration, M3RegistrationChange::None);
+
+        let mut mode = GuiMode::Mouse;
+        let mut input = InputSystem::new();
+        let mut gameplay_input_enabled = false;
+        commit_m3_transition_state(
+            transition,
+            &mut mode,
+            &mut input,
+            &mut gameplay_input_enabled,
+        );
+
+        assert_eq!(mode, GuiMode::None);
+        assert!(gameplay_input_enabled);
+        assert_eq!(input.debug_snapshot().queued_events, 0);
+    }
+
+    #[test]
+    fn global_mode_hotkey_accepts_only_initial_f1_and_f2_presses() {
+        assert_eq!(
+            mode_hotkey_from_key(KeyCode::F1, ElementState::Pressed, false),
+            Some(GuiMode::Keyboard)
+        );
+        assert_eq!(
+            mode_hotkey_from_key(KeyCode::F2, ElementState::Pressed, false),
+            Some(GuiMode::Mouse)
+        );
+        assert_eq!(
+            mode_hotkey_from_key(KeyCode::F1, ElementState::Released, false),
+            None
+        );
+        assert_eq!(
+            mode_hotkey_from_key(KeyCode::F2, ElementState::Pressed, true),
+            None
+        );
+    }
+
+    #[test]
+    fn open_modes_block_every_gameplay_input_class() {
+        for mode in [GuiMode::Keyboard, GuiMode::Mouse] {
+            for class in [
+                M3InputClass::Keyboard,
+                M3InputClass::Mouse,
+                M3InputClass::RawMouse,
+            ] {
+                assert!(m3_blocks_gameplay_input(mode, class));
+            }
+            assert!(!m3_blocks_gameplay_input(mode, M3InputClass::Lifecycle));
+        }
+        assert!(!m3_blocks_gameplay_input(
+            GuiMode::None,
+            M3InputClass::Keyboard
+        ));
+    }
+
+    #[test]
+    fn cursor_conversion_and_scroll_direction_match_logical_gui_space() {
+        assert_eq!(
+            logical_cursor_from_physical(PhysicalPosition::new(300.0, 150.0), 1.5),
+            (200.0, 100.0)
+        );
+        assert_eq!(logical_viewport_from_physical(1920, 1080, 1.5), (1280, 720));
+        assert_eq!(
+            logical_cursor_from_physical(PhysicalPosition::new(300.0, 150.0), 0.75),
+            (400.0, 200.0)
+        );
+        assert_eq!(
+            logical_viewport_from_physical(1440, 810, 0.75),
+            (1920, 1080)
+        );
+        assert_eq!(
+            scroll_delta_to_gui_lines(&MouseScrollDelta::LineDelta(0.0, 2.0)),
+            -2.0
+        );
+        assert_eq!(
+            scroll_delta_to_gui_lines(&MouseScrollDelta::LineDelta(0.0, -2.0)),
+            2.0
+        );
+        let mut gui = M3Gui::new();
+        gui.set_viewport(640, 180);
+        gui.scroll_by(100.0);
+        let before = gui.scroll_offset;
+        gui.scroll_by(scroll_delta_to_gui_lines(&MouseScrollDelta::LineDelta(
+            0.0, 1.0,
+        )));
+        assert!(
+            gui.scroll_offset < before,
+            "wheel-up must move toward the top"
+        );
+    }
+
+    #[test]
+    fn mouse_button_release_is_harmless_and_uses_real_cursor_coordinates() {
+        let mut gui = M3Gui::new();
+        gui.set_viewport(1280, 720);
+        let before = gui.config.chamfer;
+        // This is the viewport-relative cursor coordinate passed by CursorMoved,
+        // not the window's screen position.
+        let layout = gui.render();
+        assert!(!layout.is_empty());
+        assert_eq!(
+            gui.handle_mouse_input(0.0, 0.0, MouseButton::Left, M3Action::Release),
+            GuiAction::None
+        );
+        assert_eq!(gui.config.chamfer, before);
+    }
+
+    #[test]
+    fn hotkey_snapshots_normalize_stairs_and_reject_invalid_values_transactionally() {
+        let mut config = GenConfig::default_config();
+        config.vertical_edges = Some(3);
+        let snapshot = hotkey_generation_snapshot(KeyCode::F9, false, &config)
+            .unwrap()
+            .expect("F9 requests generation");
+        assert!(!snapshot.stairs);
+        assert_eq!(snapshot.vertical_edges, Some(0));
+        assert_eq!(
+            config.vertical_edges,
+            Some(3),
+            "draft changes only after enqueue"
+        );
+
+        let mut invalid = GenConfig::default_config();
+        invalid.extent = 1;
+        let before = invalid.clone();
+        assert!(hotkey_generation_snapshot(KeyCode::F5, false, &invalid).is_err());
+        assert_eq!(invalid, before, "rejected hotkey must not mutate the draft");
+    }
+
+    #[test]
+    fn close_intent_is_latest_action_only_and_matching_success_only() {
+        let mut intent = Some(4);
+        update_close_intent(&mut intent, 5, false);
+        assert_eq!(intent, None, "ordinary Generate cancels close intent");
+        update_close_intent(&mut intent, 7, true);
+        assert_eq!(intent, Some(7));
+        assert_ne!(Some(6), intent, "stale completion cannot close");
+        assert_eq!(
+            Some(7),
+            intent,
+            "only the matching successful commit closes"
+        );
+    }
+
+    #[test]
+    fn opening_transition_releases_active_gameplay_and_closes_the_gate() {
+        let mut input = InputSystem::new();
+        install_app_fps_input(&mut input);
+        input.queue_event(engine::input::InputEvent::Key {
+            code: KeyCode::KeyW,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        input.dispatch_frame();
+        let forward = engine::input::ActionId::from("move.forward");
+        assert!(input.snapshot().action_pressed(&forward));
+
+        let transition =
+            plan_m3_transition(GuiMode::None, GuiMode::Keyboard, false, false).unwrap();
+        let mut mode = GuiMode::None;
+        let mut gameplay_input_enabled = true;
+        commit_m3_transition_state(
+            transition,
+            &mut mode,
+            &mut input,
+            &mut gameplay_input_enabled,
+        );
+        input.dispatch_frame();
+
+        assert_eq!(mode, GuiMode::Keyboard);
+        assert!(!gameplay_input_enabled);
+        assert!(!input.snapshot().action_pressed(&forward));
+        assert!(input.snapshot().action_just_released(&forward));
     }
 }
