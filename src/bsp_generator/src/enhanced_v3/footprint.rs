@@ -11,17 +11,12 @@ use super::rng::{self, V3Seed};
 
 // ── Placement constants ────────────────────────────────────────────────────
 
-/// Minimum room outer span in Quake units (112 = 7 quanta).
-const MIN_OUTER_SPAN: i32 = 112;
-
-/// Maximum room outer span in Quake units (256 = 16 quanta).
-const MAX_OUTER_SPAN: i32 = 256;
-
-/// Minimum outer span in quanta.
-const MIN_SPAN_Q: i32 = MIN_OUTER_SPAN / CONSTRUCTION_QUANTUM; // 7
-
-/// Maximum outer span in quanta.
-const MAX_SPAN_Q: i32 = MAX_OUTER_SPAN / CONSTRUCTION_QUANTUM; // 16
+/// Compatibility room-span bounds. Explorer overrides are resolved from
+/// `V3Config` inside `build_footprints`.
+#[cfg(test)]
+const MIN_OUTER_SPAN: i32 = config::DEFAULT_ROOM_SPAN_MIN as i32;
+#[cfg(test)]
+const MAX_OUTER_SPAN: i32 = config::DEFAULT_ROOM_SPAN_MAX as i32;
 
 /// Every non-empty subset of the four corners.  The constructor accepts all
 /// patterns, including an all-corner octagon.
@@ -270,9 +265,14 @@ pub fn build_footprints(
     seed: V3Seed,
     alloc: &mut V3IdAllocator,
 ) -> Result<(Vec<Footprint>, FootprintLayout), V3Error> {
+    config.validate()?;
     let extent = config.xy_extent as i32;
     let q = CONSTRUCTION_QUANTUM;
-    let target = config.preset.min_rooms() as usize;
+    let target = config.effective_rooms() as usize;
+    let min_outer_span = config.effective_room_span_min() as i32;
+    let max_outer_span = config.effective_room_span_max() as i32;
+    let min_span_q = min_outer_span / q;
+    let max_span_q = max_outer_span / q;
     let extent_q = extent / q;
     let lower_target = (target + 1) / 2;
     let upper_target = target - lower_target;
@@ -285,8 +285,13 @@ pub fn build_footprints(
     // slack supplies the upper crest approach. Any odd remainder stays above
     // the upper band.
     const TRANSITION_LANE_Q: i32 = 16;
-    let room_band_q = (extent_q - TRANSITION_LANE_Q) / 2;
-    let upper_band_origin_q = room_band_q + TRANSITION_LANE_Q;
+    let transition_lane_q = if config.effective_vertical_edges() > 0 {
+        TRANSITION_LANE_Q
+    } else {
+        0
+    };
+    let room_band_q = (extent_q - transition_lane_q) / 2;
+    let upper_band_origin_q = room_band_q + transition_lane_q;
     let slot_width_q = extent_q / columns;
     let slot_depth_q = room_band_q / layer_rows;
 
@@ -294,10 +299,11 @@ pub fn build_footprints(
     // cells whose centers are inside a chamfered polygon. This deliberately
     // leaves no occupancy holes at clipped corners and makes overlap proof a
     // simple interval proof independent of a hash-table traversal.
-    if slot_width_q < MIN_SPAN_Q + 1 || slot_depth_q < MIN_SPAN_Q + 1 {
+    if slot_width_q < min_span_q + 1 || slot_depth_q < min_span_q + 1 {
         return Err(V3Error::InvalidFootprint {
             detail: format!(
-                "extent {extent} cannot reserve {target} rooms plus a 256-unit transition lane"
+                "extent {extent} cannot reserve {target} rooms with span {min_outer_span}..={max_outer_span} and a {}-unit transition lane",
+                transition_lane_q * q
             ),
         });
     }
@@ -335,18 +341,24 @@ pub fn build_footprints(
         // Horizontal slots retain two quanta of slack. The tight Rich/1024
         // vertical band retains one full quantum, which is sufficient for a
         // positive route gap while preserving the frozen 112-unit minimum.
-        let max_width_q = (slot_width_q - 2).min(MAX_SPAN_Q);
-        let max_depth_q = (slot_depth_q - 1).min(MAX_SPAN_Q);
-        let primary_max_width_q = max_width_q;
+        let max_width_q = (slot_width_q - 2).min(max_span_q);
+        let max_depth_q = (slot_depth_q - 1).min(max_span_q);
+        if max_width_q < min_span_q || max_depth_q < min_span_q {
+            return Err(V3Error::InvalidFootprint {
+                detail: format!(
+                    "room {room_index} slot cannot fit configured span {min_outer_span}..={max_outer_span}"
+                ),
+            });
+        }
         let w_q = if room_index == 0 {
-            seeded_even_span(u0, primary_max_width_q)
+            seeded_even_span(u0, min_span_q, max_width_q)
         } else {
-            MIN_SPAN_Q + (u0 % (max_width_q - MIN_SPAN_Q + 1) as u64) as i32
+            min_span_q + (u0 % (max_width_q - min_span_q + 1) as u64) as i32
         };
         let d_q = if room_index == 0 {
-            (MIN_SPAN_Q + 1).min(max_depth_q)
+            (min_span_q + 1).min(max_depth_q)
         } else {
-            MIN_SPAN_Q + (u1 % (max_depth_q - MIN_SPAN_Q + 1) as u64) as i32
+            min_span_q + (u1 % (max_depth_q - min_span_q + 1) as u64) as i32
         };
         room_dims.push(RoomDim {
             room_index,
@@ -412,7 +424,7 @@ pub fn build_footprints(
         // cannot also retain a 64-unit cardinal portal edge after chamfering.
         let chamfer_size = 2 * q;
         let room_index = d.room_index;
-        let vertices = if room_index % 3 == 0 {
+        let vertices = if !config.chamfer || room_index % 3 == 0 {
             rect_vertices(shell)
         } else {
             // A 112-unit side still retains an 80-unit cardinal edge with one
@@ -491,10 +503,10 @@ pub fn build_footprints(
         }
         let w = x1 - x0;
         let d = y1 - y0;
-        if w < MIN_OUTER_SPAN || w > MAX_OUTER_SPAN || d < MIN_OUTER_SPAN || d > MAX_OUTER_SPAN {
+        if w < min_outer_span || w > max_outer_span || d < min_outer_span || d > max_outer_span {
             return Err(V3Error::InvalidFootprint {
                 detail: format!(
-                    "room {} span {w}×{d} outside [{MIN_OUTER_SPAN}..{MAX_OUTER_SPAN}]",
+                    "room {} span {w}×{d} outside [{min_outer_span}..{max_outer_span}]",
                     fp.room_id
                 ),
             });
@@ -563,13 +575,17 @@ fn chamfered_vertices(
     Ok(vertices)
 }
 
-/// Pick an even quantum span in the valid range for the legacy spawn host.
-fn seeded_even_span(random: u64, maximum: i32) -> i32 {
-    let first = if MIN_SPAN_Q % 2 == 0 {
-        MIN_SPAN_Q
+/// Pick an even quantum span in the configured range for the spawn host.
+/// A one-value odd range remains valid and returns its sole value.
+fn seeded_even_span(random: u64, minimum: i32, maximum: i32) -> i32 {
+    let first = if minimum % 2 == 0 {
+        minimum
     } else {
-        MIN_SPAN_Q + 1
+        minimum + 1
     };
+    if first > maximum {
+        return minimum;
+    }
     let count = (maximum - first) / 2 + 1;
     first + 2 * (random % count as u64) as i32
 }

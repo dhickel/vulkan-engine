@@ -21,7 +21,7 @@
 use super::assembly::{
     self, Assembly, AssemblyBrush, BrushRole, Interface, ProtectedVolume, Support,
 };
-use super::config::{V3Config, CONSTRUCTION_QUANTUM, HEADROOM, ROUTE_WIDTH};
+use super::config::{ArchType, V3Config, CONSTRUCTION_QUANTUM, HEADROOM, ROUTE_WIDTH};
 use super::emission;
 use super::error::V3Error;
 use super::footprint::build_footprints;
@@ -34,7 +34,9 @@ use super::intent::plan_composition;
 use super::metadata::EnhancedV3Metadata;
 use super::reservation::{Reservation, ReservationSet};
 use super::rng::V3Seed;
-use super::topology::{build_topology, compute_reservations};
+#[cfg(test)]
+use super::topology::compute_reservations;
+use super::topology::{build_topology, compute_reservations_with_config};
 use std::collections::BTreeMap;
 
 // ── Pipeline output ───────────────────────────────────────────────────────
@@ -62,6 +64,7 @@ pub struct V3PipelineOutput {
 ///
 /// Two calls with identical `config` produce byte-identical output.
 pub fn run_pipeline(config: &V3Config) -> Result<V3PipelineOutput, V3Error> {
+    config.validate()?;
     let seed = V3Seed::new(config.seed);
     let mut alloc = V3IdAllocator::new();
 
@@ -72,7 +75,7 @@ pub fn run_pipeline(config: &V3Config) -> Result<V3PipelineOutput, V3Error> {
     let topology = build_topology(config, &footprints, &layout, seed, &mut alloc)?;
 
     // 3. Compute reservation volumes
-    let (spawn_volume, light_volumes) = compute_reservations(&topology)?;
+    let (spawn_volume, light_volumes) = compute_reservations_with_config(&topology, config, seed)?;
 
     // 4. Reserve every point-entity clearance volume before feature planning.
     let mut protected_reservations = ReservationSet::new();
@@ -90,9 +93,11 @@ pub fn run_pipeline(config: &V3Config) -> Result<V3PipelineOutput, V3Error> {
 
     // 6. Build assembly from topology (with feature brushes from plan)
     let (assembly, spawn_origin, light_origins) = build_assembly_from_topology(
+        config,
         &topology,
         &plan,
         &spawn_volume,
+        &light_volumes,
         &protected_reservations,
         seed,
     )?;
@@ -105,12 +110,19 @@ pub fn run_pipeline(config: &V3Config) -> Result<V3PipelineOutput, V3Error> {
         .map(|b| b.brush.faces.len() as u32)
         .sum();
     let actual_entities: u32 = 2 + light_origins.len() as u32; // worldspawn + spawn + lights
-    if actual_faces > config.preset.face_budget() || actual_faces >= super::config::FACE_BUDGET {
+    if (!config.has_overrides() && actual_faces > config.preset.face_budget())
+        || actual_faces >= super::config::FACE_BUDGET
+    {
         return Err(V3Error::CompositionInvariant {
             detail: format!(
-                "{} actual faces {actual_faces} exceed preset/M2 budget",
+                "{} actual faces {actual_faces} exceed the active source/M2 budget",
                 config.preset.tag()
             ),
+        });
+    }
+    if actual_entities >= super::config::ENTITY_BUDGET {
+        return Err(V3Error::CompositionInvariant {
+            detail: format!("actual entities {actual_entities} exceed the M2 budget"),
         });
     }
     if plan.estimated_total_faces < actual_faces {
@@ -123,7 +135,12 @@ pub fn run_pipeline(config: &V3Config) -> Result<V3PipelineOutput, V3Error> {
     }
 
     // 8. Emit canonical .map text
-    let map_text = emission::emit_map_text(&assembly, spawn_origin, &light_origins)?;
+    let map_text = emission::emit_map_text_with_minlight(
+        &assembly,
+        spawn_origin,
+        &light_origins,
+        config.minlight,
+    )?;
 
     // 9. Build metadata
     let grammar_families: Vec<String> = plan.grammar_families.iter().cloned().collect();
@@ -894,6 +911,69 @@ fn build_pointed_arch_surround(
             wall_thickness,
         );
         push_wall_brush(brushes, bounds, format!("{base_id}/lintel"), x, y, z)?;
+    }
+
+    Ok(())
+}
+
+/// Build a shallow segmented surround above the compatibility 64×80 core.
+///
+/// The first 16-unit crown band remains fully open, the second fills the
+/// outer 16-unit shoulders while retaining a 32-unit centre, and a full
+/// lintel seals the wall above. This is visibly distinct from the pointed
+/// compatibility profile while retaining cardinal, quantum-aligned brushes.
+fn build_segmented_arch_surround(
+    room: &CommittedRoom,
+    direction: WallDirection,
+    aperture_center: i128,
+    wall_thickness: i128,
+    brushes: &mut Vec<AssemblyBrush>,
+    bounds: &mut Vec<BrushBounds>,
+) -> Result<(), V3Error> {
+    let rid = room.id.stable_key();
+    let wall_z0 = i128::from(room.floor_z) + wall_thickness;
+    let wall_z1 = i128::from(room.floor_z) + i128::from(room.dims.2) - wall_thickness;
+    let arch_base = wall_z0 + i128::from(HEADROOM);
+    let shoulder_z0 = arch_base + i128::from(CONSTRUCTION_QUANTUM);
+    let shoulder_z1 = shoulder_z0 + i128::from(CONSTRUCTION_QUANTUM);
+    let half_width = i128::from(ROUTE_WIDTH / 2);
+    let shoulder_width = i128::from(CONSTRUCTION_QUANTUM);
+    let root = format!("{rid}/wall_{}/segmented_arch", direction.tag());
+
+    if shoulder_z0 < wall_z1 {
+        let top = shoulder_z1.min(wall_z1);
+        for (tag, span) in [
+            (
+                "left",
+                (
+                    aperture_center - half_width,
+                    aperture_center - half_width + shoulder_width,
+                ),
+            ),
+            (
+                "right",
+                (
+                    aperture_center + half_width - shoulder_width,
+                    aperture_center + half_width,
+                ),
+            ),
+        ] {
+            let (x, y, z) =
+                wall_piece_bounds(room, direction, span, (shoulder_z0, top), wall_thickness);
+            push_wall_brush(brushes, bounds, format!("{root}/shoulder_{tag}"), x, y, z)?;
+        }
+    }
+
+    let lintel_z0 = shoulder_z1.min(wall_z1);
+    if lintel_z0 < wall_z1 {
+        let (x, y, z) = wall_piece_bounds(
+            room,
+            direction,
+            (aperture_center - half_width, aperture_center + half_width),
+            (lintel_z0, wall_z1),
+            wall_thickness,
+        );
+        push_wall_brush(brushes, bounds, format!("{root}/lintel"), x, y, z)?;
     }
 
     Ok(())
@@ -1765,6 +1845,12 @@ fn build_feature_brushes(
             BrushRole::Column
         } else if inst.tags.contains("buttress") {
             BrushRole::Buttress
+        } else if inst.tags.contains("portal-chamber") {
+            BrushRole::Blade
+        } else if inst.tags.contains("fractured-vault") {
+            BrushRole::VaultRib
+        } else if inst.tags.contains("monolith") {
+            BrushRole::Monolith
         } else if inst.tags.contains("terrace") {
             BrushRole::FloorSlab
         } else {
@@ -1867,9 +1953,11 @@ fn build_feature_brushes(
 
 /// Build a validated assembly from the committed topology and composition plan.
 fn build_assembly_from_topology(
+    config: &V3Config,
     topology: &CommittedTopology,
     plan: &PlanOutcome,
     spawn_volume: &QuantumVolume,
+    light_volumes: &[QuantumVolume],
     reservations: &ReservationSet,
     _seed: V3Seed,
 ) -> Result<(Assembly, (i32, i32, i32), Vec<(i32, i32, i32)>), V3Error> {
@@ -1878,9 +1966,7 @@ fn build_assembly_from_topology(
     let mut brushes: Vec<AssemblyBrush> = Vec::new();
     let mut bounds: Vec<BrushBounds> = Vec::new();
 
-    // Detect whether we should emit pointed arch surrounds.
-    // For Phase 03, all presets get pointed arches on portals.
-    let use_pointed_arches = true;
+    let shaped_arch = matches!(config.arch_type, ArchType::Pointed | ArchType::Segmented);
 
     // Both transition approaches meet their host slabs at wall planes. No
     // tread enters a room slab, so the exact mask is empty; inventing a broad
@@ -2005,24 +2091,34 @@ fn build_assembly_from_topology(
                 direction,
                 wall_apertures,
                 wall_thickness,
-                use_pointed_arches,
+                shaped_arch,
                 &mut brushes,
                 &mut bounds,
             )?;
 
-            // Build pointed arch surrounds above portal apertures.
-            if use_pointed_arches {
-                for aperture in wall_apertures {
-                    let wall_coord = room_wall_coordinate(room, direction);
-                    build_pointed_arch_surround(
+            for aperture in wall_apertures {
+                match config.arch_type {
+                    ArchType::None => {}
+                    ArchType::Pointed => {
+                        let wall_coord = room_wall_coordinate(room, direction);
+                        build_pointed_arch_surround(
+                            room,
+                            direction,
+                            wall_coord,
+                            aperture.center,
+                            wall_thickness,
+                            &mut brushes,
+                            &mut bounds,
+                        )?;
+                    }
+                    ArchType::Segmented => build_segmented_arch_surround(
                         room,
                         direction,
-                        wall_coord,
                         aperture.center,
                         wall_thickness,
                         &mut brushes,
                         &mut bounds,
-                    )?;
+                    )?,
                 }
             }
         }
@@ -2151,18 +2247,32 @@ fn build_assembly_from_topology(
     let spawn_z = spawn_volume.z0 + 2 * CONSTRUCTION_QUANTUM;
     let spawn_origin = (spawn_x, spawn_y, spawn_z);
 
-    // Light origins: center of each room near ceiling
+    // `None` retains the compatibility room-midpoint bytes. Explicit light
+    // counts use the exact selected reservation centres.
     let q = CONSTRUCTION_QUANTUM;
-    let light_origins: Vec<(i32, i32, i32)> = topology
-        .rooms
-        .iter()
-        .map(|room| {
-            let lx = (room.shell.0 + room.shell.2) / 2;
-            let ly = (room.shell.1 + room.shell.3) / 2;
-            let lz = room.floor_z + room.dims.2 as i32 - 2 * q;
-            (lx, ly, lz)
-        })
-        .collect();
+    let light_origins: Vec<(i32, i32, i32)> = if config.light_count.is_none() {
+        topology
+            .rooms
+            .iter()
+            .map(|room| {
+                let lx = (room.shell.0 + room.shell.2) / 2;
+                let ly = (room.shell.1 + room.shell.3) / 2;
+                let lz = room.floor_z + room.dims.2 as i32 - 2 * q;
+                (lx, ly, lz)
+            })
+            .collect()
+    } else {
+        light_volumes
+            .iter()
+            .map(|volume| {
+                (
+                    (volume.x0 + volume.x1) / 2,
+                    (volume.y0 + volume.y1) / 2,
+                    (volume.z0 + volume.z1) / 2,
+                )
+            })
+            .collect()
+    };
 
     Ok((assembly, spawn_origin, light_origins))
 }
@@ -2196,9 +2306,16 @@ mod tests {
                 ))
                 .unwrap();
         }
-        let (assembly, _, _) =
-            build_assembly_from_topology(&topology, &plan, &spawn_volume, &reservations, seed)
-                .unwrap();
+        let (assembly, _, _) = build_assembly_from_topology(
+            &config,
+            &topology,
+            &plan,
+            &spawn_volume,
+            &light_volumes,
+            &reservations,
+            seed,
+        )
+        .unwrap();
         (topology, assembly, plan)
     }
 

@@ -5,8 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use super::composition;
-use super::config::{V3Config, CONSTRUCTION_QUANTUM, HEADROOM};
+use super::config::{GrammarMode, V3Config, CONSTRUCTION_QUANTUM, HEADROOM};
 use super::error::V3Error;
 use super::ids::{
     CommittedRoom, CommittedTopology, FeatureId, FeatureInstance, InstanceId, PlanOutcome,
@@ -473,8 +472,52 @@ pub fn plan_composition(
     spawn_volume: &QuantumVolume,
     light_volumes: &[QuantumVolume],
 ) -> Result<PlanOutcome, V3Error> {
+    config.validate()?;
     let preset = config.preset.tag();
-    let required = composition::required_families_for_preset(preset);
+    let eligible = config.enabled_grammar_families();
+    let available_rooms = topology.rooms.len().saturating_sub(1);
+    let baseline = (config.preset.minimum_assemblies() as usize).min(available_rooms);
+    let target_assemblies = if config.uses_default_composition() {
+        baseline
+    } else if config.feature_density <= 0.5 {
+        ((baseline as f32 * config.feature_density / 0.5).round() as usize).min(available_rooms)
+    } else {
+        (baseline
+            + ((available_rooms.saturating_sub(baseline)) as f32 * (config.feature_density - 0.5)
+                / 0.5)
+                .round() as usize)
+            .min(available_rooms)
+    };
+
+    let family_schedule: Vec<&str> = if config.uses_default_composition() {
+        config.preset.required_families().to_vec()
+    } else if target_assemblies == 0 {
+        Vec::new()
+    } else {
+        match config.grammar_mode {
+            GrammarMode::Single => {
+                let family = eligible
+                    .iter()
+                    .copied()
+                    .min_by_key(|family| {
+                        let key = format!("single-family/{family}");
+                        (
+                            seed.candidate_seed(tags::COMPOSITION, key.as_bytes())
+                                .u64_at(0),
+                            *family,
+                        )
+                    })
+                    .ok_or_else(|| V3Error::CompositionInvariant {
+                        detail: "single grammar mode has no eligible family".into(),
+                    })?;
+                vec![family; target_assemblies]
+            }
+            GrammarMode::Mixed => (0..target_assemblies)
+                .map(|index| eligible[index % eligible.len()])
+                .collect(),
+        }
+    };
+
     let mut instances = Vec::new();
     let mut families = BTreeSet::new();
     let mut rejected = Vec::new();
@@ -483,7 +526,8 @@ pub fn plan_composition(
         .chain(light_volumes.iter().copied())
         .collect();
 
-    for family in required {
+    for family in &family_schedule {
+        let family = *family;
         let mut placed = false;
         for (room_id, detail_rank) in rank_rooms(seed, family, topology, spawn_room(topology)) {
             if used_rooms.contains(&room_id) {
@@ -547,7 +591,7 @@ pub fn plan_composition(
                 });
             }
             used_rooms.insert(room_id);
-            families.insert((*family).to_string());
+            families.insert(family.to_string());
             placed = true;
             break;
         }
@@ -559,14 +603,18 @@ pub fn plan_composition(
         }
     }
 
-    let minimum_ok = families.len() as u32 >= config.preset.minimum_families()
-        && used_rooms.len() as u32 >= config.preset.minimum_assemblies()
-        && instances.len() as u32 >= config.preset.minimum_feature_brushes();
+    let minimum_ok = if config.uses_default_composition() {
+        families.len() as u32 >= config.preset.minimum_families()
+            && used_rooms.len() as u32 >= config.preset.minimum_assemblies()
+            && instances.len() as u32 >= config.preset.minimum_feature_brushes()
+    } else {
+        used_rooms.len() == family_schedule.len()
+    };
     if !minimum_ok {
         return Err(V3Error::MinimumIdentityFailure {
             preset: preset.to_string(),
-            required: config.preset.minimum_families(),
-            actual: families.len() as u32,
+            required: family_schedule.len() as u32,
+            actual: used_rooms.len() as u32,
         });
     }
 
@@ -606,8 +654,12 @@ pub fn plan_composition(
         rejected,
         support_edges,
         identity_satisfied: true,
-        estimated_total_faces: config.preset.face_budget(),
-        estimated_total_entities: topology.rooms.len() as u32 + 2,
+        estimated_total_faces: if config.has_overrides() {
+            super::config::FACE_BUDGET - 1
+        } else {
+            config.preset.face_budget()
+        },
+        estimated_total_entities: light_volumes.len() as u32 + 2,
     })
 }
 

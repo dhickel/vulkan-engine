@@ -409,6 +409,7 @@ pub fn build_topology(
     seed: V3Seed,
     alloc: &mut V3IdAllocator,
 ) -> Result<CommittedTopology, V3Error> {
+    config.validate()?;
     if footprints.is_empty() {
         return Err(V3Error::TopologyInvariant {
             detail: "topology requires at least one footprint".into(),
@@ -416,7 +417,7 @@ pub fn build_topology(
     }
 
     let q = CONSTRUCTION_QUANTUM;
-    let target_loops = config.preset.target_loops() as usize;
+    let target_loops = config.effective_loops() as usize;
 
     // ── Build committed rooms ─────────────────────────────────────────
     let mut rooms: Vec<CommittedRoom> = Vec::new();
@@ -757,15 +758,22 @@ pub fn build_topology(
     // deterministic room selection from committed room data.
     validate_spawn_host(footprints)?;
 
-    let transition = build_transition(
-        footprints,
-        &rooms,
-        &routes,
-        &lower_indices,
-        &upper_indices,
-        seed,
-    )?;
-    let transitions = vec![transition];
+    let mut transitions = Vec::with_capacity(config.effective_vertical_edges() as usize);
+    for transition_id in 0..config.effective_vertical_edges() {
+        let transition = build_transition(
+            footprints,
+            &rooms,
+            &routes,
+            &lower_indices,
+            &upper_indices,
+            &transitions,
+            transition_id,
+            seed,
+        )?;
+        transitions.push(transition);
+    }
+
+    split_route_segments(config, footprints, &mut routes, seed)?;
 
     // ── Assemble ─────────────────────────────────────────────────────
     let topology = CommittedTopology {
@@ -791,6 +799,154 @@ pub fn build_topology(
     Ok(topology)
 }
 
+/// Partition selected graph routes into the exact requested number of
+/// physical corridor segments. Default configurations retain the original
+/// one-envelope-per-route bytes. Explorer-only extra segments are collinear,
+/// quantum-aligned partitions of the same clear corridor volume.
+fn split_route_segments(
+    config: &V3Config,
+    footprints: &[Footprint],
+    routes: &mut [CommittedRoute],
+    seed: V3Seed,
+) -> Result<(), V3Error> {
+    let target = config.effective_corridors() as usize;
+    if target == routes.len() {
+        return Ok(());
+    }
+    if target < routes.len() {
+        return Err(V3Error::TopologyInvariant {
+            detail: format!(
+                "corridor segment target {target} is below route count {}",
+                routes.len()
+            ),
+        });
+    }
+
+    #[derive(Clone, Copy)]
+    enum Axis {
+        X { start: i32, end: i32 },
+        Y { start: i32, end: i32 },
+    }
+
+    let mut axes = Vec::with_capacity(routes.len());
+    let mut capacities = Vec::with_capacity(routes.len());
+    let mut ranked = Vec::with_capacity(routes.len());
+    for (index, route) in routes.iter().enumerate() {
+        let source = footprints
+            .iter()
+            .find(|footprint| footprint.room_id == route.source_room)
+            .ok_or_else(|| V3Error::TopologyInvariant {
+                detail: format!("route/{:04} source footprint missing", route.id),
+            })?;
+        let target_room = footprints
+            .iter()
+            .find(|footprint| footprint.room_id == route.target_room)
+            .ok_or_else(|| V3Error::TopologyInvariant {
+                detail: format!("route/{:04} target footprint missing", route.id),
+            })?;
+        let axis = if source.aabb.2 <= target_room.aabb.0 {
+            Axis::X {
+                start: source.aabb.2,
+                end: target_room.aabb.0,
+            }
+        } else if target_room.aabb.2 <= source.aabb.0 {
+            Axis::X {
+                start: target_room.aabb.2,
+                end: source.aabb.0,
+            }
+        } else if source.aabb.3 <= target_room.aabb.1 {
+            Axis::Y {
+                start: source.aabb.3,
+                end: target_room.aabb.1,
+            }
+        } else if target_room.aabb.3 <= source.aabb.1 {
+            Axis::Y {
+                start: target_room.aabb.3,
+                end: source.aabb.1,
+            }
+        } else {
+            return Err(V3Error::TopologyInvariant {
+                detail: format!(
+                    "route/{:04} endpoints are not cardinally separated",
+                    route.id
+                ),
+            });
+        };
+        let length = match axis {
+            Axis::X { start, end } | Axis::Y { start, end } => end - start,
+        };
+        let capacity = (length / CONSTRUCTION_QUANTUM).clamp(1, 3) as usize;
+        axes.push(axis);
+        capacities.push(capacity);
+        let key = format!("corridor-segments/{:04}", route.id);
+        ranked.push((
+            seed.candidate_seed(rng::tags::TOPOLOGY, key.as_bytes())
+                .u64_at(0),
+            route.id,
+            index,
+        ));
+    }
+    ranked.sort_unstable();
+
+    let mut segment_counts = vec![1usize; routes.len()];
+    let mut remaining = target - routes.len();
+    while remaining > 0 {
+        let mut progressed = false;
+        for &(_, _, index) in &ranked {
+            if segment_counts[index] >= capacities[index] {
+                continue;
+            }
+            segment_counts[index] += 1;
+            remaining -= 1;
+            progressed = true;
+            if remaining == 0 {
+                break;
+            }
+        }
+        if !progressed {
+            return Err(V3Error::TopologyInvariant {
+                detail: format!(
+                    "corridor segment target {target} exceeds the {} quantum-aligned segments available in this layout",
+                    target - remaining
+                ),
+            });
+        }
+    }
+
+    for (index, route) in routes.iter_mut().enumerate() {
+        let count = segment_counts[index];
+        if count == 1 {
+            continue;
+        }
+        let envelope = route.envelopes[0];
+        let (cross_lo, cross_hi) = match axes[index] {
+            Axis::X { .. } => (envelope.1, envelope.3),
+            Axis::Y { .. } => (envelope.0, envelope.2),
+        };
+        let (start, end) = match axes[index] {
+            Axis::X { start, end } | Axis::Y { start, end } => (start, end),
+        };
+        let total_quanta = (end - start) / CONSTRUCTION_QUANTUM;
+        let base_quanta = total_quanta / count as i32;
+        let remainder = total_quanta % count as i32;
+        let mut cursor = start;
+        let mut envelopes = Vec::with_capacity(count);
+        for segment in 0..count {
+            let quanta = base_quanta + i32::from((segment as i32) < remainder);
+            let next = cursor + quanta * CONSTRUCTION_QUANTUM;
+            envelopes.push(match axes[index] {
+                Axis::X { .. } => (cursor, cross_lo, next, cross_hi),
+                Axis::Y { .. } => (cross_lo, cursor, cross_hi, next),
+            });
+            cursor = next;
+        }
+        debug_assert_eq!(cursor, end);
+        route.envelopes = envelopes;
+    }
+
+    Ok(())
+}
+
 // ── Transition construction ────────────────────────────────────────────────
 
 const STAIR_STEPS: i32 = 12;
@@ -803,6 +959,8 @@ fn build_transition(
     routes: &[CommittedRoute],
     lower_indices: &[usize],
     upper_indices: &[usize],
+    existing: &[CommittedTransition],
+    transition_id: u32,
     seed: V3Seed,
 ) -> Result<CommittedTransition, V3Error> {
     let q = CONSTRUCTION_QUANTUM;
@@ -842,6 +1000,24 @@ fn build_transition(
             let stair_start = lower.aabb.3 + LOWER_APPROACH_QUANTA * q;
             let stair_end = stair_start + STAIR_STEPS * q;
             let shell_rect = (x_span.0 - q, lower.aabb.3, x_span.1 + q, upper.aabb.1);
+
+            // Each explorer transition owns distinct host rooms and a
+            // non-overlapping shell/headroom lane.
+            if existing.iter().any(|transition| {
+                transition.lower_room == lower.room_id
+                    || transition.upper_room == upper.room_id
+                    || rects_overlap(
+                        shell_rect,
+                        (
+                            transition.protected_volume.0 - q,
+                            transition.protected_volume.1,
+                            transition.protected_volume.3 + q,
+                            transition.protected_volume.4,
+                        ),
+                    )
+            }) {
+                continue;
+            }
 
             // The physical shell and every 80-unit clearance column span both
             // elevations. They may enter only their two host rooms at the
@@ -985,7 +1161,7 @@ fn build_transition(
     ));
 
     Ok(CommittedTransition {
-        id: 0,
+        id: transition_id,
         lower_room: rooms[chosen.lower_idx].id,
         upper_room: rooms[chosen.upper_idx].id,
         protected_volume: (pv_x0, pv_y0, pv_z0, pv_x1, pv_y1, pv_z1),
@@ -1070,6 +1246,39 @@ fn validate_spawn_host(footprints: &[Footprint]) -> Result<(), V3Error> {
 pub fn compute_reservations(
     topology: &CommittedTopology,
 ) -> Result<(QuantumVolume, Vec<QuantumVolume>), V3Error> {
+    let light_rooms: Vec<_> = topology.rooms.iter().collect();
+    compute_reservations_for_rooms(topology, &light_rooms)
+}
+
+/// Compute reservations using the configured exact light count. `None` keeps
+/// the compatibility one-light-per-room order; explicit counts select rooms
+/// by a stable detail-stage rank and then restore canonical RoomId order.
+pub fn compute_reservations_with_config(
+    topology: &CommittedTopology,
+    config: &V3Config,
+    seed: V3Seed,
+) -> Result<(QuantumVolume, Vec<QuantumVolume>), V3Error> {
+    config.validate()?;
+    let mut light_rooms: Vec<_> = topology.rooms.iter().collect();
+    if let Some(light_count) = config.light_count {
+        light_rooms.sort_by_key(|room| {
+            let key = format!("light/{}", room.id.stable_key());
+            (
+                seed.candidate_seed(rng::tags::EMISSION, key.as_bytes())
+                    .u64_at(0),
+                room.id,
+            )
+        });
+        light_rooms.truncate(light_count as usize);
+        light_rooms.sort_by_key(|room| room.id);
+    }
+    compute_reservations_for_rooms(topology, &light_rooms)
+}
+
+fn compute_reservations_for_rooms(
+    topology: &CommittedTopology,
+    light_rooms: &[&CommittedRoom],
+) -> Result<(QuantumVolume, Vec<QuantumVolume>), V3Error> {
     let q = CONSTRUCTION_QUANTUM;
 
     // Select the largest lower room for spawn.
@@ -1103,7 +1312,7 @@ pub fn compute_reservations(
     })?;
 
     let mut light_volumes = Vec::new();
-    for room in &topology.rooms {
+    for room in light_rooms {
         let lx = ((room.shell.0 + room.shell.2) / 2 / q) * q;
         let ly = ((room.shell.1 + room.shell.3) / 2 / q) * q;
         let lz = room.floor_z + room.dims.2 as i32 - 2 * q;

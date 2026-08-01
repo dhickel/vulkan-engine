@@ -22,6 +22,8 @@ pub enum V3Error {
         value: u64,
         quantum: u64,
     },
+    /// A configuration field has an invalid value or conflicts with another field.
+    ConfigInvalid { field: &'static str, detail: String },
     /// An unknown preset tag was supplied.
     UnknownPreset { tag: String },
 
@@ -169,6 +171,9 @@ impl fmt::Display for V3Error {
                 f,
                 "config field '{field}' value {value} not quantum-aligned (quantum: {quantum})"
             ),
+            Self::ConfigInvalid { field, detail } => {
+                write!(f, "config field '{field}' is invalid: {detail}")
+            }
             Self::UnknownPreset { tag } => write!(f, "unknown preset tag: '{tag}'"),
             Self::ZeroBound => write!(f, "bounded v3 choice requires a non-zero bound"),
             Self::RejectionStreamExhausted => {

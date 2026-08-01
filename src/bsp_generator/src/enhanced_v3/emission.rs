@@ -35,6 +35,16 @@ pub fn emit_map_text(
     spawn_origin: (i32, i32, i32),
     light_origins: &[(i32, i32, i32)],
 ) -> Result<String, V3Error> {
+    emit_map_text_with_minlight(assembly, spawn_origin, light_origins, 16)
+}
+
+/// Emit canonical map text with an explicit worldspawn `_minlight` value.
+pub fn emit_map_text_with_minlight(
+    assembly: &Assembly,
+    spawn_origin: (i32, i32, i32),
+    light_origins: &[(i32, i32, i32)],
+    minlight: u32,
+) -> Result<String, V3Error> {
     if !assembly.validated {
         return Err(V3Error::UnvalidatedAssembly);
     }
@@ -45,7 +55,7 @@ pub fn emit_map_text(
     out.push_str("{\n");
     out.push_str("\"classname\" \"worldspawn\"\n");
     out.push_str("\"wad\" \"cc0_dungeon_v2.wad\"\n");
-    out.push_str("\"_minlight\" \"16\"\n");
+    writeln!(out, "\"_minlight\" \"{minlight}\"").expect("write to String is infallible");
     // emit a blank line for readability between header and brushes
     out.push('\n');
 
@@ -112,8 +122,12 @@ pub fn texture_for_role(role: BrushRole) -> &'static str {
         BrushRole::WallShell | BrushRole::PortalThroat => "bs_wall",
         BrushRole::FloorSlab => "bs_floor",
         BrushRole::CeilingSlab => "bs_ceil",
-        BrushRole::Column | BrushRole::Buttress => "bs_accent",
-        BrushRole::Feature => "bs_accent",
+        BrushRole::Column
+        | BrushRole::Buttress
+        | BrushRole::Blade
+        | BrushRole::VaultRib
+        | BrushRole::Monolith
+        | BrushRole::Feature => "bs_accent",
         BrushRole::World => "bs_wall",
     }
 }

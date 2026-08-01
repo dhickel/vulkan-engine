@@ -59,12 +59,34 @@ pub const MAX_FACES_PER_FEATURE: u32 = 200;
 /// Maximum entities per room.
 pub const MAX_ENTITIES_PER_ROOM: u32 = 5;
 
+// ── Explorer configuration constants ──────────────────────────────────────
+
+/// Supported exact room-count override range.
+pub const ROOM_COUNT_MIN: u32 = 3;
+pub const ROOM_COUNT_MAX: u32 = 40;
+/// Maximum exact same-layer loop override.
+pub const LOOP_COUNT_MAX: u32 = 6;
+/// Maximum exact lower-to-upper stair connections.
+pub const VERTICAL_EDGE_MAX: u32 = 3;
+/// Compatibility room-span floor and ceiling.
+pub const DEFAULT_ROOM_SPAN_MIN: u32 = 112;
+pub const DEFAULT_ROOM_SPAN_MAX: u32 = 256;
+/// Canonical grammar-family tags in deterministic order.
+pub const GRAMMAR_FAMILIES: &[&str] = &[
+    "portal-chamber",
+    "buttressed-hall",
+    "column-grove",
+    "fractured-vault",
+    "terraced-shrine",
+    "monolithic-chamber",
+];
+
 // ── Preset definitions ─────────────────────────────────────────────────────
 
 /// Density presets for the Enhanced V3 pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum V3Preset {
-    /// Sparse: minimal feature density (12+ rooms).
+    /// Sparse: minimal feature density (12 rooms).
     Sparse,
     /// Moderate: balanced feature density (20 rooms, 2 loops).
     Moderate,
@@ -92,7 +114,16 @@ impl V3Preset {
         }
     }
 
-    /// Minimum number of rooms for this preset.
+    /// Return the next preset in explorer order.
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Sparse => Self::Moderate,
+            Self::Moderate => Self::Rich,
+            Self::Rich => Self::Sparse,
+        }
+    }
+
+    /// Exact compatibility room count for this preset.
     pub fn min_rooms(self) -> u32 {
         match self {
             Self::Sparse => 12,
@@ -101,7 +132,7 @@ impl V3Preset {
         }
     }
 
-    /// Target number of loops for this preset.
+    /// Target number of same-layer loops for this preset.
     pub fn target_loops(self) -> u32 {
         match self {
             Self::Sparse => 0,
@@ -110,7 +141,7 @@ impl V3Preset {
         }
     }
 
-    /// Minimum number of grammar families that must be represented.
+    /// Minimum number of grammar families represented by the compatibility profile.
     pub fn minimum_families(self) -> u32 {
         match self {
             Self::Sparse => 1,
@@ -119,7 +150,7 @@ impl V3Preset {
         }
     }
 
-    /// Minimum number of grounded feature assemblies required.
+    /// Number of grounded feature assemblies in the compatibility profile.
     pub fn minimum_assemblies(self) -> u32 {
         match self {
             Self::Sparse => 1,
@@ -128,7 +159,7 @@ impl V3Preset {
         }
     }
 
-    /// Minimum number of feature brushes required.
+    /// Minimum number of feature brushes required by the compatibility profile.
     pub fn minimum_feature_brushes(self) -> u32 {
         match self {
             Self::Sparse => 2,
@@ -137,20 +168,9 @@ impl V3Preset {
         }
     }
 
-    /// Required grammar families for this preset (in canonical order).
+    /// Required compatibility grammar families in canonical order.
     pub fn required_families(self) -> &'static [&'static str] {
-        match self {
-            Self::Sparse => &["portal-chamber"],
-            Self::Moderate => &["portal-chamber", "buttressed-hall", "column-grove"],
-            Self::Rich => &[
-                "portal-chamber",
-                "buttressed-hall",
-                "column-grove",
-                "fractured-vault",
-                "terraced-shrine",
-                "monolithic-chamber",
-            ],
-        }
+        &GRAMMAR_FAMILIES[..self.minimum_families() as usize]
     }
 
     /// Conservative estimated face budget for the preset.
@@ -163,45 +183,435 @@ impl V3Preset {
     }
 }
 
+/// Portal surround selected for every cardinal aperture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArchType {
+    /// Rectangular 64×80 opening with a flat lintel.
+    None,
+    /// Compatibility stepped pointed surround.
+    Pointed,
+    /// Shallow stepped segmented surround.
+    Segmented,
+}
+
+impl ArchType {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Pointed => "pointed",
+            Self::Segmented => "segmented",
+        }
+    }
+
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "none" => Some(Self::None),
+            "pointed" => Some(Self::Pointed),
+            "segmented" => Some(Self::Segmented),
+            _ => None,
+        }
+    }
+
+    /// Pointed → Segmented → None → Pointed.
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Pointed => Self::Segmented,
+            Self::Segmented => Self::None,
+            Self::None => Self::Pointed,
+        }
+    }
+}
+
+impl Default for ArchType {
+    fn default() -> Self {
+        Self::Pointed
+    }
+}
+
+/// How grammar families are assigned to feature-bearing rooms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GrammarMode {
+    /// Seed-select one eligible family and repeat it in every selected room.
+    Single,
+    /// Cycle eligible families per room, then repeat deterministically.
+    Mixed,
+}
+
+impl GrammarMode {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Single => "single",
+            Self::Mixed => "mixed",
+        }
+    }
+
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "single" => Some(Self::Single),
+            "mixed" => Some(Self::Mixed),
+            _ => None,
+        }
+    }
+}
+
+impl Default for GrammarMode {
+    fn default() -> Self {
+        Self::Mixed
+    }
+}
+
+/// Feature-category bit flags used to filter grammar materialization.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FeatureFlags(u32);
+
+impl FeatureFlags {
+    pub const PILLARS: Self = Self(1 << 0);
+    pub const BUTTRESSES: Self = Self(1 << 1);
+    pub const BLADES: Self = Self(1 << 2);
+    pub const VAULT_RIBS: Self = Self(1 << 3);
+    pub const MONOLITHS: Self = Self(1 << 4);
+    pub const ALL: Self = Self(
+        Self::PILLARS.0
+            | Self::BUTTRESSES.0
+            | Self::BLADES.0
+            | Self::VAULT_RIBS.0
+            | Self::MONOLITHS.0,
+    );
+
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    pub const fn all() -> Self {
+        Self::ALL
+    }
+
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "pillars" => Some(Self::PILLARS),
+            "buttresses" => Some(Self::BUTTRESSES),
+            "blades" => Some(Self::BLADES),
+            "vault-ribs" => Some(Self::VAULT_RIBS),
+            "monoliths" => Some(Self::MONOLITHS),
+            _ => None,
+        }
+    }
+
+    pub fn tags(self) -> Vec<&'static str> {
+        [
+            (Self::PILLARS, "pillars"),
+            (Self::BUTTRESSES, "buttresses"),
+            (Self::BLADES, "blades"),
+            (Self::VAULT_RIBS, "vault-ribs"),
+            (Self::MONOLITHS, "monoliths"),
+        ]
+        .into_iter()
+        .filter_map(|(flag, tag)| self.contains(flag).then_some(tag))
+        .collect()
+    }
+
+    /// Whether the feature category associated with a grammar is enabled.
+    /// Terraced shrines have no category flag and remain allowlist-controlled.
+    pub fn enables_family(self, family: &str) -> bool {
+        match family {
+            "portal-chamber" => self.contains(Self::BLADES),
+            "buttressed-hall" => self.contains(Self::BUTTRESSES),
+            "column-grove" => self.contains(Self::PILLARS),
+            "fractured-vault" => self.contains(Self::VAULT_RIBS),
+            "monolithic-chamber" => self.contains(Self::MONOLITHS),
+            "terraced-shrine" => true,
+            _ => false,
+        }
+    }
+}
+
+impl Default for FeatureFlags {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
+impl std::fmt::Debug for FeatureFlags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_set().entries(self.tags()).finish()
+    }
+}
+
+impl std::ops::BitOr for FeatureFlags {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for FeatureFlags {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+impl std::ops::BitAnd for FeatureFlags {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Self(self.0 & rhs.0)
+    }
+}
+
 // ── Validated configuration ────────────────────────────────────────────────
 
-/// Immutable validated configuration for the Enhanced V3 pipeline.
+/// Enhanced V3 generation configuration.
 ///
-/// Wraps the frozen contract constants. All values are validated at
-/// construction and never change.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `new` retains the production compatibility profile. Optional fields are
+/// explorer overrides; `None` always resolves through the selected preset.
+#[derive(Debug, Clone)]
 pub struct V3Config {
-    /// Master seed for deterministic generation.
     pub seed: u64,
-    /// Density preset.
     pub preset: V3Preset,
-    /// XY extent per axis (must be quantum-aligned, within bounds).
     pub xy_extent: u32,
+    pub rooms: Option<u32>,
+    pub corridors: Option<u32>,
+    pub loops: Option<u32>,
+    pub vertical_edges: Option<u32>,
+    pub chamfer: bool,
+    pub arch_type: ArchType,
+    pub stairs: bool,
+    pub room_span_min: Option<u32>,
+    pub room_span_max: Option<u32>,
+    /// Empty means all six families are eligible; selection still follows the preset/density.
+    pub grammar_families: Vec<String>,
+    pub grammar_mode: GrammarMode,
+    pub features: FeatureFlags,
+    pub feature_density: f32,
+    pub minlight: u32,
+    pub light_count: Option<u32>,
 }
 
 impl V3Config {
-    /// Create and validate a V3 configuration.
+    /// Create the byte-compatible V3 production configuration.
     pub fn new(seed: u64, preset: V3Preset, xy_extent: u32) -> Result<Self, V3Error> {
-        if xy_extent < XY_MIN || xy_extent > XY_MAX {
-            return Err(V3Error::ConfigOutOfRange {
-                field: "xy_extent",
-                value: xy_extent as u64,
-                min: XY_MIN as u64,
-                max: XY_MAX as u64,
-            });
-        }
-        if xy_extent % CONSTRUCTION_QUANTUM as u32 != 0 {
-            return Err(V3Error::ConfigNotQuantumAligned {
-                field: "xy_extent",
-                value: xy_extent as u64,
-                quantum: CONSTRUCTION_QUANTUM as u64,
-            });
-        }
-        Ok(Self {
+        let config = Self {
             seed,
             preset,
             xy_extent,
-        })
+            rooms: None,
+            corridors: None,
+            loops: None,
+            vertical_edges: None,
+            chamfer: true,
+            arch_type: ArchType::Pointed,
+            stairs: true,
+            room_span_min: None,
+            room_span_max: None,
+            grammar_families: Vec::new(),
+            grammar_mode: GrammarMode::Mixed,
+            features: FeatureFlags::ALL,
+            feature_density: 0.5,
+            minlight: 16,
+            light_count: None,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validate public fields after caller mutation and before generation.
+    pub fn validate(&self) -> Result<(), V3Error> {
+        validate_range("xy_extent", self.xy_extent, XY_MIN, XY_MAX)?;
+        validate_quantum("xy_extent", self.xy_extent)?;
+
+        if let Some(rooms) = self.rooms {
+            validate_range("rooms", rooms, ROOM_COUNT_MIN, ROOM_COUNT_MAX)?;
+        }
+        if let Some(loops) = self.loops {
+            validate_range("loops", loops, 0, LOOP_COUNT_MAX)?;
+        }
+        if let Some(vertical_edges) = self.vertical_edges {
+            validate_range("vertical_edges", vertical_edges, 0, VERTICAL_EDGE_MAX)?;
+            if !self.stairs && vertical_edges > 0 {
+                return invalid(
+                    "vertical_edges",
+                    "must be zero or omitted when stairs are disabled",
+                );
+            }
+        }
+
+        let room_count = self.effective_rooms();
+        let loop_count = self.effective_loops();
+        let route_count = room_count - 2 + loop_count;
+        if let Some(corridors) = self.corridors {
+            if corridors < route_count || corridors > route_count.saturating_mul(3) {
+                return Err(V3Error::ConfigOutOfRange {
+                    field: "corridors",
+                    value: corridors as u64,
+                    min: route_count as u64,
+                    max: route_count.saturating_mul(3) as u64,
+                });
+            }
+        }
+
+        let lower_rooms = room_count.div_ceil(2);
+        let upper_rooms = room_count / 2;
+        let vertical_edges = self.effective_vertical_edges();
+        if vertical_edges > lower_rooms.min(upper_rooms) {
+            return invalid(
+                "vertical_edges",
+                format!(
+                    "{vertical_edges} transitions need distinct hosts, but {room_count} rooms provide only {} per layer",
+                    lower_rooms.min(upper_rooms)
+                ),
+            );
+        }
+
+        let span_min = self.effective_room_span_min();
+        let span_max = self.effective_room_span_max();
+        validate_range(
+            "room_span_min",
+            span_min,
+            DEFAULT_ROOM_SPAN_MIN,
+            self.xy_extent,
+        )?;
+        validate_range(
+            "room_span_max",
+            span_max,
+            DEFAULT_ROOM_SPAN_MIN,
+            self.xy_extent,
+        )?;
+        validate_quantum("room_span_min", span_min)?;
+        validate_quantum("room_span_max", span_max)?;
+        if span_min > span_max {
+            return invalid(
+                "room_span_min",
+                format!("{span_min} exceeds room_span_max {span_max}"),
+            );
+        }
+
+        if !self.feature_density.is_finite() || !(0.0..=1.0).contains(&self.feature_density) {
+            return invalid(
+                "feature_density",
+                format!(
+                    "expected a finite value in [0, 1], got {}",
+                    self.feature_density
+                ),
+            );
+        }
+        validate_range("minlight", self.minlight, 0, 255)?;
+        if let Some(light_count) = self.light_count {
+            validate_range("light_count", light_count, 0, room_count)?;
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        for family in &self.grammar_families {
+            if !GRAMMAR_FAMILIES.contains(&family.as_str()) {
+                return invalid("grammar_families", format!("unknown family '{family}'"));
+            }
+            if !seen.insert(family.as_str()) {
+                return invalid("grammar_families", format!("duplicate family '{family}'"));
+            }
+            if !self.features.enables_family(family) {
+                return invalid(
+                    "features",
+                    format!("family '{family}' is disabled by its feature flag"),
+                );
+            }
+        }
+        if self.feature_density > 0.0 && self.enabled_grammar_families().is_empty() {
+            return invalid(
+                "features",
+                "feature density is non-zero but no grammar family is enabled",
+            );
+        }
+
+        Ok(())
+    }
+
+    pub fn effective_rooms(&self) -> u32 {
+        self.rooms.unwrap_or_else(|| self.preset.min_rooms())
+    }
+
+    pub fn effective_loops(&self) -> u32 {
+        self.loops.unwrap_or_else(|| self.preset.target_loops())
+    }
+
+    pub fn effective_route_count(&self) -> u32 {
+        self.effective_rooms() - 2 + self.effective_loops()
+    }
+
+    /// Exact physical corridor segment count. Graph routes remain controlled by loops.
+    pub fn effective_corridors(&self) -> u32 {
+        self.corridors
+            .unwrap_or_else(|| self.effective_route_count())
+    }
+
+    pub fn effective_vertical_edges(&self) -> u32 {
+        if self.stairs {
+            self.vertical_edges.unwrap_or(1)
+        } else {
+            0
+        }
+    }
+
+    pub fn effective_room_span_min(&self) -> u32 {
+        self.room_span_min.unwrap_or(DEFAULT_ROOM_SPAN_MIN)
+    }
+
+    pub fn effective_room_span_max(&self) -> u32 {
+        self.room_span_max.unwrap_or(DEFAULT_ROOM_SPAN_MAX)
+    }
+
+    pub fn effective_light_count(&self) -> u32 {
+        self.light_count.unwrap_or_else(|| self.effective_rooms())
+    }
+
+    /// Eligible families in canonical order after allowlist and feature filtering.
+    pub fn enabled_grammar_families(&self) -> Vec<&'static str> {
+        GRAMMAR_FAMILIES
+            .iter()
+            .copied()
+            .filter(|family| {
+                (self.grammar_families.is_empty()
+                    || self
+                        .grammar_families
+                        .iter()
+                        .any(|configured| configured == family))
+                    && self.features.enables_family(family)
+            })
+            .collect()
+    }
+
+    /// Whether composition fields are the compatibility defaults.
+    pub fn uses_default_composition(&self) -> bool {
+        self.grammar_families.is_empty()
+            && self.grammar_mode == GrammarMode::Mixed
+            && self.features == FeatureFlags::ALL
+            && self.feature_density.to_bits() == 0.5f32.to_bits()
+    }
+
+    /// Whether any explorer override differs from the production compatibility profile.
+    pub fn has_overrides(&self) -> bool {
+        self.rooms.is_some()
+            || self.corridors.is_some()
+            || self.loops.is_some()
+            || self.vertical_edges.is_some()
+            || !self.chamfer
+            || self.arch_type != ArchType::Pointed
+            || !self.stairs
+            || self.room_span_min.is_some()
+            || self.room_span_max.is_some()
+            || !self.grammar_families.is_empty()
+            || self.grammar_mode != GrammarMode::Mixed
+            || self.features != FeatureFlags::ALL
+            || self.feature_density.to_bits() != 0.5f32.to_bits()
+            || self.minlight != 16
+            || self.light_count.is_some()
     }
 
     /// Create a nominal Sparse configuration for testing.
@@ -218,6 +628,67 @@ impl V3Config {
     pub fn nominal_rich() -> Self {
         Self::new(0, V3Preset::Rich, 3072).expect("nominal rich config must be valid")
     }
+}
+
+impl PartialEq for V3Config {
+    fn eq(&self, other: &Self) -> bool {
+        self.seed == other.seed
+            && self.preset == other.preset
+            && self.xy_extent == other.xy_extent
+            && self.rooms == other.rooms
+            && self.corridors == other.corridors
+            && self.loops == other.loops
+            && self.vertical_edges == other.vertical_edges
+            && self.chamfer == other.chamfer
+            && self.arch_type == other.arch_type
+            && self.stairs == other.stairs
+            && self.room_span_min == other.room_span_min
+            && self.room_span_max == other.room_span_max
+            && self.grammar_families == other.grammar_families
+            && self.grammar_mode == other.grammar_mode
+            && self.features == other.features
+            && self.feature_density.to_bits() == other.feature_density.to_bits()
+            && self.minlight == other.minlight
+            && self.light_count == other.light_count
+    }
+}
+
+impl Eq for V3Config {}
+
+impl Default for V3Config {
+    fn default() -> Self {
+        Self::nominal_sparse()
+    }
+}
+
+fn validate_range(field: &'static str, value: u32, min: u32, max: u32) -> Result<(), V3Error> {
+    if value < min || value > max {
+        return Err(V3Error::ConfigOutOfRange {
+            field,
+            value: value as u64,
+            min: min as u64,
+            max: max as u64,
+        });
+    }
+    Ok(())
+}
+
+fn validate_quantum(field: &'static str, value: u32) -> Result<(), V3Error> {
+    if value % CONSTRUCTION_QUANTUM as u32 != 0 {
+        return Err(V3Error::ConfigNotQuantumAligned {
+            field,
+            value: value as u64,
+            quantum: CONSTRUCTION_QUANTUM as u64,
+        });
+    }
+    Ok(())
+}
+
+fn invalid<T>(field: &'static str, detail: impl Into<String>) -> Result<T, V3Error> {
+    Err(V3Error::ConfigInvalid {
+        field,
+        detail: detail.into(),
+    })
 }
 
 // ── Cardinal and 45° normal classification ────────────────────────────────

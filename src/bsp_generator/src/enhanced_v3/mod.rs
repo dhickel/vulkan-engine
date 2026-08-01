@@ -38,8 +38,11 @@ pub mod topology;
 
 pub use assembly::{Assembly, AssemblyBrush, BrushRole, Interface, ProtectedVolume, Support};
 pub use composition::{CompositionPlan, GrammarDescriptor};
-pub use config::{V3Config, V3Preset, CONSTRUCTION_QUANTUM, HEADROOM, ROUTE_WIDTH};
-pub use emission::{emit_map_text, texture_for_role};
+pub use config::{
+    ArchType, FeatureFlags, GrammarMode, V3Config, V3Preset, CONSTRUCTION_QUANTUM,
+    GRAMMAR_FAMILIES, HEADROOM, ROUTE_WIDTH,
+};
+pub use emission::{emit_map_text, emit_map_text_with_minlight, texture_for_role};
 pub use error::V3Error;
 pub use footprint::{build_footprints, Footprint, FootprintLayout};
 pub use geometry::{
@@ -56,7 +59,7 @@ pub use metadata::EnhancedV3Metadata;
 pub use pipeline::{run_pipeline, V3PipelineOutput};
 pub use reservation::{build_reservations, Reservation, ReservationSet};
 pub use rng::{tags, CandidateSelector, V3Seed, V3StageSeed};
-pub use topology::{build_topology, compute_reservations};
+pub use topology::{build_topology, compute_reservations, compute_reservations_with_config};
 
 // ── Public pipeline entry point ────────────────────────────────────────────
 

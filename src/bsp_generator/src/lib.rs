@@ -79,7 +79,7 @@ pub use enhanced::pipeline::{generate_enhanced, EnhancedMetadata};
 
 // ── Enhanced v3 public API ────────────────────────────────────────────────
 
-pub use enhanced_v3::config::{V3Config, V3Preset};
+pub use enhanced_v3::config::{ArchType, FeatureFlags, GrammarMode, V3Config, V3Preset};
 pub use enhanced_v3::error::V3Error;
 pub use enhanced_v3::generate_v3;
 pub use enhanced_v3::metadata::EnhancedV3Metadata;
