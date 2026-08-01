@@ -136,15 +136,16 @@ struct SourceBudget {
     brushes: u32,
     faces_ok: bool,
     entities_ok: bool,
-    brushes_ok: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CompiledBudget {
     bsp_faces: Option<u32>,
     bsp_entities: Option<u32>,
+    static_batches: u32,
     faces_ok: bool,
     entities_ok: bool,
+    static_batches_ok: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,6 +188,7 @@ struct LiveStartupResult {
 struct CompileOutput {
     bsp_bytes: Vec<u8>,
     lit_bytes: Vec<u8>,
+    static_batches: u32,
     success: bool,
     warnings: Vec<String>,
 }
@@ -222,6 +224,7 @@ fn compile_for_runtime(map_text: &str) -> Result<CompileOutput, String> {
         return Ok(CompileOutput {
             bsp_bytes: vec![],
             lit_bytes: vec![],
+            static_batches: 0,
             success: false,
             warnings: vec![format!(
                 "qbsp failed: {}",
@@ -270,9 +273,36 @@ fn compile_for_runtime(map_text: &str) -> Result<CompileOutput, String> {
         vec![]
     };
 
+    let palette_bytes = std::fs::read(&work_pal).map_err(|e| format!("read palette: {e}"))?;
+    let wad_bytes = std::fs::read(&work_wad).map_err(|e| format!("read WAD: {e}"))?;
+    let wad_archive = ("cc0_dungeon_v2.wad".to_string(), wad_bytes);
+    let world = bsp::BspLoader::load(
+        &bsp_bytes,
+        &bsp::LoadOptions {
+            strict: true,
+            palette: Some(palette_bytes.clone()),
+            lit_data: Some(lit_bytes.clone()),
+            wad_archives: vec![wad_archive.clone()],
+            source_identity: "enhanced-v3-runtime-evidence".to_string(),
+            ..Default::default()
+        },
+    )
+    .map_err(|report| format!("load compiled BSP for batch evidence: {report:?}"))?;
+    let extracted = bsp::extract::extract(bsp::BspExtractionRequest {
+        world,
+        palette: Some(bsp::resources::decode_palette(&palette_bytes)),
+        wad_archives: vec![wad_archive],
+        strict: true,
+        ..Default::default()
+    })
+    .map_err(|report| format!("extract compiled BSP for batch evidence: {report:?}"))?;
+    let static_batches = u32::try_from(extracted.render_batches.len())
+        .map_err(|_| "static batch count exceeds u32".to_string())?;
+
     Ok(CompileOutput {
         bsp_bytes,
         lit_bytes,
+        static_batches,
         success: true,
         warnings,
     })
@@ -459,7 +489,6 @@ fn runtime_budget_and_spatial_evidence() {
             brushes: source_brushes,
             faces_ok: source_faces < 10000,
             entities_ok: source_entities < 300,
-            brushes_ok: source_brushes < 500,
         };
 
         // Compile for BSP-level checks
@@ -471,8 +500,10 @@ fn runtime_budget_and_spatial_evidence() {
                     let cb = CompiledBudget {
                         bsp_faces,
                         bsp_entities,
+                        static_batches: co.static_batches,
                         faces_ok: bsp_faces.unwrap_or(0) < 10000,
                         entities_ok: bsp_entities.unwrap_or(0) < 300,
+                        static_batches_ok: co.static_batches < 500,
                     };
 
                     let spawn_solid = is_point_solid(
@@ -598,15 +629,14 @@ fn runtime_budget_and_spatial_evidence() {
             "{}: entity budget fail",
             entry.id
         );
-        assert!(
-            entry.source_budget.brushes_ok,
-            "{}: brush/batch budget fail",
-            entry.id
-        );
-
         if let Some(ref cb) = entry.compiled_budget {
             assert!(cb.faces_ok, "{}: compiled face budget fail", entry.id);
             assert!(cb.entities_ok, "{}: compiled entity budget fail", entry.id);
+            assert!(
+                cb.static_batches_ok,
+                "{}: static batch budget fail ({} >= 500)",
+                entry.id, cb.static_batches
+            );
         }
 
         // Spawn solid check is best-effort heuristic — log but don't fail
