@@ -316,12 +316,13 @@ impl M3Gui {
             FieldId::Stairs => self.config.stairs,
             id if Self::grammar_id(id).is_some() => {
                 let family = Self::grammar_id(id).unwrap();
-                self.config.grammar_families.is_empty()
-                    || self
-                        .config
-                        .grammar_families
-                        .iter()
-                        .any(|item| item == family)
+                self.config.features.enables_family(family)
+                    && (self.config.grammar_families.is_empty()
+                        || self
+                            .config
+                            .grammar_families
+                            .iter()
+                            .any(|item| item == family))
             }
             id if Self::feature_id(id).is_some() => {
                 self.config.features.contains(Self::feature_id(id).unwrap())
@@ -349,6 +350,12 @@ impl M3Gui {
     }
 
     fn set_grammar_enabled(&mut self, family: &str, enabled: bool) {
+        if enabled && !self.config.features.enables_family(family) {
+            self.status = Some(format!(
+                "Cannot enable '{family}': its required feature flag is disabled."
+            ));
+            return;
+        }
         // Empty is V3's all-family representation, so materialize all six
         // before changing one checkbox. This makes the default UI truthful.
         let mut selected: Vec<String> = if self.config.grammar_families.is_empty() {
@@ -482,6 +489,21 @@ impl M3Gui {
             FieldId::WallThickness => (CONSTRUCTION_QUANTUM as u64, CONSTRUCTION_QUANTUM as u64),
             _ => (0, 0),
         }
+    }
+
+    fn clear_optional_numeric(&mut self, id: FieldId) -> bool {
+        match id {
+            FieldId::Rooms => self.config.rooms = None,
+            FieldId::Corridors => self.config.corridors = None,
+            FieldId::Loops => self.config.loops = None,
+            FieldId::VerticalEdges => self.config.vertical_edges = None,
+            FieldId::RoomSpanMin => self.config.room_span_min = None,
+            FieldId::RoomSpanMax => self.config.room_span_max = None,
+            FieldId::LightCount => self.config.light_count = None,
+            _ => return false,
+        }
+        self.reconcile_draft();
+        true
     }
 
     fn set_numeric(&mut self, id: FieldId, value: u64) {
@@ -668,7 +690,15 @@ impl M3Gui {
             KeyCode::Space => self.toggle_selected(),
             KeyCode::Equal | KeyCode::NumpadAdd => self.adjust_selected(true),
             KeyCode::Minus | KeyCode::NumpadSubtract => self.adjust_selected(false),
-            _ => key_to_digit(key).map_or(GuiAction::None, |digit| self.begin_edit(digit)),
+            _ => {
+                if let Some(digit) = key_to_digit(key) {
+                    self.begin_edit(digit)
+                } else if key_to_decimal_point(key).is_some() {
+                    self.begin_decimal_edit()
+                } else {
+                    GuiAction::None
+                }
+            }
         }
     }
 
@@ -680,9 +710,6 @@ impl M3Gui {
             }
             KeyCode::Backspace => {
                 self.edit_buffer.pop();
-                if self.edit_buffer.is_empty() {
-                    self.editing_field = None;
-                }
                 GuiAction::None
             }
             KeyCode::Tab => {
@@ -693,6 +720,14 @@ impl M3Gui {
             _ => {
                 if let Some(digit) = key_to_digit(key) {
                     self.edit_buffer.push(digit);
+                } else if FIELDS[index].kind == FieldKind::F32
+                    && key_to_decimal_point(key).is_some()
+                    && !self.edit_buffer.contains('.')
+                {
+                    if self.edit_buffer.is_empty() {
+                        self.edit_buffer.push('0');
+                    }
+                    self.edit_buffer.push('.');
                 }
                 GuiAction::None
             }
@@ -709,10 +744,22 @@ impl M3Gui {
         GuiAction::None
     }
 
+    fn begin_decimal_edit(&mut self) -> GuiAction {
+        let field = self.selected();
+        if field.kind == FieldKind::F32 && field.editable {
+            self.editing_field = Some(self.selected_field);
+            self.edit_buffer = "0.".into();
+        }
+        GuiAction::None
+    }
+
     fn commit_edit(&mut self, index: usize) {
         let field = FIELDS[index];
         let attempted = self.edit_buffer.clone();
         let valid = match field.kind {
+            FieldKind::U64 | FieldKind::U32 if attempted.is_empty() => {
+                self.clear_optional_numeric(field.id)
+            }
             FieldKind::U64 | FieldKind::U32 => match attempted.parse::<u64>() {
                 Ok(value) => {
                     self.set_numeric(field.id, value);
@@ -1260,6 +1307,13 @@ fn random_u64() -> Result<u64, getrandom::Error> {
     getrandom::getrandom(&mut bytes)?;
     Ok(u64::from_le_bytes(bytes))
 }
+fn key_to_decimal_point(key: KeyCode) -> Option<char> {
+    match key {
+        KeyCode::Period | KeyCode::NumpadDecimal => Some('.'),
+        _ => None,
+    }
+}
+
 fn key_to_digit(key: KeyCode) -> Option<char> {
     Some(match key {
         KeyCode::Digit0 | KeyCode::Numpad0 => '0',
@@ -1325,6 +1379,24 @@ mod tests {
     }
 
     #[test]
+    fn disabled_features_hide_their_default_grammar_and_reject_reenabling_it() {
+        let mut gui = M3Gui::new();
+        gui.selected_field = field(FieldId::Blades);
+        gui.handle_keyboard_input(KeyCode::Space, press());
+        assert!(!gui.bool_value(FieldId::PortalChamber));
+
+        gui.selected_field = field(FieldId::PortalChamber);
+        gui.handle_keyboard_input(KeyCode::Space, press());
+        assert!(gui.config.grammar_families.is_empty());
+        assert!(gui.config.is_valid());
+        assert!(gui
+            .status
+            .as_deref()
+            .unwrap()
+            .contains("required feature flag is disabled"));
+    }
+
+    #[test]
     fn escape_always_closes_while_editing() {
         let mut gui = M3Gui::new();
         gui.selected_field = field(FieldId::Seed);
@@ -1347,6 +1419,20 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_arrows_and_tab_group_navigation_skip_fixed_fields() {
+        let mut gui = M3Gui::new();
+        gui.selected_field = field(FieldId::Stairs);
+        gui.handle_keyboard_input(KeyCode::ArrowDown, press());
+        assert_eq!(gui.selected().id, FieldId::RoomSpanMin);
+        gui.handle_keyboard_input(KeyCode::Tab, press());
+        assert_eq!(gui.selected().section, Section::Grammar);
+        gui.handle_keyboard_input(KeyCode::ShiftLeft, press());
+        gui.handle_keyboard_input(KeyCode::Tab, press());
+        assert_eq!(gui.selected().section, Section::Geometry);
+        gui.handle_keyboard_input(KeyCode::ShiftLeft, Action::Release);
+    }
+
+    #[test]
     fn invalid_numeric_parse_sets_actionable_status_without_discarding_value() {
         let mut gui = M3Gui::new();
         gui.selected_field = field(FieldId::Seed);
@@ -1360,6 +1446,34 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("Invalid Seed value"));
+    }
+
+    #[test]
+    fn decimal_editing_accepts_top_row_and_numpad_decimal_points() {
+        let mut gui = M3Gui::new();
+        gui.selected_field = field(FieldId::Density);
+        gui.handle_keyboard_input(KeyCode::Period, press());
+        gui.handle_keyboard_input(KeyCode::Digit7, press());
+        gui.handle_keyboard_input(KeyCode::Enter, press());
+        assert_eq!(gui.config.feature_density, 0.7);
+
+        gui.handle_keyboard_input(KeyCode::NumpadDecimal, press());
+        gui.handle_keyboard_input(KeyCode::Numpad2, press());
+        gui.handle_keyboard_input(KeyCode::NumpadEnter, press());
+        assert_eq!(gui.config.feature_density, 0.2);
+    }
+
+    #[test]
+    fn empty_optional_numeric_edit_restores_none_semantics() {
+        let mut gui = M3Gui::new();
+        gui.config.rooms = Some(20);
+        gui.selected_field = field(FieldId::Rooms);
+        gui.handle_keyboard_input(KeyCode::Enter, press());
+        gui.handle_keyboard_input(KeyCode::Backspace, press());
+        assert_eq!(gui.editing_field, Some(gui.selected_field));
+        gui.handle_keyboard_input(KeyCode::Enter, press());
+        assert_eq!(gui.config.rooms, None);
+        assert!(gui.config.is_valid());
     }
 
     #[test]
@@ -1498,6 +1612,24 @@ mod tests {
         ] {
             assert!(rendered.contains(label), "missing {label}");
         }
+    }
+
+    #[test]
+    fn imgui_overlay_emits_non_empty_draw_data_without_a_gpu_context() {
+        let mut gui = M3Gui::new();
+        let mut imgui = imgui::Context::create();
+        // A renderer normally builds the atlas before the first frame; this
+        // CPU-only smoke provides the same prerequisite without Vulkan.
+        let _ = imgui.fonts().build_rgba32_texture();
+        imgui.io_mut().display_size = [1280.0, 720.0];
+        imgui.io_mut().delta_time = 1.0 / 60.0;
+        {
+            let ui = imgui.frame();
+            gui.render_imgui(ui, &renderer::prelude::DebugUiFrameContext::default());
+        }
+        let draw_data = imgui.render();
+        assert!(draw_data.total_vtx_count > 0);
+        assert!(draw_data.total_idx_count > 0);
     }
 
     #[test]

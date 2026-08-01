@@ -461,7 +461,7 @@ These issues block the beta gate and must be resolved before sign-off:
 - **Dynamic entity transforms**: Inline brush model transforms update through `BspMountState` per-batch transform maps. Full entity-to-scene-node mapping for external models is partially implemented.
 - **Physics world colliders**: World trimesh collision from clipnodes is pending; point-contents and hull traces are functional.
 - **Open arches only**: Doors (`func_door`, `func_button`, `func_plat`) are excluded from generator output. All generated room connections use open arches with no moving geometry or trigger wiring.
-- **Single-layer Cartesian only**: No ramps, stairs, multi-floor, diagonal rooms, or curved corridors.
+- **Legacy v1 generator only**: Legacy output is single-layer Cartesian with no ramps, stairs, multi-floor, diagonal rooms, or curved corridors. EnhancedV3 M3 generation is separately two-layer with its frozen stair contract; diagonal portals and concave rooms remain deferred.
 
 ## See Also
 

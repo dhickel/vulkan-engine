@@ -162,7 +162,7 @@ The following values define the procedural generation domain for M1 and M2 and a
 | minimum room outer span | ≥ 112 Quake units (7 quanta) |
 | clear route width (corridors, passages, portal throats, junction centers) | ≥ 64 Quake units (4 quanta) |
 | clear headroom (corridors and portal throats) | ≥ 80 Quake units (5 quanta) |
-| route type | level (no ramps, no stairs for beta) |
+| route type | Legacy v1: level (no ramps or stairs). Enhanced v2/v3: frozen two-layer stair arrangement in `bsp-dungeon-generation.md` §§17/20. |
 | room connections | open arches (no doors for beta) |
 | stacked XY spaces | prohibited (no room directly above another) |
 
@@ -506,3 +506,16 @@ evidence quality.
 | Headless renderer capture | PASS | Strict production Sparse/Rich BSP2 artifacts captured through engine-owned draw capture; fixed and targeted grammar-feature evidence is indexed at `.internal-dev/captures/enhanced-v3-production/manifest.md` |
 | Live-WSI lifecycle | NOT_RUN | Requires live WSI environment |
 | Reference-renderer calibration | NOT_RUN | Requires GPU + vkQuake |
+
+### 17.7 In-Game Explorer GUI Acceptance
+
+| criterion | status | basis |
+|-----------|--------|-------|
+| Complete public `V3Config` inventory | PASS | GUI/config round-trip and optional-override restoration tests cover every public field; fixed wall thickness is disabled rather than invented as a knob |
+| Keyboard interaction model | PASS | Focused library tests cover navigation, group cycling, top-row/numpad integer and decimal editing, optional reset, toggles, actions, release/repeat suppression, and Escape-always-close |
+| Mouse interaction model | PASS | Deterministic raw-hitbox tests cover exact dropdown selection, steppers, checkboxes, action buttons, viewport coordinates, bounded scrolling, and a non-GPU ImGui draw-data smoke |
+| Dual-input gameplay isolation | PASS (source + focused tests) | Production routing helpers and binary tests prove every keyboard, pointer, wheel, and raw-mouse class is blocked from gameplay while either menu is open; opening queues releases and gates FPS updates |
+| Full regeneration transaction | PASS (existing pipeline + integration tests) | GUI actions snapshot a validated full config into the existing background worker and retain the established package, prepare/validate/commit, prior-world preservation, and retirement handoff paths |
+| Windowed startup smoke | PASS (task-local) | Timeout-bound `--m3-generate` runs reached swapchain creation, BSP upload, and repeated frame recording without fatal errors |
+| Automated F1/F2 interaction and click-through proof | NOT_RUN | The task-local live smoke did not inject menu hotkeys or pointer actions; source and focused tests do not substitute for an automated interactive run |
+| Resize/minimize/surface-loss lifecycle | NOT_RUN | Formal WSI lifecycle evidence remains separate and unexecuted |

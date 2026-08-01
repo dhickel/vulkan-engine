@@ -542,13 +542,13 @@ On scene load with BSP source reference:
 | contract | status | evidence basis | blocker | reviewer |
 |----------|--------|---------------|---------|----------|
 | Crate dependency graph (§2) | PASS (Phase 09) | Cross-checked against workspace Cargo.toml files: `bsp`→`glam` only; `bsp_runtime`→`bsp`+`renderer`(`bsp` feature)+`engine_events` plus external `glam`/`log`/`serde`/`serde_json`; `renderer` optionally depends on `bsp` behind `renderer/bsp`; no `bsp_runtime`→`physics`, `renderer`→`bsp_runtime`, or `renderer`→`physics` dependency. | none | dhickel (2026-07-23) |
-| Resource ownership enumeration (§3) | PARTIAL (Phase A EnhancedV3, 2025-07-24) | `PreparedBspMount` is move-only and Scene detachment is wired. Every `DetachedBspMount` is now queued in `BspCoordinator::pending_retirements` and never silently dropped. The coordinator exposes `drain_pending_retirements()` / `requeue_retirement()` for explicit caller handoff to `Renderer::retire_bsp_mount`. Renderer fence-aware queue acceptance itself is still a caller responsibility; the coordinator does not own the GPU retirement queue. | GitHub #59 (coordinator handoff resolved); renderer retirement queue ownership remains external | dhickel (2025-07-24) |
-| Prepare/validate/commit/rollback flow (§4) | PARTIAL (Phase A EnhancedV3, 2025-07-24) | Move-only candidate/Scene transfer, stale-completion detachment, and pre-retirement candidate work are repaired and tested. Rollback, unload, replacement, stale upload, and teardown now deposit every `DetachedBspMount` into the coordinator's pending queue rather than dropping it. Committed bridge tokens are still consumed without an active teardown receipt. | GitHub #60 (bridge active-lifecycle boundaries still required); coordinator detachment handoff resolved | dhickel (2025-07-24) |
+| Resource ownership enumeration (§3) | PARTIAL (Phase A EnhancedV3, 2026-07-24) | `PreparedBspMount` is move-only and Scene detachment is wired. Every `DetachedBspMount` is now queued in `BspCoordinator::pending_retirements` and never silently dropped. The coordinator exposes `drain_pending_retirements()` / `requeue_retirement()` for explicit caller handoff to `Renderer::retire_bsp_mount`. Renderer fence-aware queue acceptance itself is still a caller responsibility; the coordinator does not own the GPU retirement queue. | GitHub #59 (coordinator handoff resolved); renderer retirement queue ownership remains external | dhickel (2026-07-24) |
+| Prepare/validate/commit/rollback flow (§4) | PARTIAL (Phase A EnhancedV3, 2026-07-24) | Move-only candidate/Scene transfer, stale-completion detachment, and pre-retirement candidate work are repaired and tested. Rollback, unload, replacement, stale upload, and teardown now deposit every `DetachedBspMount` into the coordinator's pending queue rather than dropping it. Committed bridge tokens are still consumed without an active teardown receipt. | GitHub #60 (bridge active-lifecycle boundaries still required); coordinator detachment handoff resolved | dhickel (2026-07-24) |
 | Generation token model (§5) | PASS (Phase 05) | `u64` monotonic counter; incremented on each `prepare()`; checked on `validate()` and `commit()`; `StaleGeneration` error on mismatch; newer prepare invalidates previous candidate | none | dhickel (2026-07-23) |
 | App bridge hooks (§6) | PASS (Phase 05) | `AppBridge` trait with `prepare`/`validate`/`commit`/`rollback` methods; `BridgeAggregator` manages multiple bridges; bridge commit panics → coordinator poisoned | none | dhickel (2026-07-23) |
 | Poisoning behavior (§6.3) | PASS (Phase 05) | `BspCoordinator::is_poisoned()` gates `prepare`/`validate`/`commit`/`rollback`; `teardown()` bypasses poison check (terminal cleanup). 10 lifecycle fault tests pass. | none | dhickel (2026-07-23) |
 | Cache identity components (§7) | PASS (Phase 07) | `CacheIdentity` computes SHA-256 from 10 components; stored in source-link; verified on restore | none | dhickel (2026-07-23) |
-| Unload/reload/reimport semantics (§8) | PARTIAL (Phase A EnhancedV3, 2025-07-24) | Scene/source-link references are detached and stale candidates do not mutate the active mount. Detached mounts are queued for explicit handoff rather than silently dropped. No generic active bridge teardown runs on unload/replacement. | GitHub #60 (bridge lifecycle revisions still required); coordinator detachment handoff resolved | dhickel (2025-07-24) |
+| Unload/reload/reimport semantics (§8) | PARTIAL (Phase A EnhancedV3, 2026-07-24) | Scene/source-link references are detached and stale candidates do not mutate the active mount. Detached mounts are queued for explicit handoff rather than silently dropped. No generic active bridge teardown runs on unload/replacement. | GitHub #60 (bridge lifecycle revisions still required); coordinator detachment handoff resolved | dhickel (2026-07-24) |
 | Source-link persistence (§9, §11 frozen) | PASS (Phase 08) | Source reference not expanded copy; fingerprint+ordinal identity; `BspPersistenceEnvelope` schema V1; 21 persistence tests + 9 app persistence tests pass | none | dhickel (2026-07-23) |
 | Versioned persistence schema (§11 frozen) | PASS (Phase 08) | Schema version enum with `from_u32`; banned fields enforced; `MutableBehaviorState` stores door/button/platform/trigger state, light styles, timers, external model overrides | none | dhickel (2026-07-23) |
 | Lock ordering constraints (§10) | PASS (Phase 05) | Prepare holds no lock across I/O; commit holds `SceneWorld` lock briefly for publication only; no reentrancy from bridge hooks | deadlock analysis pending | dhickel (2026-07-23) |
@@ -708,3 +708,24 @@ coordinator-side queue and drain API.
 4. Queue removal is transactional with respect to lock acquisition: every cache
    and allocator lock needed for destruction is acquired before a closure leaves
    renderer ownership.
+
+## 15. Windowed EnhancedV3 Regeneration Ownership
+
+The in-game M3 GUI does not introduce a third transaction domain. The app owns
+the mutable draft, menu mode, input guard, background-worker request queue, and
+latest-request/close-intent state. The generator and compiler never run on the
+event thread.
+
+A GUI request first uses filesystem artifact-set publication (Domain B): the
+complete `GenConfig` snapshot is validated as `V3Config`, generated through the
+EnhancedV3 pipeline, compiled by the pinned ericw profile, and published to a
+request-unique package directory. Only the latest successful result may proceed.
+
+The event-loop owner then uses runtime mount publication (Domain A): strict
+package authorization, coordinator prepare, hidden renderer mount preparation,
+scene validation, commit, and detached-mount handoff. A stale worker result,
+compiler/package failure, authorization failure, renderer preparation failure,
+or coordinator validation failure leaves the active BSP and app state unchanged.
+`Apply & Close` is presentation intent keyed to the exact request ID; it is
+fulfilled only after Domain A commit succeeds and has no authority to publish a
+partial candidate.

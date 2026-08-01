@@ -94,7 +94,7 @@ Boundary configurations (§10.2) use the same nominal XY and Z values for their 
 | clear route width (corridors, passages, portal throats, junction centers) | ≥ 64 Quake units (4 quanta) |
 | clear headroom (corridors and portal throats) | ≥ 80 Quake units (5 quanta) |
 | public `Corridor.height` | exactly 80 Quake units; non-80 public input is rejected (owner-approved source: `owner-sprint-20260726`; implementation deferred to Phase 09) |
-| route type | level (no ramps, no stairs for beta) |
+| route type | Legacy v1: level (no ramps or stairs). Enhanced v2/v3: frozen two-layer stair arrangement (§17/§20). |
 | room connections | open arches only (no doors for beta — see §6) |
 | stacked XY spaces | prohibited (no room directly above another) |
 | room shape | axis-aligned rectangular rooms (no diagonal, polygonal, or curved rooms) |
@@ -811,7 +811,46 @@ outside `src/bsp_generator/src/enhanced_v3/` and `src/bsp_generator/src/enhanced
 | Production acceptance | **PASS** | Preset identity minima, exact 12-entry source matrix, diagonal/pointed/stair/grammar evidence, budgets, and seed variation — all validated |
 | Headless renderer capture | **PASS** | Production Sparse/Rich BSP2 artifacts rendered through strict engine-owned headless draw capture on RADV; fixed spawn/corridor/junction captures and targeted twisted-pillar, fractured-vault, and terraced-shrine captures are recorded in `.internal-dev/captures/enhanced-v3-production/manifest.md` |
 
-### 20.17 Re-Review Triggers
+### 20.17 Windowed In-Game Explorer GUI
+
+The windowed `bsp_beta --m3-generate` path provides one in-game EnhancedV3
+configuration overlay with two mutually exclusive interaction modes:
+
+- **F1 Keyboard mode**: arrows navigate, Enter edits or activates, Tab and
+  Shift+Tab move between groups, Space toggles checkboxes, `+`/`-` adjust
+  numeric fields, decimal keys edit numbers, and Escape closes. Keyboard input
+  is consumed by the menu and every mouse interaction is discarded.
+- **F2 Mouse mode**: pointer clicks select fields, exact dropdown options,
+  steppers, checkboxes, and actions; the wheel scrolls bounded content. Mouse
+  input is consumed by the menu and keyboard input is discarded except Escape
+  and the globally consumed F1/F2 mode controls.
+- **No menu**: the normal app-owned gameplay input route remains authoritative.
+  Opening either menu queues releases for gameplay bindings and pauses FPS
+  controller updates; closing restores gameplay without synthesizing presses.
+
+The overlay exposes every public `V3Config` field: seed, preset, XY extent,
+rooms, corridors, loops, vertical edges, chamfer, arch type, stairs, room-span
+bounds, grammar allowlist and mode, all five feature flags, feature density,
+minlight, and optional light count. The fixed 16-unit wall thickness is shown
+as a disabled structural invariant and is not represented as a fabricated
+configuration field.
+
+`Generate` snapshots the complete validated draft and leaves the menu open.
+`Apply & Close` closes only after its matching latest request successfully
+publishes. Work remains off the event thread and follows the existing pipeline:
+EnhancedV3 generation and `.map` staging, pinned ericw compilation and atomic
+package publication, strict authorization, hidden renderer preparation,
+coordinator validation/commit, and detached-mount retirement handoff. A failed
+or stale request never replaces the active world. Successful generation shows
+a two-second overlay or noncapturing title indication.
+
+Source-level GUI, routing, pipeline, and binary tests pass. Timeout-bound
+windowed startup proves startup, swapchain creation, BSP upload, and frame
+recording in the task environment; automated F1/F2 interaction, resize,
+minimize/restore, and surface-loss lifecycle evidence remain unexecuted and
+must not be inferred from that smoke.
+
+### 20.18 Re-Review Triggers
 
 Any change to the following requires owner re-review:
 
