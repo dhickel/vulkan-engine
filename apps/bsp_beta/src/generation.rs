@@ -80,7 +80,27 @@ pub fn discover_ericw_tools(
 pub fn tools_available(dir: &Path) -> bool {
     ["qbsp", "vis", "light"]
         .into_iter()
-        .all(|tool| dir.join(tool).is_file())
+        .map(|tool| dir.join(tool))
+        .all(|path| is_executable_file(&path))
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        return std::fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false);
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 /// Create a process-unique root for packages created by this explorer run.
@@ -387,6 +407,25 @@ mod tests {
         assert_eq!(
             discover_ericw_tools(Some(path)).unwrap_err(),
             ToolDiscoveryError::ExplicitInvalid(path.to_path_buf())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tool_discovery_rejects_non_executable_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        for tool in ["qbsp", "vis", "light"] {
+            let path = root.path().join(tool);
+            std::fs::write(&path, "not executable").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        assert!(!tools_available(root.path()));
+        assert_eq!(
+            discover_ericw_tools(Some(root.path())).unwrap_err(),
+            ToolDiscoveryError::ExplicitInvalid(root.path().to_path_buf())
         );
     }
 
