@@ -427,7 +427,7 @@ public fields are explorer overrides and must pass `validate()` after mutation.
 | `chamfer` | `true` | boolean |
 | `arch_type` | `Pointed` | `None`, `Pointed`, `Segmented` |
 | `stairs` | `true` | boolean |
-| `room_span_min` / `room_span_max` | 112 / 256 | quantum-aligned valid span |
+| `room_span_min` / `room_span_max` | 112 / 448 | quantum-aligned valid span |
 | grammar families / mode | all / `Mixed` | family allowlist; `Single` or `Mixed` |
 | feature flags / density | all / 0.5 | category flags; finite 0.0–1.0 |
 | `minlight` | 16 | 0–255 |
@@ -444,6 +444,45 @@ public fields are explorer overrides and must pass `validate()` after mutation.
 The measured default-extent seed matrix (0, 42, 99, 255) emits 1,856–1,883
 Sparse, 3,275–3,310 Moderate, and 4,725–4,782 Rich source faces. The preset
 and M2 ceilings remain 3,000/5,000/8,000 and 10,000 respectively.
+
+### Chamfer / Octagon Policy
+
+When chamfers are enabled (`chamfer: true`, the default), rooms preferentially
+receive multi-corner chamfer patterns rather than pure rectangular footprints.
+Full octagonal rooms occur in ordinary output — not as rare specials. The
+chamfer cut depth scales with the shorter room axis:
+
+| shorter axis | chamfer depth |
+|-------------|---------------|
+| 112–191     | 32 units      |
+| 192–255     | 48 units      |
+| ≥ 256       | 64 units      |
+
+The `--no-chamfer` flag or `chamfer: false` in config produces pure axis-aligned
+rectangular rooms only.
+
+### Visible Pointed Arch Crowns
+
+Every Pointed portal (`arch_type: Pointed`, the default) retains a 64×80
+clear core at the throat for gameplay passage. Above the core, a stepped
+crown rises at least 48 units high in 16-unit bands, using `bs_accent` trim
+texture. The crown is a real visible geometric feature carved into the wall
+brushwork — not a decal, not an entity, not a flat texture trick. The stepped
+bands create a recognizably pointed silhouette when viewed from either side of
+the portal, and the `bs_accent` trim visually separates the crown from the
+surrounding `bs_wall` surface.
+
+### Room-Scaled Features
+
+Feature brushes scale with the host room's shorter axis to maintain visual
+proportion and gameplay readability:
+
+- **Pillars**: 16×16 in rooms with shorter axis < 192; 32×32 in rooms with
+  shorter axis ≥ 192.
+- **Buttresses**: use two-quantum thickness (32 units) regardless of room
+  size, projecting from walls at the full room height.
+- **Blade walls**: span the full clear room height (floor to ceiling) rather
+  than a partial divider, creating tall narrow passage-splitting geometry.
 
 ### Deferred Capabilities
 

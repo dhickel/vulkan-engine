@@ -153,6 +153,25 @@ Generation options are `--seed <u64>`, `--preset sparse|moderate|rich`,
 `--chamfer`/`--no-chamfer`, `--arch-type none|pointed|segmented`, and
 `--grammar-families <csv|all>`. They are rejected without `--m3-generate`.
 
+#### EnhancedV3 Visual Richness
+
+The EnhancedV3 profile produces visually richer dungeons than previous
+generations through several coordinated improvements:
+
+- **Extended room span**: the default `room_span_max` is 448 units (up from
+  256 in earlier profiles), allowing larger chambers and more dramatic spatial
+  variation.
+- **Chamfer/octagon policy**: with chamfers enabled (default), rooms
+  preferentially receive multi-corner chamfer patterns and full octagons
+  appear in ordinary output. Chamfer depth scales with the shorter room axis
+  (32/48/64 units).
+- **Visible pointed arch crowns**: every Pointed portal retains a 64×80
+  clear core with a stepped crown at least 48 units high in 16-unit bands
+  using `bs_accent` trim — real geometric brushwork, not texture trickery.
+- **Room-scaled features**: pillars scale to 32×32 in rooms with shorter
+  axis ≥ 192, buttresses use two-quantum (32-unit) thickness, and blade
+  walls span the full clear room height.
+
 #### In-Game GUI (F1 / F2)
 
 In a live window (`--m3-generate` without `--headless` or `--mcp`), press

@@ -1,6 +1,6 @@
 {
   "schema": "enhanced-v3-corpus/v1",
-  "frozen_at": "1785506435",
+  "frozen_at": "1785602939",
   "generator": "bsp_generator/enhanced_v3",
   "entries": [
     {
@@ -8,396 +8,424 @@
       "seed": 0,
       "preset": "sparse",
       "extent": 2048,
-      "map_sha256": "47cbb65243b5bfa594a22e77cc0587b0020fe1ee9d78d2891555b1c70ae28751",
-      "metadata_sha256": "2863df6c773c8d86accb1732cae9500590eb828659a2dce5882ea0545d493286",
-      "bsp_sha256": "6933ebd543dd47d3b972d5a0bcd499144debf54cabe4307acf58cc03468e2812",
-      "room_count": 3,
-      "actual_faces": 108,
-      "actual_entities": 4,
-      "actual_brushes": 18,
+      "map_sha256": "2f61feb27abe698e5b07dbbd49d51e505c025f77bb6d83df766ebd6f9ec9ec4a",
+      "metadata_sha256": "4834630c434110f808f930a7237473079a199d6605ac4ba0ee50fe6199c2df57",
+      "bsp_sha256": "86b785af2d712d8b07636060f624db2f955b66cc96d138531197fa03321cdee9",
+      "lit_sha256": "f4b41a5c2990710213bc891776c21e1c1cabc540c22b94266d319f81293aa784",
+      "room_count": 12,
+      "actual_faces": 1885,
+      "actual_entities": 14,
+      "actual_brushes": 310,
       "spawn_origin": [
-        1024,
-        544,
-        56
+        224,
+        128,
+        48
       ],
-      "light_count": 3,
+      "light_count": 12,
       "bounds": [
-        944,
-        464,
         0,
-        1280,
-        752,
+        0,
+        0,
+        1472,
+        2000,
         368
       ],
       "has_upper_layer": true,
       "grammar_families": [
         "portal-chamber"
       ],
-      "compiled_faces": 165
+      "compiled_faces": 3987
     },
     {
-      "id": "v3-sparse-seed-1",
-      "seed": 1,
+      "id": "v3-sparse-seed-42",
+      "seed": 42,
       "preset": "sparse",
       "extent": 2048,
-      "map_sha256": "47cbb65243b5bfa594a22e77cc0587b0020fe1ee9d78d2891555b1c70ae28751",
-      "metadata_sha256": "0adde0ac05de7138c7c38c2ad84c5bbfd52b6a70813bc76cd4f20ab02f55de50",
-      "bsp_sha256": "6933ebd543dd47d3b972d5a0bcd499144debf54cabe4307acf58cc03468e2812",
-      "room_count": 3,
-      "actual_faces": 108,
-      "actual_entities": 4,
-      "actual_brushes": 18,
+      "map_sha256": "ea00d65b7a2d2bbe408a94479245af8d992a47760e3b2f27a12a200f3ef40ec8",
+      "metadata_sha256": "8e89b0bdca12b0d098b147ceaece6ea5d50f49684abf6bff202386a63011f25e",
+      "bsp_sha256": "fb7ad85f8053b60c2741b8d541cd20192620413829666e7a7fed6412c52fce9b",
+      "lit_sha256": "b4adad4d63461a142ac6b6a5d11bb87d0ebefab15fea033d69b3be6959983012",
+      "room_count": 12,
+      "actual_faces": 1920,
+      "actual_entities": 14,
+      "actual_brushes": 315,
       "spawn_origin": [
-        1024,
-        544,
-        56
+        224,
+        128,
+        48
       ],
-      "light_count": 3,
+      "light_count": 12,
       "bounds": [
-        944,
-        464,
         0,
-        1280,
-        752,
+        0,
+        0,
+        1472,
+        2000,
         368
       ],
       "has_upper_layer": true,
       "grammar_families": [
         "portal-chamber"
       ],
-      "compiled_faces": 165
+      "compiled_faces": 4100
     },
     {
-      "id": "v3-sparse-seed-2",
-      "seed": 2,
+      "id": "v3-sparse-seed-99",
+      "seed": 99,
       "preset": "sparse",
       "extent": 2048,
-      "map_sha256": "47cbb65243b5bfa594a22e77cc0587b0020fe1ee9d78d2891555b1c70ae28751",
-      "metadata_sha256": "5524a41be80490fd6ef4af40c9b1ca2dfbdc928034b1f026074586c202d380f6",
-      "bsp_sha256": "6933ebd543dd47d3b972d5a0bcd499144debf54cabe4307acf58cc03468e2812",
-      "room_count": 3,
-      "actual_faces": 108,
-      "actual_entities": 4,
-      "actual_brushes": 18,
+      "map_sha256": "6bcbd3074dd89c0d5dad339d920c017188d935d6b477cc16dc59dfa56b67b9c0",
+      "metadata_sha256": "b640dbcff73a06b05fc6c47fb7d984279442bd715bf73050925ab61fa02c91c2",
+      "bsp_sha256": "f74864d2df9e6d9b4eda8dac15fd98bb64da2b40c9b14a81fffd3340d350fa10",
+      "lit_sha256": "0dcbab5fe189353d6c717af814f903520f1830b9b346cad388423563c2d8f1a2",
+      "room_count": 12,
+      "actual_faces": 1919,
+      "actual_entities": 14,
+      "actual_brushes": 314,
       "spawn_origin": [
-        1024,
-        544,
-        56
+        1248,
+        704,
+        48
       ],
-      "light_count": 3,
+      "light_count": 12,
       "bounds": [
-        944,
-        464,
         0,
-        1280,
-        752,
+        0,
+        0,
+        1472,
+        2000,
         368
       ],
       "has_upper_layer": true,
       "grammar_families": [
         "portal-chamber"
       ],
-      "compiled_faces": 165
+      "compiled_faces": 4219
     },
     {
-      "id": "v3-sparse-seed-3",
-      "seed": 3,
+      "id": "v3-sparse-seed-255",
+      "seed": 255,
       "preset": "sparse",
       "extent": 2048,
-      "map_sha256": "47cbb65243b5bfa594a22e77cc0587b0020fe1ee9d78d2891555b1c70ae28751",
-      "metadata_sha256": "61808ea18b8bc4325246fb70c759ada65ccab36596457a5869ed56fe4b9fca36",
-      "bsp_sha256": "6933ebd543dd47d3b972d5a0bcd499144debf54cabe4307acf58cc03468e2812",
-      "room_count": 3,
-      "actual_faces": 108,
-      "actual_entities": 4,
-      "actual_brushes": 18,
+      "map_sha256": "bb56a914a13b0d58b484cd4be3d57574e8cd21743f28d13ab1b2cd81b0f9cdfd",
+      "metadata_sha256": "8e1f0614a24759226e1731301ffc2a2a244b89f8b7d97511a9a1656e747b177c",
+      "bsp_sha256": "169be215cc0e9aed16ac2dbcb6e1cebbd90a028bbea6de302c2793c86f27bd2f",
+      "lit_sha256": "6aac50dcde3534dde566f14dabbe0b4d6d077e94924719347a93896803762e22",
+      "room_count": 12,
+      "actual_faces": 1882,
+      "actual_entities": 14,
+      "actual_brushes": 309,
       "spawn_origin": [
-        1024,
-        544,
-        56
+        224,
+        416,
+        48
       ],
-      "light_count": 3,
+      "light_count": 12,
       "bounds": [
-        944,
+        0,
+        0,
+        0,
+        1424,
+        1968,
+        368
+      ],
+      "has_upper_layer": true,
+      "grammar_families": [
+        "portal-chamber"
+      ],
+      "compiled_faces": 3491
+    },
+    {
+      "id": "v3-moderate-seed-0",
+      "seed": 0,
+      "preset": "moderate",
+      "extent": 2048,
+      "map_sha256": "a210e863be58f358c0f9be3659c29ca2b434a5d19ea7a383e1d964ab68811199",
+      "metadata_sha256": "8545af5609654450d210ea7dc04424f57a943f54ef70114a370db6f3b14f3189",
+      "bsp_sha256": "e4d535bda0147ce9b799fbc531755b026f0d0f4e9eca6aad4a8aa6a67ede65ba",
+      "lit_sha256": "9332ca63ebe828871005919b454f71bc242e9b0f00a34c0c13f28201ccdd86e3",
+      "room_count": 20,
+      "actual_faces": 3330,
+      "actual_entities": 22,
+      "actual_brushes": 550,
+      "spawn_origin": [
+        224,
+        80,
+        48
+      ],
+      "light_count": 20,
+      "bounds": [
+        0,
+        0,
+        0,
+        1472,
+        2016,
+        368
+      ],
+      "has_upper_layer": true,
+      "grammar_families": [
+        "buttressed-hall",
+        "column-grove",
+        "portal-chamber"
+      ],
+      "compiled_faces": 5625
+    },
+    {
+      "id": "v3-moderate-seed-42",
+      "seed": 42,
+      "preset": "moderate",
+      "extent": 2048,
+      "map_sha256": "3dba4256903528f1b7671d589b0737370ed81fbabec50c85b03dd4d47f140c34",
+      "metadata_sha256": "5c3854c00dec07beeb61de713027dd7959034f9790da54a71ff44413d7031799",
+      "bsp_sha256": "10d4a3b9288be326ae706a6d1ed1029b9fcbce56fa0a4bf1ef54be9718daf16f",
+      "lit_sha256": "1f47515ebfe7e77714200a5daeffec404c84b8c748fc7f403b38be0a590a6be3",
+      "room_count": 20,
+      "actual_faces": 3315,
+      "actual_entities": 22,
+      "actual_brushes": 547,
+      "spawn_origin": [
+        224,
+        80,
+        48
+      ],
+      "light_count": 20,
+      "bounds": [
+        0,
+        0,
+        0,
+        1472,
+        2016,
+        368
+      ],
+      "has_upper_layer": true,
+      "grammar_families": [
+        "buttressed-hall",
+        "column-grove",
+        "portal-chamber"
+      ],
+      "compiled_faces": 5996
+    },
+    {
+      "id": "v3-moderate-seed-99",
+      "seed": 99,
+      "preset": "moderate",
+      "extent": 2048,
+      "map_sha256": "3054d5cda49393e10cb7bcd2382e4b4151901da1d99ced06bf5169e88d9b5efb",
+      "metadata_sha256": "886110e2c8c3a42a31a6e5df265a62dea8d3265c969c81a2bc166483c2ad6498",
+      "bsp_sha256": "ed8d8143b2acd3c3099dca9bfc8507722be833f7a9bca8ee3a986e4def45b17f",
+      "lit_sha256": "178bca0be54581876ce52a98fbb33d40d4c69c229eb6aea6e0adf86c6cfb4d95",
+      "room_count": 20,
+      "actual_faces": 3286,
+      "actual_entities": 22,
+      "actual_brushes": 541,
+      "spawn_origin": [
+        224,
+        80,
+        48
+      ],
+      "light_count": 20,
+      "bounds": [
+        0,
+        0,
+        0,
+        1472,
+        2016,
+        368
+      ],
+      "has_upper_layer": true,
+      "grammar_families": [
+        "buttressed-hall",
+        "column-grove",
+        "portal-chamber"
+      ],
+      "compiled_faces": 5842
+    },
+    {
+      "id": "v3-moderate-seed-255",
+      "seed": 255,
+      "preset": "moderate",
+      "extent": 2048,
+      "map_sha256": "27344f2467a417924078390286e550817fed8a88d02050a52a3ddb2ce6707ee8",
+      "metadata_sha256": "03f44491ac366b23531262c7ceeab5a07e00272a16392711a12ee2d91c116d32",
+      "bsp_sha256": "bfe6a6f3e508c1c2837d163288b8f1c114cd23f1a018d4c9215825985e9e7a9a",
+      "lit_sha256": "6c9f4a725a475275b70eed2f59f7b866c6196980113d244289027d534de591db",
+      "room_count": 20,
+      "actual_faces": 3292,
+      "actual_entities": 22,
+      "actual_brushes": 544,
+      "spawn_origin": [
+        224,
+        256,
+        48
+      ],
+      "light_count": 20,
+      "bounds": [
+        0,
+        0,
+        0,
+        1472,
+        2016,
+        368
+      ],
+      "has_upper_layer": true,
+      "grammar_families": [
+        "buttressed-hall",
+        "column-grove",
+        "portal-chamber"
+      ],
+      "compiled_faces": 5145
+    },
+    {
+      "id": "v3-rich-seed-0",
+      "seed": 0,
+      "preset": "rich",
+      "extent": 3072,
+      "map_sha256": "147b6793c9ccb15ee9c69e694ce491caa2b950041ebeca64827545fa296bbfa6",
+      "metadata_sha256": "30d7c6415b191a1106faa19cfa28c7aced02373c53a15c1dd86e1213b83773ff",
+      "bsp_sha256": "edaeac830b277c4aaa16a23c933f42c71695db656634b539896eefe43497cede",
+      "lit_sha256": "cb76e0893e8e61205ab0bc0c0cbcffaa701df85b1bbe79ed8ddd468a01d96b86",
+      "room_count": 28,
+      "actual_faces": 4803,
+      "actual_entities": 30,
+      "actual_brushes": 793,
+      "spawn_origin": [
+        224,
+        80,
+        48
+      ],
+      "light_count": 28,
+      "bounds": [
+        0,
+        0,
+        0,
+        1984,
+        2976,
+        368
+      ],
+      "has_upper_layer": true,
+      "grammar_families": [
+        "buttressed-hall",
+        "column-grove",
+        "fractured-vault",
+        "monolithic-chamber",
+        "portal-chamber",
+        "terraced-shrine"
+      ],
+      "compiled_faces": 8871
+    },
+    {
+      "id": "v3-rich-seed-42",
+      "seed": 42,
+      "preset": "rich",
+      "extent": 3072,
+      "map_sha256": "c7cf97278c31e4a3cbc435b843016b07c9343939033098b5dc9e92fe16d37bf5",
+      "metadata_sha256": "422c3fd9f594a76c35c8ad7dba1e831db8344ce2bb9fac41c2e03ca8f55c7a1f",
+      "bsp_sha256": "e13b0f192e936c87f7981032cc78d5a0484811f74b16079469b611895ba28703",
+      "lit_sha256": "3abef4e47a6a5cdbf495965004d74335a04f1c01d7c9910c16ff9cd6af8103f7",
+      "room_count": 28,
+      "actual_faces": 4800,
+      "actual_entities": 30,
+      "actual_brushes": 791,
+      "spawn_origin": [
+        224,
+        80,
+        48
+      ],
+      "light_count": 28,
+      "bounds": [
+        0,
+        0,
+        0,
+        1984,
+        2992,
+        368
+      ],
+      "has_upper_layer": true,
+      "grammar_families": [
+        "buttressed-hall",
+        "column-grove",
+        "fractured-vault",
+        "monolithic-chamber",
+        "portal-chamber",
+        "terraced-shrine"
+      ],
+      "compiled_faces": 9717
+    },
+    {
+      "id": "v3-rich-seed-99",
+      "seed": 99,
+      "preset": "rich",
+      "extent": 3072,
+      "map_sha256": "d318b9c345937ffa3af937ab348e2a88c80d1a18af165b88f37dda91644918b1",
+      "metadata_sha256": "cd1c7b997208450889a2f615eb8d92e7472980b8c354a3bb0a897b301c4015aa",
+      "bsp_sha256": "d61aff8bf05aedf974df7ec7be9a3f8b3d545b020345d5959de9c33d6e658e76",
+      "lit_sha256": "6eb3ba4414fd72c79f1def66f964e32f5dc412076d2c6cafd51285676c58baf3",
+      "room_count": 28,
+      "actual_faces": 4824,
+      "actual_entities": 30,
+      "actual_brushes": 795,
+      "spawn_origin": [
+        1760,
         464,
-        0,
-        1280,
-        752,
-        368
+        48
       ],
-      "has_upper_layer": true,
-      "grammar_families": [
-        "portal-chamber"
-      ],
-      "compiled_faces": 165
-    },
-    {
-      "id": "v3-moderate-seed-4",
-      "seed": 4,
-      "preset": "moderate",
-      "extent": 2048,
-      "map_sha256": "eb507a7b0258aa456b55d91b9e3de25a6d2dd2e62a298980240b3ebd439e7dd9",
-      "metadata_sha256": "ee98ffbfc6068fe730f1d1a391b6f28c5ccf317a838719bc5c9803b060f6b158",
-      "bsp_sha256": "9c5010c8fa5db2244ba77f6ef819977746658bd5b85ddd8a157465cbbe98e12c",
-      "room_count": 4,
-      "actual_faces": 144,
-      "actual_entities": 5,
-      "actual_brushes": 24,
-      "spawn_origin": [
-        1024,
-        96,
-        56
-      ],
-      "light_count": 4,
+      "light_count": 28,
       "bounds": [
-        928,
-        16,
         0,
-        1280,
-        304,
-        368
-      ],
-      "has_upper_layer": true,
-      "grammar_families": [
-        "buttressed-hall",
-        "portal-chamber"
-      ],
-      "compiled_faces": 210
-    },
-    {
-      "id": "v3-moderate-seed-5",
-      "seed": 5,
-      "preset": "moderate",
-      "extent": 2048,
-      "map_sha256": "eb507a7b0258aa456b55d91b9e3de25a6d2dd2e62a298980240b3ebd439e7dd9",
-      "metadata_sha256": "9d081986904589286b0d3edde1cd841e3869ff2576cf56b56bd71048a870b07d",
-      "bsp_sha256": "9c5010c8fa5db2244ba77f6ef819977746658bd5b85ddd8a157465cbbe98e12c",
-      "room_count": 4,
-      "actual_faces": 144,
-      "actual_entities": 5,
-      "actual_brushes": 24,
-      "spawn_origin": [
-        1024,
-        96,
-        56
-      ],
-      "light_count": 4,
-      "bounds": [
-        928,
-        16,
         0,
-        1280,
-        304,
-        368
-      ],
-      "has_upper_layer": true,
-      "grammar_families": [
-        "buttressed-hall",
-        "portal-chamber"
-      ],
-      "compiled_faces": 210
-    },
-    {
-      "id": "v3-moderate-seed-6",
-      "seed": 6,
-      "preset": "moderate",
-      "extent": 2048,
-      "map_sha256": "eb507a7b0258aa456b55d91b9e3de25a6d2dd2e62a298980240b3ebd439e7dd9",
-      "metadata_sha256": "176547771cb3caf1503daa184e8f8411aad343b193c1d439b91f7232c4bddaf1",
-      "bsp_sha256": "9c5010c8fa5db2244ba77f6ef819977746658bd5b85ddd8a157465cbbe98e12c",
-      "room_count": 4,
-      "actual_faces": 144,
-      "actual_entities": 5,
-      "actual_brushes": 24,
-      "spawn_origin": [
-        1024,
-        96,
-        56
-      ],
-      "light_count": 4,
-      "bounds": [
-        928,
-        16,
         0,
-        1280,
-        304,
-        368
-      ],
-      "has_upper_layer": true,
-      "grammar_families": [
-        "buttressed-hall",
-        "portal-chamber"
-      ],
-      "compiled_faces": 210
-    },
-    {
-      "id": "v3-moderate-seed-7",
-      "seed": 7,
-      "preset": "moderate",
-      "extent": 2048,
-      "map_sha256": "eb507a7b0258aa456b55d91b9e3de25a6d2dd2e62a298980240b3ebd439e7dd9",
-      "metadata_sha256": "f4c9f2980996d01bd5b30c44a2eb052099264eee484e74d5ee6f717f3dba169d",
-      "bsp_sha256": "9c5010c8fa5db2244ba77f6ef819977746658bd5b85ddd8a157465cbbe98e12c",
-      "room_count": 4,
-      "actual_faces": 144,
-      "actual_entities": 5,
-      "actual_brushes": 24,
-      "spawn_origin": [
-        1024,
-        96,
-        56
-      ],
-      "light_count": 4,
-      "bounds": [
-        928,
-        16,
-        0,
-        1280,
-        304,
-        368
-      ],
-      "has_upper_layer": true,
-      "grammar_families": [
-        "buttressed-hall",
-        "portal-chamber"
-      ],
-      "compiled_faces": 210
-    },
-    {
-      "id": "v3-rich-seed-8",
-      "seed": 8,
-      "preset": "rich",
-      "extent": 3072,
-      "map_sha256": "1d630387a53bf690d7a532c792c8cf08b31e18422ad8efdeebeb9ec5d99dc0d1",
-      "metadata_sha256": "9faac3d0d029e3f15e2c165699c1aa09bff442dbc829595dad25db3824cb6568",
-      "bsp_sha256": "a1ea7f5d21bf2eeaaa038fdde17e6469b872ca18ec26b783f66c62d825bff7ef",
-      "room_count": 6,
-      "actual_faces": 216,
-      "actual_entities": 7,
-      "actual_brushes": 36,
-      "spawn_origin": [
-        1536,
-        112,
-        56
-      ],
-      "light_count": 6,
-      "bounds": [
-        1424,
-        16,
-        0,
-        1792,
-        432,
+        1984,
+        2992,
         368
       ],
       "has_upper_layer": true,
       "grammar_families": [
         "buttressed-hall",
         "column-grove",
-        "portal-chamber"
+        "fractured-vault",
+        "monolithic-chamber",
+        "portal-chamber",
+        "terraced-shrine"
       ],
-      "compiled_faces": 288
+      "compiled_faces": 9564
     },
     {
-      "id": "v3-rich-seed-9",
-      "seed": 9,
+      "id": "v3-rich-seed-255",
+      "seed": 255,
       "preset": "rich",
       "extent": 3072,
-      "map_sha256": "1d630387a53bf690d7a532c792c8cf08b31e18422ad8efdeebeb9ec5d99dc0d1",
-      "metadata_sha256": "1d13c162489a127a6675a766e208147de6ea0f27b6157e9e2862c895ff189881",
-      "bsp_sha256": "a1ea7f5d21bf2eeaaa038fdde17e6469b872ca18ec26b783f66c62d825bff7ef",
-      "room_count": 6,
-      "actual_faces": 216,
-      "actual_entities": 7,
-      "actual_brushes": 36,
+      "map_sha256": "8e1d3b3459db2569db7f4c5445a824107152bc518c93b568b712e2e5b3150104",
+      "metadata_sha256": "81eb4d896e608347ddf32f03e6ce3cc58a694a8367c5ea330087b87b3e37d4cc",
+      "bsp_sha256": "5be07559746941c0de6031f76d71b6c033e07b1c1e858fe41e857cbf0b82447c",
+      "lit_sha256": "601c11745d114caea3cb06176ed3085a474a8410ceb9719f63cabf844843cb67",
+      "room_count": 28,
+      "actual_faces": 4753,
+      "actual_entities": 30,
+      "actual_brushes": 786,
       "spawn_origin": [
-        1536,
-        112,
-        56
+        224,
+        272,
+        48
       ],
-      "light_count": 6,
+      "light_count": 28,
       "bounds": [
-        1424,
-        16,
         0,
-        1792,
-        432,
+        0,
+        0,
+        1984,
+        2992,
         368
       ],
       "has_upper_layer": true,
       "grammar_families": [
         "buttressed-hall",
         "column-grove",
-        "portal-chamber"
+        "fractured-vault",
+        "monolithic-chamber",
+        "portal-chamber",
+        "terraced-shrine"
       ],
-      "compiled_faces": 288
-    },
-    {
-      "id": "v3-rich-seed-10",
-      "seed": 10,
-      "preset": "rich",
-      "extent": 3072,
-      "map_sha256": "1d630387a53bf690d7a532c792c8cf08b31e18422ad8efdeebeb9ec5d99dc0d1",
-      "metadata_sha256": "35948ca07511206ee33a9d53b3ab580fcfb6815d60ebd26ac855f78675f1cba4",
-      "bsp_sha256": "a1ea7f5d21bf2eeaaa038fdde17e6469b872ca18ec26b783f66c62d825bff7ef",
-      "room_count": 6,
-      "actual_faces": 216,
-      "actual_entities": 7,
-      "actual_brushes": 36,
-      "spawn_origin": [
-        1536,
-        112,
-        56
-      ],
-      "light_count": 6,
-      "bounds": [
-        1424,
-        16,
-        0,
-        1792,
-        432,
-        368
-      ],
-      "has_upper_layer": true,
-      "grammar_families": [
-        "buttressed-hall",
-        "column-grove",
-        "portal-chamber"
-      ],
-      "compiled_faces": 288
-    },
-    {
-      "id": "v3-rich-seed-11",
-      "seed": 11,
-      "preset": "rich",
-      "extent": 3072,
-      "map_sha256": "1d630387a53bf690d7a532c792c8cf08b31e18422ad8efdeebeb9ec5d99dc0d1",
-      "metadata_sha256": "c517ffc7b954a2e70263880a821bb18f09ef6c292512b75f0795af60883c9681",
-      "bsp_sha256": "a1ea7f5d21bf2eeaaa038fdde17e6469b872ca18ec26b783f66c62d825bff7ef",
-      "room_count": 6,
-      "actual_faces": 216,
-      "actual_entities": 7,
-      "actual_brushes": 36,
-      "spawn_origin": [
-        1536,
-        112,
-        56
-      ],
-      "light_count": 6,
-      "bounds": [
-        1424,
-        16,
-        0,
-        1792,
-        432,
-        368
-      ],
-      "has_upper_layer": true,
-      "grammar_families": [
-        "buttressed-hall",
-        "column-grove",
-        "portal-chamber"
-      ],
-      "compiled_faces": 288
+      "compiled_faces": 8908
     }
   ]
 }

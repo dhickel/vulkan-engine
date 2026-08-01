@@ -37,14 +37,15 @@ const EXTENTS: [u32; 3] = [1024, 2048, 3072];
 const CORPUS_SIZE: usize = 12;
 
 fn corpus_entries() -> Vec<(u64, V3Preset, u32)> {
+    let seeds = [0u64, 42, 99, 255];
     let mut entries = Vec::with_capacity(CORPUS_SIZE);
-    for seed in 0..4u64 {
+    for &seed in &seeds {
         entries.push((seed, V3Preset::Sparse, 2048));
     }
-    for seed in 4..8u64 {
+    for &seed in &seeds {
         entries.push((seed, V3Preset::Moderate, 2048));
     }
-    for seed in 8..12u64 {
+    for &seed in &seeds {
         entries.push((seed, V3Preset::Rich, 3072));
     }
     entries
