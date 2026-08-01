@@ -519,9 +519,11 @@ variant, public export, or production code was changed.
   proof only.
 - **Semantic pipeline density**: The private proof pipeline cannot yet emit compiler-safe
   structural density at generation time; the dense Rich fixture is hand-authored.
-- **Deferred capabilities**: Diagonal portals, concave rooms, accessible upper features,
-  segmented-arch integration, additional room families, and other deferred capabilities
-  remain excluded from the proof boundary per the G-12 contract.
+- **Proof-era deferred capabilities**: Diagonal portals, concave rooms, accessible upper
+  features, segmented-arch integration, additional room families, and other capabilities
+  were excluded from this historical proof boundary per G-12. The later explorer
+  authorization integrates cardinal segmented surrounds with an interface seal; it does
+  not rewrite the focused fixture's historical evidence class.
 
 ### 16.4 Reference
 
@@ -536,12 +538,14 @@ variant, public export, or production code was changed.
 
 The Enhanced v3 profile (`src/bsp_generator/src/enhanced_v3/`) is a structurally
 disjoint pipeline from Legacy v1 and Enhanced v2. It produces M2-only, two-layer
-dungeons with cardinal + 45° chamfered-octagonal rooms, pointed-arch portal
-apertures, grounded assemblies, and Sparse/Moderate/Rich density presets. It
-reuses the CC0 Dungeon v2 theme without modification.
+dungeons with cardinal + 45° chamfered-octagonal rooms, selectable cardinal
+portal surrounds, grounded assemblies, and Sparse/Moderate/Rich density presets.
+Pointed is the byte-compatible default; rectangular and sealed segmented
+surrounds are explorer overrides. The profile reuses the CC0 Dungeon v2 theme
+without modification.
 
 ```text
-V3Config  (validates at construction, no separate validate())
+V3Config  (`new()` validates defaults; mutated explorer fields use `validate()`)
     │
     │  V3Seed::new(seed)  →  stage_seed("v3-placement")
     ▼
@@ -634,11 +638,15 @@ produce cryptographically independent output streams across all three domains.
 - Protected volumes (portals, stair wells) cannot be intruded upon
   (`ProtectedVolumeIntrusion` error)
 
-**Pointed-arch portals:**
+**Cardinal portal surrounds:**
 - Full-depth shell omission through the wall — no separate opening brush
-- 64×80 swept clearance at the throat
+- 64×80 swept clearance at the throat for `None`, `Pointed`, and `Segmented`
 - On cardinal walls only — diagonal portals are deferred
 - Aperture ownership: the shell wall's omission IS the portal
+- `Pointed` remains the byte-compatible default; `None` emits a flat rectangular opening
+- `Segmented` retains two stepped crown bands. The corridor roof seals the first band;
+  a one-quantum cap immediately outside the remaining 32-unit centre recess seals the
+  Z=112–128 interface without reducing the navigable throat
 
 ### 17.5 Composition Planning
 
@@ -681,12 +689,12 @@ are below their preset ceilings and the M2 10,000-face ceiling.
 | geometry arithmetic | i32 / f32 mix | i128 Rational only |
 | approved normals | axis-aligned only | cardinal + 45° diagonal |
 | room shape | rectangular only | chamfered/octagonal + rectangular |
-| portal shape | rectangular (gap in wall) | pointed-arch (full-depth omission) |
+| portal shape | rectangular (gap in wall) | cardinal rectangular/pointed/segmented full-depth omission |
 | assemblies | none (brush-per-primitive) | grounded support graph |
 | grammar families | 2 strategies (Uniform/ByZone) | 6 descriptor families |
 | density presets | none (single EnhancedConfig) | Sparse/Moderate/Rich |
 | minimum-identity | none | typed `MinimumIdentityFailure` |
-| config type | `EnhancedConfig` (10 fields) | `V3Config` (3 fields) |
+| config type | `EnhancedConfig` (10 fields) | `V3Config` (18 fields, including explorer overrides) |
 | stage tags | 6 tags | 4 tags |
 | error type | `EnhancedError` (12 variants) | `V3Error` (45 variants) |
 | theme | cc0_dungeon_v2 | cc0_dungeon_v2 (reused) |
@@ -708,6 +716,8 @@ are below their preset ceilings and the M2 10,000-face ceiling.
 | `enhanced_v3_qualification.rs` | full qualification suite |
 | `enhanced_v3_production_acceptance.rs` | exact preset topology, 12-entry source matrix, real plan identity, and source evidence |
 | `enhanced_v3_compiled_space.rs` | pinned 12-entry compiler matrix, strict reload, budgets, and compiled witnesses |
-| `tools/dungeon_gen/tests/enhanced_v3_cli.rs` | m3 defaults, preset/extent parsing, exact summaries, deterministic replay, seed distinction, and v1/v2 flag isolation |
+| `enhanced_v3_explorer.rs` | all explorer overrides, arch variants, exact topology meanings, and validation |
+| `tools/dungeon_gen/tests/enhanced_v3_cli.rs` | all m3 options, exact summaries, deterministic replay, seed distinction, and v1/v2 flag isolation |
+| `tools/engine_pack/tests/enhanced_dungeon_v3_candidate.rs` | full-config segmented generation, warning-free ericw compilation, strict package publication, and override records |
 
 Engine-owned headless capture evidence is indexed at `.internal-dev/captures/enhanced-v3-production/manifest.md`; it remains distinct from live WSI validation.

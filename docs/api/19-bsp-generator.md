@@ -614,8 +614,9 @@ pub const SOCKET_CORNER_MARGIN: i32 = 32;
 ## Enhanced v3 API
 
 The Enhanced v3 profile lives in `bsp_generator::enhanced_v3`. It produces M2-only,
-two-layer dungeons with cardinal + 45° geometry, pointed-arch portals, grounded
-assemblies, and Sparse/Moderate/Rich density presets.
+two-layer dungeons with cardinal + 45° geometry, pointed-default plus
+rectangular/segmented cardinal portal surrounds, grounded assemblies, and
+Sparse/Moderate/Rich density presets.
 
 ### `generate_v3()`
 
@@ -656,11 +657,27 @@ pub struct V3Config {
     pub seed: u64,
     pub preset: V3Preset,
     pub xy_extent: u32,
+    pub rooms: Option<u32>,
+    pub corridors: Option<u32>,
+    pub loops: Option<u32>,
+    pub vertical_edges: Option<u32>,
+    pub chamfer: bool,
+    pub arch_type: ArchType,
+    pub stairs: bool,
+    pub room_span_min: Option<u32>,
+    pub room_span_max: Option<u32>,
+    pub grammar_families: Vec<String>,
+    pub grammar_mode: GrammarMode,
+    pub features: FeatureFlags,
+    pub feature_density: f32,
+    pub minlight: u32,
+    pub light_count: Option<u32>,
 }
 ```
 
-Validated M2-only two-layer configuration. Validates all fields at construction —
-no separate `validate()` step.
+M2-only two-layer configuration. `new()` creates and validates the byte-compatible
+production defaults. Explorer fields are public overrides; call `validate()` after
+mutating them. `run_pipeline()` and package entry points revalidate before generation.
 
 **Constructors:**
 
@@ -673,6 +690,8 @@ no separate `validate()` step.
 
 **Validation rules:**
 - `xy_extent` must be 1024–3072 and a multiple of 16
+- Mutated explorer fields must be revalidated by `validate()`; `run_pipeline()` and package entry points do this before generation
+- `ArchType::None`, `Pointed`, and `Segmented` are accepted cardinal surrounds; segmented generation adds a corridor-side crown cap while retaining the complete 64×80 throat
 - Non-quantum-aligned values produce `V3Error::ConfigNotQuantumAligned`
 - Out-of-range values produce `V3Error::ConfigOutOfRange`
 
@@ -709,6 +728,13 @@ validated preset contract; production acceptance treats those counts as exact.
 V3Preset::from_tag("sparse")    // => Some(V3Preset::Sparse)
 V3Preset::from_tag("dense")     // => None
 ```
+
+### `ArchType`
+
+`ArchType::from_tag()` accepts `"none"`, `"pointed"`, and `"segmented"`.
+`cycle()` advances `Pointed → Segmented → None → Pointed`. `Pointed` remains
+the byte-compatible default; the other variants affect only explicit explorer
+configurations.
 
 ### `NormalClass`
 
@@ -828,7 +854,10 @@ pub enum GenerationProfile {
 
 Production dispatch uses `from_tag("m3")` → `Some(EnhancedV3)`.
 The proof-only tag `"enhanced-v3"` returns `None`.
-The `dungeon_gen` CLI uses `--class m3` with optional `--preset` and `--extent` flags.
+The `dungeon_gen` CLI uses `--class m3` and exposes every explorer field through
+`--preset`, `--extent`, `--rooms`, `--corridors`, `--loops`, `--vertical-edges`,
+`--chamfer`/`--no-chamfer`, `--arch-type`, `--stairs`/`--no-stairs`, room-span,
+grammar, feature-density, minlight, and light-count options.
 
 ### Enhanced v3 Constants
 

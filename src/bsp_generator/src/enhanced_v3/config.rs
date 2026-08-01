@@ -779,6 +779,16 @@ mod tests {
     }
 
     #[test]
+    fn arch_types_roundtrip_and_cycle_in_explorer_order() {
+        for arch_type in [ArchType::None, ArchType::Pointed, ArchType::Segmented] {
+            assert_eq!(ArchType::from_tag(arch_type.tag()), Some(arch_type));
+        }
+        assert_eq!(ArchType::Pointed.cycle(), ArchType::Segmented);
+        assert_eq!(ArchType::Segmented.cycle(), ArchType::None);
+        assert_eq!(ArchType::None.cycle(), ArchType::Pointed);
+    }
+
+    #[test]
     fn classify_cardinal_normals() {
         assert_eq!(classify_normal(1, 0, 0), NormalClass::Cardinal);
         assert_eq!(classify_normal(0, 1, 0), NormalClass::Cardinal);

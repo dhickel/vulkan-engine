@@ -317,15 +317,18 @@ rule does not change generic `engine_pack compile-bsp` optional-companion behavi
 
 The `bsp_generator` crate also provides an **Enhanced v3** profile that produces
 M2-only, two-layer dungeons with cardinal (axis-aligned) and exact 45° diagonal
-chamfered-octagonal rooms, pointed-arch portal apertures, grounded assemblies,
-and Sparse/Moderate/Rich density presets. It reuses the CC0 Dungeon v2 theme.
+chamfered-octagonal rooms, selectable cardinal portal surrounds, grounded
+assemblies, and Sparse/Moderate/Rich density presets. Pointed arches remain the
+byte-compatible default; rectangular and segmented surrounds are explorer
+overrides. The profile reuses the CC0 Dungeon v2 theme.
 
 ### Key Features
 
 - **Cardinal + 45° geometry**: rooms use axis-aligned and 45° diagonal footprints
   with chamfered/octagonal shapes
-- **Pointed-arch portals**: full-depth shell omission through walls with 64×80
-  swept clearance at the throat
+- **Selectable cardinal portal surrounds**: rectangular, pointed (default), or
+  segmented full-depth shell omissions with 64×80 swept clearance at the throat;
+  segmented crowns use a corridor-side backing cap so the decorative recess is sealed
 - **Grounded assemblies**: acyclic support graph ensuring every feature brush
   is transitively supported by floor surfaces
 - **Three density presets**: Sparse (≥12 rooms), Moderate (≥20 rooms, 2 loops),
@@ -349,6 +352,10 @@ dungeon_gen --class m3 --seed 42
 # Explicit preset and extent
 dungeon_gen --class m3 --seed 42 --preset moderate --extent 2048
 dungeon_gen --class m3 --seed 99 --preset rich --extent 3072
+
+# Explorer overrides, including the sealed segmented surround
+dungeon_gen --class m3 --seed 42 --preset moderate --rooms 20 \
+  --corridors 25 --loops 3 --arch-type segmented --minlight 32 --light-count 4
 
 # Publish through engine_pack with a preset
 engine_pack enhanced-dungeon-v3 --seed 42 --preset moderate --out /tmp/pkg
@@ -402,11 +409,27 @@ let map_text = generate_v3(&config)?;
 
 ### V3Config Fields
 
-| field | Sparse default | Moderate default | Rich default | range |
-|-------|---------------|-----------------|-------------|-------|
-| `seed` | 0 | 0 | 0 | any `u64` |
-| `preset` | `Sparse` | `Moderate` | `Rich` | one of three variants |
-| `xy_extent` | 2048 | 2048 | 3072 | 1024–3072, multiple of 16 |
+`V3Config::new()` retains the byte-compatible preset defaults. The remaining
+public fields are explorer overrides and must pass `validate()` after mutation.
+`run_pipeline()` and package entry points perform that validation again.
+
+| field | compatibility default | accepted explorer values |
+|-------|-----------------------|--------------------------|
+| `seed` | caller supplied | any `u64` |
+| `preset` | caller supplied | `Sparse`, `Moderate`, `Rich` |
+| `xy_extent` | 2048 (Sparse/Moderate), 3072 (Rich) | 1024–3072, multiple of 16 |
+| `rooms` | preset count | 3–40 |
+| `corridors` | one segment per route | exact constructible segment count |
+| `loops` | preset target | 0–6 |
+| `vertical_edges` | 1 | 0–3 |
+| `chamfer` | `true` | boolean |
+| `arch_type` | `Pointed` | `None`, `Pointed`, `Segmented` |
+| `stairs` | `true` | boolean |
+| `room_span_min` / `room_span_max` | 112 / 256 | quantum-aligned valid span |
+| grammar families / mode | all / `Mixed` | family allowlist; `Single` or `Mixed` |
+| feature flags / density | all / 0.5 | category flags; finite 0.0–1.0 |
+| `minlight` | 16 | 0–255 |
+| `light_count` | room count | 0–rooms |
 
 ### Preset Comparison
 
@@ -424,9 +447,8 @@ and M2 ceilings remain 3,000/5,000/8,000 and 10,000 respectively.
 
 The following capabilities are deferred and not available in Enhanced v3 production:
 
-- Diagonal portals (pointed-arch on 45° walls)
+- Diagonal portals (shaped apertures on 45° walls)
 - Concave rooms (T/L/alcove shapes)
-- Segmented-arch portal integration
 - Trim theme role
 - Lattice-slope walls (15°/30°)
 - Third navigation layer
@@ -438,8 +460,8 @@ The following capabilities are deferred and not available in Enhanced v3 product
 These limitations apply to the Legacy v1 generator (`bsp_generator::generate`)
 only. The Enhanced v2 profile supports two-layer dungeons with stairs, multiple
 room palettes, and corridor/ceiling/pillar variance. The Enhanced v3 profile
-adds cardinal + 45° chamfered geometry, pointed-arch portals, and grounded
-assemblies.
+adds cardinal + 45° chamfered geometry, selectable cardinal portal surrounds,
+and grounded assemblies.
 
 - Single-layer Cartesian only (no ramps, stairs, multi-floor)
 - Axis-aligned rectangular rooms only

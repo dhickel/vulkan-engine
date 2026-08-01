@@ -1,7 +1,8 @@
 //! Enhanced V3 dungeon package candidate builder.
 //!
-//! Takes a seed, density preset, XY extent, and output directory. Generates a
-//! `.map` via `bsp_generator::generate_enhanced_v3`, compiles it through
+//! Takes a validated full `V3Config` and output directory, with a legacy
+//! seed/preset/extent wrapper for byte-compatible callers. Generates a `.map`
+//! via `bsp_generator::generate_enhanced_v3`, compiles it through
 //! ericw-tools, and collects BSP+LIT+WAD+palette+metadata into a validated
 //! closure published atomically through a same-filesystem no-replace transaction.
 //!
@@ -43,12 +44,27 @@ pub fn build_v3_package(
     name: &str,
     profile_override: Option<&str>,
 ) -> Result<BuildV3Result, BuildV3Error> {
-    // ── 1. Build V3Config ────────────────────────────────────────────
     let config = V3Config::new(seed, preset, xy_extent).map_err(BuildV3Error::Config)?;
+    build_v3_package_from_config(&config, out_dir, tool_path, name, profile_override)
+}
 
-    // ── 2. Generate .map ─────────────────────────────────────────────
+/// Build and publish a package from a fully validated EnhancedV3 explorer
+/// configuration. This is the runtime explorer entry point; the legacy
+/// seed/preset/extent wrapper above remains byte-compatible.
+pub fn build_v3_package_from_config(
+    config: &V3Config,
+    out_dir: &Path,
+    tool_path: Option<&Path>,
+    name: &str,
+    profile_override: Option<&str>,
+) -> Result<BuildV3Result, BuildV3Error> {
+    config.validate().map_err(BuildV3Error::Config)?;
+    let seed = config.seed;
+    let preset = config.preset;
+
+    // ── 1. Generate .map ─────────────────────────────────────────────
     let (map_text, meta) =
-        bsp_generator::generate_enhanced_v3(&config).map_err(BuildV3Error::Generation)?;
+        bsp_generator::generate_enhanced_v3(config).map_err(BuildV3Error::Generation)?;
 
     // ── 3. Resolve compiler profile ──────────────────────────────────
     let profile_content = if let Some(profile_path) = profile_override {
@@ -180,11 +196,7 @@ pub fn build_v3_package(
             "seed": meta.seed(),
             "preset": meta.preset(),
             "xy_extent": meta.xy_extent(),
-            "config": {
-                "seed": seed,
-                "preset": preset.tag(),
-                "xy_extent": xy_extent,
-            },
+            "config": v3_config_json(config),
             "output": {
                 "room_count": meta.room_count(),
                 "lower_room_count": meta.lower_room_count(),
@@ -228,9 +240,7 @@ pub fn build_v3_package(
             &staging,
             name,
             &compile_result,
-            &preset,
-            seed,
-            xy_extent,
+            config,
             &meta,
             &staged_hashes,
         )?;
@@ -412,6 +422,140 @@ fn cc0_dungeon_v2_dir() -> Result<PathBuf, BuildV3Error> {
     Ok(engine_root.join("src/bsp_generator/themes/cc0_dungeon_v2"))
 }
 
+fn v3_config_json(config: &V3Config) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "seed": config.seed,
+        "preset": config.preset.tag(),
+        "xy_extent": config.xy_extent,
+    });
+    if config.has_overrides() {
+        value
+            .as_object_mut()
+            .expect("V3 config JSON root is an object")
+            .insert(
+                "overrides".into(),
+                serde_json::json!({
+                    "rooms": config.rooms,
+                    "corridors": config.corridors,
+                    "loops": config.loops,
+                    "vertical_edges": config.vertical_edges,
+                    "chamfer": config.chamfer,
+                    "arch_type": config.arch_type.tag(),
+                    "stairs": config.stairs,
+                    "room_span_min": config.room_span_min,
+                    "room_span_max": config.room_span_max,
+                    "grammar_families": config.grammar_families,
+                    "grammar_mode": config.grammar_mode.tag(),
+                    "features": config.features.tags(),
+                    "feature_density": config.feature_density,
+                    "minlight": config.minlight,
+                    "light_count": config.light_count,
+                }),
+            );
+    }
+    value
+}
+
+fn v3_config_override_table(config: &V3Config) -> toml::Table {
+    use toml::Value;
+
+    let mut table = toml::Table::new();
+    table.insert(
+        "rooms".into(),
+        Value::Integer(config.effective_rooms() as i64),
+    );
+    table.insert(
+        "rooms_explicit".into(),
+        Value::Boolean(config.rooms.is_some()),
+    );
+    table.insert(
+        "corridors".into(),
+        Value::Integer(config.effective_corridors() as i64),
+    );
+    table.insert(
+        "corridors_explicit".into(),
+        Value::Boolean(config.corridors.is_some()),
+    );
+    table.insert(
+        "loops".into(),
+        Value::Integer(config.effective_loops() as i64),
+    );
+    table.insert(
+        "loops_explicit".into(),
+        Value::Boolean(config.loops.is_some()),
+    );
+    table.insert(
+        "vertical_edges".into(),
+        Value::Integer(config.effective_vertical_edges() as i64),
+    );
+    table.insert(
+        "vertical_edges_explicit".into(),
+        Value::Boolean(config.vertical_edges.is_some()),
+    );
+    table.insert("chamfer".into(), Value::Boolean(config.chamfer));
+    table.insert(
+        "arch_type".into(),
+        Value::String(config.arch_type.tag().into()),
+    );
+    table.insert("stairs".into(), Value::Boolean(config.stairs));
+    table.insert(
+        "room_span_min".into(),
+        Value::Integer(config.effective_room_span_min() as i64),
+    );
+    table.insert(
+        "room_span_min_explicit".into(),
+        Value::Boolean(config.room_span_min.is_some()),
+    );
+    table.insert(
+        "room_span_max".into(),
+        Value::Integer(config.effective_room_span_max() as i64),
+    );
+    table.insert(
+        "room_span_max_explicit".into(),
+        Value::Boolean(config.room_span_max.is_some()),
+    );
+    table.insert(
+        "grammar_families".into(),
+        Value::Array(
+            config
+                .grammar_families
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    table.insert(
+        "grammar_mode".into(),
+        Value::String(config.grammar_mode.tag().into()),
+    );
+    table.insert(
+        "features".into(),
+        Value::Array(
+            config
+                .features
+                .tags()
+                .into_iter()
+                .map(|tag| Value::String(tag.into()))
+                .collect(),
+        ),
+    );
+    table.insert(
+        "feature_density".into(),
+        Value::Float(config.feature_density as f64),
+    );
+    table.insert("minlight".into(), Value::Integer(config.minlight as i64));
+    table.insert(
+        "light_count".into(),
+        Value::Integer(config.effective_light_count() as i64),
+    );
+    table.insert(
+        "light_count_explicit".into(),
+        Value::Boolean(config.light_count.is_some()),
+    );
+    table
+}
+
 // ── Atomic no-replace publication with collision resolution ───────────────
 
 /// Attempt atomic no-replace publication of a validated staging directory.
@@ -520,9 +664,7 @@ fn build_v3_canonical_manifest(
     staging: &Path,
     _name: &str,
     compile_result: &bsp::CompileResult,
-    preset: &V3Preset,
-    seed: u64,
-    xy_extent: u32,
+    config: &V3Config,
     meta: &bsp_generator::enhanced_v3::EnhancedV3Metadata,
     staged_hashes: &[(String, String)],
 ) -> Result<String, BuildV3Error> {
@@ -547,9 +689,15 @@ fn build_v3_canonical_manifest(
             "schema_version".into(),
             Value::String(meta.schema_version().into()),
         );
-        gen.insert("seed".into(), Value::Integer(seed as i64));
-        gen.insert("preset".into(), Value::String(preset.tag().into()));
-        gen.insert("xy_extent".into(), Value::Integer(xy_extent as i64));
+        gen.insert("seed".into(), Value::Integer(config.seed as i64));
+        gen.insert("preset".into(), Value::String(config.preset.tag().into()));
+        gen.insert("xy_extent".into(), Value::Integer(config.xy_extent as i64));
+        if config.has_overrides() {
+            gen.insert(
+                "overrides".into(),
+                Value::Table(v3_config_override_table(config)),
+            );
+        }
         root.insert("generator".into(), Value::Table(gen));
     }
 

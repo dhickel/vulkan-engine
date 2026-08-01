@@ -7,8 +7,10 @@
 //! Tests skip gracefully when tools are absent.
 
 use bsp::{BspLoader, LoadOptions};
-use bsp_generator::enhanced_v3::{V3Config, V3Preset};
-use engine_pack::enhanced_dungeon_v3::{build_v3_package, BuildV3Result};
+use bsp_generator::enhanced_v3::{ArchType, V3Config, V3Preset};
+use engine_pack::enhanced_dungeon_v3::{
+    build_v3_package, build_v3_package_from_config, BuildV3Result,
+};
 use std::path::{Path, PathBuf};
 
 // ── Paths ─────────────────────────────────────────────────────────────────
@@ -48,6 +50,49 @@ fn tools_available(dir: &Path) -> bool {
 }
 
 // ── Test: Full V3 pipeline (generate → compile → validate closure) ───────
+
+#[test]
+fn v3_full_config_pipeline_records_explorer_overrides() {
+    let tool_dir = ericw_tools_dir();
+    if !tools_available(&tool_dir) {
+        eprintln!("SKIP: ericw-tools not found at {}", tool_dir.display());
+        return;
+    }
+
+    let staging = unique_tmp("v3-explorer-config");
+    let out_dir = staging.join("published");
+    let mut config = V3Config::new(42, V3Preset::Moderate, 2048).unwrap();
+    config.rooms = Some(20);
+    config.corridors = Some(25);
+    config.loops = Some(3);
+    config.arch_type = ArchType::Segmented;
+    config.minlight = 32;
+    config.light_count = Some(4);
+
+    build_v3_package_from_config(&config, &out_dir, Some(&tool_dir), "v3_explorer", None)
+        .expect("full explorer config package must compile and publish");
+
+    let map = std::fs::read_to_string(out_dir.join("v3_explorer.map")).unwrap();
+    assert!(map.contains("\"_minlight\" \"32\""));
+    assert_eq!(map.matches("\"classname\" \"light\"").count(), 4);
+
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out_dir.join("metadata.json")).unwrap()).unwrap();
+    let overrides = &metadata["config"]["overrides"];
+    assert_eq!(overrides["rooms"], 20);
+    assert_eq!(overrides["corridors"], 25);
+    assert_eq!(overrides["loops"], 3);
+    assert_eq!(overrides["arch_type"], "segmented");
+    assert_eq!(overrides["minlight"], 32);
+    assert_eq!(overrides["light_count"], 4);
+
+    let manifest = std::fs::read_to_string(out_dir.join("v3_explorer.manifest.toml")).unwrap();
+    assert!(manifest.contains("[generator.overrides]"));
+    assert!(manifest.contains("corridors = 25"));
+    assert!(manifest.contains("arch_type = \"segmented\""));
+
+    let _ = std::fs::remove_dir_all(staging);
+}
 
 #[test]
 fn v3_full_pipeline_generate_compile_validate_closure() {

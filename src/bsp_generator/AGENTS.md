@@ -145,8 +145,8 @@ tests/
 
 The Enhanced v3 profile is an additive, structurally disjoint generation path
 in `src/enhanced_v3/`. It produces M2-only two-layer dungeons with cardinal +
-45° chamfered-octagonal rooms, pointed-arch portal apertures, grounded
-assemblies, and Sparse/Moderate/Rich density presets.
+45° chamfered-octagonal rooms, pointed-default plus rectangular/segmented cardinal
+portal surrounds, grounded assemblies, and Sparse/Moderate/Rich density presets.
 
 #### Quick Start
 
@@ -217,7 +217,7 @@ Legacy v1's `"dungeon-gen/v1"` and Enhanced v2's `"dungeon-gen/v2"`. Stage tags:
 | domain | `"dungeon-gen/v2"` | `"dungeon-gen/v3"` |
 | geometry | axis-aligned only | cardinal + 45° diagonal |
 | room shape | rectangular only | chamfered/octagonal + rectangular |
-| portals | rectangular aperture | pointed-arch aperture |
+| portals | rectangular aperture | cardinal pointed (default), rectangular, or segmented surround |
 | assemblies | none | grounded support graph |
 | grammar families | 2 strategies only | 6 descriptor families |
 | presets | none (single config) | Sparse/Moderate/Rich |

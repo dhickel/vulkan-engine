@@ -920,8 +920,11 @@ fn build_pointed_arch_surround(
 ///
 /// The first 16-unit crown band remains fully open, the second fills the
 /// outer 16-unit shoulders while retaining a 32-unit centre, and a full
-/// lintel seals the wall above. This is visibly distinct from the pointed
-/// compatibility profile while retaining cardinal, quantum-aligned brushes.
+/// lintel seals the wall above. A one-quantum cap immediately outside the
+/// remaining centre opening joins the surround to the corridor roof, so the
+/// visible recess cannot reach exterior void. This is visibly distinct from
+/// the pointed compatibility profile while retaining cardinal,
+/// quantum-aligned brushes.
 fn build_segmented_arch_surround(
     room: &CommittedRoom,
     direction: WallDirection,
@@ -962,6 +965,42 @@ fn build_segmented_arch_surround(
                 wall_piece_bounds(room, direction, span, (shoulder_z0, top), wall_thickness);
             push_wall_brush(brushes, bounds, format!("{root}/shoulder_{tag}"), x, y, z)?;
         }
+
+        // A level-route ceiling seals the first crown band through Z=112;
+        // transition crowns open only into their sealed stairwell. Back the
+        // remaining 32-unit opening in the next band immediately outside the
+        // room wall. Keeping the cap out of the wall depth preserves the
+        // segmented recess while closing the only path to exterior void.
+        let crown_span = (
+            aperture_center - half_width + shoulder_width,
+            aperture_center + half_width - shoulder_width,
+        );
+        let (mut x, mut y, z) = wall_piece_bounds(
+            room,
+            direction,
+            crown_span,
+            (shoulder_z0, top),
+            wall_thickness,
+        );
+        match direction {
+            WallDirection::North => {
+                y.0 -= wall_thickness;
+                y.1 -= wall_thickness;
+            }
+            WallDirection::South => {
+                y.0 += wall_thickness;
+                y.1 += wall_thickness;
+            }
+            WallDirection::West => {
+                x.0 -= wall_thickness;
+                x.1 -= wall_thickness;
+            }
+            WallDirection::East => {
+                x.0 += wall_thickness;
+                x.1 += wall_thickness;
+            }
+        }
+        push_wall_brush(brushes, bounds, format!("{root}/interface_cap"), x, y, z)?;
     }
 
     let lintel_z0 = shoulder_z1.min(wall_z1);
@@ -2284,15 +2323,14 @@ mod tests {
     use super::super::config::V3Preset;
     use super::*;
 
-    fn sparse_topology_and_assembly() -> (CommittedTopology, Assembly, PlanOutcome) {
-        let config = V3Config::nominal_sparse();
+    fn topology_and_assembly(config: &V3Config) -> (CommittedTopology, Assembly, PlanOutcome) {
         let seed = V3Seed::new(config.seed);
         let mut alloc = V3IdAllocator::new();
-        let (footprints, layout) = build_footprints(&config, seed, &mut alloc).unwrap();
-        let topology = build_topology(&config, &footprints, &layout, seed, &mut alloc).unwrap();
+        let (footprints, layout) = build_footprints(config, seed, &mut alloc).unwrap();
+        let topology = build_topology(config, &footprints, &layout, seed, &mut alloc).unwrap();
         let (spawn_volume, light_volumes) = compute_reservations(&topology).unwrap();
         let plan =
-            plan_composition(seed, &config, &topology, &spawn_volume, &light_volumes).unwrap();
+            plan_composition(seed, config, &topology, &spawn_volume, &light_volumes).unwrap();
         let mut reservations = ReservationSet::new();
         reservations
             .add(Reservation::new("spawn", "spawn_point", spawn_volume))
@@ -2307,7 +2345,7 @@ mod tests {
                 .unwrap();
         }
         let (assembly, _, _) = build_assembly_from_topology(
-            &config,
+            config,
             &topology,
             &plan,
             &spawn_volume,
@@ -2317,6 +2355,10 @@ mod tests {
         )
         .unwrap();
         (topology, assembly, plan)
+    }
+
+    fn sparse_topology_and_assembly() -> (CommittedTopology, Assembly, PlanOutcome) {
+        topology_and_assembly(&V3Config::nominal_sparse())
     }
 
     fn point_is_inside_brush(brush: &AssemblyBrush, point: (i128, i128, i128)) -> bool {
@@ -2677,6 +2719,120 @@ mod tests {
                 assert!(point_is_solid(
                     &assembly,
                     wall_point(center - 8, 8, core_top + 24)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn segmented_portals_keep_the_full_throat_and_seal_the_crown_interface() {
+        let mut config = V3Config::nominal_sparse();
+        config.arch_type = ArchType::Segmented;
+        config.validate().unwrap();
+        let (topology, assembly, _plan) = topology_and_assembly(&config);
+        let q = i128::from(CONSTRUCTION_QUANTUM);
+
+        for portal in &topology.portals {
+            let source_direction = WallDirection::parse(portal).unwrap();
+            let endpoints = [
+                (portal.source_room, source_direction),
+                (portal.target_room.unwrap(), source_direction.opposite()),
+            ];
+            for (room_id, direction) in endpoints {
+                let room = topology.room(room_id).unwrap();
+                let center = if direction.is_horizontal_route() {
+                    i128::from(portal.anchor.1)
+                } else {
+                    i128::from(portal.anchor.0)
+                };
+                let core_bottom = i128::from(room.floor_z + CONSTRUCTION_QUANTUM);
+                let core_top = core_bottom + i128::from(HEADROOM);
+                let wall_point = |tangent: i128, normal: i128, z: i128| match direction {
+                    WallDirection::North => (tangent, i128::from(room.shell.1) + normal, z),
+                    WallDirection::South => (tangent, i128::from(room.shell.3) - normal, z),
+                    WallDirection::West => (i128::from(room.shell.0) + normal, tangent, z),
+                    WallDirection::East => (i128::from(room.shell.2) - normal, tangent, z),
+                };
+
+                // The complete 64×80 throat stays open through the wall and
+                // one quantum into the adjoining corridor.
+                for normal in [-15_i128, 1, 8, 15] {
+                    for tangent in [center - 31, center, center + 31] {
+                        for z in [core_bottom + 1, core_bottom + 40, core_top - 1] {
+                            let point = wall_point(tangent, normal, z);
+                            assert!(
+                                !point_is_solid(&assembly, point),
+                                "{} {} segmented throat is solid at {point:?}",
+                                room.id,
+                                direction.tag(),
+                            );
+                        }
+                    }
+                }
+
+                let root = format!(
+                    "{}/wall_{}/segmented_arch",
+                    room.id.stable_key(),
+                    direction.tag()
+                );
+                for suffix in ["shoulder_left", "shoulder_right", "lintel", "interface_cap"] {
+                    assert!(
+                        assembly
+                            .brushes
+                            .iter()
+                            .any(|brush| brush.id == format!("{root}/{suffix}")),
+                        "missing segmented surround {root}/{suffix}",
+                    );
+                }
+
+                // The two stepped crown bands remain visible from the room:
+                // a 64-unit first recess, then a 32-unit centre recess between
+                // solid shoulders.
+                assert!(!point_is_solid(
+                    &assembly,
+                    wall_point(center, 8, core_top + 8)
+                ));
+                assert!(!point_is_solid(
+                    &assembly,
+                    wall_point(center, 8, core_top + q + 8)
+                ));
+                for tangent in [center - 24, center + 24] {
+                    assert!(point_is_solid(
+                        &assembly,
+                        wall_point(tangent, 8, core_top + q + 8)
+                    ));
+                }
+
+                // The centre recess terminates in a one-quantum backing cap
+                // immediately outside the room wall instead of opening above
+                // the corridor roof into exterior void.
+                let cap = assembly
+                    .brushes
+                    .iter()
+                    .find(|brush| brush.id == format!("{root}/interface_cap"))
+                    .unwrap();
+                let expected = match direction {
+                    WallDirection::North => (
+                        (center - q, i128::from(room.shell.1) - q, core_top + q),
+                        (center + q, i128::from(room.shell.1), core_top + 2 * q),
+                    ),
+                    WallDirection::South => (
+                        (center - q, i128::from(room.shell.3), core_top + q),
+                        (center + q, i128::from(room.shell.3) + q, core_top + 2 * q),
+                    ),
+                    WallDirection::West => (
+                        (i128::from(room.shell.0) - q, center - q, core_top + q),
+                        (i128::from(room.shell.0), center + q, core_top + 2 * q),
+                    ),
+                    WallDirection::East => (
+                        (i128::from(room.shell.2), center - q, core_top + q),
+                        (i128::from(room.shell.2) + q, center + q, core_top + 2 * q),
+                    ),
+                };
+                assert_eq!(cap.brush.aabb().unwrap(), expected);
+                assert!(point_is_solid(
+                    &assembly,
+                    wall_point(center, -8, core_top + q + 8)
                 ));
             }
         }
