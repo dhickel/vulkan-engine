@@ -177,6 +177,43 @@ fn initial_m3_config(args: &cli::CliArgs) -> Result<GenConfig, AppError> {
     Ok(config)
 }
 
+/// Remove stale explorer package roots left behind by killed or crashed
+/// processes. Roots are process-scoped (`bsp-beta-m3-<pid>-<nonce>-<seq>`),
+/// so any root older than `max_age` whose owning PID is not alive is safe to
+/// reap. This keeps the system temp dir from accumulating compiled packages
+/// across runs, which can exhaust tmpfs quotas on small mounts.
+pub fn sweep_stale_package_roots(max_age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix("bsp-beta-m3-") else {
+            continue;
+        };
+        let Some(pid_str) = rest.split('-').next() else {
+            continue;
+        };
+        // Skip roots whose owning process is still alive; they may be mid-build.
+        if let Ok(pid) = pid_str.parse::<u32>() {
+            if pid != 0 && std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                continue;
+            }
+        }
+        if let Ok(metadata) = entry.metadata() {
+            if let Ok(modified) = metadata.modified() {
+                if now.duration_since(modified).unwrap_or_default() >= max_age {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+    }
+}
+
 fn build_initial_generated_import(
     args: &cli::CliArgs,
 ) -> Result<(package::AuthorizedBspImport, GeneratedLaunch), AppError> {
@@ -189,6 +226,9 @@ fn build_initial_generated_import(
             )
         })?;
     let initial_config = initial_m3_config(args)?;
+    // Reap stale package roots from killed/crashed runs before reserving a
+    // fresh one; keeps the temp mount from accumulating compiled packages.
+    sweep_stale_package_roots(std::time::Duration::from_secs(300));
     let package_root = generation::create_unique_package_root().map_err(|error| {
         AppError::BridgeProof(format!("reserve generated package root: {error}"))
     })?;
@@ -2592,6 +2632,59 @@ fn install_app_fps_input(input: &mut InputSystem) {
         LayerDescriptor::new("bsp-beta-fps-actions", LayerPriority(10)),
         map.into_layer(),
     );
+}
+
+#[cfg(test)]
+mod sweep_stale_roots_tests {
+    use super::sweep_stale_package_roots;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    fn root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(name)
+    }
+
+    fn age(path: &std::path::Path, spec: &str) {
+        let _ = std::process::Command::new("touch")
+            .args(["-d", spec])
+            .arg(path)
+            .status();
+    }
+
+    #[test]
+    fn sweep_removes_stale_roots_and_keeps_fresh_and_live() {
+        let stale = root(&format!(
+            "bsp-beta-m3-999999-100-0"
+        ));
+        let fresh = root(&format!(
+            "bsp-beta-m3-{}-{}-0",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let unrelated = root("unrelated-dir");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::create_dir_all(&fresh).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+
+        age(&stale, "1 hour ago");
+        age(&unrelated, "1 hour ago");
+
+        sweep_stale_package_roots(Duration::from_secs(300));
+
+        assert!(!stale.exists(), "stale root should be reaped");
+        assert!(
+            fresh.exists(),
+            "fresh root owned by this live PID must survive"
+        );
+        assert!(unrelated.exists(), "non-package dirs must survive");
+
+        let _ = std::fs::remove_dir_all(&stale);
+        let _ = std::fs::remove_dir_all(&fresh);
+        let _ = std::fs::remove_dir_all(&unrelated);
+    }
 }
 
 #[cfg(test)]
