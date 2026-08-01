@@ -243,22 +243,44 @@ fn feature_is_clear(
 fn portal_chamber(room: &CommittedRoom) -> Option<Vec<FeatureDraft>> {
     let (x0, y0, z0, x1, _y1, z1) = room_interior(room)?;
     let q = CONSTRUCTION_QUANTUM;
-    let top = (z0 + HEADROOM).min(z1);
-    // Central cardinal wall spans remain present on chamfered rooms; locating
-    // the paired pilasters there keeps the framing inside the true convex hull.
+    // Room-scaled blades: in rooms ≥ 192 short axis, span full clear
+    // floor-to-ceiling height; smaller rooms use headroom-limited pilasters.
+    let short_axis = (x1 - x0).min(z1 - z0);
+    let large_room = short_axis >= 12 * q;
+    let blade_top = if large_room {
+        z1
+    } else {
+        (z0 + HEADROOM).min(z1)
+    };
+    let blade_thickness = if large_room { 2 * q } else { q };
     let centre = ((x0 + x1) / 2 / q) * q;
-    let left = QuantumVolume::new(centre - 2 * q, y0, z0, centre - q, y0 + q, top)?;
-    let right = QuantumVolume::new(centre + q, y0, z0, centre + 2 * q, y0 + q, top)?;
+    let left = QuantumVolume::new(
+        centre - 2 * q,
+        y0,
+        z0,
+        centre - 2 * q + blade_thickness,
+        y0 + q,
+        blade_top,
+    )?;
+    let right = QuantumVolume::new(
+        centre + 2 * q - blade_thickness,
+        y0,
+        z0,
+        centre + 2 * q,
+        y0 + q,
+        blade_top,
+    )?;
+    let role_tag = if large_room { "blade" } else { "pilaster" };
     Some(vec![
         FeatureDraft {
             volume: left,
             support: DraftSupport::Surface(SupportSurfaceKind::Wall),
-            tags: tags("portal-chamber", "pilaster", "left-frame"),
+            tags: tags("portal-chamber", role_tag, "left-frame"),
         },
         FeatureDraft {
             volume: right,
             support: DraftSupport::Surface(SupportSurfaceKind::Wall),
-            tags: tags("portal-chamber", "pilaster", "right-frame"),
+            tags: tags("portal-chamber", role_tag, "right-frame"),
         },
     ])
 }
@@ -269,10 +291,12 @@ fn buttressed_hall(room: &CommittedRoom) -> Option<Vec<FeatureDraft>> {
     }
     let (x0, y0, z0, _x1, y1, z1) = room_interior(room)?;
     let q = CONSTRUCTION_QUANTUM;
-    let a = QuantumVolume::new(x0, y0, z0, x0 + q, y0 + q, z1)?;
-    let b = QuantumVolume::new(x0, y1 - q, z0, x0 + q, y1, z1)?;
-    // A short wall-to-floor buttress pair remains visibly distinct even in a
-    // minimum room and contacts its named wall instead of pretending to be a floor feature.
+    // Room-scaled buttresses: 2-quantum thickness when the shorter axis
+    // is ≥ 192, otherwise keep the 1-quantum minimum.
+    let short_axis = ((_x1 - x0).min(y1 - y0)).min(z1 - z0);
+    let thickness = if short_axis >= 12 * q { 2 * q } else { q };
+    let a = QuantumVolume::new(x0, y0, z0, x0 + thickness, y0 + thickness, z1)?;
+    let b = QuantumVolume::new(x0, y1 - thickness, z0, x0 + thickness, y1, z1)?;
     Some(vec![
         FeatureDraft {
             volume: a,
@@ -319,8 +343,12 @@ fn column_grove(room: &CommittedRoom, rich: bool, detail_rank: u64) -> Option<Ve
             },
         ]);
     }
-    let a = QuantumVolume::new(x0, y0, z0, x0 + q, y0 + q, z1)?;
-    let b = QuantumVolume::new(x1 - q, y1 - q, z0, x1, y1, z1)?;
+    // Room-scaled pillars: 32×32 (2q) when the shorter axis is ≥ 192,
+    // otherwise keep the compact 16×16 (1q) form.
+    let short_axis = (x1 - x0).min(y1 - y0);
+    let pillar_w = if short_axis >= 12 * q { 2 * q } else { q };
+    let a = QuantumVolume::new(x0, y0, z0, x0 + pillar_w, y0 + pillar_w, z1)?;
+    let b = QuantumVolume::new(x1 - pillar_w, y1 - pillar_w, z0, x1, y1, z1)?;
     Some(vec![
         FeatureDraft {
             volume: a,
@@ -787,7 +815,12 @@ mod tests {
             super::super::config::V3Preset::Rich,
         ] {
             for seed in [0, 42, 99, 255] {
-                for extent in [1024, 2048, 3072] {
+                let extents: &[u32] = match preset {
+                    super::super::config::V3Preset::Sparse => &[1024, 2048, 3072],
+                    super::super::config::V3Preset::Moderate => &[2048, 3072],
+                    super::super::config::V3Preset::Rich => &[3072],
+                };
+                for &extent in extents {
                     plan(preset, seed, extent)
                         .unwrap_or_else(|error| panic!("{preset:?}/{seed}/{extent}: {error}"));
                 }

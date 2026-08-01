@@ -70,7 +70,7 @@ pub const LOOP_COUNT_MAX: u32 = 6;
 pub const VERTICAL_EDGE_MAX: u32 = 3;
 /// Compatibility room-span floor and ceiling.
 pub const DEFAULT_ROOM_SPAN_MIN: u32 = 112;
-pub const DEFAULT_ROOM_SPAN_MAX: u32 = 256;
+pub const DEFAULT_ROOM_SPAN_MAX: u32 = 448;
 /// Canonical grammar-family tags in deterministic order.
 pub const GRAMMAR_FAMILIES: &[&str] = &[
     "portal-chamber",

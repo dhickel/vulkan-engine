@@ -858,7 +858,7 @@ mod tests {
         assert_eq!(config.effective_corridors(), 10);
         assert_eq!(config.effective_vertical_edges(), 1);
         assert_eq!(config.effective_room_span_min(), 112);
-        assert_eq!(config.effective_room_span_max(), 256);
+        assert_eq!(config.effective_room_span_max(), 448);
         assert_eq!(config.effective_light_count(), 12);
     }
 

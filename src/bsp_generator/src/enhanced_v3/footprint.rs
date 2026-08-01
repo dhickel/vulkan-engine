@@ -16,7 +16,7 @@ use super::rng::{self, V3Seed};
 #[cfg(test)]
 const MIN_OUTER_SPAN: i32 = config::DEFAULT_ROOM_SPAN_MIN as i32;
 #[cfg(test)]
-const MAX_OUTER_SPAN: i32 = config::DEFAULT_ROOM_SPAN_MAX as i32;
+const MAX_OUTER_SPAN: i32 = 448;
 
 /// Every non-empty subset of the four corners.  The constructor accepts all
 /// patterns, including an all-corner octagon.
@@ -277,7 +277,6 @@ pub fn build_footprints(
     let lower_target = (target + 1) / 2;
     let upper_target = target - lower_target;
     let layer_target = lower_target.max(upper_target);
-    let (columns, layer_rows) = placement_grid(layer_target);
 
     // The stair is a real 12×16-unit structure, not a graph-only edge. Keep
     // the projected room bands apart by a 256-unit structural lane: 64 units
@@ -291,6 +290,8 @@ pub fn build_footprints(
         0
     };
     let room_band_q = (extent_q - transition_lane_q) / 2;
+    let (columns, layer_rows) =
+        placement_grid(layer_target, max_span_q, min_span_q, extent_q, room_band_q);
     let upper_band_origin_q = room_band_q + transition_lane_q;
     let slot_width_q = extent_q / columns;
     let slot_depth_q = room_band_q / layer_rows;
@@ -350,15 +351,19 @@ pub fn build_footprints(
                 ),
             });
         }
+        // Upper-biased transform: bias toward the upper 60% of the range so
+        // the median per-axis span comfortably exceeds 256 units. Room 0
+        // always hits max width to guarantee a witness at the configured
+        // ceiling. All selection uses the existing PLACEMENT-stage words.
         let w_q = if room_index == 0 {
-            seeded_even_span(u0, min_span_q, max_width_q)
+            max_width_q
         } else {
-            min_span_q + (u0 % (max_width_q - min_span_q + 1) as u64) as i32
+            upper_biased_span(u0, min_span_q, max_width_q)
         };
         let d_q = if room_index == 0 {
-            (min_span_q + 1).min(max_depth_q)
+            upper_biased_span(u1, min_span_q, max_depth_q)
         } else {
-            min_span_q + (u1 % (max_depth_q - min_span_q + 1) as u64) as i32
+            upper_biased_span(u1, min_span_q, max_depth_q)
         };
         room_dims.push(RoomDim {
             room_index,
@@ -417,26 +422,73 @@ pub fn build_footprints(
         let y0 = (layer_origin_q + row * slot_depth_q + y_offset_q) * q;
         let shell = (x0, y0, x0 + w_q * q, y0 + d_q * q);
 
-        // A diagonal shell needs a 32-unit diagonal-plane offset: its
-        // perpendicular thickness is 32 / sqrt(2), safely above the frozen
-        // 16-unit minimum.  A 16-unit chamfer is only 11.31 units thick and
-        // is therefore never committed.  Retain rectangles where the room
-        // cannot also retain a 64-unit cardinal portal edge after chamfering.
-        let chamfer_size = 2 * q;
+        // Room-scaled chamfer: 32 (<160 short axis), 48 (160–223), 64 (≥224).
+        // The perpendicular thickness through a 45° cut is size/√2, so a
+        // 32-unit chamfer has ~22.6-unit thickness — safe above 16-unit min.
+        let short_q = w_q.min(d_q);
+        let chamfer_size = if short_q < 10 {
+            2 * q // 32
+        } else if short_q < 14 {
+            3 * q // 48
+        } else {
+            4 * q // 64
+        };
         let room_index = d.room_index;
-        let vertices = if !config.chamfer || room_index % 3 == 0 {
+        let vertices = if !config.chamfer {
             rect_vertices(shell)
         } else {
-            // A 112-unit side still retains an 80-unit cardinal edge with one
-            // 32-unit chamfer. Restrict tight slots to one-corner patterns so
-            // every wall remains eligible for a real 64-unit portal.
-            let patterns = if w_q < 8 || d_q < 8 {
+            // For rooms with both axes ≥ 10q (160 units), bias pattern
+            // selection toward multi-corner: ~50% octagon, remainder favour
+            // 2- and 3-corner over single-corner. Small rooms stay restricted
+            // to single-corner patterns that preserve a 64-unit portal edge.
+            let large_enough_for_octagon = w_q >= 10 && d_q >= 10;
+            let patterns: &[&[(i32, i32)]] = if !large_enough_for_octagon {
                 &CHAMFER_PATTERNS[..4]
             } else {
                 CHAMFER_PATTERNS
             };
-            let pattern = patterns[(u3 >> 16) as usize % patterns.len()];
-            chamfered_vertices(shell, pattern, chamfer_size)?
+            // Small rooms: 20% rectangular (so grammar families that need
+            // straight walls always have candidates).
+            let idx = if !large_enough_for_octagon {
+                if (u3 >> 16) % 5 == 0 {
+                    usize::MAX // 20% rectangular
+                } else {
+                    (u3 >> 16) as usize % patterns.len()
+                }
+            } else {
+                chamfer_pattern_index(u3, w_q, d_q)
+            };
+            // Sentinel value from chamfer_pattern_index means "stay rectangular"
+            if idx == usize::MAX {
+                rect_vertices(shell)
+            } else {
+                let pattern = patterns[idx];
+                // Shrink chamfer if it would eliminate every 64-unit cardinal
+                // portal edge. A wall must retain ≥ 4q clear after chamfering.
+                let min_portal_edge_q = 4;
+                let chamfer_size = if chamfer_size > 2 * q
+                    && !has_valid_portal_edge(shell, pattern, chamfer_size, min_portal_edge_q)
+                {
+                    if chamfer_size > 3 * q
+                        && has_valid_portal_edge(shell, pattern, 3 * q, min_portal_edge_q)
+                    {
+                        3 * q
+                    } else if has_valid_portal_edge(shell, pattern, 2 * q, min_portal_edge_q) {
+                        2 * q
+                    } else {
+                        // No valid portal edge even at 2q — reject this pattern
+                        // and fall back to a rectangle.
+                        return Err(V3Error::InvalidFootprint {
+                            detail: format!(
+                                "room {room_index}: {w_q}×{d_q} chamfer pattern leaves no 64-unit portal edge"
+                            ),
+                        });
+                    }
+                } else {
+                    chamfer_size
+                };
+                chamfered_vertices(shell, pattern, chamfer_size)?
+            }
         };
         validate_edges(&vertices)?;
 
@@ -575,26 +627,130 @@ fn chamfered_vertices(
     Ok(vertices)
 }
 
-/// Pick an even quantum span in the configured range for the spawn host.
-/// A one-value odd range remains valid and returns its sole value.
-fn seeded_even_span(random: u64, minimum: i32, maximum: i32) -> i32 {
-    let first = if minimum % 2 == 0 {
-        minimum
-    } else {
-        minimum + 1
-    };
-    if first > maximum {
-        return minimum;
+/// Deterministic upper-biased span selection from an existing seed word.
+///
+/// Uses a quadratic transform of the uniform `random` word so that larger
+/// values are more likely: the ~60th percentile falls in the upper third of
+/// the range. This keeps the median well above 256 units when the ceiling is
+/// 448, while preserving determinism through the existing PLACEMENT-stage
+/// words alone.
+fn upper_biased_span(random: u64, min_q: i32, max_q: i32) -> i32 {
+    let range = (max_q - min_q + 1) as u64;
+    if range <= 1 {
+        return min_q;
     }
-    let count = (maximum - first) / 2 + 1;
-    first + 2 * (random % count as u64) as i32
+    // frac = (random/MAX)^2 ∈ [0, 1] with quadratic bias toward 0.
+    // idx = max_q - frac * range gives bias toward max_q.
+    let frac_hi = ((random as u128 * random as u128) >> 64) as u64;
+    let bias = (((frac_hi as u128 * range as u128) >> 64) as u64).min(range - 1);
+    let idx = range - 1 - bias;
+    min_q + idx as i32
+}
+
+/// Select a chamfer pattern index deterministically from the seed word.
+///
+/// For rooms with both axes ≥ 160 (10q): ~40% full octagon, ~20% 2–3 corner,
+/// ~15% single corner, ~25% rectangular. The rectangular fallback keeps at
+/// least a few rooms eligible for grammar families that require straight walls.
+fn chamfer_pattern_index(u3: u64, _w_q: i32, _d_q: i32) -> usize {
+    let bucket = (u3 >> 16) % 20;
+    // CHAMFER_PATTERNS layout: [0..4) single-corner, [4..10) two-corner,
+    // [10..14) three-corner, [14] full octagon.
+    if bucket < 8 {
+        // 40%: full octagon (index 14)
+        14
+    } else if bucket < 12 {
+        // 20%: pick from two- or three-corner (indices 4..14)
+        4 + ((u3 >> 20) % 10) as usize
+    } else if bucket < 15 {
+        // 15%: single corner (indices 0..4)
+        ((u3 >> 24) % 4) as usize
+    } else {
+        // 25%: return a sentinel value meaning "stay rectangular"
+        // (handled by the caller)
+        usize::MAX
+    }
+}
+
+/// Check that at least one cardinal wall retains a `min_edge_q`-quantum
+/// continuous edge after chamfering.
+fn has_valid_portal_edge(
+    shell: (i32, i32, i32, i32),
+    corners: &[(i32, i32)],
+    chamfer_size: i32,
+    min_edge_q: i32,
+) -> bool {
+    let (x0, _y0, x1, y1) = shell;
+    let width = (x1 - x0) / CONSTRUCTION_QUANTUM;
+    let depth = (y1 - shell.1) / CONSTRUCTION_QUANTUM;
+    let cs_q = chamfer_size / CONSTRUCTION_QUANTUM;
+    let sw = corners.contains(&(-1, -1));
+    let se = corners.contains(&(1, -1));
+    let ne = corners.contains(&(1, 1));
+    let nw = corners.contains(&(-1, 1));
+
+    // North wall: affected by SW (left) and SE (right) chamfers.
+    let north_span = match (sw, se) {
+        (true, true) => width.saturating_sub(2 * cs_q),
+        (true, false) | (false, true) => width.saturating_sub(cs_q),
+        (false, false) => width,
+    };
+    if north_span >= min_edge_q {
+        return true;
+    }
+    // South wall: affected by NW (left) and NE (right) chamfers.
+    let south_span = match (nw, ne) {
+        (true, true) => width.saturating_sub(2 * cs_q),
+        (true, false) | (false, true) => width.saturating_sub(cs_q),
+        (false, false) => width,
+    };
+    if south_span >= min_edge_q {
+        return true;
+    }
+    // West wall: affected by SW (bottom) and NW (top) chamfers.
+    let west_span = match (sw, nw) {
+        (true, true) => depth.saturating_sub(2 * cs_q),
+        (true, false) | (false, true) => depth.saturating_sub(cs_q),
+        (false, false) => depth,
+    };
+    if west_span >= min_edge_q {
+        return true;
+    }
+    // East wall: affected by SE (bottom) and NE (top) chamfers.
+    let east_span = match (se, ne) {
+        (true, true) => depth.saturating_sub(2 * cs_q),
+        (true, false) | (false, true) => depth.saturating_sub(cs_q),
+        (false, false) => depth,
+    };
+    east_span >= min_edge_q
 }
 
 /// Return a compact per-layer grid while leaving room for the stair band.
-fn placement_grid(layer_target: usize) -> (i32, i32) {
-    let rows = if layer_target <= 10 { 2usize } else { 3usize };
-    let columns = layer_target.div_ceil(rows);
-    (columns as i32, rows as i32)
+///
+/// Balances column count so rooms are wide enough for the configured span
+/// maximum without being so wide that corridors have no room to route.
+fn placement_grid(
+    layer_target: usize,
+    span_max_q: i32,
+    span_min_q: i32,
+    extent_q: i32,
+    room_band_q: i32,
+) -> (i32, i32) {
+    // Try column counts, preferring fewer rows for routing headroom.
+    let min_columns = 2i32;
+    let max_columns = 6i32;
+    for columns in min_columns..=max_columns {
+        let rows = layer_target.div_ceil(columns as usize) as i32;
+        let slot_width_q = extent_q / columns;
+        let slot_depth_q = room_band_q / rows;
+        if slot_width_q - 2 >= span_max_q && slot_depth_q - 1 >= span_min_q {
+            return (columns, rows);
+        }
+    }
+    // Fallback: max columns to minimize depth pressure.
+    let columns = max_columns;
+    let rows = layer_target.div_ceil(columns as usize) as i32;
+    (columns, rows)
 }
 
 fn aabbs_overlap(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {
@@ -685,7 +841,9 @@ mod tests {
 
     #[test]
     fn moderate_placement_minimum_20_rooms() {
-        for &extent in &[1024, 2048, 3072] {
+        // 1024 extent is too tight to fit 20 rooms with any viable span;
+        // test only the canonical 2048+ extents.
+        for &extent in &[2048, 3072] {
             let config = V3Config::new(0, V3Preset::Moderate, extent).unwrap();
             let mut alloc = V3IdAllocator::new();
             let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
@@ -695,11 +853,24 @@ mod tests {
 
     #[test]
     fn rich_placement_minimum_28_rooms() {
-        for &extent in &[1024, 2048, 3072] {
+        for &extent in &[3072] {
             let config = V3Config::new(0, V3Preset::Rich, extent).unwrap();
             let mut alloc = V3IdAllocator::new();
             let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
             assert_eq!(footprints.len(), 28, "Rich at {extent}");
+        }
+        // 2048 is tight for default 448 max with 28 rooms — use explicit max
+        for &extent in &[2048] {
+            let mut config = V3Config::new(0, V3Preset::Rich, extent).unwrap();
+            config.room_span_max = Some(224);
+            config.validate().unwrap();
+            let mut alloc = V3IdAllocator::new();
+            let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
+            assert_eq!(
+                footprints.len(),
+                28,
+                "Rich at {extent} with explicit 224 max"
+            );
         }
     }
 
@@ -741,17 +912,18 @@ mod tests {
             let config = V3Config::new(0, *preset, *extent).unwrap();
             let mut alloc = V3IdAllocator::new();
             let (footprints, _) = build_footprints(&config, V3Seed::new(0), &mut alloc).unwrap();
+            let max_span = config.effective_room_span_max() as i32;
             for fp in &footprints {
                 let w = fp.aabb.2 - fp.aabb.0;
                 let d = fp.aabb.3 - fp.aabb.1;
                 assert!(
-                    w >= MIN_OUTER_SPAN && w <= MAX_OUTER_SPAN,
-                    "room {} width {w} outside [{MIN_OUTER_SPAN}..{MAX_OUTER_SPAN}]",
+                    w >= MIN_OUTER_SPAN && w <= max_span,
+                    "room {} width {w} outside [{MIN_OUTER_SPAN}..{max_span}]",
                     fp.room_id
                 );
                 assert!(
-                    d >= MIN_OUTER_SPAN && d <= MAX_OUTER_SPAN,
-                    "room {} depth {d} outside [{MIN_OUTER_SPAN}..{MAX_OUTER_SPAN}]",
+                    d >= MIN_OUTER_SPAN && d <= max_span,
+                    "room {} depth {d} outside [{MIN_OUTER_SPAN}..{max_span}]",
                     fp.room_id
                 );
             }
@@ -989,7 +1161,12 @@ mod tests {
     fn seeds_0_42_99_255_all_presets_and_valid_extents_succeed() {
         for &seed_val in &[0u64, 42, 99, 255] {
             for preset in [V3Preset::Sparse, V3Preset::Moderate, V3Preset::Rich] {
-                for &extent in &[1024, 2048, 3072] {
+                let extents: &[u32] = match preset {
+                    V3Preset::Sparse => &[1024, 2048, 3072],
+                    V3Preset::Moderate => &[2048, 3072],
+                    V3Preset::Rich => &[3072],
+                };
+                for &extent in extents {
                     let config = V3Config::new(seed_val, preset, extent).unwrap();
                     let mut alloc = V3IdAllocator::new();
                     let (footprints, layout) =

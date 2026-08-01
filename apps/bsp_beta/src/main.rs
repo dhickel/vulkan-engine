@@ -2653,9 +2653,7 @@ mod sweep_stale_roots_tests {
 
     #[test]
     fn sweep_removes_stale_roots_and_keeps_fresh_and_live() {
-        let stale = root(&format!(
-            "bsp-beta-m3-999999-100-0"
-        ));
+        let stale = root(&format!("bsp-beta-m3-999999-100-0"));
         let fresh = root(&format!(
             "bsp-beta-m3-{}-{}-0",
             std::process::id(),

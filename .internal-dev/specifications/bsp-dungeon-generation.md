@@ -645,7 +645,7 @@ Identical to the Enhanced v2 vertical contract (§17.2, `DECISION-20260729-02`):
 - **Chamfered/octagonal footprint**: rooms may use cardinal + 45° footprint families
 - **Axis-aligned rectangular rooms** remain supported (compatible with v1/v2)
 - **Minimum room outer span**: ≥ 112 Quake units (7 quanta; 80-unit clear interior)
-- **Maximum room outer span**: ≤ 256 Quake units per axis
+- **Maximum room outer span**: ≤ 448 Quake units per axis (owner re-review 2026-08-01: intentionally revised from 256 to 448 for EnhancedV3 only; Legacy v1 and Enhanced v2 remain 112–256)
 - **Balanced layer membership**: max difference of 1 between lower and upper layers
 - **Shared XY occupancy grid**: no two rooms may overlap in XY projection
 

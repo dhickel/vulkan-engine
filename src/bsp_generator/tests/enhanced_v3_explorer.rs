@@ -19,7 +19,7 @@ fn compatibility_constructor_resolves_existing_defaults() {
     assert_eq!(sparse.effective_corridors(), 10);
     assert_eq!(sparse.effective_vertical_edges(), 1);
     assert_eq!(sparse.effective_room_span_min(), 112);
-    assert_eq!(sparse.effective_room_span_max(), 256);
+    assert_eq!(sparse.effective_room_span_max(), 448);
     assert_eq!(sparse.effective_light_count(), 12);
     assert!(sparse.chamfer);
     assert!(sparse.stairs);

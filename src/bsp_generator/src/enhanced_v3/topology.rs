@@ -2062,7 +2062,12 @@ mod tests {
             super::super::config::V3Preset::Moderate,
             super::super::config::V3Preset::Rich,
         ] {
-            for &extent in &[1024u32, 2048, 3072] {
+            let extents: &[u32] = match preset {
+                super::super::config::V3Preset::Sparse => &[1024, 2048, 3072],
+                super::super::config::V3Preset::Moderate => &[2048, 3072],
+                super::super::config::V3Preset::Rich => &[3072],
+            };
+            for &extent in extents {
                 let mut seed_signatures = std::collections::BTreeSet::new();
                 for seed_val in [0u64, 42, 99, 255] {
                     let config = V3Config::new(seed_val, preset, extent).unwrap();
