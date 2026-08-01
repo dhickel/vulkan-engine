@@ -128,16 +128,30 @@ extraction.
 
 `--m3-generate` builds an EnhancedV3 full-config package through `engine_pack`,
 then strictly authorizes its BSP, explicit `.lit`, WAD, palette, and texture
-closure before using the same runtime path as direct imports. It always uses
-strict mode and rejects direct BSP, palette, LIT, WAD, and texture companion
-flags. Tool discovery
-uses `--ericw-tools`, `ERICW_TOOLS_DIR`, the documented HOME installation, then
-one PATH directory containing all of `qbsp`, `vis`, and `light`.
+closure before using the same runtime path as direct imports. Generated package
+authorization remains strict even when a launcher passes `--development`; direct
+BSP, palette, LIT, WAD, and texture companion flags remain incompatible with
+generation. Tool discovery uses `--ericw-tools`, `ERICW_TOOLS_DIR`, the
+documented HOME installation, then one PATH directory containing all of `qbsp`,
+`vis`, and `light`.
+
+With no generation options, startup selects a system-time seed and the Moderate
+preset. Chamfers and pointed arches are enabled, and all six grammar families
+are eligible. CLI overrides seed the initial generated package and the in-game
+GUI draft:
 
 ```bash
-cargo run -p bsp_beta -- --m3-generate --headless
+cargo run -p bsp_beta -- --development --m3-generate --preset moderate
+cargo run -p bsp_beta -- --m3-generate --seed 42 --preset rich --rooms 28
+cargo run -p bsp_beta -- --m3-generate --corridors 24 --loops 3 --no-chamfer \
+  --arch-type segmented --grammar-families portal-chamber,column-grove
 cargo run -p bsp_beta -- --m3-generate --ericw-tools /path/to/ericw/bin
 ```
+
+Generation options are `--seed <u64>`, `--preset sparse|moderate|rich`,
+`--rooms <n>`, `--corridors <n>`, `--loops <n>`,
+`--chamfer`/`--no-chamfer`, `--arch-type none|pointed|segmented`, and
+`--grammar-families <csv|all>`. They are rejected without `--m3-generate`.
 
 #### In-Game GUI (F1 / F2)
 

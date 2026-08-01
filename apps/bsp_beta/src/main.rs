@@ -94,6 +94,7 @@ fn main() {
 struct GeneratedLaunch {
     tools_dir: PathBuf,
     package_root: PathBuf,
+    initial_config: GenConfig,
 }
 
 fn cleanup_generated_launch(generated: Option<&GeneratedLaunch>) {
@@ -155,6 +156,27 @@ fn authorize_generated_package(
     .map_err(AppError::PackageLoad)
 }
 
+fn initial_m3_config(args: &cli::CliArgs) -> Result<GenConfig, AppError> {
+    let mut config = GenConfig::default_config();
+    config.seed = args.m3_seed;
+    config.preset = args.m3_preset;
+    config.extent = if args.m3_preset == bsp_generator::enhanced_v3::V3Preset::Rich {
+        3072
+    } else {
+        2048
+    };
+    config.rooms = args.m3_rooms;
+    config.corridors = args.m3_corridors;
+    config.loops = args.m3_loops;
+    config.chamfer = args.m3_chamfer;
+    config.arch_type = args.m3_arch_type;
+    config.grammar_families = args.m3_grammar_families.clone();
+    config
+        .to_v3_config()
+        .map_err(|error| AppError::BridgeProof(format!("invalid M3 CLI config: {error}")))?;
+    Ok(config)
+}
+
 fn build_initial_generated_import(
     args: &cli::CliArgs,
 ) -> Result<(package::AuthorizedBspImport, GeneratedLaunch), AppError> {
@@ -166,13 +188,14 @@ fn build_initial_generated_import(
                     .into(),
             )
         })?;
+    let initial_config = initial_m3_config(args)?;
     let package_root = generation::create_unique_package_root().map_err(|error| {
         AppError::BridgeProof(format!("reserve generated package root: {error}"))
     })?;
     let startup = generation::startup_package_dir(&package_root);
-    let config = GenConfig::default_config()
+    let config = initial_config
         .to_v3_config()
-        .map_err(|error| AppError::BridgeProof(format!("default V3 config: {error}")))?;
+        .map_err(|error| AppError::BridgeProof(format!("invalid M3 CLI config: {error}")))?;
     if let Err(error) = engine_pack::enhanced_dungeon_v3::build_v3_package_from_config(
         &config,
         &startup,
@@ -191,6 +214,7 @@ fn build_initial_generated_import(
             GeneratedLaunch {
                 tools_dir,
                 package_root,
+                initial_config,
             },
         )),
         Err(error) => {
@@ -1516,11 +1540,11 @@ fn run_m3_generate_windowed(
             return Err(AppError::EventLoop(error));
         }
     };
-    let default_cfg = GenConfig::default_config();
+    let initial_cfg = generated.initial_config.clone();
     let window = match WindowBuilder::new()
         .with_title(format!(
             "BSP Beta — m3-generate | {}",
-            default_cfg.describe()
+            initial_cfg.describe()
         ))
         .with_inner_size(winit::dpi::LogicalSize::new(1280, 720))
         .build(&event_loop)
@@ -1559,7 +1583,9 @@ fn run_m3_generate_windowed(
     install_app_fps_input(&mut loop_state.input);
 
     // ── M3 GUI setup ──────────────────────────────────────────────────
-    let gui: Rc<RefCell<M3Gui>> = Rc::new(RefCell::new(M3Gui::new()));
+    let mut gui_state = M3Gui::new();
+    gui_state.config = initial_cfg.clone();
+    let gui: Rc<RefCell<M3Gui>> = Rc::new(RefCell::new(gui_state));
     loop_state.gameplay_input_enabled = true;
 
     let worker = GenWorker::spawn();
@@ -1572,7 +1598,7 @@ fn run_m3_generate_windowed(
     let mut ctrl_held = false;
     let mut torn_down = false;
     let mut title_toast_deadline = None;
-    let mut last_title_desc = default_cfg.describe();
+    let mut last_title_desc = initial_cfg.describe();
 
     window.request_redraw();
 
@@ -2618,7 +2644,42 @@ mod acceptance_camera_tests {
 #[cfg(test)]
 mod m3_integration_tests {
     use super::*;
+    use bsp_generator::enhanced_v3::{ArchType, V3Preset};
     use winit::event::MouseScrollDelta;
+
+    #[test]
+    fn cli_generation_overrides_seed_the_initial_gui_config() {
+        let args = cli::parse_from([
+            "--development",
+            "--m3-generate",
+            "--seed",
+            "42",
+            "--preset",
+            "rich",
+            "--rooms",
+            "28",
+            "--corridors",
+            "30",
+            "--loops",
+            "4",
+            "--no-chamfer",
+            "--arch-type",
+            "segmented",
+            "--grammar-families",
+            "portal-chamber,column-grove,terraced-shrine",
+        ])
+        .unwrap();
+        let config = initial_m3_config(&args).unwrap();
+        assert_eq!(config.seed, 42);
+        assert_eq!(config.preset, V3Preset::Rich);
+        assert_eq!(config.extent, 3072);
+        assert_eq!(config.rooms, Some(28));
+        assert_eq!(config.corridors, Some(30));
+        assert_eq!(config.loops, Some(4));
+        assert!(!config.chamfer);
+        assert_eq!(config.arch_type, ArchType::Segmented);
+        assert_eq!(config.grammar_families.len(), 3);
+    }
 
     #[test]
     fn mode_planner_keeps_registration_on_switch_and_gates_gameplay() {

@@ -360,8 +360,10 @@ dungeon_gen --class m3 --seed 42 --preset moderate --rooms 20 \
 # Publish through engine_pack with a preset
 engine_pack enhanced-dungeon-v3 --seed 42 --preset moderate --out /tmp/pkg
 
-# Explore interactively with the dungeon explorer
-./tools/dungeon_explore.sh --class m3 --seed 42
+# Explore with the in-game GUI (architectural is default)
+./tools/dungeon_explore.sh --seed 42
+# Or select a specific mode
+./tools/dungeon_explore.sh --m3 --preset rich --rooms 20
 ```
 
 **Published package layout:**

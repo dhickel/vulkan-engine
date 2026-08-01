@@ -814,7 +814,14 @@ outside `src/bsp_generator/src/enhanced_v3/` and `src/bsp_generator/src/enhanced
 ### 20.17 Windowed In-Game Explorer GUI
 
 The windowed `bsp_beta --m3-generate` path provides one in-game EnhancedV3
-configuration overlay with two mutually exclusive interaction modes:
+configuration overlay with two mutually exclusive interaction modes. Initial
+startup configuration accepts `--seed`, `--preset`, exact room/corridor/loop
+overrides, chamfer enable/disable, arch type, and a grammar-family allowlist.
+An omitted seed derives from the current system time; the remaining defaults are
+Moderate, chamfer enabled, pointed arches, and all six grammar families eligible.
+The startup package and GUI draft must reflect the same resolved configuration.
+
+Interaction modes:
 
 - **F1 Keyboard mode**: arrows navigate, Enter edits or activates, Tab and
   Shift+Tab move between groups, Space toggles checkboxes, `+`/`-` adjust

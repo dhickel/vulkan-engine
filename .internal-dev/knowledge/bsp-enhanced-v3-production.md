@@ -89,6 +89,10 @@ counts remain below their preset ceilings and the 10,000-face M2 ceiling.
 - `dungeon_gen`'s stderr summary includes the requested output path, so
   deterministic CLI checks must compare map bytes (and same-path summaries),
   not summaries from distinct `--out` paths.
+- `bsp_beta --m3-generate` resolves an omitted startup seed from system time and
+  defaults to Moderate, chamfer enabled, pointed arches, and all six grammar
+  families. CLI overrides must seed both the initial package and the GUI draft;
+  otherwise the first editor state misrepresents the mounted world.
 
 ### Proof-vs-Production Gotcha
 The old 160-brush proof model was hand-authored for budget ceiling evidence.

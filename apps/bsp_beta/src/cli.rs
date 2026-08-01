@@ -3,6 +3,15 @@
 //! Supported flags are intentionally space-separated only:
 //!   --bsp <path>          Path to a compiled .bsp file (required by runtime).
 //!   --m3-generate         Generate an EnhancedV3 dungeon from scratch.
+//!   --seed <u64>          Generation seed (default: current system time).
+//!   --preset <name>       sparse, moderate, or rich (default: moderate).
+//!   --rooms <n>           Exact room-count override.
+//!   --corridors <n>       Exact corridor-count override.
+//!   --loops <n>           Exact loop-count override.
+//!   --chamfer             Enable chamfered rooms (default).
+//!   --no-chamfer          Disable chamfered rooms.
+//!   --arch-type <name>    none, pointed, or segmented (default: pointed).
+//!   --grammar-families    Comma-separated grammar allowlist (default: all six).
 //!   --ericw-tools <dir>   Path to ericw-tools bin directory for compilation.
 //!   --scale <float>       Quake→engine scale factor (default: 0.0254).
 //!   --headless            Run in headless mode (no window).
@@ -12,6 +21,9 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use bsp_generator::enhanced_v3::{ArchType, V3Preset, GRAMMAR_FAMILIES};
 
 /// Parsed CLI arguments for the BSP beta application.
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +65,22 @@ pub struct CliArgs {
     pub m3_generate: bool,
     /// Phase B: Path to ericw-tools bin directory.
     pub ericw_tools_dir: Option<PathBuf>,
+    /// EnhancedV3 generation seed. Defaults to the current system time.
+    pub m3_seed: u64,
+    /// EnhancedV3 density preset.
+    pub m3_preset: V3Preset,
+    /// Optional exact room-count override.
+    pub m3_rooms: Option<u32>,
+    /// Optional exact corridor-count override.
+    pub m3_corridors: Option<u32>,
+    /// Optional exact loop-count override.
+    pub m3_loops: Option<u32>,
+    /// Whether seeded room footprints may be chamfered.
+    pub m3_chamfer: bool,
+    /// Portal surround type.
+    pub m3_arch_type: ArchType,
+    /// Empty means all six grammar families are eligible.
+    pub m3_grammar_families: Vec<String>,
 }
 
 /// Import mode for CLI — mutually exclusive --strict and --development.
@@ -85,8 +113,14 @@ pub enum CliError {
     M3GenerateWadConflict,
     /// --m3-generate owns the generated texture closure.
     M3GenerateTexturesConflict,
-    /// Generated packages are always strict imports.
-    M3GenerateDevelopmentConflict,
+    /// Generation-only option used without --m3-generate.
+    M3OptionRequiresGenerate(&'static str),
+    /// Invalid EnhancedV3 generation option.
+    InvalidM3Value {
+        flag: &'static str,
+        value: String,
+        expected: &'static str,
+    },
 }
 
 impl fmt::Display for CliError {
@@ -134,9 +168,14 @@ impl fmt::Display for CliError {
             CliError::M3GenerateTexturesConflict => {
                 write!(f, "--m3-generate and --textures are mutually exclusive")
             }
-            CliError::M3GenerateDevelopmentConflict => {
-                write!(f, "--m3-generate always uses strict package authorization")
+            CliError::M3OptionRequiresGenerate(flag) => {
+                write!(f, "{flag} is only valid with --m3-generate")
             }
+            CliError::InvalidM3Value {
+                flag,
+                value,
+                expected,
+            } => write!(f, "{flag} expects {expected}, got '{value}'"),
         }
     }
 }
@@ -200,6 +239,14 @@ impl Default for CliArgs {
             acceptance_camera: None,
             m3_generate: false,
             ericw_tools_dir: None,
+            m3_seed: system_time_seed(),
+            m3_preset: V3Preset::Moderate,
+            m3_rooms: None,
+            m3_corridors: None,
+            m3_loops: None,
+            m3_chamfer: true,
+            m3_arch_type: ArchType::Pointed,
+            m3_grammar_families: Vec::new(),
         }
     }
 }
@@ -208,6 +255,7 @@ impl Default for CliArgs {
 pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<CliArgs, CliError> {
     let args: Vec<String> = args.into_iter().map(Into::into).collect();
     let mut opts = CliArgs::default();
+    let mut m3_option_used = None;
     let mut i = 0;
 
     while i < args.len() {
@@ -310,6 +358,58 @@ pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<C
                 opts.m3_generate = true;
                 i += 1;
             }
+            "--seed" => {
+                opts.m3_seed = parse_u64_value(&args, i, "--seed")?;
+                m3_option_used = Some("--seed");
+                i += 2;
+            }
+            "--preset" => {
+                let value = next_value(&args, i, "--preset")?;
+                opts.m3_preset = V3Preset::from_tag(value).ok_or_else(|| {
+                    invalid_m3_value("--preset", value, "sparse, moderate, or rich")
+                })?;
+                m3_option_used = Some("--preset");
+                i += 2;
+            }
+            "--rooms" => {
+                opts.m3_rooms = Some(parse_u32_value(&args, i, "--rooms")?);
+                m3_option_used = Some("--rooms");
+                i += 2;
+            }
+            "--corridors" => {
+                opts.m3_corridors = Some(parse_u32_value(&args, i, "--corridors")?);
+                m3_option_used = Some("--corridors");
+                i += 2;
+            }
+            "--loops" => {
+                opts.m3_loops = Some(parse_u32_value(&args, i, "--loops")?);
+                m3_option_used = Some("--loops");
+                i += 2;
+            }
+            "--chamfer" => {
+                opts.m3_chamfer = true;
+                m3_option_used = Some("--chamfer");
+                i += 1;
+            }
+            "--no-chamfer" => {
+                opts.m3_chamfer = false;
+                m3_option_used = Some("--no-chamfer");
+                i += 1;
+            }
+            "--arch-type" => {
+                let value = next_value(&args, i, "--arch-type")?;
+                opts.m3_arch_type = ArchType::from_tag(value).ok_or_else(|| {
+                    invalid_m3_value("--arch-type", value, "none, pointed, or segmented")
+                })?;
+                m3_option_used = Some("--arch-type");
+                i += 2;
+            }
+            "--grammar-families" => {
+                let value = next_value(&args, i, "--grammar-families")?;
+                opts.m3_grammar_families = parse_grammar_families(value)?;
+                m3_option_used = Some("--grammar-families");
+                i += 2;
+            }
             "--ericw-tools" => {
                 let value = next_value(&args, i, "--ericw-tools")?;
                 opts.ericw_tools_dir = Some(PathBuf::from(value));
@@ -320,7 +420,11 @@ pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<C
     }
 
     // ── m3-generate conflict checks ──────────────────────────────
-    if opts.m3_generate {
+    if !opts.m3_generate {
+        if let Some(flag) = m3_option_used {
+            return Err(CliError::M3OptionRequiresGenerate(flag));
+        }
+    } else {
         if opts.bsp_path.is_some() {
             return Err(CliError::M3GenerateBspConflict);
         }
@@ -336,11 +440,12 @@ pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<C
         if opts.textures_dir.is_some() {
             return Err(CliError::M3GenerateTexturesConflict);
         }
-        if opts.import_mode == Some(ImportMode::Development) {
-            return Err(CliError::M3GenerateDevelopmentConflict);
+        // Generated mode owns a complete closure and is always authorized
+        // strictly at runtime. Preserve an explicit mode for script-level CLI
+        // compatibility, otherwise expose strict as the effective default.
+        if opts.import_mode.is_none() {
+            opts.import_mode = Some(ImportMode::Strict);
         }
-        // Generated mode owns a complete closure and is always strict.
-        opts.import_mode = Some(ImportMode::Strict);
     }
 
     if opts.bsp_path.is_some() && opts.import_mode.is_none() {
@@ -348,6 +453,60 @@ pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<C
     }
 
     Ok(opts)
+}
+
+fn system_time_seed() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64
+}
+
+fn invalid_m3_value(flag: &'static str, value: &str, expected: &'static str) -> CliError {
+    CliError::InvalidM3Value {
+        flag,
+        value: value.to_string(),
+        expected,
+    }
+}
+
+fn parse_u64_value(args: &[String], i: usize, flag: &'static str) -> Result<u64, CliError> {
+    let value = next_value(args, i, flag)?;
+    value
+        .parse()
+        .map_err(|_| invalid_m3_value(flag, value, "an unsigned 64-bit integer"))
+}
+
+fn parse_u32_value(args: &[String], i: usize, flag: &'static str) -> Result<u32, CliError> {
+    let value = next_value(args, i, flag)?;
+    value
+        .parse()
+        .map_err(|_| invalid_m3_value(flag, value, "an unsigned 32-bit integer"))
+}
+
+fn parse_grammar_families(value: &str) -> Result<Vec<String>, CliError> {
+    if value == "all" {
+        return Ok(Vec::new());
+    }
+    let mut families = Vec::new();
+    for family in value.split(',') {
+        if family.is_empty() || !GRAMMAR_FAMILIES.contains(&family) {
+            return Err(invalid_m3_value(
+                "--grammar-families",
+                value,
+                "all or a comma-separated list of the six grammar family tags",
+            ));
+        }
+        if families.iter().any(|existing| existing == family) {
+            return Err(invalid_m3_value(
+                "--grammar-families",
+                value,
+                "a duplicate-free comma-separated grammar family list",
+            ));
+        }
+        families.push(family.to_string());
+    }
+    Ok(families)
 }
 
 fn next_value<'a>(
@@ -370,13 +529,22 @@ fn print_usage() {
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  Direct BSP launch:   bsp_beta --strict|--development --bsp <path> [OPTIONS]");
-    eprintln!("  Generate & launch:    bsp_beta --m3-generate [--strict] [OPTIONS]");
+    eprintln!("  Generate & launch:    bsp_beta --m3-generate [--strict|--development] [OPTIONS]");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --strict               Strict import mode");
     eprintln!("  --development          Development import mode");
     eprintln!("  --bsp <path>           Path to compiled .bsp file");
     eprintln!("  --m3-generate          Generate EnhancedV3 dungeon from scratch");
+    eprintln!("  --seed <u64>           Generation seed (default: current system time)");
+    eprintln!("  --preset <name>        sparse|moderate|rich (default: moderate)");
+    eprintln!("  --rooms <n>            Exact room-count override");
+    eprintln!("  --corridors <n>        Exact corridor-count override");
+    eprintln!("  --loops <n>            Exact same-layer loop-count override");
+    eprintln!("  --chamfer              Enable chamfered rooms (default)");
+    eprintln!("  --no-chamfer           Disable chamfered rooms");
+    eprintln!("  --arch-type <name>     none|pointed|segmented (default: pointed)");
+    eprintln!("  --grammar-families <csv|all>  Grammar allowlist (default: all six)");
     eprintln!("  --ericw-tools <dir>    Path to ericw-tools bin directory");
     eprintln!("  --scale <float>        Quake→engine scale factor (default: 0.0254)");
     eprintln!("  --headless             Run headless (no window, renders N frames)");
@@ -588,16 +756,86 @@ mod tests {
         let args = parse_from(["--m3-generate"]).unwrap();
         assert!(args.m3_generate);
         assert!(args.bsp_path.is_none());
-        // Defaults to strict when no mode specified
         assert_eq!(args.import_mode, Some(ImportMode::Strict));
+        assert_eq!(args.m3_preset, V3Preset::Moderate);
+        assert!(args.m3_chamfer);
+        assert_eq!(args.m3_arch_type, ArchType::Pointed);
+        assert!(args.m3_grammar_families.is_empty());
     }
 
     #[test]
-    fn m3_generate_rejects_development_mode() {
+    fn m3_generate_accepts_development_mode_for_launcher_compatibility() {
+        let args = parse_from(["--development", "--m3-generate"]).unwrap();
+        assert_eq!(args.import_mode, Some(ImportMode::Development));
+    }
+
+    #[test]
+    fn m3_generation_options_parse() {
+        let args = parse_from([
+            "--m3-generate",
+            "--seed",
+            "42",
+            "--preset",
+            "rich",
+            "--rooms",
+            "28",
+            "--corridors",
+            "30",
+            "--loops",
+            "4",
+            "--no-chamfer",
+            "--arch-type",
+            "segmented",
+            "--grammar-families",
+            "portal-chamber,column-grove,terraced-shrine",
+        ])
+        .unwrap();
+        assert_eq!(args.m3_seed, 42);
+        assert_eq!(args.m3_preset, V3Preset::Rich);
+        assert_eq!(args.m3_rooms, Some(28));
+        assert_eq!(args.m3_corridors, Some(30));
+        assert_eq!(args.m3_loops, Some(4));
+        assert!(!args.m3_chamfer);
+        assert_eq!(args.m3_arch_type, ArchType::Segmented);
         assert_eq!(
-            parse_from(["--m3-generate", "--development"]).unwrap_err(),
-            CliError::M3GenerateDevelopmentConflict
+            args.m3_grammar_families,
+            ["portal-chamber", "column-grove", "terraced-shrine"]
         );
+    }
+
+    #[test]
+    fn m3_generation_options_require_generate_mode() {
+        assert_eq!(
+            parse_from(["--seed", "42"]).unwrap_err(),
+            CliError::M3OptionRequiresGenerate("--seed")
+        );
+    }
+
+    #[test]
+    fn malformed_m3_generation_options_are_rejected() {
+        assert!(matches!(
+            parse_from(["--m3-generate", "--seed", "-1"]).unwrap_err(),
+            CliError::InvalidM3Value { flag: "--seed", .. }
+        ));
+        assert!(matches!(
+            parse_from(["--m3-generate", "--preset", "dense"]).unwrap_err(),
+            CliError::InvalidM3Value {
+                flag: "--preset",
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_from([
+                "--m3-generate",
+                "--grammar-families",
+                "portal-chamber,unknown"
+            ])
+            .unwrap_err(),
+            CliError::InvalidM3Value {
+                flag: "--grammar-families",
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -68,6 +68,14 @@ fn cli_preserves_struct_values() {
         acceptance_camera: None,
         m3_generate: false,
         ericw_tools_dir: None,
+        m3_seed: 42,
+        m3_preset: bsp_generator::enhanced_v3::V3Preset::Moderate,
+        m3_rooms: None,
+        m3_corridors: None,
+        m3_loops: None,
+        m3_chamfer: true,
+        m3_arch_type: bsp_generator::enhanced_v3::ArchType::Pointed,
+        m3_grammar_families: Vec::new(),
     };
 
     let cloned = original.clone();
