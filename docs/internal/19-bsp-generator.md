@@ -710,4 +710,4 @@ are below their preset ceilings and the M2 10,000-face ceiling.
 | `enhanced_v3_compiled_space.rs` | pinned 12-entry compiler matrix, strict reload, budgets, and compiled witnesses |
 | `tools/dungeon_gen/tests/enhanced_v3_cli.rs` | m3 defaults, preset/extent parsing, exact summaries, deterministic replay, seed distinction, and v1/v2 flag isolation |
 
-Phase 05 does not claim a headless renderer capture; that evidence remains owned by the root phase.
+Engine-owned headless capture evidence is indexed at `.internal-dev/captures/enhanced-v3-production/manifest.md`; it remains distinct from live WSI validation.

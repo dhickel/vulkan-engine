@@ -636,16 +636,14 @@ fn generate_v3_has_texture_assignments() {
 }
 
 #[test]
-fn generate_v3_entity_count_reasonable() {
+fn generate_v3_entity_count_matches_sparse_room_count() {
     let config = V3Config::nominal_sparse();
     let map = generate_v3(&config).unwrap();
-    // Expect: 1 spawn + 1 light per room
-    // 3 rooms = 3 lights + 1 spawn = 4 entities
+    // Production emits one spawn and one light for each of Sparse's 12 rooms.
     let light_count = map.matches("\"classname\" \"light\"").count();
     let spawn_count = map.matches("\"classname\" \"info_player_start\"").count();
     assert_eq!(spawn_count, 1);
-    // Sparse has 3 rooms -> 3 lights
-    assert!(light_count >= 2);
+    assert_eq!(light_count, 12);
 }
 
 #[test]
@@ -663,17 +661,38 @@ fn generate_v3_face_count_within_budget() {
 }
 
 #[test]
-fn generate_v3_spawn_near_center_of_first_room() {
+fn generate_v3_spawn_is_inside_the_largest_lower_room() {
     let config = V3Config::nominal_sparse();
-    let map = generate_v3(&config).unwrap();
+    let output = run_pipeline(&config).unwrap();
+    assert_eq!(generate_v3(&config).unwrap(), output.map_text);
 
-    // Extract spawn origin
-    let origin_line = map
-        .lines()
-        .find(|l| l.contains("\"origin\""))
-        .expect("must have origin line");
-    // Parse: "origin" "x y z"
-    let parts: Vec<&str> = origin_line.split('"').collect();
-    // Find the origin values
-    assert!(!parts.is_empty());
+    let mut allocator = V3IdAllocator::new();
+    let (footprints, layout) = build_footprints(&config, V3Seed::new(0), &mut allocator).unwrap();
+    let topology = build_topology(
+        &config,
+        &footprints,
+        &layout,
+        V3Seed::new(0),
+        &mut allocator,
+    )
+    .unwrap();
+    let spawn_room = topology
+        .rooms
+        .iter()
+        .filter(|room| room.layer == 0)
+        .max_by(|left, right| {
+            let left_area =
+                i64::from(left.shell.2 - left.shell.0) * i64::from(left.shell.3 - left.shell.1);
+            let right_area =
+                i64::from(right.shell.2 - right.shell.0) * i64::from(right.shell.3 - right.shell.1);
+            left_area
+                .cmp(&right_area)
+                .then_with(|| right.id.cmp(&left.id))
+        })
+        .unwrap();
+    let (x, y, z) = output.metadata.spawn_origin();
+
+    assert!(x > spawn_room.shell.0 && x < spawn_room.shell.2);
+    assert!(y > spawn_room.shell.1 && y < spawn_room.shell.3);
+    assert_eq!(z, spawn_room.floor_z + 3 * CONSTRUCTION_QUANTUM);
 }
