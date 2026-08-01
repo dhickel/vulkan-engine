@@ -13,6 +13,7 @@
 //!   that wires structural behaviors (doors, buttons, platforms, triggers,
 //!   targets, light styles).
 
+pub mod generation;
 pub mod physics_bridge;
 pub mod player_navigation;
 pub mod runtime_bridge;

@@ -66,6 +66,8 @@ fn cli_preserves_struct_values() {
         all_visible: false,
         corpus_identity: None,
         acceptance_camera: None,
+        m3_generate: false,
+        ericw_tools_dir: None,
     };
 
     let cloned = original.clone();

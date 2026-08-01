@@ -14,8 +14,10 @@ mod cli;
 mod mcp;
 
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use bsp_beta::generation::{self, GenConfig, GenWorker};
 use bsp_beta::physics_bridge::PhysicsBridge;
 use bsp_beta::runtime_bridge::RuntimeBridge;
 use bsp_beta::scene_sync::{sync_snapshot_to_scene, EntityNodeMap};
@@ -85,69 +87,168 @@ fn main() {
     }
 }
 
+struct GeneratedLaunch {
+    tools_dir: PathBuf,
+    package_root: PathBuf,
+}
+
+fn cleanup_generated_launch(generated: Option<&GeneratedLaunch>) {
+    if let Some(generated) = generated {
+        let _ = std::fs::remove_dir_all(&generated.package_root);
+    }
+}
+
+fn app_import_mode(args: &cli::CliArgs) -> Result<package::ImportMode, AppError> {
+    match args
+        .require_import_mode()
+        .map_err(|_| AppError::NoImportMode)?
+    {
+        cli::ImportMode::Strict => Ok(package::ImportMode::Strict),
+        cli::ImportMode::Development => Ok(package::ImportMode::Development),
+    }
+}
+
+/// Authorize a complete engine_pack V3 closure. Generated mode always names
+/// the LIT companion explicitly; its absence is a package failure, not an
+/// implicit fallback.
+fn authorize_generated_package(
+    package_dir: &std::path::Path,
+    scale: f32,
+) -> Result<package::AuthorizedBspImport, AppError> {
+    let bsp = package_dir.join("bsp_beta_gen.bsp");
+    let lit = package_dir.join("bsp_beta_gen.lit");
+    let palette = package_dir.join("palette.lmp");
+    let wad = package_dir.join("cc0_dungeon_v2.wad");
+    let textures = package_dir.join("textures");
+    for (label, path) in [
+        ("BSP", &bsp),
+        ("LIT", &lit),
+        ("palette", &palette),
+        ("WAD", &wad),
+    ] {
+        if !path.is_file() {
+            return Err(AppError::BridgeProof(format!(
+                "generated package is missing {label} at {}",
+                path.display()
+            )));
+        }
+    }
+    if !textures.is_dir() {
+        return Err(AppError::BridgeProof(format!(
+            "generated package is missing texture closure at {}",
+            textures.display()
+        )));
+    }
+    package::authorize_direct_import(
+        &bsp,
+        &palette,
+        Some(&lit),
+        &[wad],
+        Some(&textures),
+        package::ImportMode::Strict,
+        scale,
+    )
+    .map_err(AppError::PackageLoad)
+}
+
+fn build_initial_generated_import(
+    args: &cli::CliArgs,
+) -> Result<(package::AuthorizedBspImport, GeneratedLaunch), AppError> {
+    let tools_dir = generation::discover_ericw_tools(args.ericw_tools_dir.as_deref())
+        .map_err(|error| AppError::BridgeProof(error.to_string()))?
+        .ok_or_else(|| {
+            AppError::BridgeProof(
+                "ericw-tools not found (use --ericw-tools, ERICW_TOOLS_DIR, HOME default, or PATH)"
+                    .into(),
+            )
+        })?;
+    let package_root = generation::create_unique_package_root().map_err(|error| {
+        AppError::BridgeProof(format!("reserve generated package root: {error}"))
+    })?;
+    let startup = generation::startup_package_dir(&package_root);
+    let config = GenConfig::default_config()
+        .to_v3_config()
+        .map_err(|error| AppError::BridgeProof(format!("default V3 config: {error}")))?;
+    if let Err(error) = engine_pack::enhanced_dungeon_v3::build_v3_package_from_config(
+        &config,
+        &startup,
+        Some(&tools_dir),
+        "bsp_beta_gen",
+        None,
+    ) {
+        let _ = std::fs::remove_dir_all(&package_root);
+        return Err(AppError::BridgeProof(format!(
+            "initial M3 package build: {error}"
+        )));
+    }
+    match authorize_generated_package(&startup, args.scale) {
+        Ok(import) => Ok((
+            import,
+            GeneratedLaunch {
+                tools_dir,
+                package_root,
+            },
+        )),
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&package_root);
+            Err(error)
+        }
+    }
+}
+
 fn run() -> Result<(), AppError> {
     let args = cli::CliArgs::parse();
-
-    let bsp_path = args.bsp_path.as_ref().ok_or(AppError::NoBspPath)?;
-    let palette_path = args
-        .resolve_palette_path()
-        .map_err(|e| AppError::BridgeProof(e.to_string()))?;
-
-    let lit_path = args.resolve_lit_path();
-    let wad_path = args
-        .resolve_wad_path()
-        .map_err(|e| AppError::BridgeProof(e.to_string()))?;
-
-    let import_mode = args
-        .require_import_mode()
-        .map_err(|_| AppError::NoImportMode)?;
-
-    let bsp_runtime_mode = match import_mode {
-        cli::ImportMode::Strict => package::ImportMode::Strict,
-        cli::ImportMode::Development => package::ImportMode::Development,
+    let import_mode = if args.m3_generate {
+        package::ImportMode::Strict
+    } else {
+        // Preserve the direct-launch error order: a missing source is reported
+        // before the direct import-mode requirement.
+        args.bsp_path.as_ref().ok_or(AppError::NoBspPath)?;
+        app_import_mode(&args)?
     };
-
-    let textures_dir = args.textures_dir.as_deref();
-
-    // ── Authorize direct import through the runtime package boundary ────
     let t_build = Instant::now();
-    let wad_paths: Vec<PathBuf> = wad_path.into_iter().collect();
-    let import = package::authorize_direct_import(
-        bsp_path,
-        &palette_path,
-        lit_path.as_deref(),
-        &wad_paths,
-        textures_dir,
-        bsp_runtime_mode,
-        args.scale,
-    )?;
+    let (import, generated) = if args.m3_generate {
+        let (import, launch) = build_initial_generated_import(&args)?;
+        (import, Some(launch))
+    } else {
+        let bsp_path = args.bsp_path.as_ref().ok_or(AppError::NoBspPath)?;
+        let palette = args
+            .resolve_palette_path()
+            .map_err(|error| AppError::BridgeProof(error.to_string()))?;
+        let wad_paths: Vec<PathBuf> = args
+            .resolve_wad_path()
+            .map_err(|error| AppError::BridgeProof(error.to_string()))?
+            .into_iter()
+            .collect();
+        let import = package::authorize_direct_import(
+            bsp_path,
+            &palette,
+            args.resolve_lit_path().as_deref(),
+            &wad_paths,
+            args.textures_dir.as_deref(),
+            import_mode,
+            args.scale,
+        )?;
+        log::info!(
+            "BSP authorized: {} ({} bytes)",
+            bsp_path.display(),
+            import.bsp.bytes.len()
+        );
+        (import, None)
+    };
+    log::info!("Effective import:\n{}", effective_import_summary(&import));
 
-    log::info!(
-        "BSP authorized: {} ({} bytes, {}ms)",
-        bsp_path.display(),
-        import.bsp.bytes.len(),
-        t_build.elapsed().as_millis(),
-    );
-
-    // Emit effective-import summary.
-    let summary = effective_import_summary(&import);
-    log::info!("Effective import:\n{summary}");
-
-    // ── Coordinator-based prepare ─────────────────────────────────────
-    let mut coordinator = BspCoordinator::new();
-
-    // Register app-owned bridges
-    let physics_bridge = PhysicsBridge::new();
-    let runtime_bridge = RuntimeBridge::new();
-    coordinator.register_bridge("physics", Box::new(physics_bridge));
-    coordinator.register_bridge("runtime", Box::new(runtime_bridge));
-
-    // The proof below consumes this already-authorized parsed world and the
-    // coordinator's staged extraction; it never reauthorizes, reparses, or
-    // reextracts the launch inputs.
     let proof_world = import.world.clone();
-    let prepare = coordinator.prepare_authorized_import(import)?;
-
+    let mut coordinator = BspCoordinator::new();
+    coordinator.register_bridge("physics", Box::new(PhysicsBridge::new()));
+    coordinator.register_bridge("runtime", Box::new(RuntimeBridge::new()));
+    let prepare = match coordinator.prepare_authorized_import(import) {
+        Ok(prepare) => prepare,
+        Err(error) => {
+            cleanup_generated_launch(generated.as_ref());
+            return Err(AppError::BspRuntime(error));
+        }
+    };
     log::info!(
         "BSP extraction: {} faces, {} entities, {} lights, {} batches, PVS={} ({}ms total)",
         prepare.face_count,
@@ -157,7 +258,6 @@ fn run() -> Result<(), AppError> {
         prepare.has_pvs,
         t_build.elapsed().as_millis(),
     );
-
     if args.show_lights {
         if let Some(extracted) = coordinator.staged_extraction() {
             for light in &extracted.light_descriptors {
@@ -172,21 +272,33 @@ fn run() -> Result<(), AppError> {
             }
         }
     }
+    let extracted = match coordinator.staged_extraction() {
+        Some(extracted) => extracted,
+        None => {
+            rollback_staged_without_renderer(&mut coordinator);
+            cleanup_generated_launch(generated.as_ref());
+            return Err(AppError::BridgeProof(
+                "authorized import did not stage extraction".into(),
+            ));
+        }
+    };
+    if let Err(error) = run_load_query_physics_behavior_proof(&proof_world, args.scale, extracted) {
+        rollback_staged_without_renderer(&mut coordinator);
+        cleanup_generated_launch(generated.as_ref());
+        return Err(error);
+    }
 
-    // ── Run startup proof ─────────────────────────────────────────────
-    let extracted = coordinator.staged_extraction().ok_or_else(|| {
-        AppError::BridgeProof("authorized import did not stage extraction".into())
-    })?;
-    run_load_query_physics_behavior_proof(&proof_world, args.scale, extracted)?;
-
-    // ── Run ────────────────────────────────────────────────────────────
-    if args.mcp {
+    let result = if args.mcp {
         run_mcp(&mut coordinator)
     } else if args.headless {
         run_headless(&args, &mut coordinator)
+    } else if let Some(ref generated) = generated {
+        run_m3_generate_windowed(&mut coordinator, generated, args.scale)
     } else {
         run_windowed(&mut coordinator)
-    }
+    };
+    cleanup_generated_launch(generated.as_ref());
+    result
 }
 
 // ─── Startup proof ─────────────────────────────────────────────────────
@@ -516,11 +628,24 @@ fn bsp_acceptance_camera(
 // ─── Windowed mode ─────────────────────────────────────────────────────
 
 fn run_windowed(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
-    let event_loop = EventLoop::new()?;
-    let window = WindowBuilder::new()
+    let event_loop = match EventLoop::new() {
+        Ok(event_loop) => event_loop,
+        Err(error) => {
+            rollback_staged_without_renderer(coordinator);
+            return Err(AppError::EventLoop(error));
+        }
+    };
+    let window = match WindowBuilder::new()
         .with_title(APP_WINDOW_TITLE)
         .with_inner_size(winit::dpi::LogicalSize::new(1280, 720))
-        .build(&event_loop)?;
+        .build(&event_loop)
+    {
+        Ok(window) => window,
+        Err(error) => {
+            rollback_staged_without_renderer(coordinator);
+            return Err(AppError::Window(error));
+        }
+    };
 
     let config = RendererConfig {
         app_name: "bsp_beta".to_string(),
@@ -529,7 +654,13 @@ fn run_windowed(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
         ..RendererConfig::default()
     };
 
-    let mut renderer = Renderer::new(config, &window).map_err(AppError::RendererInit)?;
+    let mut renderer = match Renderer::new(config, &window) {
+        Ok(renderer) => renderer,
+        Err(error) => {
+            rollback_staged_without_renderer(coordinator);
+            return Err(AppError::RendererInit(error));
+        }
+    };
     let mut scene = Scene::new();
 
     // Upload renderer resources from the staged extraction
@@ -573,15 +704,28 @@ fn run_windowed(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
         .filter_map(|ed| ed.model_ref.map(|m| (ed.entity_index, format!("*{}", m))))
         .collect();
 
-    let mount = renderer.prepare_bsp_mount(extracted)?;
+    let mount = match renderer.prepare_bsp_mount(extracted) {
+        Ok(mount) => mount,
+        Err(error) => {
+            rollback_and_retire(coordinator, &mut renderer);
+            return Err(AppError::Renderer(error));
+        }
+    };
     let token = bsp_runtime::BspGenerationToken {
         generation: coordinator.current_generation(),
     };
-    coordinator.set_renderer_mount_ready(token, mount)?;
-
-    // Validate all fallible publication checks, then commit.
-    coordinator.validate_for_scene(token, &mut scene)?;
-    coordinator.commit(token, &mut scene)?;
+    if let Err(error) = coordinator.set_renderer_mount_ready(token, mount) {
+        rollback_and_retire(coordinator, &mut renderer);
+        return Err(AppError::BspRuntime(error));
+    }
+    if let Err(error) = coordinator.validate_for_scene(token, &mut scene) {
+        rollback_and_retire(coordinator, &mut renderer);
+        return Err(AppError::BspRuntime(error));
+    }
+    if let Err(error) = coordinator.commit(token, &mut scene) {
+        rollback_and_retire(coordinator, &mut renderer);
+        return Err(AppError::BspRuntime(error));
+    }
 
     log::info!("BSP mount uploaded and attached via coordinator");
 
@@ -611,6 +755,11 @@ fn run_windowed(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
                 Ok(r) => r,
                 Err(e) => {
                     log::error!("Platform input routing failed: {e}");
+                    if let Err(error) =
+                        teardown_retire_and_reap(coordinator, &mut renderer, &mut scene)
+                    {
+                        log::error!("BSP teardown handoff failed: {error}");
+                    }
                     elwt.exit();
                     return;
                 }
@@ -621,11 +770,21 @@ fn run_windowed(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
                     match event {
                         WindowEvent::CloseRequested => {
                             log::info!("Close requested, exiting");
+                            if let Err(error) =
+                                teardown_retire_and_reap(coordinator, &mut renderer, &mut scene)
+                            {
+                                log::error!("BSP teardown handoff failed: {error}");
+                            }
                             elwt.exit();
                         }
                         WindowEvent::Resized(size) => {
                             if let Err(e) = renderer.resize(size.width, size.height) {
                                 log::error!("Resize failed: {e}");
+                                if let Err(error) =
+                                    teardown_retire_and_reap(coordinator, &mut renderer, &mut scene)
+                                {
+                                    log::error!("BSP teardown handoff failed: {error}");
+                                }
                                 elwt.exit();
                             }
                         }
@@ -647,6 +806,13 @@ fn run_windowed(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
                                 | Ok(FrameRenderOutcome::PresentedSuboptimal) => {}
                                 Err(e) => {
                                     log::error!("Render failed: {e}");
+                                    if let Err(error) = teardown_retire_and_reap(
+                                        coordinator,
+                                        &mut renderer,
+                                        &mut scene,
+                                    ) {
+                                        log::error!("BSP teardown handoff failed: {error}");
+                                    }
                                     elwt.exit();
                                     return;
                                 }
@@ -663,6 +829,400 @@ fn run_windowed(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
         .map_err(AppError::EventLoop)?;
 
     Ok(())
+}
+
+// ─── m3-generate mode ────────────────────────────────────────────────────
+
+/// App-owned data that must be captured while a new extraction is still staged.
+/// `BspCoordinator::commit` consumes the candidate, so reading it afterward
+/// would silently retain state from the old world (or nothing at all).
+struct MountedAppState {
+    spawn: Vec3,
+    inline_model_infos: Vec<InlineModelInfo>,
+    entity_classnames: std::collections::HashMap<u32, String>,
+    entity_source_models: std::collections::HashMap<u32, String>,
+}
+
+fn capture_staged_app_state(
+    extracted: &bsp::extract::ExtractedBsp,
+    fallback: Vec3,
+) -> MountedAppState {
+    MountedAppState {
+        spawn: bsp_player_start(extracted, fallback),
+        inline_model_infos: extracted
+            .inline_models
+            .iter()
+            .map(|model| InlineModelInfo {
+                entity_index: model.entity_index,
+                model_index: model.model_index,
+                origin: [model.origin.x, model.origin.y, model.origin.z],
+                angles: model.angle.map(|angle| [0.0, angle, 0.0]),
+                scale: None,
+                local_mins: [
+                    model.local_bounds.0.x,
+                    model.local_bounds.0.y,
+                    model.local_bounds.0.z,
+                ],
+                local_maxs: [
+                    model.local_bounds.1.x,
+                    model.local_bounds.1.y,
+                    model.local_bounds.1.z,
+                ],
+            })
+            .collect(),
+        entity_classnames: extracted
+            .entity_descriptors
+            .iter()
+            .map(|entity| (entity.entity_index, entity.classname.clone()))
+            .collect(),
+        entity_source_models: extracted
+            .entity_descriptors
+            .iter()
+            .filter_map(|entity| {
+                entity
+                    .model_ref
+                    .map(|model| (entity.entity_index, format!("*{model}")))
+            })
+            .collect(),
+    }
+}
+
+fn apply_mounted_app_state(loop_state: &mut AppLoopState, mounted: MountedAppState) {
+    loop_state.camera = Camera::new(mounted.spawn);
+    loop_state.fps_controller = FPSController::new(0.002, 1.0);
+    loop_state.inline_model_infos = mounted.inline_model_infos;
+    loop_state.entity_classnames = mounted.entity_classnames;
+    loop_state.entity_source_models = mounted.entity_source_models;
+    // Entity indices are generation-local. Do not let an old map's node IDs
+    // receive snapshot updates after a successful replacement.
+    loop_state.entity_node_map = EntityNodeMap::default();
+}
+
+/// Resolve a generated package into an authorized import, stage it, and publish
+/// it atomically. Any failure before publication rolls back the candidate while
+/// leaving the old active scene mount untouched.
+fn commit_generated_package(
+    package_dir: &std::path::Path,
+    coordinator: &mut BspCoordinator,
+    renderer: &mut Renderer,
+    scene: &mut Scene,
+    scale: f32,
+) -> Result<MountedAppState, String> {
+    let import =
+        authorize_generated_package(package_dir, scale).map_err(|error| error.to_string())?;
+    if let Err(error) = coordinator.prepare_authorized_import(import) {
+        rollback_and_retire(coordinator, renderer);
+        return Err(format!("prepare: {error}"));
+    }
+    mount_staged_candidate(coordinator, renderer, scene, Vec3::new(0.0, 2.0, 5.0))
+}
+
+fn mount_staged_candidate(
+    coordinator: &mut BspCoordinator,
+    renderer: &mut Renderer,
+    scene: &mut Scene,
+    fallback_spawn: Vec3,
+) -> Result<MountedAppState, String> {
+    let extracted = coordinator
+        .staged_extraction()
+        .ok_or_else(|| "no staged extraction".to_string())?;
+    let app_state = capture_staged_app_state(extracted, fallback_spawn);
+    let mount = match renderer.prepare_bsp_mount(extracted) {
+        Ok(mount) => mount,
+        Err(error) => {
+            rollback_and_retire(coordinator, renderer);
+            return Err(format!("renderer prepare_bsp_mount: {error}"));
+        }
+    };
+    let token = bsp_runtime::BspGenerationToken {
+        generation: coordinator.current_generation(),
+    };
+    if let Err(error) = coordinator.set_renderer_mount_ready(token, mount) {
+        rollback_and_retire(coordinator, renderer);
+        return Err(format!("set_renderer_mount_ready: {error}"));
+    }
+    if let Err(error) = coordinator.validate_for_scene(token, scene) {
+        rollback_and_retire(coordinator, renderer);
+        return Err(format!("validate_for_scene: {error}"));
+    }
+    if let Err(error) = coordinator.commit(token, scene) {
+        rollback_and_retire(coordinator, renderer);
+        return Err(format!("commit: {error}"));
+    }
+    Ok(app_state)
+}
+
+fn rollback_staged_without_renderer(coordinator: &mut BspCoordinator) {
+    if let Err(error) = coordinator.rollback() {
+        log::error!("generated mount rollback failed: {error}");
+    }
+}
+
+fn rollback_and_retire(coordinator: &mut BspCoordinator, renderer: &mut Renderer) {
+    if let Err(error) = coordinator.rollback() {
+        log::error!("generated mount rollback failed: {error}");
+    }
+    if let Err(error) = drain_and_retire(coordinator, renderer) {
+        log::error!("generated mount retirement handoff failed: {error}");
+    }
+}
+
+/// Drain all pending retirements from the coordinator and submit each to the
+/// renderer. On rejection, reconstruct and requeue.
+fn drain_and_retire(
+    coordinator: &mut BspCoordinator,
+    renderer: &mut Renderer,
+) -> Result<(), String> {
+    let mut pending = coordinator.drain_pending_retirements().into_iter();
+    while let Some(detached) = pending.next() {
+        match renderer.retire_bsp_mount(detached) {
+            Ok(_) => log::debug!("BSP mount retired"),
+            Err(rejection) => {
+                let reason = rejection.reason.clone();
+                coordinator.requeue_retirement(rejection.into_detached());
+                // The caller transferred custody of the remaining vector when
+                // draining it, so return every unprocessed receipt as well.
+                for remaining in pending {
+                    coordinator.requeue_retirement(remaining);
+                }
+                return Err(format!("renderer rejected BSP retirement: {reason}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Teardown while Scene and Renderer are alive. A rejected receipt remains in
+/// coordinator custody, and no follow-up drain is allowed to consume/drop it.
+fn teardown_and_retire_all(
+    coordinator: &mut BspCoordinator,
+    renderer: &mut Renderer,
+    scene: &mut Scene,
+) -> Result<(), String> {
+    coordinator.teardown(scene);
+    drain_and_retire(coordinator, renderer)
+}
+
+/// Submit every detached receipt while Renderer and Scene remain live.
+/// Normal frame acquisition reaps fence-complete records, and Renderer drop
+/// performs the terminal reap after device idle.
+fn teardown_retire_and_reap(
+    coordinator: &mut BspCoordinator,
+    renderer: &mut Renderer,
+    scene: &mut Scene,
+) -> Result<(), AppError> {
+    teardown_and_retire_all(coordinator, renderer, scene).map_err(AppError::BridgeProof)
+}
+
+/// Windowed generated explorer. The startup package was already built,
+/// strictly authorized, and staged by `run`; headless and MCP use the same
+/// established runners rather than shadow copies of their proof behavior.
+fn run_m3_generate_windowed(
+    coordinator: &mut BspCoordinator,
+    generated: &GeneratedLaunch,
+    scale: f32,
+) -> Result<(), AppError> {
+    let mut gen_config = GenConfig::default_config();
+    let event_loop = match EventLoop::new() {
+        Ok(event_loop) => event_loop,
+        Err(error) => {
+            rollback_staged_without_renderer(coordinator);
+            return Err(AppError::EventLoop(error));
+        }
+    };
+    let window = match WindowBuilder::new()
+        .with_title(format!(
+            "BSP Beta — m3-generate | {}",
+            gen_config.describe()
+        ))
+        .with_inner_size(winit::dpi::LogicalSize::new(1280, 720))
+        .build(&event_loop)
+    {
+        Ok(window) => window,
+        Err(error) => {
+            rollback_staged_without_renderer(coordinator);
+            return Err(AppError::Window(error));
+        }
+    };
+    let mut renderer = match Renderer::new(
+        RendererConfig {
+            app_name: "bsp_beta".to_string(),
+            window_width: 1280,
+            window_height: 720,
+            ..RendererConfig::default()
+        },
+        &window,
+    ) {
+        Ok(renderer) => renderer,
+        Err(error) => {
+            rollback_staged_without_renderer(coordinator);
+            return Err(AppError::RendererInit(error));
+        }
+    };
+    let mut scene = Scene::new();
+    let initial = mount_staged_candidate(
+        coordinator,
+        &mut renderer,
+        &mut scene,
+        Vec3::new(0.0, 2.0, 5.0),
+    )
+    .map_err(AppError::BridgeProof)?;
+    let mut loop_state = AppLoopState::new(Camera::new(initial.spawn), ModelMappings::default());
+    apply_mounted_app_state(&mut loop_state, initial);
+    install_app_fps_input(&mut loop_state.input);
+
+    let worker = GenWorker::spawn();
+    let tools_dir = generated.tools_dir.clone();
+    let package_root = generated.package_root.clone();
+    let last_request = std::sync::atomic::AtomicU64::new(0);
+    let mut ctrl_held = false;
+    let mut torn_down = false;
+    window.request_redraw();
+
+    event_loop.run(move |event, elwt| {
+        elwt.set_control_flow(ControlFlow::Poll);
+        let mut shutdown = |coordinator: &mut BspCoordinator,
+                            renderer: &mut Renderer,
+                            scene: &mut Scene| {
+            if !torn_down {
+                torn_down = true;
+                if let Err(error) = teardown_retire_and_reap(coordinator, renderer, scene) {
+                    log::error!("BSP teardown handoff failed: {error}");
+                }
+            }
+        };
+        if let Err(error) = engine::input::route_platform_input_to_app(
+            &mut renderer, &window, &mut loop_state.input, &event,
+        ) {
+            log::error!("Platform input routing failed: {error}");
+            shutdown(coordinator, &mut renderer, &mut scene);
+            elwt.exit();
+            return;
+        }
+        if let Event::WindowEvent { event: WindowEvent::ModifiersChanged(modifiers), .. } = &event {
+            ctrl_held = modifiers.state().control_key();
+        }
+        let regen = match &event {
+            Event::WindowEvent { event: WindowEvent::KeyboardInput { event, .. }, .. }
+                if event.state.is_pressed() && !event.repeat => match event.physical_key {
+                    winit::keyboard::PhysicalKey::Code(key) => handle_gen_hotkey(key, ctrl_held, &mut gen_config),
+                    _ => false,
+                },
+            _ => false,
+        };
+        if regen {
+            window.set_title(&format!("BSP Beta — m3-generate [pending] | {}", gen_config.describe()));
+            let id = worker.enqueue(gen_config.clone(), tools_dir.clone(), &package_root);
+            last_request.store(id, Ordering::Relaxed);
+        }
+        while let Some(result) = worker.poll_result() {
+            let latest = last_request.load(Ordering::Relaxed);
+            if result.id != latest {
+                log::info!("discarding stale generation result {} (latest {})", result.id, latest);
+                let _ = std::fs::remove_dir_all(&result.package_dir);
+            } else if result.success {
+                match commit_generated_package(&result.package_dir, coordinator, &mut renderer, &mut scene, scale) {
+                    Ok(mounted) => {
+                        apply_mounted_app_state(&mut loop_state, mounted);
+                        window.set_title(&format!("BSP Beta — m3-generate | {}", result.config.describe()));
+                    }
+                    Err(error) => {
+                        log::error!("generated replacement failed; previous world remains active: {error}");
+                        window.set_title(&format!("BSP Beta — m3-generate [failed] | {}", result.config.describe()));
+                        let _ = std::fs::remove_dir_all(&result.package_dir);
+                    }
+                }
+            } else {
+                log::error!("generation {} failed: {}", result.id, result.error.unwrap_or_else(|| "unknown failure".into()));
+                window.set_title(&format!("BSP Beta — m3-generate [failed] | {}", result.config.describe()));
+                let _ = std::fs::remove_dir_all(&result.package_dir);
+            }
+        }
+        if let Err(error) = drain_and_retire(coordinator, &mut renderer) {
+            log::error!("BSP retirement handoff failed: {error}");
+        }
+        match event {
+            Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
+                WindowEvent::CloseRequested => {
+                    shutdown(coordinator, &mut renderer, &mut scene);
+                    elwt.exit();
+                }
+                WindowEvent::Resized(size) => if let Err(error) = renderer.resize(size.width, size.height) {
+                    log::error!("Resize failed: {error}");
+                    shutdown(coordinator, &mut renderer, &mut scene);
+                    elwt.exit();
+                },
+                WindowEvent::RedrawRequested => {
+                    let size = window.inner_size();
+                    match render_app_frame(&mut renderer, &mut scene, &mut loop_state, size.width, size.height, false) {
+                        Ok(FrameRenderOutcome::Rendered | FrameRenderOutcome::SkippedAcquireUnavailable |
+                           FrameRenderOutcome::SkippedResizePending | FrameRenderOutcome::SubmittedNotPresented |
+                           FrameRenderOutcome::PresentedSuboptimal) => window.request_redraw(),
+                        Err(error) => {
+                            log::error!("Render failed: {error}");
+                            shutdown(coordinator, &mut renderer, &mut scene);
+                            elwt.exit();
+                        }
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }).map_err(AppError::EventLoop)?;
+    Ok(())
+}
+
+/// Handle a generation hotkey press. Returns true if regeneration is needed.
+fn handle_gen_hotkey(
+    physical_key: winit::keyboard::KeyCode,
+    ctrl_held: bool,
+    config: &mut GenConfig,
+) -> bool {
+    use winit::keyboard::KeyCode;
+
+    match physical_key {
+        KeyCode::F5 => {
+            config.increment_seed();
+            log::info!("F5: seed incremented to {} — regenerating", config.seed);
+            true
+        }
+        KeyCode::F6 => {
+            config.cycle_preset();
+            log::info!(
+                "F6: preset cycled to {} (extent={}) — regenerating",
+                config.preset.tag(),
+                config.extent
+            );
+            true
+        }
+        KeyCode::F7 => {
+            config.chamfer = !config.chamfer;
+            log::info!("F7: chamfer toggled to {} — regenerating", config.chamfer);
+            true
+        }
+        KeyCode::F8 => {
+            config.cycle_arch_type();
+            log::info!(
+                "F8: arch cycled to {} — regenerating",
+                config.arch_type.tag()
+            );
+            true
+        }
+        KeyCode::F9 => {
+            config.stairs = !config.stairs;
+            log::info!("F9: stairs toggled to {} — regenerating", config.stairs);
+            true
+        }
+        KeyCode::KeyR if ctrl_held => {
+            log::info!(
+                "Ctrl+R: regenerating with unchanged config: {}",
+                config.describe()
+            );
+            true
+        }
+        _ => false,
+    }
 }
 
 // ─── Headless mode ─────────────────────────────────────────────────────
@@ -735,14 +1295,29 @@ fn prepare_headless_runtime(
         bsp_headless_camera(player_start, extracted)
     };
 
-    let mount = renderer.prepare_bsp_mount(extracted)?;
+    let mount = match renderer.prepare_bsp_mount(extracted) {
+        Ok(mount) => mount,
+        Err(error) => {
+            rollback_and_retire(coordinator, &mut renderer);
+            return Err(AppError::Renderer(error));
+        }
+    };
     let mcp_map = mcp_map_data.map(|ext| mcp::McpMap::from_mount(ext, &mount, 0));
     let token = bsp_runtime::BspGenerationToken {
         generation: coordinator.current_generation(),
     };
-    coordinator.set_renderer_mount_ready(token, mount)?;
-    coordinator.validate_for_scene(token, &mut scene)?;
-    coordinator.commit(token, &mut scene)?;
+    if let Err(error) = coordinator.set_renderer_mount_ready(token, mount) {
+        rollback_and_retire(coordinator, &mut renderer);
+        return Err(AppError::BspRuntime(error));
+    }
+    if let Err(error) = coordinator.validate_for_scene(token, &mut scene) {
+        rollback_and_retire(coordinator, &mut renderer);
+        return Err(AppError::BspRuntime(error));
+    }
+    if let Err(error) = coordinator.commit(token, &mut scene) {
+        rollback_and_retire(coordinator, &mut renderer);
+        return Err(AppError::BspRuntime(error));
+    }
 
     let mut loop_state = AppLoopState::new(headless_camera, ModelMappings::default());
     loop_state.inline_model_infos = inline_model_infos;
@@ -779,43 +1354,19 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
         mut scene,
         mut loop_state,
         ..
-    } = prepare_headless_runtime(coordinator, None, args)?;
+    } = match prepare_headless_runtime(coordinator, None, args) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            if let Err(rollback) = coordinator.rollback() {
+                log::error!("headless setup rollback failed: {rollback}");
+            }
+            return Err(error);
+        }
+    };
 
-    // ── Warmup ─────────────────────────────────────────────────────────
-    for _ in 0..5 {
-        render_app_frame(
-            &mut renderer,
-            &mut scene,
-            &mut loop_state,
-            vp_width,
-            vp_height,
-            true,
-        )
-        .map_err(AppError::Renderer)?;
-    }
-
-    // ── Phase 07: Stats evidence request (before capture/smoke) ────────
-    if args.stats {
-        use renderer::api::bsp::BspEvidenceVisibility;
-        let visibility = if args.all_visible {
-            BspEvidenceVisibility::AllVisible
-        } else {
-            BspEvidenceVisibility::NormalPvs
-        };
-        let corpus = args
-            .corpus_identity
-            .clone()
-            .unwrap_or_else(|| "bsp-beta-headless".to_string());
-        let stats_key = renderer
-            .request_bsp_frame_evidence(corpus, "headless-stats".to_string(), visibility)
-            .map_err(|e| {
-                AppError::RendererInit(renderer::RendererError::InvalidState(format!(
-                    "evidence request: {e}"
-                )))
-            })?;
-
-        // Render until evidence is sealed.
-        for _attempt in 0..16 {
+    let run_result = (|| -> Result<(), AppError> {
+        // ── Warmup ─────────────────────────────────────────────────────────
+        for _ in 0..5 {
             render_app_frame(
                 &mut renderer,
                 &mut scene,
@@ -825,67 +1376,30 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
                 true,
             )
             .map_err(AppError::Renderer)?;
-            match renderer.take_bsp_frame_evidence(stats_key) {
-                renderer::api::bsp::BspEvidenceStatus::Sealed(report) => {
-                    let serialized = serde_json::to_string_pretty(&report).map_err(|e| {
-                        AppError::RendererInit(renderer::RendererError::InvalidState(format!(
-                            "serialize report: {e}"
-                        )))
-                    })?;
-                    println!("{serialized}");
-                    if !report.eligible {
-                        log::warn!("Stats report is not eligible for acceptance");
-                        std::process::exit(1);
-                    }
-                    return Ok(());
-                }
-                renderer::api::bsp::BspEvidenceStatus::RejectedNoMount => {
-                    log::error!("Stats request rejected: no active BSP mount");
-                    std::process::exit(1);
-                }
-                renderer::api::bsp::BspEvidenceStatus::MissingReport => {
-                    log::error!("Stats report missing");
-                    std::process::exit(1);
-                }
-                renderer::api::bsp::BspEvidenceStatus::Pending => {
-                    // Continue rendering
-                }
-            }
         }
-        log::error!("Stats report not ready after bounded frame attempts");
-        std::process::exit(1);
-    }
 
-    // ── Capture ────────────────────────────────────────────────────────
-    if args.capture_frames > 0 {
-        let capture_dir = PathBuf::from(format!(
-            ".internal-dev/captures/bsp-beta/headless-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&capture_dir).map_err(|e| {
-            AppError::RendererInit(renderer::RendererError::InvalidState(format!(
-                "create capture dir: {e}"
-            )))
-        })?;
-
-        for frame_num in 0..args.capture_frames {
-            let png_path = capture_dir.join(format!("bsp_beta_frame_{frame_num:04}.png"));
-            let sidecar_path =
-                capture_dir.join(format!("bsp_beta_frame_{frame_num:04}_sidecar.json"));
-
-            renderer
-                .request_frame_capture(FrameCaptureRequest {
-                    target: CaptureTarget::Draw,
-                    output_path: png_path.clone(),
-                    sidecar_path: Some(sidecar_path),
-                })
+        // ── Phase 07: Stats evidence request (before capture/smoke) ────────
+        if args.stats {
+            use renderer::api::bsp::BspEvidenceVisibility;
+            let visibility = if args.all_visible {
+                BspEvidenceVisibility::AllVisible
+            } else {
+                BspEvidenceVisibility::NormalPvs
+            };
+            let corpus = args
+                .corpus_identity
+                .clone()
+                .unwrap_or_else(|| "bsp-beta-headless".to_string());
+            let stats_key = renderer
+                .request_bsp_frame_evidence(corpus, "headless-stats".to_string(), visibility)
                 .map_err(|e| {
                     AppError::RendererInit(renderer::RendererError::InvalidState(format!(
-                        "capture request: {e}"
+                        "evidence request: {e}"
                     )))
                 })?;
 
-            for _ in 0..8 {
+            // Render until evidence is sealed.
+            for _attempt in 0..16 {
                 render_app_frame(
                     &mut renderer,
                     &mut scene,
@@ -895,73 +1409,167 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
                     true,
                 )
                 .map_err(AppError::Renderer)?;
-                if png_path.is_file() {
-                    break;
+                match renderer.take_bsp_frame_evidence(stats_key) {
+                    renderer::api::bsp::BspEvidenceStatus::Sealed(report) => {
+                        let serialized = serde_json::to_string_pretty(&report).map_err(|e| {
+                            AppError::RendererInit(renderer::RendererError::InvalidState(format!(
+                                "serialize report: {e}"
+                            )))
+                        })?;
+                        println!("{serialized}");
+                        if !report.eligible {
+                            log::warn!("Stats report is not eligible for acceptance");
+                            return Err(AppError::BridgeProof(
+                                "stats report is not eligible for acceptance".into(),
+                            ));
+                        }
+                        return Ok(());
+                    }
+                    renderer::api::bsp::BspEvidenceStatus::RejectedNoMount => {
+                        log::error!("Stats request rejected: no active BSP mount");
+                        return Err(AppError::BridgeProof(
+                            "stats request rejected: no active BSP mount".into(),
+                        ));
+                    }
+                    renderer::api::bsp::BspEvidenceStatus::MissingReport => {
+                        log::error!("Stats report missing");
+                        return Err(AppError::BridgeProof("stats report missing".into()));
+                    }
+                    renderer::api::bsp::BspEvidenceStatus::Pending => {
+                        // Continue rendering
+                    }
                 }
             }
+            log::error!("Stats report not ready after bounded frame attempts");
+            return Err(AppError::BridgeProof(
+                "stats report not ready after bounded frame attempts".into(),
+            ));
+        }
 
-            if !png_path.is_file() {
-                let message = match renderer.last_frame_capture_status() {
-                    Some(FrameCaptureStatus::Failed { message, .. }) => message.clone(),
-                    Some(FrameCaptureStatus::BackendNotImplemented { .. }) => {
-                        "capture backend not implemented".to_string()
-                    }
-                    Some(FrameCaptureStatus::Pending { .. }) => {
-                        "capture remained pending after bounded frame pumping".to_string()
-                    }
-                    _ => "capture status not reported".to_string(),
-                };
-                return Err(AppError::RendererInit(
-                    renderer::RendererError::InvalidState(format!(
-                        "frame {frame_num} capture failed: {message}"
-                    )),
-                ));
-            }
+        // ── Capture ────────────────────────────────────────────────────────
+        if args.capture_frames > 0 {
+            let capture_dir = PathBuf::from(format!(
+                ".internal-dev/captures/bsp-beta/headless-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&capture_dir).map_err(|e| {
+                AppError::RendererInit(renderer::RendererError::InvalidState(format!(
+                    "create capture dir: {e}"
+                )))
+            })?;
 
-            match renderer.last_frame_capture_status() {
-                Some(FrameCaptureStatus::Succeeded {
-                    output_path,
-                    width,
-                    height,
-                    ..
-                }) if *output_path == png_path => {
-                    log::info!(
-                        "✓ Frame {frame_num}: {} ({}×{})",
-                        output_path.display(),
+            for frame_num in 0..args.capture_frames {
+                let png_path = capture_dir.join(format!("bsp_beta_frame_{frame_num:04}.png"));
+                let sidecar_path =
+                    capture_dir.join(format!("bsp_beta_frame_{frame_num:04}_sidecar.json"));
+
+                renderer
+                    .request_frame_capture(FrameCaptureRequest {
+                        target: CaptureTarget::Draw,
+                        output_path: png_path.clone(),
+                        sidecar_path: Some(sidecar_path),
+                    })
+                    .map_err(|e| {
+                        AppError::RendererInit(renderer::RendererError::InvalidState(format!(
+                            "capture request: {e}"
+                        )))
+                    })?;
+
+                for _ in 0..8 {
+                    render_app_frame(
+                        &mut renderer,
+                        &mut scene,
+                        &mut loop_state,
+                        vp_width,
+                        vp_height,
+                        true,
+                    )
+                    .map_err(AppError::Renderer)?;
+                    if png_path.is_file() {
+                        break;
+                    }
+                }
+
+                if !png_path.is_file() {
+                    let message = match renderer.last_frame_capture_status() {
+                        Some(FrameCaptureStatus::Failed { message, .. }) => message.clone(),
+                        Some(FrameCaptureStatus::BackendNotImplemented { .. }) => {
+                            "capture backend not implemented".to_string()
+                        }
+                        Some(FrameCaptureStatus::Pending { .. }) => {
+                            "capture remained pending after bounded frame pumping".to_string()
+                        }
+                        _ => "capture status not reported".to_string(),
+                    };
+                    return Err(AppError::RendererInit(
+                        renderer::RendererError::InvalidState(format!(
+                            "frame {frame_num} capture failed: {message}"
+                        )),
+                    ));
+                }
+
+                match renderer.last_frame_capture_status() {
+                    Some(FrameCaptureStatus::Succeeded {
+                        output_path,
                         width,
-                        height
-                    );
+                        height,
+                        ..
+                    }) if *output_path == png_path => {
+                        log::info!(
+                            "✓ Frame {frame_num}: {} ({}×{})",
+                            output_path.display(),
+                            width,
+                            height
+                        );
+                    }
+                    _ => log::info!("✓ Frame {frame_num}: {}", png_path.display()),
                 }
-                _ => log::info!("✓ Frame {frame_num}: {}", png_path.display()),
+            }
+        } else {
+            let smoke_frames = 5u32;
+            for frame_num in 0..smoke_frames {
+                render_app_frame(
+                    &mut renderer,
+                    &mut scene,
+                    &mut loop_state,
+                    vp_width,
+                    vp_height,
+                    true,
+                )
+                .map_err(AppError::Renderer)?;
+                log::info!("Smoke frame {frame_num}/{smoke_frames} rendered");
             }
         }
-    } else {
-        let smoke_frames = 5u32;
-        for frame_num in 0..smoke_frames {
-            render_app_frame(
-                &mut renderer,
-                &mut scene,
-                &mut loop_state,
-                vp_width,
-                vp_height,
-                true,
-            )
-            .map_err(AppError::Renderer)?;
-            log::info!("Smoke frame {frame_num}/{smoke_frames} rendered");
+
+        Ok(())
+    })();
+    let teardown = teardown_retire_and_reap(coordinator, &mut renderer, &mut scene);
+    match (run_result, teardown) {
+        (Err(error), Err(teardown_error)) => {
+            log::error!("headless teardown after failure also failed: {teardown_error}");
+            Err(error)
+        }
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => {
+            log::info!("BSP beta headless complete");
+            Ok(())
         }
     }
-
-    log::info!("BSP beta headless complete");
-    Ok(())
 }
 
 fn run_mcp(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
     log::info!("Starting BSP beta MCP mode (headless 1920×1080)");
     // Capture extraction before it gets consumed.
-    let extracted_clone = coordinator
-        .staged_extraction()
-        .ok_or_else(|| AppError::BridgeProof("no staged extraction".to_string()))?
-        .clone();
+    let extracted_clone = match coordinator.staged_extraction() {
+        Some(extracted) => extracted.clone(),
+        None => {
+            if let Err(rollback) = coordinator.rollback() {
+                log::error!("MCP setup rollback failed: {rollback}");
+            }
+            return Err(AppError::BridgeProof("no staged extraction".to_string()));
+        }
+    };
     let _bsp_size = extracted_clone.face_geometries.len();
 
     let HeadlessRuntime {
@@ -969,23 +1577,44 @@ fn run_mcp(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
         mut scene,
         mut loop_state,
         mcp_map,
-    } = prepare_headless_runtime(
+    } = match prepare_headless_runtime(
         coordinator,
         Some(&extracted_clone),
         &cli::CliArgs::default(),
-    )?;
-    let mcp_map = mcp_map
-        .ok_or_else(|| AppError::BridgeProof("MCP map data was not retained".to_string()))?;
+    ) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            if let Err(rollback) = coordinator.rollback() {
+                log::error!("MCP setup rollback failed: {rollback}");
+            }
+            return Err(error);
+        }
+    };
 
-    // Prime GPU resources before accepting the first capture request.
-    for _ in 0..5 {
-        render_app_frame(&mut renderer, &mut scene, &mut loop_state, 1920, 1080, true)?;
-    }
+    let run_result = (|| -> Result<(), AppError> {
+        let mcp_map = mcp_map
+            .ok_or_else(|| AppError::BridgeProof("MCP map data was not retained".to_string()))?;
 
-    log::info!("BSP mount published; serving MCP JSON-RPC on stdio");
-    mcp::serve(&mut renderer, &mut scene, &mut loop_state, mcp_map)?;
+        // Prime GPU resources before accepting the first capture request.
+        for _ in 0..5 {
+            render_app_frame(&mut renderer, &mut scene, &mut loop_state, 1920, 1080, true)?;
+        }
+
+        log::info!("BSP mount published; serving MCP JSON-RPC on stdio");
+        mcp::serve(&mut renderer, &mut scene, &mut loop_state, mcp_map)?;
+        Ok(())
+    })();
+    let teardown = teardown_retire_and_reap(coordinator, &mut renderer, &mut scene);
     log::info!("MCP stdin closed; shutting down");
-    Ok(())
+    match (run_result, teardown) {
+        (Err(error), Err(teardown_error)) => {
+            log::error!("MCP teardown after failure also failed: {teardown_error}");
+            Err(error)
+        }
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 // ─── App-owned frame loop helpers ──────────────────────────────────────
@@ -1136,11 +1765,34 @@ fn install_app_fps_input(input: &mut InputSystem) {
 
 #[cfg(test)]
 mod acceptance_camera_tests {
-    use super::camera_angles_for_direction;
+    use super::{camera_angles_for_direction, handle_gen_hotkey, GenConfig};
     use glam::Vec3;
 
     fn assert_near(actual: f32, expected: f32) {
         assert!((actual - expected).abs() < 1.0e-5, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn generation_hotkeys_change_only_their_declared_setting() {
+        use winit::keyboard::KeyCode;
+
+        let mut config = GenConfig::default_config();
+        let original = config.clone();
+        assert!(handle_gen_hotkey(KeyCode::F5, false, &mut config));
+        assert_eq!(config.seed, original.seed.wrapping_add(1));
+        assert_eq!(config.preset, original.preset);
+
+        assert!(handle_gen_hotkey(KeyCode::F6, false, &mut config));
+        assert_ne!(config.preset, original.preset);
+        assert!(handle_gen_hotkey(KeyCode::F7, false, &mut config));
+        assert_ne!(config.chamfer, original.chamfer);
+        assert!(handle_gen_hotkey(KeyCode::F8, false, &mut config));
+        assert!(handle_gen_hotkey(KeyCode::F9, false, &mut config));
+
+        let before_ctrl_r = config.clone();
+        assert!(handle_gen_hotkey(KeyCode::KeyR, true, &mut config));
+        assert_eq!(config, before_ctrl_r);
+        assert!(!handle_gen_hotkey(KeyCode::KeyR, false, &mut config));
     }
 
     #[test]

@@ -124,6 +124,26 @@ child. No `--textures` argument means no PBR discovery. The runtime authorizes
 all accepted bytes through one `PackageResolver` boundary before parse or
 extraction.
 
+### EnhancedV3 live explorer
+
+`--m3-generate` builds an EnhancedV3 full-config package through `engine_pack`,
+then strictly authorizes its BSP, explicit `.lit`, WAD, palette, and texture
+closure before using the same runtime path as direct imports. It always uses
+strict mode and rejects direct BSP, palette, LIT, WAD, and texture companion
+flags. Tool discovery
+uses `--ericw-tools`, `ERICW_TOOLS_DIR`, the documented HOME installation, then
+one PATH directory containing all of `qbsp`, `vis`, and `light`.
+
+```bash
+cargo run -p bsp_beta -- --m3-generate --headless
+cargo run -p bsp_beta -- --m3-generate --ericw-tools /path/to/ericw/bin
+```
+
+In a window, non-repeating F5 increments the seed, F6 cycles preset/extent,
+F7 toggles chamfer, F8 cycles Pointed/Segmented/None, F9 toggles stairs, and
+Ctrl+R rebuilds the unchanged configuration. Compilation runs off the render
+thread; queued requests coalesce and every build uses a distinct package path.
+
 For deterministic renderer-owned captures:
 
 ```bash

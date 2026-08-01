@@ -2,6 +2,8 @@
 //!
 //! Supported flags are intentionally space-separated only:
 //!   --bsp <path>          Path to a compiled .bsp file (required by runtime).
+//!   --m3-generate         Generate an EnhancedV3 dungeon from scratch.
+//!   --ericw-tools <dir>   Path to ericw-tools bin directory for compilation.
 //!   --scale <float>       Quake→engine scale factor (default: 0.0254).
 //!   --headless            Run in headless mode (no window).
 //!   --mcp                 Run a headless MCP JSON-RPC server over stdio.
@@ -47,6 +49,10 @@ pub struct CliArgs {
     /// overbright 2.0, style 0, animation 0.0). Only available in headless
     /// acceptance mode; rejected in ordinary windowed launches.
     pub acceptance_camera: Option<String>,
+    /// Phase B: Generate an EnhancedV3 dungeon map from scratch.
+    pub m3_generate: bool,
+    /// Phase B: Path to ericw-tools bin directory.
+    pub ericw_tools_dir: Option<PathBuf>,
 }
 
 /// Import mode for CLI — mutually exclusive --strict and --development.
@@ -69,6 +75,18 @@ pub enum CliError {
     ConflictingImportMode,
     /// No import mode selected; --strict or --development required.
     NoImportMode,
+    /// --m3-generate conflicts with --bsp.
+    M3GenerateBspConflict,
+    /// --m3-generate conflicts with explicit --palette.
+    M3GeneratePaletteConflict,
+    /// --m3-generate conflicts with explicit --lit.
+    M3GenerateLitConflict,
+    /// --m3-generate conflicts with explicit --wad.
+    M3GenerateWadConflict,
+    /// --m3-generate owns the generated texture closure.
+    M3GenerateTexturesConflict,
+    /// Generated packages are always strict imports.
+    M3GenerateDevelopmentConflict,
 }
 
 impl fmt::Display for CliError {
@@ -100,6 +118,24 @@ impl fmt::Display for CliError {
             }
             CliError::NoImportMode => {
                 write!(f, "no import mode selected; use --strict or --development")
+            }
+            CliError::M3GenerateBspConflict => {
+                write!(f, "--m3-generate and --bsp are mutually exclusive")
+            }
+            CliError::M3GeneratePaletteConflict => {
+                write!(f, "--m3-generate and --palette are mutually exclusive")
+            }
+            CliError::M3GenerateLitConflict => {
+                write!(f, "--m3-generate and --lit are mutually exclusive")
+            }
+            CliError::M3GenerateWadConflict => {
+                write!(f, "--m3-generate and --wad are mutually exclusive")
+            }
+            CliError::M3GenerateTexturesConflict => {
+                write!(f, "--m3-generate and --textures are mutually exclusive")
+            }
+            CliError::M3GenerateDevelopmentConflict => {
+                write!(f, "--m3-generate always uses strict package authorization")
             }
         }
     }
@@ -162,6 +198,8 @@ impl Default for CliArgs {
             all_visible: false,
             corpus_identity: None,
             acceptance_camera: None,
+            m3_generate: false,
+            ericw_tools_dir: None,
         }
     }
 }
@@ -268,8 +306,41 @@ pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<C
                 opts.acceptance_camera = Some(label);
                 i += 2;
             }
+            "--m3-generate" => {
+                opts.m3_generate = true;
+                i += 1;
+            }
+            "--ericw-tools" => {
+                let value = next_value(&args, i, "--ericw-tools")?;
+                opts.ericw_tools_dir = Some(PathBuf::from(value));
+                i += 2;
+            }
             other => return Err(CliError::UnknownArgument(other.to_string())),
         }
+    }
+
+    // ── m3-generate conflict checks ──────────────────────────────
+    if opts.m3_generate {
+        if opts.bsp_path.is_some() {
+            return Err(CliError::M3GenerateBspConflict);
+        }
+        if opts.palette_path.is_some() {
+            return Err(CliError::M3GeneratePaletteConflict);
+        }
+        if opts.lit_path.is_some() {
+            return Err(CliError::M3GenerateLitConflict);
+        }
+        if opts.wad_path.is_some() {
+            return Err(CliError::M3GenerateWadConflict);
+        }
+        if opts.textures_dir.is_some() {
+            return Err(CliError::M3GenerateTexturesConflict);
+        }
+        if opts.import_mode == Some(ImportMode::Development) {
+            return Err(CliError::M3GenerateDevelopmentConflict);
+        }
+        // Generated mode owns a complete closure and is always strict.
+        opts.import_mode = Some(ImportMode::Strict);
     }
 
     if opts.bsp_path.is_some() && opts.import_mode.is_none() {
@@ -297,12 +368,16 @@ fn print_usage() {
     eprintln!();
     eprintln!("BSP Beta — Maintained Load-Query-Physics-Behavior-Reload Proof");
     eprintln!();
-    eprintln!("Usage: bsp_beta --strict|--development [OPTIONS]");
+    eprintln!("Usage:");
+    eprintln!("  Direct BSP launch:   bsp_beta --strict|--development --bsp <path> [OPTIONS]");
+    eprintln!("  Generate & launch:    bsp_beta --m3-generate [--strict] [OPTIONS]");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --strict               Strict import mode");
     eprintln!("  --development          Development import mode");
     eprintln!("  --bsp <path>           Path to compiled .bsp file");
+    eprintln!("  --m3-generate          Generate EnhancedV3 dungeon from scratch");
+    eprintln!("  --ericw-tools <dir>    Path to ericw-tools bin directory");
     eprintln!("  --scale <float>        Quake→engine scale factor (default: 0.0254)");
     eprintln!("  --headless             Run headless (no window, renders N frames)");
     eprintln!("  --mcp                  Run headless MCP JSON-RPC server over stdio");
@@ -316,6 +391,14 @@ fn print_usage() {
     eprintln!("  --all-visible          Use all-visible evidence mode (with --stats)");
     eprintln!("  --corpus <name>        Corpus identity for evidence report");
     eprintln!("  --acceptance-camera <label>  Phase 09 frozen camera: spawn|corridor|junction");
+    eprintln!();
+    eprintln!("Hotkeys (live windowed m3-generate mode):");
+    eprintln!("  F5                     Increment seed & regenerate");
+    eprintln!("  F6                     Cycle Sparse→Moderate→Rich→Sparse");
+    eprintln!("  F7                     Toggle chamfer & regenerate");
+    eprintln!("  F8                     Cycle Pointed→Segmented→None→Pointed");
+    eprintln!("  F9                     Toggle stairs & regenerate");
+    eprintln!("  Ctrl+R                 Regenerate with unchanged config");
     eprintln!();
 }
 
@@ -496,6 +579,69 @@ mod tests {
             args.require_import_mode().unwrap_err(),
             CliError::NoImportMode
         );
+    }
+
+    // ── m3-generate tests ─────────────────────────────────────────────
+
+    #[test]
+    fn m3_generate_alone_is_valid() {
+        let args = parse_from(["--m3-generate"]).unwrap();
+        assert!(args.m3_generate);
+        assert!(args.bsp_path.is_none());
+        // Defaults to strict when no mode specified
+        assert_eq!(args.import_mode, Some(ImportMode::Strict));
+    }
+
+    #[test]
+    fn m3_generate_rejects_development_mode() {
+        assert_eq!(
+            parse_from(["--m3-generate", "--development"]).unwrap_err(),
+            CliError::M3GenerateDevelopmentConflict
+        );
+    }
+
+    #[test]
+    fn m3_generate_conflicts_with_bsp() {
+        let err = parse_from(["--m3-generate", "--bsp", "maps/test.bsp"]).unwrap_err();
+        assert_eq!(err, CliError::M3GenerateBspConflict);
+    }
+
+    #[test]
+    fn m3_generate_conflicts_with_palette() {
+        let err = parse_from(["--m3-generate", "--palette", "gfx/pal.lmp"]).unwrap_err();
+        assert_eq!(err, CliError::M3GeneratePaletteConflict);
+    }
+
+    #[test]
+    fn m3_generate_conflicts_with_lit() {
+        let err = parse_from(["--m3-generate", "--lit", "maps/test.lit"]).unwrap_err();
+        assert_eq!(err, CliError::M3GenerateLitConflict);
+    }
+
+    #[test]
+    fn m3_generate_conflicts_with_wad() {
+        let err = parse_from(["--m3-generate", "--wad", "maps/dungeon.wad"]).unwrap_err();
+        assert_eq!(err, CliError::M3GenerateWadConflict);
+    }
+
+    #[test]
+    fn m3_generate_conflicts_with_textures() {
+        let err = parse_from(["--m3-generate", "--textures", "textures"]).unwrap_err();
+        assert_eq!(err, CliError::M3GenerateTexturesConflict);
+    }
+
+    #[test]
+    fn m3_generate_accepts_ericw_tools_dir() {
+        let args = parse_from(["--m3-generate", "--ericw-tools", "/opt/ericw/bin"]).unwrap();
+        assert!(args.m3_generate);
+        assert_eq!(args.ericw_tools_dir, Some(PathBuf::from("/opt/ericw/bin")));
+    }
+
+    #[test]
+    fn m3_generate_accepts_strict_flag() {
+        let args = parse_from(["--m3-generate", "--strict"]).unwrap();
+        assert!(args.m3_generate);
+        assert_eq!(args.import_mode, Some(ImportMode::Strict));
     }
 
     #[test]

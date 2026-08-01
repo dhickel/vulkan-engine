@@ -12,6 +12,8 @@ physics = { path = "../../src/physics" }
 input = { path = "../../src/input" }
 engine_events = { path = "../../src/events" }
 engine = { path = "../.." }
+engine_pack = { path = "../../tools/engine_pack" }
+bsp_generator = { path = "../../src/bsp_generator" }
 glam = "0.28"
 log = "0.4"
 env_logger = "0.11"
