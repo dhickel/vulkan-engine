@@ -831,9 +831,9 @@ impl Renderer {
     /// Preflight validates every owned handle, computes the common `retire_after`
     /// serial (`max(last_referenced, latest_submitted)`), extracts the arena
     /// closure from the surface cache, and enqueues the closure for deferred GPU
-    /// destruction. On success, returns a [`BspRetirementAcknowledgement`].
+    /// destruction. On success, returns a [`crate::api::bsp::BspRetirementAcknowledgement`].
     ///
-    /// On preflight failure, returns a [`BspRetirementRejection`] that preserves
+    /// On preflight failure, returns a [`crate::api::bsp::BspRetirementRejection`] that preserves
     /// the intact lease and mount state.
     ///
     /// Available only with the `bsp` feature.

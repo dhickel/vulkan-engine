@@ -168,8 +168,10 @@ pub struct BspRetirementAcknowledgement {
 /// Recoverable rejection from a BSP retirement preflight.
 ///
 /// The lease, scene state, handles, generations, and queues are unchanged.
-/// The caller may retry or use the mount elsewhere.
+/// Consume it with [`Self::into_detached`] to retain the complete receipt for
+/// retry or coordinator requeueing.
 #[cfg(feature = "bsp")]
+#[must_use = "a retirement rejection must be reconstructed and retried or requeued"]
 #[derive(Debug)]
 pub struct BspRetirementRejection {
     pub reason: String,
@@ -177,6 +179,21 @@ pub struct BspRetirementRejection {
     pub lease: BspResourceLease,
     /// The deactivated mount state (still holds PVS data for diagnostics).
     pub state: BspMountState,
+}
+
+#[cfg(feature = "bsp")]
+impl BspRetirementRejection {
+    /// Reconstruct a [`DetachedBspMount`] from this rejection for retry.
+    ///
+    /// The lease and mount state are preserved intact. The caller may
+    /// re-submit the reconstructed mount through the renderer retirement
+    /// preflight or requeue it for later disposal.
+    pub fn into_detached(self) -> DetachedBspMount {
+        DetachedBspMount {
+            state: self.state,
+            lease: self.lease,
+        }
+    }
 }
 
 #[cfg(feature = "bsp")]
@@ -588,9 +605,9 @@ impl PreparedBspMount {
 
     /// Detach an unpublished mount from runtime ownership.
     ///
-    /// Deprecated: prefer [`PreparedBspMount::into_detached`] or
-    /// renderer cancellation. This compat path discards the resource lease
-    /// and must only be used by legacy callers that never uploaded GPU data.
+    /// Deprecated: prefer [`PreparedBspMount::into_detached`] or renderer
+    /// cancellation. This compatibility path retains the full resource lease
+    /// in its returned detached receipt.
     #[deprecated(
         since = "0.14.0",
         note = "use into_detached() or renderer cancellation"
@@ -2494,5 +2511,32 @@ mod tests {
 
         let detached = DetachedBspMount::from_published(published);
         assert_eq!(detached.lease.arena_id, 0);
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn rejection_into_detached_preserves_lease_and_state() {
+        // BspRetirementRejection::into_detached reconstructs an intact
+        // DetachedBspMount suitable for retry.
+        let lease = BspResourceLease {
+            arena_id: 77,
+            mesh_handles: vec![MeshHandle::new(2, 0)],
+            texture_handles: vec![],
+            material_handles: vec![],
+        };
+        let mut state = BspMountState::new();
+        state.activate();
+        state.deactivate();
+
+        let rejection = BspRetirementRejection {
+            reason: "arena mismatch".to_string(),
+            lease,
+            state,
+        };
+
+        let detached = rejection.into_detached();
+        assert_eq!(detached.lease.arena_id, 77);
+        assert_eq!(detached.lease.mesh_handles.len(), 1);
+        assert!(!detached.state.active);
     }
 }

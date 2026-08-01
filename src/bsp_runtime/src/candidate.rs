@@ -36,7 +36,7 @@ use crate::error::{BspRuntimeError, CandidatePhase};
 use crate::source_link::BspSourceLink;
 
 use bsp::extract::ExtractedBsp;
-use renderer::api::bsp::PreparedBspMount;
+use renderer::api::bsp::{DetachedBspMount, PreparedBspMount};
 use renderer::api::PointLight;
 
 // ── Renderer Lease ────────────────────────────────────────────────────
@@ -720,26 +720,33 @@ impl BspCandidate {
     }
 
     /// Mark the renderer upload as failed. Legacy path.
+    ///
+    /// Returns the ready lease when one had already been accepted. The caller
+    /// must hand the detached receipt to renderer retirement; this compatibility
+    /// path never drops a lease internally.
     #[doc(hidden)]
-    pub fn fail_renderer_upload(&mut self, reason: String) {
-        if let RendererLease::Ready(mount) =
-            std::mem::replace(&mut self.renderer_lease, RendererLease::Failed { reason })
-        {
-            let _retired = mount.retire();
-        }
+    #[must_use = "a detached BSP mount must be handed to renderer retirement"]
+    pub fn fail_renderer_upload(&mut self, reason: String) -> Option<DetachedBspMount> {
+        let detached =
+            match std::mem::replace(&mut self.renderer_lease, RendererLease::Failed { reason }) {
+                RendererLease::Ready(mount) => Some(mount.into_detached()),
+                _ => None,
+            };
         self.state = CandidateState::Failed;
+        detached
     }
 
     /// Transition the renderer lease to Ready. Legacy path.
+    ///
+    /// A rejected mount is returned as a detached receipt so the caller can
+    /// retire or requeue it rather than losing its resource lease.
     #[doc(hidden)]
-    pub fn set_renderer_ready(&mut self, mount: PreparedBspMount) -> Result<(), BspRuntimeError> {
-        match self.transition_to_renderer_ready(self.generation, mount) {
-            Ok(()) => Ok(()),
-            Err((error, mount)) => {
-                let _retired = mount.retire();
-                Err(error)
-            }
-        }
+    pub fn set_renderer_ready(
+        &mut self,
+        mount: PreparedBspMount,
+    ) -> Result<(), (BspRuntimeError, DetachedBspMount)> {
+        self.transition_to_renderer_ready(self.generation, mount)
+            .map_err(|(error, mount)| (error, mount.into_detached()))
     }
 
     /// Take the ready mount, leaving the lease in NotStarted.

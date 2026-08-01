@@ -48,9 +48,30 @@
 - Panic in bridge commit/rollback → coordinator poisoned
 - `is_poisoned()` query, no further BSP operations accepted
 
+### Retirement Handoff API (Phase A — EnhancedV3)
+
+Every `DetachedBspMount` produced by replacement, unload, rollback, stale upload, or
+teardown is deposited into the coordinator's pending-retirement queue exactly once.
+The coordinator never silently drops a detached receipt. Callers must drain and submit
+each mount to `Renderer::retire_bsp_mount`.
+
+| method | role |
+|--------|------|
+| `pending_retirement_count()` | current queue depth |
+| `retired_mount_count()` | cumulative detachment count (diagnostic only) |
+| `retirement_diagnostics()` | alias for `retired_mount_count` |
+| `drain_pending_retirements()` | take all queued `DetachedBspMount`s, leaving queue empty |
+| `requeue_retirement(detached)` | return a previously drained receipt to the queue (e.g. after rejection retry) |
+
+If `Renderer::retire_bsp_mount` rejects with a `BspRetirementRejection`, reconstruct
+the `DetachedBspMount` via `BspRetirementRejection::into_detached()` and requeue it.
+`Scene::clear_bsp_mount()` likewise returns (rather than drops) its detached receipt,
+so direct scene users must submit or requeue that receipt as well.
+
 ### Current Lifecycle Boundary
 - `PreparedBspMount` is move-only and `Scene::retire_bsp_mount()` detaches it from scene submission.
-- That receipt is not a renderer fence-retirement acknowledgement. BSP cache payload queueing is blocked on GitHub #59; generic committed-bridge teardown is blocked on GitHub #60.
+- Detached mounts are now queued for explicit renderer fence-aware retirement via the handoff API above.
+- Generic committed-bridge teardown is blocked on GitHub #60.
 
 ## Validation
 

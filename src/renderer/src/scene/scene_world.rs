@@ -2570,15 +2570,16 @@ impl SceneWorld {
 
     /// Clear the BSP mount, disabling PVS culling and BSP light selection.
     ///
-    /// Deprecated: this drops the resource lease. Use [`Self::retire_bsp_mount`]
-    /// to obtain a [`DetachedBspMount`] for renderer retirement.
+    /// Deprecated: use [`Self::retire_bsp_mount`] directly. This compatibility
+    /// path returns the full lease-bearing receipt for renderer retirement.
     #[cfg(feature = "bsp")]
     #[deprecated(
         since = "0.14.0",
         note = "use retire_bsp_mount() to preserve the lease"
     )]
-    pub(crate) fn clear_bsp_mount(&mut self) {
-        let _ = self.retire_bsp_mount();
+    #[must_use = "a detached BSP mount must be retired through the renderer"]
+    pub(crate) fn clear_bsp_mount(&mut self) -> Option<crate::api::bsp::DetachedBspMount> {
+        self.retire_bsp_mount()
     }
 
     /// Detach the active BSP mount and return the lease-bearing

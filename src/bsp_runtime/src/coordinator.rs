@@ -41,7 +41,7 @@ use crate::package::{AuthorizedBspImport, ImportMode, PbrCompanionKind};
 use crate::source_link::{reconcile_overrides, BspSourceLink, OverrideReconciliation};
 
 use bsp::extract::{EntityDescriptor, ExtractedBsp};
-use renderer::api::bsp::PreparedBspMount;
+use renderer::api::bsp::{DetachedBspMount, PreparedBspMount};
 use renderer::api::{PointLight, Scene};
 
 /// Result of a prepare operation.
@@ -167,6 +167,14 @@ pub struct BspCoordinator {
     /// This records removal from runtime/scene ownership only, not acceptance
     /// by a renderer fence-aware retirement queue.
     retired_mount_count: u64,
+
+    /// Detached mounts awaiting explicit renderer retirement.
+    ///
+    /// Every replacement, unload, rollback, stale upload, and teardown that
+    /// produces a [`DetachedBspMount`] deposits it here exactly once. The
+    /// coordinator never silently drops a detached receipt. Callers must
+    /// drain this queue and submit each mount to [`renderer::api::Renderer::retire_bsp_mount`].
+    pending_retirements: Vec<DetachedBspMount>,
 }
 
 impl BspCoordinator {
@@ -177,6 +185,7 @@ impl BspCoordinator {
             state: CoordinatorState::Idle,
             bridges: BridgeAggregator::new(),
             retired_mount_count: 0,
+            pending_retirements: Vec::new(),
         }
     }
 
@@ -188,6 +197,10 @@ impl BspCoordinator {
             self.state,
             CoordinatorState::Active(_)
                 | CoordinatorState::CandidateBesideActive {
+                    active: Some(_),
+                    ..
+                }
+                | CoordinatorState::CleanupBlocked {
                     active: Some(_),
                     ..
                 }
@@ -217,8 +230,19 @@ impl BspCoordinator {
 
     /// Returns the number of detached mounts (diagnostic only, not renderer
     /// fence-retirement acknowledgement).
+    ///
+    /// This is incremented for every scene-detachment handoff regardless of
+    /// whether the resulting [`DetachedBspMount`] has been drained by the
+    /// caller. Use [`pending_retirement_count`](Self::pending_retirement_count)
+    /// for the current queue depth.
     pub fn retired_mount_count(&self) -> u64 {
         self.retired_mount_count
+    }
+
+    /// Returns the number of detached mounts currently awaiting explicit
+    /// renderer retirement through [`drain_pending_retirements`](Self::drain_pending_retirements).
+    pub fn pending_retirement_count(&self) -> usize {
+        self.pending_retirements.len()
     }
 
     /// Returns a reference to the staged extraction from the current
@@ -244,7 +268,10 @@ impl BspCoordinator {
             CoordinatorState::CandidateBesideActive {
                 active: Some(m), ..
             } => Some(m),
-            CoordinatorState::PublishedQuarantined { active: m, .. } => Some(m),
+            CoordinatorState::CleanupBlocked {
+                active: Some(m), ..
+            }
+            | CoordinatorState::PublishedQuarantined { active: m, .. } => Some(m),
             _ => None,
         }
     }
@@ -282,7 +309,16 @@ impl BspCoordinator {
                     None
                 }
             }
-            CoordinatorState::CandidateBesideActive { active, .. } => active.take(),
+            CoordinatorState::CandidateBesideActive { active, .. }
+            | CoordinatorState::CleanupBlocked { active, .. } => active.take(),
+            CoordinatorState::PublishedQuarantined { .. } => {
+                let old = std::mem::replace(&mut self.state, CoordinatorState::Idle);
+                if let CoordinatorState::PublishedQuarantined { active, .. } = old {
+                    Some(active)
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -982,7 +1018,9 @@ impl BspCoordinator {
                         prior_source_identity: prior_id.clone(),
                         quarantine_detail: q_detail,
                     };
-                    drop(retired);
+                    if let Some(retired) = retired {
+                        self.pending_retirements.push(retired);
+                    }
                     return Err(BspRuntimeError::PublishedButQuarantined {
                         published_generation: published_gen,
                         prior_generation: prior_gen,
@@ -1000,7 +1038,9 @@ impl BspCoordinator {
         } else {
             debug_assert!(retired.is_none());
         }
-        drop(retired);
+        if let Some(retired) = retired {
+            self.pending_retirements.push(retired);
+        }
 
         let cache_identity = active_mount.cache_identity.clone();
 
@@ -1070,8 +1110,33 @@ impl BspCoordinator {
     ///
     /// This is a diagnostic count only; it is not evidence that renderer
     /// cache payloads were accepted by a fence-aware retirement queue.
+    /// It increments on every detachment regardless of whether the receipt
+    /// has been drained from the pending queue.
     pub fn retirement_diagnostics(&self) -> u64 {
         self.retired_mount_count
+    }
+
+    /// Drain all pending detached mounts for explicit renderer retirement.
+    ///
+    /// Every [`DetachedBspMount`] produced by replacement, unload, rollback,
+    /// stale upload, or teardown is deposited into the coordinator's internal
+    /// queue. The caller must drain this queue and submit each mount to
+    /// [`renderer::api::Renderer::retire_bsp_mount`]. The coordinator never silently drops
+    /// a detached receipt.
+    ///
+    /// Returns all pending mounts, leaving the internal queue empty.
+    pub fn drain_pending_retirements(&mut self) -> Vec<DetachedBspMount> {
+        std::mem::take(&mut self.pending_retirements)
+    }
+
+    /// Requeue a [`DetachedBspMount`] that was previously drained.
+    ///
+    /// Use this to return a receipt that could not be retired (e.g., after
+    /// a [`renderer::api::bsp::BspRetirementRejection`] was reconstructed via
+    /// [`renderer::api::bsp::BspRetirementRejection::into_detached`]). The mount is appended to
+    /// the internal queue and will appear in the next drain.
+    pub fn requeue_retirement(&mut self, detached: DetachedBspMount) {
+        self.pending_retirements.push(detached);
     }
 
     // ── Unload ─────────────────────────────────────────────────────────
@@ -1277,9 +1342,10 @@ impl BspCoordinator {
 
     /// Tear down all BSP resources for renderer shutdown or device loss.
     ///
-    /// Releases the active mount and any staged candidate. After calling this,
-    /// the coordinator is clean but still usable for future prepares.
-    /// Callers must ensure the scene has already been cleared externally.
+    /// Releases the active mount and any staged candidate. Every resulting
+    /// detached mount remains in the pending-retirement queue for explicit
+    /// caller handoff. After calling this, the coordinator is clean but still
+    /// usable for future prepares.
     pub fn teardown(&mut self, scene: &mut Scene) {
         // Release candidate first
         self.rollback_candidate_with_retirement().ok();
@@ -2030,8 +2096,9 @@ impl BspCoordinator {
     }
 
     fn retire_unpublished_mount(&mut self, mount: PreparedBspMount) {
-        let _detached = mount.retire();
+        let detached = mount.into_detached();
         self.retired_mount_count = self.retired_mount_count.saturating_add(1);
+        self.pending_retirements.push(detached);
         log::debug!("BSP coordinator: detached unpublished renderer mount");
     }
 
@@ -2096,22 +2163,21 @@ impl BspCoordinator {
             });
         }
 
-        // Phase 06: Teardown active bridge receipts before scene detach.
-        // Bridge teardown removes app-owned resources (physics, behavior state)
-        // while the scene mount is still published.
-        let old_mount = self
-            .take_active_mount()
-            .expect("active mount was borrowed and prechecked above");
-
-        let old_light_ids = old_mount.light_ids.clone();
+        // Remove lights before consuming the active record so a fallible scene
+        // operation leaves coordinator ownership intact for a later retry.
+        let old_light_ids = active_mount.light_ids.clone();
         scene
             .replace_prevalidated_bsp_point_lights(&old_light_ids, &[])
             .map_err(|error| BspRuntimeError::RetirementHandoffFailed {
                 reason: format!("failed to remove BSP-owned point lights: {error:?}"),
             })?;
 
-        // Teardown bridge receipts — on failure, the quarantine retains receipts
-        // but the scene is still detached.
+        // Phase 06: Teardown active bridge receipts before scene detach.
+        // Bridge teardown removes app-owned resources (physics, behavior state)
+        // while the scene mount is still published.
+        let old_mount = self
+            .take_active_mount()
+            .expect("active mount was borrowed and prechecked above");
         if !old_mount.active_bridge_receipts.is_empty() {
             if let Err(quarantine) = self.bridges.teardown_all(old_mount.active_bridge_receipts) {
                 log::error!(
@@ -2131,12 +2197,12 @@ impl BspCoordinator {
         scene.clear_bsp_source_link();
 
         self.retired_mount_count = self.retired_mount_count.saturating_add(1);
+        self.pending_retirements.push(retired);
         log::debug!(
             "BSP coordinator: detached active mount '{}' (generation {})",
             old_mount.source_identity,
             old_mount.committed_generation
         );
-        drop(retired);
         Ok(())
     }
 

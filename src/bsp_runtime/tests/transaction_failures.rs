@@ -646,6 +646,7 @@ fn duplicate_renderer_ready_lease_is_detached() {
         Err(BspRuntimeError::DuplicateReadyLease { .. })
     ));
     assert_eq!(coordinator.retirement_diagnostics(), retirements_before + 1);
+    assert_eq!(coordinator.pending_retirement_count(), 1);
     coordinator.validate(prepare.token).unwrap();
     let mut scene = Scene::new();
     assert!(coordinator.commit(prepare.token, &mut scene).is_ok());
@@ -1060,6 +1061,7 @@ fn stale_renderer_completion_is_rejected_and_does_not_mutate_candidate() {
     ));
     assert!(coordinator.staged_extraction().is_some());
     assert_eq!(coordinator.retirement_diagnostics(), retirements_before + 1);
+    assert_eq!(coordinator.pending_retirement_count(), 1);
 }
 
 #[test]
@@ -1077,6 +1079,7 @@ fn duplicate_renderer_ready_lease_is_rejected() {
         Err(BspRuntimeError::DuplicateReadyLease { .. })
     ));
     assert_eq!(coordinator.retirement_diagnostics(), retirements_before + 1);
+    assert_eq!(coordinator.pending_retirement_count(), 1);
     coordinator.validate(prepare.token).unwrap();
 }
 
@@ -1172,6 +1175,67 @@ fn teardown_retires_active_and_counts() {
     coordinator.teardown(&mut scene);
     assert!(!coordinator.is_active());
     assert!(coordinator.retirement_diagnostics() > ret_before);
+    assert_eq!(coordinator.pending_retirement_count(), 1);
+}
+
+#[test]
+fn published_quarantine_and_teardown_queue_each_detached_mount() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+    coordinator.register_bridge("failing-teardown", Box::new(FailingTeardownBridge));
+
+    let first = coordinator.prepare(&bsp_bytes, None, "maps/a").unwrap();
+    coordinator
+        .commit_with_mount(first.token, &mut scene, empty_mount())
+        .unwrap();
+
+    let replacement = coordinator.prepare(&bsp_bytes, None, "maps/b").unwrap();
+    let result = coordinator.commit_with_mount(replacement.token, &mut scene, empty_mount());
+    assert!(matches!(
+        result,
+        Err(BspRuntimeError::PublishedButQuarantined { .. })
+    ));
+    assert!(scene.has_bsp_mount());
+    assert_eq!(coordinator.pending_retirement_count(), 1);
+
+    // Teardown must drain the active B mount even though replacement left the
+    // coordinator in PublishedQuarantined; it appends B without dropping A.
+    coordinator.teardown(&mut scene);
+    assert!(!scene.has_bsp_mount());
+    assert_eq!(coordinator.pending_retirement_count(), 2);
+}
+
+#[test]
+fn cleanup_blocked_teardown_queues_retained_active_mount() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+    coordinator.register_bridge("panic-rollback", Box::new(PanicRollbackBridge));
+
+    let first = coordinator.prepare(&bsp_bytes, None, "maps/a").unwrap();
+    coordinator
+        .commit_with_mount(first.token, &mut scene, empty_mount())
+        .unwrap();
+
+    let candidate = coordinator.prepare(&bsp_bytes, None, "maps/b").unwrap();
+    coordinator
+        .set_renderer_mount_ready(candidate.token, empty_mount())
+        .unwrap();
+    assert!(matches!(
+        coordinator.rollback(),
+        Err(BspRuntimeError::RollbackFailure { .. })
+    ));
+    assert!(coordinator.is_poisoned());
+    assert!(coordinator.is_active());
+    assert!(scene.has_bsp_mount());
+    assert_eq!(coordinator.pending_retirement_count(), 1);
+
+    // The staged B receipt is already queued. Terminal teardown must retain
+    // and queue the active A receipt rather than dropping it with CleanupBlocked.
+    coordinator.teardown(&mut scene);
+    assert!(!scene.has_bsp_mount());
+    assert_eq!(coordinator.pending_retirement_count(), 2);
 }
 
 #[test]
