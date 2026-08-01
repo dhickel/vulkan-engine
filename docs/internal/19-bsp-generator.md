@@ -694,7 +694,7 @@ are below their preset ceilings and the M2 10,000-face ceiling.
 | grammar families | 2 strategies (Uniform/ByZone) | 6 descriptor families |
 | density presets | none (single EnhancedConfig) | Sparse/Moderate/Rich |
 | minimum-identity | none | typed `MinimumIdentityFailure` |
-| config type | `EnhancedConfig` (10 fields) | `V3Config` (18 fields, including explorer overrides) |
+| config type | `EnhancedConfig` (10 fields) | `V3Config` (19 fields, including explorer overrides; `layers` is validated as exactly 2) |
 | stage tags | 6 tags | 4 tags |
 | error type | `EnhancedError` (12 variants) | `V3Error` (45 variants) |
 | theme | cc0_dungeon_v2 | cc0_dungeon_v2 (reused) |

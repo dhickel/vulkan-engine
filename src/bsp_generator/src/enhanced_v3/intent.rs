@@ -654,7 +654,7 @@ pub fn plan_composition(
         rejected,
         support_edges,
         identity_satisfied: true,
-        estimated_total_faces: if config.has_overrides() {
+        estimated_total_faces: if config.has_output_overrides() {
             super::config::FACE_BUDGET - 1
         } else {
             config.preset.face_budget()

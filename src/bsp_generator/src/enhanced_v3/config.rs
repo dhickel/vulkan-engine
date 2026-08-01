@@ -381,6 +381,9 @@ pub struct V3Config {
     pub rooms: Option<u32>,
     pub corridors: Option<u32>,
     pub loops: Option<u32>,
+    /// Declared layer count. EnhancedV3 is permanently a two-layer profile,
+    /// so an explicit override may only affirm `LAYER_COUNT`.
+    pub layers: Option<u32>,
     pub vertical_edges: Option<u32>,
     pub chamfer: bool,
     pub arch_type: ArchType,
@@ -406,6 +409,7 @@ impl V3Config {
             rooms: None,
             corridors: None,
             loops: None,
+            layers: None,
             vertical_edges: None,
             chamfer: true,
             arch_type: ArchType::Pointed,
@@ -433,6 +437,9 @@ impl V3Config {
         }
         if let Some(loops) = self.loops {
             validate_range("loops", loops, 0, LOOP_COUNT_MAX)?;
+        }
+        if let Some(layers) = self.layers {
+            validate_range("layers", layers, LAYER_COUNT, LAYER_COUNT)?;
         }
         if let Some(vertical_edges) = self.vertical_edges {
             validate_range("vertical_edges", vertical_edges, 0, VERTICAL_EDGE_MAX)?;
@@ -551,6 +558,13 @@ impl V3Config {
             .unwrap_or_else(|| self.effective_route_count())
     }
 
+    /// Effective layer count. This remains exactly two under the frozen V3
+    /// vertical contract; the optional field makes that invariant explicit in
+    /// explorer configuration and package provenance.
+    pub fn effective_layers(&self) -> u32 {
+        self.layers.unwrap_or(LAYER_COUNT)
+    }
+
     pub fn effective_vertical_edges(&self) -> u32 {
         if self.stairs {
             self.vertical_edges.unwrap_or(1)
@@ -595,8 +609,14 @@ impl V3Config {
             && self.feature_density.to_bits() == 0.5f32.to_bits()
     }
 
-    /// Whether any explorer override differs from the production compatibility profile.
+    /// Whether any explorer field was explicitly overridden for provenance.
     pub fn has_overrides(&self) -> bool {
+        self.layers.is_some() || self.has_output_overrides()
+    }
+
+    /// Whether an override can change generated output or its active budget.
+    /// `layers = Some(2)` only declares the frozen layout and is provenance-only.
+    pub(crate) fn has_output_overrides(&self) -> bool {
         self.rooms.is_some()
             || self.corridors.is_some()
             || self.loops.is_some()
@@ -638,6 +658,7 @@ impl PartialEq for V3Config {
             && self.rooms == other.rooms
             && self.corridors == other.corridors
             && self.loops == other.loops
+            && self.layers == other.layers
             && self.vertical_edges == other.vertical_edges
             && self.chamfer == other.chamfer
             && self.arch_type == other.arch_type

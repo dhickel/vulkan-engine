@@ -110,7 +110,7 @@ pub fn run_pipeline(config: &V3Config) -> Result<V3PipelineOutput, V3Error> {
         .map(|b| b.brush.faces.len() as u32)
         .sum();
     let actual_entities: u32 = 2 + light_origins.len() as u32; // worldspawn + spawn + lights
-    if (!config.has_overrides() && actual_faces > config.preset.face_budget())
+    if (!config.has_output_overrides() && actual_faces > config.preset.face_budget())
         || actual_faces >= super::config::FACE_BUDGET
     {
         return Err(V3Error::CompositionInvariant {

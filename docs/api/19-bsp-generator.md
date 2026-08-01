@@ -660,6 +660,7 @@ pub struct V3Config {
     pub rooms: Option<u32>,
     pub corridors: Option<u32>,
     pub loops: Option<u32>,
+    pub layers: Option<u32>,
     pub vertical_edges: Option<u32>,
     pub chamfer: bool,
     pub arch_type: ArchType,
@@ -690,6 +691,7 @@ mutating them. `run_pipeline()` and package entry points revalidate before gener
 
 **Validation rules:**
 - `xy_extent` must be 1024–3072 and a multiple of 16
+- An explicit `layers` value must be exactly 2; it records the frozen two-layer V3 layout and cannot enable a third or single-layer variant
 - Mutated explorer fields must be revalidated by `validate()`; `run_pipeline()` and package entry points do this before generation
 - `ArchType::None`, `Pointed`, and `Segmented` are accepted cardinal surrounds; segmented generation adds a corridor-side crown cap while retaining the complete 64×80 throat
 - Non-quantum-aligned values produce `V3Error::ConfigNotQuantumAligned`
@@ -855,7 +857,7 @@ pub enum GenerationProfile {
 Production dispatch uses `from_tag("m3")` → `Some(EnhancedV3)`.
 The proof-only tag `"enhanced-v3"` returns `None`.
 The `dungeon_gen` CLI uses `--class m3` and exposes every explorer field through
-`--preset`, `--extent`, `--rooms`, `--corridors`, `--loops`, `--vertical-edges`,
+`--preset`, `--extent`, `--rooms`, `--corridors`, `--loops`, `--layers`, `--vertical-edges`,
 `--chamfer`/`--no-chamfer`, `--arch-type`, `--stairs`/`--no-stairs`, room-span,
 grammar, feature-density, minlight, and light-count options.
 
