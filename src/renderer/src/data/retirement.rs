@@ -1134,6 +1134,45 @@ mod tests {
 
     #[cfg(feature = "bsp")]
     #[test]
+    fn bsp_terminal_idle_reap_destroys_pending_payload_exactly_once() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        struct DropProbe(Arc<AtomicUsize>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut queue = GpuRetirementQueue::new();
+        queue.enqueue(
+            RetirementClass::BspArenaRetirement,
+            FrameSerial::new(7),
+            DropProbe(Arc::clone(&drops)),
+        );
+
+        // device_wait_idle authorizes reaping through the latest submitted serial.
+        let reaped = queue
+            .try_reap(FrameSerial::new(7), |_| Ok::<(), ()>(()))
+            .expect("terminal reap succeeds");
+        assert!(queue.is_empty());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(reaped);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+        let duplicate = queue
+            .try_reap(FrameSerial::new(7), |_| Ok::<(), ()>(()))
+            .expect("duplicate terminal reap is idempotent");
+        drop(duplicate);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
     fn bsp_closure_is_debug() {
         let closure = crate::data::retirement::BspRetirementClosure {
             arena_id: 1,

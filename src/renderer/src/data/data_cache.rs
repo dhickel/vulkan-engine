@@ -1905,6 +1905,7 @@ impl TextureCache {
         &mut self,
         texture_ids: Vec<TextureHandle>,
         preserve_reserved: bool,
+        allocator: Option<&vk_mem::Allocator>,
     ) {
         for id in texture_ids.into_iter() {
             if preserve_reserved && (id.slot as usize) < Self::DEFAULT_TEX_ITER_START {
@@ -1918,8 +1919,10 @@ impl TextureCache {
             if let Some(slot) = self.cached_textures.get_mut(slot_idx) {
                 let old_tex = std::mem::replace(slot, CachedTexture::_NULL);
                 if let CachedTexture::Loaded(tex) = old_tex {
-                    if let Ok(allocator) = self.allocator.lock() {
-                        vk_util::destroy_image(&self.device, &allocator, tex.alloc)
+                    if let Some(allocator) = allocator {
+                        vk_util::destroy_image(&self.device, allocator, tex.alloc);
+                    } else if let Ok(allocator) = self.allocator.lock() {
+                        vk_util::destroy_image(&self.device, &allocator, tex.alloc);
                     } else {
                         error!("allocator lock poisoned while deallocating texture payload");
                     }
@@ -1932,11 +1935,23 @@ impl TextureCache {
     }
 
     fn deallocate_textures(&mut self, texture_ids: Vec<TextureHandle>) {
-        self.deallocate_textures_with_policy(texture_ids, true);
+        self.deallocate_textures_with_policy(texture_ids, true, None);
     }
 
     pub fn deallocate_texture(&mut self, texture_id: TextureHandle) {
         self.deallocate_textures(vec![texture_id]);
+    }
+
+    /// Deallocate a texture while reusing an allocator guard already acquired
+    /// after the texture-cache lock. Retirement reaping uses this path to avoid
+    /// recursively locking the non-reentrant allocator mutex.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn deallocate_texture_with_allocator(
+        &mut self,
+        texture_id: TextureHandle,
+        allocator: &vk_mem::Allocator,
+    ) {
+        self.deallocate_textures_with_policy(vec![texture_id], true, Some(allocator));
     }
 
     fn deallocate_materials_with_policy(
@@ -1967,7 +1982,7 @@ impl TextureCache {
             }
         }
 
-        self.deallocate_textures_with_policy(texture_ids, preserve_reserved);
+        self.deallocate_textures_with_policy(texture_ids, preserve_reserved, None);
     }
 
     pub fn deallocate_materials(&mut self, material_ids: Vec<MaterialHandle>) {

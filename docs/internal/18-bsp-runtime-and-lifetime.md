@@ -111,11 +111,12 @@ All GPU resources follow the existing fence-aware retirement contract (`GpuRetir
 
 Reserved default slots for BSP resources do not yet exist — all BSP resources are dynamically created.
 
-> **Current lifecycle gap (Phase 05 revalidation):** `Scene::retire_bsp_mount()` removes
-> `BspMountState` from scene submission and returns an opaque detached-state receipt, but it
-> does not invoke the renderer cache retirement queues. Do not treat the receipt or the
-> coordinator detachment counter as fence-aware GPU retirement evidence. A renderer/core
-> handoff with submission-serial context is still required (GitHub #59).
+`Scene::retire_bsp_mount()` removes `BspMountState` from submission and returns an opaque
+receipt. The coordinator queues that receipt until the app hands it to
+`Renderer::retire_bsp_mount`, which invalidates the arena generation and accepts the complete
+GPU closure into the renderer-owned serial queue. Fence-observed frame cleanup normally reaps
+it. On normal renderer shutdown, a successful `device_wait_idle` authorizes a terminal reap
+through the latest submitted serial before data-cache and VMA destruction.
 
 ## 6. Descriptor and Frame ABI
 
@@ -266,10 +267,11 @@ All BSP GPU resources follow `DECISION-20260725-15`:
 - Submit failure cannot fabricate completion
 - Mesh/material/atlas retirement uses `RetirementClass` taxonomy
 
-The generic cache mechanisms above are not yet connected to BSP mount cancellation,
-replacement, or unload. `bsp_runtime` must not calculate serials or touch raw cache
-handles; the missing opaque renderer handoff is tracked by GitHub #59. Active app-bridge
-teardown after commit is separately missing (GitHub #60).
+BSP mount cancellation, replacement, unload, and teardown produce opaque detached receipts.
+`bsp_runtime` never calculates serials or touches raw cache handles; the app drains coordinator
+receipts into `Renderer::retire_bsp_mount`, and rejection returns the intact receipt for requeue.
+The renderer owns normal fence reaping and terminal post-idle reaping. Active app-bridge teardown
+after commit remains separately tracked by GitHub #60.
 
 ## 12. Immutable Snapshot
 
@@ -316,7 +318,9 @@ BSP draws are recorded before the geometry dynamic-rendering scope ends. `record
 
 ## 15. Device Loss / Shutdown
 
-- `VkRenderCore` records device loss immediately. BSP GPU resources follow the same terminal path: skip Vulkan/VMA teardown.
+- `VkRenderCore` records device loss immediately. BSP GPU resources follow the same terminal path: skip Vulkan/VMA teardown and do not manufacture a terminal completion serial.
+- On normal drop, successful `device_wait_idle` proves all submitted serials complete; pending BSP closures are reaped exactly once before data-cache and allocator teardown.
+- BSP reap lock order is `mesh_cache → texture_cache → bsp_surface_cache → allocator`. Texture deallocation reuses the held allocator guard and never recursively locks it.
 - `BspCoordinator::teardown()` does NOT check poison state (terminal cleanup path).
 - Bridge panics during commit or rollback poison the coordinator. Recovery requires coordinator recreation.
 
@@ -342,7 +346,7 @@ BSP draws are recorded before the geometry dynamic-rendering scope ends. `record
 | GPU upload rollback after material registration | descriptor pool double-free SIGSEGV ([#61](https://github.com/dhickel/vulkan-engine/issues/61)) |
 | Planned mesh bounds consumed by `mem::take` before batch record construction | `cannot compute bounds for empty batch mesh` ([#62](https://github.com/dhickel/vulkan-engine/issues/62)) |
 | First material handle `(0,0)` | valid when present in `BspResourceLease`; lease membership is the liveness authority |
-| Scene mount detached without renderer retirement queue | stale handle invalidation incomplete ([#59](https://github.com/dhickel/vulkan-engine/issues/59)) |
+| Renderer rejects detached mount retirement | rejection retains the intact receipt; caller requeues it without dropping subsequent drained receipts |
 | Committed bridge token consumed without active teardown receipt | generic bridge unload/replacement not atomic ([#60](https://github.com/dhickel/vulkan-engine/issues/60)) |
 
 ## 17. Known Blocked Issues (2026-07-26)

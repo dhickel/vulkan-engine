@@ -418,9 +418,11 @@ pub(crate) fn reap_texture_retirement(
 
 /// Reap the BSP retirement queue up through `latest_completed_serial`.
 ///
-/// Acquires the BSP surface cache lock **before** removing records from the
-/// queue so lock poisoning preserves every queued payload. Destroys GPU
-/// resources in dependency order, then releases mesh/texture cache slots.
+/// All fallible locks are acquired before records leave the queue, preserving
+/// transactional retry behavior after poisoning. The order matches renderer
+/// draw/cache paths: mesh cache → texture cache → BSP surface cache → allocator.
+/// Texture destruction reuses that allocator guard instead of recursively
+/// locking the allocator mutex.
 #[cfg(feature = "bsp")]
 pub(crate) fn reap_bsp_retirement(
     latest_completed_serial: u64,
@@ -429,54 +431,114 @@ pub(crate) fn reap_bsp_retirement(
     device: &ash::Device,
     allocator: &std::sync::Arc<std::sync::Mutex<vk_mem::Allocator>>,
 ) -> Result<(), String> {
+    reap_bsp_retirement_inner(
+        latest_completed_serial,
+        bsp_retirement_queue,
+        data_cache,
+        device,
+        allocator,
+        false,
+    )
+}
+
+/// Terminal BSP reap after a successful `device_wait_idle`.
+///
+/// At this point no retry can be useful: every submitted serial is complete
+/// and the cache/VMA teardown follows immediately. Recover poisoned locks so
+/// accepted closures are destroyed rather than dropped intact with their GPU
+/// payloads when the renderer is torn down.
+#[cfg(feature = "bsp")]
+pub(crate) fn reap_bsp_retirement_after_device_idle(
+    latest_completed_serial: u64,
+    bsp_retirement_queue: &mut GpuRetirementQueue<crate::data::retirement::BspRetirementClosure>,
+    data_cache: &Arc<VkDataCache>,
+    device: &ash::Device,
+    allocator: &std::sync::Arc<std::sync::Mutex<vk_mem::Allocator>>,
+) -> Result<(), String> {
+    reap_bsp_retirement_inner(
+        latest_completed_serial,
+        bsp_retirement_queue,
+        data_cache,
+        device,
+        allocator,
+        true,
+    )
+}
+
+#[cfg(feature = "bsp")]
+fn lock_bsp_retirement_dependency<'a, T>(
+    mutex: &'a std::sync::Mutex<T>,
+    name: &str,
+    terminal: bool,
+) -> Result<std::sync::MutexGuard<'a, T>, String> {
+    match mutex.lock() {
+        Ok(guard) => Ok(guard),
+        Err(poisoned) if terminal => {
+            log::error!(
+                "{name} lock poisoned during terminal BSP retirement reap; recovering for teardown"
+            );
+            Ok(poisoned.into_inner())
+        }
+        Err(_) => Err(format!(
+            "{name} lock poisoned during BSP retirement reaping"
+        )),
+    }
+}
+
+#[cfg(feature = "bsp")]
+fn reap_bsp_retirement_inner(
+    latest_completed_serial: u64,
+    bsp_retirement_queue: &mut GpuRetirementQueue<crate::data::retirement::BspRetirementClosure>,
+    data_cache: &Arc<VkDataCache>,
+    device: &ash::Device,
+    allocator: &std::sync::Arc<std::sync::Mutex<vk_mem::Allocator>>,
+    terminal: bool,
+) -> Result<(), String> {
     let completed = FrameSerial::new(latest_completed_serial);
 
-    let closure_guard = |closure: &crate::data::retirement::BspRetirementClosure| {
-        // Validate before commit: the allocator must be lockable.
-        let alloc_guard = allocator
-            .lock()
-            .map_err(|_| "allocator lock poisoned during BSP retirement reaping".to_string())?;
-        let _ = (closure, alloc_guard);
-        Ok::<_, String>(())
-    };
+    // Keep empty-queue frame acquisition cheap while still advancing the
+    // queue's completion high-water mark and detecting regressions.
+    if bsp_retirement_queue.is_empty() {
+        return bsp_retirement_queue
+            .try_reap(completed, |_| Ok::<(), String>(()))
+            .map(|_| ())
+            .map_err(|err| match err {
+                TryReapError::CompletionRegressed { previous, observed } => format!(
+                    "BSP retirement completion regression: previous={previous:?} observed={observed:?}"
+                ),
+                TryReapError::ClosureFailed(error) => error,
+            });
+    }
+
+    // Lock every destruction dependency before committing queue removal. Once
+    // these guards exist, the remaining operations are deterministic teardown.
+    let mut mesh_cache =
+        lock_bsp_retirement_dependency(&data_cache.mesh_cache, "mesh_cache", terminal)?;
+    let mut texture_cache =
+        lock_bsp_retirement_dependency(&data_cache.texture_cache, "texture_cache", terminal)?;
+    let mut surface_cache = lock_bsp_retirement_dependency(
+        &data_cache.bsp_surface_cache,
+        "bsp_surface_cache",
+        terminal,
+    )?;
+    let alloc_guard = lock_bsp_retirement_dependency(allocator, "allocator", terminal)?;
 
     let reaped = bsp_retirement_queue
         .try_reap(completed, |eligible| {
-            for record in eligible {
-                debug_assert_eq!(
-                    record.class,
-                    crate::data::retirement::RetirementClass::BspArenaRetirement
-                );
-                closure_guard(&record.payload)?;
-            }
-            Ok::<_, String>(())
+            debug_assert!(eligible.iter().all(|record| {
+                record.class == crate::data::retirement::RetirementClass::BspArenaRetirement
+            }));
+            Ok::<(), String>(())
         })
         .map_err(|err| match err {
-            TryReapError::CompletionRegressed { previous, observed } => {
-                format!(
-                    "BSP retirement completion regression: previous={previous:?} observed={observed:?}"
-                )
-            }
-            TryReapError::ClosureFailed(e) => e,
+            TryReapError::CompletionRegressed { previous, observed } => format!(
+                "BSP retirement completion regression: previous={previous:?} observed={observed:?}"
+            ),
+            TryReapError::ClosureFailed(error) => error,
         })?;
 
-    if reaped.is_empty() {
-        return Ok(());
-    }
-
-    // Now commit: destroy GPU resources and release cache slots.
-    let alloc_guard = allocator
-        .lock()
-        .map_err(|_| "allocator lock poisoned during BSP retirement destruction".to_string())?;
-
-    let mut surface_cache = data_cache
-        .bsp_surface_cache
-        .lock()
-        .map_err(|_| "bsp_surface_cache lock poisoned during BSP retirement reaping".to_string())?;
-
-    let mut mesh_handles_to_free: Vec<crate::data::handles::MeshHandle> = Vec::new();
-    let mut texture_handles_to_free: Vec<crate::data::handles::TextureHandle> = Vec::new();
-
+    let mut mesh_handles_to_free = Vec::new();
+    let mut texture_handles_to_free = Vec::new();
     for record in reaped {
         let (meshes, textures) =
             surface_cache.destroy_closure_owned(record.payload, device, &alloc_guard);
@@ -484,24 +546,11 @@ pub(crate) fn reap_bsp_retirement(
         texture_handles_to_free.extend(textures);
     }
 
-    // Release mesh handles through the mesh cache.
-    if !mesh_handles_to_free.is_empty() {
-        let mut mesh_cache = data_cache
-            .mesh_cache
-            .lock()
-            .map_err(|_| "mesh_cache lock poisoned during BSP retirement reaping".to_string())?;
-        mesh_cache.deallocate_ids(&mesh_handles_to_free);
-    }
-
-    // Release texture handles through the texture cache.
-    if !texture_handles_to_free.is_empty() {
-        let mut texture_cache = data_cache
-            .texture_cache
-            .lock()
-            .map_err(|_| "texture_cache lock poisoned during BSP retirement reaping".to_string())?;
-        for handle in texture_handles_to_free {
-            texture_cache.deallocate_texture(handle);
-        }
+    // Preserve dependency order: arena descriptors/UBOs/atlas first, then
+    // mesh slots, then texture images and slots.
+    mesh_cache.deallocate_ids(&mesh_handles_to_free);
+    for handle in texture_handles_to_free {
+        texture_cache.deallocate_texture_with_allocator(handle, &alloc_guard);
     }
 
     Ok(())

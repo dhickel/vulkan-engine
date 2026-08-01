@@ -526,8 +526,8 @@ impl Drop for VkRenderCore {
                 return;
             }
 
-            match self.device.device_wait_idle() {
-                Ok(()) => {}
+            let _device_idle = match self.device.device_wait_idle() {
+                Ok(()) => true,
                 Err(vk::Result::ERROR_DEVICE_LOST) => {
                     self.mark_device_lost();
                     log::error!(
@@ -541,6 +541,26 @@ impl Drop for VkRenderCore {
                         "Render drop: device_wait_idle failed ({:?}); proceeding with best-effort cleanup",
                         err
                     );
+                    false
+                }
+            };
+
+            // A successful idle wait proves every submitted frame complete.
+            // Reap detached BSP arenas before the data cache and VMA allocator
+            // are destroyed; no app-owned flush or synthetic frame is needed.
+            #[cfg(feature = "bsp")]
+            if _device_idle {
+                self.latest_completed_serial = self
+                    .latest_completed_serial
+                    .max(self.latest_submitted_serial);
+                if let Err(error) = crate::vulkan::vk_frame::reap_bsp_retirement_after_device_idle(
+                    self.latest_submitted_serial,
+                    &mut self.bsp_retirement_queue,
+                    &self.data_cache,
+                    &self.device,
+                    &self.allocator,
+                ) {
+                    log::error!("Render drop: terminal BSP retirement reap failed: {error}");
                 }
             }
 
