@@ -256,6 +256,66 @@ cargo test -p bsp_generator --test enhanced_v3_public_api         # API surface
 cargo test -p bsp_generator --test enhanced_v3_semantic_core      # geometry + topology
 ```
 
+### Enhanced v3 Richness V1
+
+The Enhanced v3 Richness V1 module (`src/bsp_generator/src/enhanced_v3/richness/`)
+is an additive, structurally isolated contract domain for gameplay-relevant content
+(archetypes, props, lighting recipes, theme variation, cave cells, vertical
+openings). It extends Enhanced V3 output but does not alter any baseline
+production path.
+
+#### Isolation Rule
+
+Richness V1 is **structurally isolated** from baseline V3:
+
+- **Never** mutates `V3Config`, `V3Preset`, or baseline `V3Error`.
+- **Never** routes v1, v2, or baseline-v3 RNG, serialization, ordering,
+  geometry, metadata, CLI, explorer, or packaging through richness code.
+- Uses its own domain `dungeon-gen/v3-richness/v1/request` for identity
+  hashes, independent of all generation domains.
+- All types are **crate-private** (`pub(crate)`) until the atomic release phase.
+- No public re-exports from `bsp_generator`.
+
+#### No-Runtime-RON Rule
+
+The generator performs **no runtime parsing, filesystem access, network access,
+or platform-sensitive randomization**. Authored RON is an offline source format
+compiled by `tools/richness_content_codegen`; the generated Rust file is
+checked in and byte-compared with a fresh code-generation run. Runtime
+generation reads only checked-in Rust constants.
+
+#### Profile Identity
+
+| field | value |
+|-------|-------|
+| domain separator | `"dungeon-gen/v3-richness/v1"` |
+| request hash domain | `"dungeon-gen/v3-richness/v1/request"` |
+| relationship to v3 | additive extension; v3 map geometry byte stream is unchanged |
+
+#### Module Layout
+
+```
+src/enhanced_v3/richness/
+  mod.rs          — crate-private module root; no public re-exports
+  request.rs      — RichnessDocumentV1, ResolvedRichnessRequestV1, InheritedOr<T>,
+                    RichnessTheme, RichnessPreset, RichnessCaveMode, frozen preset
+                    defaults
+  error.rs        — RichnessErrorCode (27 variants), RichnessErrorCategory (9),
+                    structured RichnessError envelope
+  canonical.rs    — canonical serialization (fixed field order, LF, one terminal
+                    newline), parse/validate/save round trip, deterministic
+                    SHA-256 identity hashes
+  metadata.rs     — immutable request-provenance metadata snapshot
+```
+
+#### Testing
+
+```bash
+cargo test -p bsp_generator richness::request
+cargo test -p bsp_generator richness::canonical
+cargo test -p bsp_generator richness::error
+```
+
 ## Key Design Rules
 
 1. **No renderer/Vulkan/windowing deps**: This crate is an offline pipeline. If you need BSP loading or rendering, use `bsp_runtime` + `renderer` downstream.

@@ -31,6 +31,7 @@ pub mod intent;
 pub mod metadata;
 pub mod pipeline;
 pub mod reservation;
+pub(crate) mod richness;
 pub mod rng;
 pub mod topology;
 

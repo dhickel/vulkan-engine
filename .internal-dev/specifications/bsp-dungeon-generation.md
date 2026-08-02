@@ -1033,3 +1033,37 @@ Any change to the following requires owner re-review:
 - Stable error variants
 - Atomic public exposure gating policy
 - Vertical opening clearance minimums or ladder/drop controller semantics
+
+### 21.14 Phase 05 Convention Qualification (PENDING OWNER)
+
+Phase 05 compiled a sealed convention fixture
+(`src/bsp_generator/tests/fixtures/enhanced_v3_richness/conventions.map`)
+through the pinned ericw-tools 2.0.0-alpha3 profile and strict-reloaded the
+output through the BSP parser with zero diagnostics. The compiler conventions
+are recorded in `bsp-spatial-physics.md` §11.7. The active-loop controller
+characterization fixture (`controller.map`) drives `PlayerMover::step()`
+through step, jump, fall, air-control, headroom, ladder-volume,
+overlapping-volume, and one-way drop cells.
+
+Custom entity classnames (`func_ladder`, `trigger_multiple`) and custom keys
+(`richness_convention`, `climb_direction`, `climb_height`, `drop_direction`,
+`drop_depth`, `one_way`) survive ericw-tools compilation intact. The `_tb_id`
+key is stripped by the compiler (confirmed Phase 01). The `_color` key on
+light entities is preserved and produces colored .lit output.
+
+Controller constants are frozen in `bsp-spatial-physics.md` §11.6:
+`PLAYER_HALF_EXTENTS_ENGINE` = (0.4064, 0.6096, 0.4064) at default scale,
+point-trace (hull 0) against compiler-preexpanded hull 1 clipnodes,
+and `PlayerMover::step()` with optional sliding resolution.
+
+A reproducible measurement harness is implemented at
+`tools/engine_pack/tests/enhanced_v3_richness_measurement.rs`. It records
+host normalization, corpus identity, warmup exclusion, sample statistics,
+stage metrics, process memory, runtime memory, package bytes, BSP lumps,
+faces/entities/batches, and artifacts. Richness ceilings are NOT yet frozen
+(no Richness maps exist).
+
+The `engine_pack` compiler runner now enforces concurrent stdout/stderr
+drains, one output ceiling, process-group termination, bounded timeout,
+and joined cleanup (`tools/engine_pack/src/compiler.rs`, Phase 05 adversarial
+tests).

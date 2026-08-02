@@ -15,7 +15,7 @@ use bsp::{
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output};
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Arc,
@@ -827,6 +827,52 @@ fn verify_compiler_version(
     })
 }
 
+// ── Process-group termination ─────────────────────────────────────────────
+
+#[cfg(unix)]
+fn configure_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn terminate_process_group(child: &mut Child, stage_name: &str) -> Result<(), CompilerError> {
+    let pgid = -(child.id() as i32);
+    // Send SIGKILL to the entire process group; joined cleanup of reader threads
+    // happens in the caller after this returns.
+    let kill_result = unsafe { libc::kill(pgid, libc::SIGKILL) };
+    let wait_result = child.wait();
+    if kill_result == -1 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::InvalidInput {
+            return Err(CompilerError::Io {
+                message: format!("failed to terminate process group for {stage_name}"),
+                source: err,
+            });
+        }
+    }
+    let _ = wait_result;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn terminate_process_group(child: &mut Child, _stage_name: &str) -> Result<(), CompilerError> {
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(())
+}
+
 /// Compute SHA-256 of a file.
 pub fn sha256_file(path: &Path) -> Result<String, CompilerError> {
     let mut file = std::fs::File::open(path)?;
@@ -1026,6 +1072,10 @@ fn run_direct_process(
         cmd.current_dir(working_dir);
     }
 
+    // Place the child in its own process group so that timeout/limit
+    // termination kills the entire tree, not just the direct child.
+    configure_process_group(&mut cmd);
+
     cmd.env_clear();
     for (key, value) in env {
         cmd.env(key, value);
@@ -1059,19 +1109,24 @@ fn run_direct_process(
     const STDOUT_LIMIT_EXCEEDED: u8 = 0b01;
     const STDERR_LIMIT_EXCEEDED: u8 = 0b10;
     let exceeded_streams = Arc::new(AtomicU8::new(0));
+    let combined_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let stdout_signal = Arc::clone(&exceeded_streams);
     let stderr_signal = Arc::clone(&exceeded_streams);
+    let stdout_bytes = Arc::clone(&combined_bytes);
+    let stderr_bytes = Arc::clone(&combined_bytes);
     let stdout_reader = thread::spawn(move || {
-        read_stream_bounded_with_signal(
+        read_stream_bounded_with_combined_signal(
             &mut stdout,
             stream_limit,
+            stdout_bytes,
             Some((stdout_signal, STDOUT_LIMIT_EXCEEDED)),
         )
     });
     let stderr_reader = thread::spawn(move || {
-        read_stream_bounded_with_signal(
+        read_stream_bounded_with_combined_signal(
             &mut stderr,
             stream_limit,
+            stderr_bytes,
             Some((stderr_signal, STDERR_LIMIT_EXCEEDED)),
         )
     });
@@ -1081,8 +1136,7 @@ fn run_direct_process(
     let status = loop {
         let limit_breach = exceeded_streams.load(Ordering::Acquire);
         if limit_breach != 0 {
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = terminate_process_group(&mut child, stage_name);
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
             return Err(CompilerError::StreamBoundExceeded {
@@ -1102,8 +1156,7 @@ fn run_direct_process(
             break status;
         }
         if started.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = terminate_process_group(&mut child, stage_name);
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
             return Err(CompilerError::Timeout {
@@ -1154,6 +1207,20 @@ fn read_stream_bounded_with_signal(
     limit: usize,
     limit_signal: Option<(Arc<AtomicU8>, u8)>,
 ) -> std::io::Result<CapturedStream> {
+    read_stream_bounded_with_combined_signal(
+        stream,
+        limit,
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        limit_signal,
+    )
+}
+
+fn read_stream_bounded_with_combined_signal(
+    stream: &mut impl Read,
+    limit: usize,
+    combined_bytes: Arc<std::sync::atomic::AtomicU64>,
+    limit_signal: Option<(Arc<AtomicU8>, u8)>,
+) -> std::io::Result<CapturedStream> {
     let mut bytes = Vec::new();
     let mut exceeded = false;
     let mut buffer = [0u8; 8192];
@@ -1163,11 +1230,14 @@ fn read_stream_bounded_with_signal(
             break;
         }
         if !exceeded {
-            if bytes
-                .len()
-                .checked_add(count)
-                .map_or(true, |length| length > limit)
-            {
+            let within_limit = combined_bytes
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    current
+                        .checked_add(count as u64)
+                        .filter(|next| *next <= limit as u64)
+                })
+                .is_ok();
+            if !within_limit {
                 // Continue draining so the child cannot block on a full pipe,
                 // but do not retain unbounded diagnostic output in memory.
                 bytes.clear();
@@ -2008,5 +2078,189 @@ light_sha256 = "0000000000000000000000000000000000000000000000000000000000000000
         assert!(msg.contains("test.bsp"));
         assert!(msg.contains("999"));
         assert!(msg.contains("100"));
+    }
+
+    // ── Phase 05 adversarial tests ────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn hanging_subprocess_is_terminated_by_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = std::env::temp_dir().join(format!(
+            "engine-pack-hang-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&temp, b"#!/bin/sh\nsleep 60\n").unwrap();
+        let mut perms = std::fs::metadata(&temp).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&temp, perms).unwrap();
+
+        let started = Instant::now();
+        let result = run_direct_process(
+            &temp,
+            &[],
+            None,
+            &minimal_env(),
+            1, // 1 second timeout
+            1024,
+            "hang-test",
+        );
+        let elapsed = started.elapsed();
+        let _ = std::fs::remove_file(&temp);
+
+        assert!(
+            matches!(result, Err(CompilerError::Timeout { .. })),
+            "hanging process must produce timeout error: {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "timeout must fire within bounded window; elapsed={elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn noisy_subprocess_is_drained_and_truncated() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = std::env::temp_dir().join(format!(
+            "engine-pack-noisy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Each stream remains below 12 bytes, but their combined output does not.
+        std::fs::write(&temp, b"#!/bin/sh\nprintf 01234567; printf abcdefgh >&2\n").unwrap();
+        let mut perms = std::fs::metadata(&temp).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&temp, perms).unwrap();
+
+        let result = run_direct_process(
+            &temp,
+            &[],
+            None,
+            &minimal_env(),
+            10,
+            12, // combined 16-byte output must trigger the one shared ceiling
+            "noisy-test",
+        );
+        let _ = std::fs::remove_file(&temp);
+
+        assert!(
+            matches!(result, Err(CompilerError::StreamBoundExceeded { .. })),
+            "noisy process exceeding limit must produce StreamBoundExceeded: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failing_subprocess_produces_nonzero_exit_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = std::env::temp_dir().join(format!(
+            "engine-pack-fail-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &temp,
+            b"#!/bin/sh\necho 'simulated compiler crash' >&2\nexit 1\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&temp).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&temp, perms).unwrap();
+
+        let result = run_direct_process(&temp, &[], None, &minimal_env(), 10, 1024, "fail-test");
+        let _ = std::fs::remove_file(&temp);
+
+        // run_direct_process returns Ok even for non-zero exit;
+        // compile_map checks exit codes separately.
+        // This test verifies the subprocess infrastructure captures the output.
+        let output = result.expect("failing subprocess must be captured");
+        assert!(!output.status.success(), "exit code must be non-zero");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("simulated"),
+            "stderr must be captured"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_group_termination_kills_descendants() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = std::env::temp_dir().join(format!(
+            "engine-pack-pgrp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &temp,
+            b"#!/bin/sh\nsleep 60 &\necho $! > descendant.pid\nwait\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&temp).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&temp, perms).unwrap();
+
+        let work_dir = temp.parent().unwrap();
+        let result = run_direct_process(
+            &temp,
+            &[],
+            Some(work_dir),
+            &minimal_env(),
+            1, // short timeout
+            1024,
+            "pgrp-test",
+        );
+        let _ = std::fs::remove_file(&temp);
+
+        assert!(
+            matches!(result, Err(CompilerError::Timeout { .. })),
+            "process group must be terminated on timeout: {result:?}"
+        );
+
+        // Verify descendant was killed
+        let pid_path = work_dir.join("descendant.pid");
+        if pid_path.exists() {
+            if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+                if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                    let proc_stat = PathBuf::from(format!("/proc/{pid}/stat"));
+                    // Poll for zombie/exit
+                    for _ in 0..50 {
+                        match std::fs::read_to_string(&proc_stat) {
+                            Ok(stat) => {
+                                let state = stat.split_whitespace().nth(2);
+                                if state == Some("Z") || state.is_none() {
+                                    let _ = std::fs::remove_file(&pid_path);
+                                    return; // descendant is dead
+                                }
+                            }
+                            Err(_) => {
+                                let _ = std::fs::remove_file(&pid_path);
+                                return; // process gone
+                            }
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    panic!("descendant {pid} survived process-group termination");
+                }
+            }
+            let _ = std::fs::remove_file(&pid_path);
+        }
     }
 }

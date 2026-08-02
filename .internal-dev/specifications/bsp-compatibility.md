@@ -612,3 +612,50 @@ diagnostics are required.
 No RichnessV1 implementation evidence exists. The Phase 01 baseline-v3 freeze
 provides the authoritative baseline hashes that RichnessV1 must not disturb.
 All RichnessV1 evidence rows are marked PENDING in `bsp-acceptance.md` §18.
+
+## 15. Phase 05 Convention Evidence (PENDING OWNER)
+
+### 15.1 Convention Fixture
+
+| fixture | path |
+|---------|------|
+| conventions.map | `src/bsp_generator/tests/fixtures/enhanced_v3_richness/conventions.map` |
+| compiler | ericw-tools 2.0.0-alpha3 (pinned) |
+| profile | `ericw-q1-bsp2-generated` |
+| WAD | `cc0_dungeon_v2.wad` |
+| palette | `palette.lmp` (project-authored) |
+| source brushes | ≥ 50 (exceeds tiny-map hull crash threshold) |
+
+### 15.2 Compiler Transformation Evidence
+
+| convention | source | compiler output | strict reload |
+|-----------|--------|----------------|---------------|
+| skip-textured faces | skip-textured floor grate and partition brush | Faces with skip texture omitted from renderable face set; brush volume contributes to clipnodes | BSP2 reload: 0 diagnostics, faces < source brush count × 6 |
+| func_detail compiler control | func_detail entity with bs_accent brush | Compiler consumes the control and merges its brush into the world model; it does not preserve an inline-model entity | func_detail absent from entity_raw; one world model and nonempty PVS |
+| clip/skip collision separation | skip-textured pillar (Z=16..224) adjacent to bs_accent pillar | Skip-textured brush faces omitted from rendering; solid volume blocks point_contents | point_contents at pillar center returns Solid |
+| colored light entity | light entity with _color "1.0 0.3 0.1" | Light entity preserved; .lit file contains nonzero RGB payload for affected luxels | .lit QLIT v1 header + RGB payload; _color key preserved in entity_raw |
+| custom entity classname | func_ladder with custom keys (climb_direction, climb_height, richness_convention) | Entity preserved with unknown classname; custom keys survive | func_ladder present in entity_raw; all custom keys preserved |
+| custom trigger entity | trigger_multiple with custom keys (drop_direction, drop_depth, one_way, richness_convention) | trigger_multiple recognized as trigger; custom keys preserved | trigger_multiple present in entity_raw; all custom keys preserved |
+| _tb_id key | `_tb_id` on the custom climb entity | Compiler strips the key from the compiled entity lump | _tb_id absent from entity_raw |
+
+### 15.3 Supported/Unsupported Summary
+
+| convention | status | structural equivalent (if unsupported) |
+|-----------|--------|---------------------------------------|
+| skip-textured face omission | SUPPORTED | — |
+| func_detail compiler control | SUPPORTED | — |
+| skip-textured collision pillar | SUPPORTED | — |
+| colored light (_color key) | SUPPORTED | — |
+| custom entity classname preservation | SUPPORTED | — |
+| custom key preservation | SUPPORTED | — |
+| _tb_id preservation | UNSUPPORTED | Fingerprint-based entity reconciliation (§10) |
+| func_ladder surface volume semantics | UNSUPPORTED (ericw-tools does not generate ladder surface flags) | App-owned climb-volume brush construction (bsp-spatial-physics.md §11.4) |
+
+### 15.4 Deterministic Recompile
+
+Two independent `qbsp → vis → light` compiles of conventions.map in separate
+temp directories produced byte-identical BSP and LIT output. SHA-256 hashes
+match across runs. This confirms the pinned compiler/profile combination
+is deterministic for the convention fixture.
+
+**Acceptance**: PENDING OWNER — the root orchestrator records the owner decision.
