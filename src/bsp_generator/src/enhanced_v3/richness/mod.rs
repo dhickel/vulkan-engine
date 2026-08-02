@@ -28,9 +28,12 @@ pub(crate) mod error;
 pub(crate) mod fields;
 pub(crate) mod fixed;
 pub(crate) mod generated_content;
+pub(crate) mod ids;
 pub(crate) mod metadata;
+pub(crate) mod pacing;
 pub(crate) mod request;
 pub(crate) mod sampling;
+pub(crate) mod zones;
 
 #[cfg(test)]
 mod vectors;
