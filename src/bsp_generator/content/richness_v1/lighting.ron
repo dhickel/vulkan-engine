@@ -1,0 +1,286 @@
+// =============================================================================
+// EnhancedV3 Richness V1 — Lighting Catalog
+// =============================================================================
+// Schema version: enhanced-v3-richness-content/v1
+//
+// Complete 12-light catalog (alphabetical by ID):
+//   brutalist_flood < cavern_gloom < cistern_cool < cold_crypt <
+//   dim_beam < egyptian_amber < entrance_torch < foundry_fire <
+//   grand_hall_grid < shrine_focus < treasury_glint < warm_hall
+//
+// Every light recipe has:
+//   - Entity key/value pairs for the Quake light entity definition
+//   - Bounded integer RGB color (0..255) and integer intensity
+//   - Placement class, falloff style, readability floor
+//   - Maximum per-map count and complete non-zero resource costs
+//   - No floating-point values
+// =============================================================================
+
+(
+schema_version: "enhanced-v3-richness-content/v1",
+lighting: [
+  // ── brutalist_flood ────────────────────────────────────────────────────
+  (
+    id: "brutalist_flood",
+    entity_keys: [
+      (key: "light", value: "300"),
+      (key: "_color", value: "180 200 220"),
+      (key: "style", value: "0"),
+    ],
+    color: (180, 200, 220),
+    intensity: 300,
+    placement_class: Ceiling,
+    falloff: Linear,
+    readability_floor: 20,
+    count: 40,
+    costs: (
+      source_faces: 0,
+      brushes: 0,
+      entities: 1,
+      lights: 1,
+    ),
+  ),
+
+  // ── cavern_gloom ───────────────────────────────────────────────────────
+  (
+    id: "cavern_gloom",
+    entity_keys: [
+      (key: "light", value: "80"),
+      (key: "_color", value: "40 60 100"),
+      (key: "style", value: "0"),
+    ],
+    color: (40, 60, 100),
+    intensity: 80,
+    placement_class: Ambient,
+    falloff: InverseSquare,
+    readability_floor: 4,
+    count: 12,
+    costs: (
+      source_faces: 0,
+      brushes: 0,
+      entities: 1,
+      lights: 1,
+    ),
+  ),
+
+  // ── cistern_cool ───────────────────────────────────────────────────────
+  (
+    id: "cistern_cool",
+    entity_keys: [
+      (key: "light", value: "120"),
+      (key: "_color", value: "60 140 160"),
+      (key: "style", value: "0"),
+    ],
+    color: (60, 140, 160),
+    intensity: 120,
+    placement_class: Ambient,
+    falloff: InverseSquare,
+    readability_floor: 8,
+    count: 16,
+    costs: (
+      source_faces: 0,
+      brushes: 0,
+      entities: 1,
+      lights: 1,
+    ),
+  ),
+
+  // ── cold_crypt ─────────────────────────────────────────────────────────
+  (
+    id: "cold_crypt",
+    entity_keys: [
+      (key: "light", value: "150"),
+      (key: "_color", value: "100 120 180"),
+      (key: "style", value: "0"),
+    ],
+    color: (100, 120, 180),
+    intensity: 150,
+    placement_class: Wall,
+    falloff: Linear,
+    readability_floor: 10,
+    count: 30,
+    costs: (
+      source_faces: 0,
+      brushes: 0,
+      entities: 1,
+      lights: 1,
+    ),
+  ),
+
+  // ── dim_beam ───────────────────────────────────────────────────────────
+  (
+    id: "dim_beam",
+    entity_keys: [
+      (key: "light", value: "100"),
+      (key: "_color", value: "120 110 90"),
+      (key: "style", value: "0"),
+    ],
+    color: (120, 110, 90),
+    intensity: 100,
+    placement_class: Ceiling,
+    falloff: Linear,
+    readability_floor: 6,
+    count: 50,
+    costs: (
+      source_faces: 0,
+      brushes: 0,
+      entities: 1,
+      lights: 1,
+    ),
+  ),
+
+  // ── egyptian_amber ─────────────────────────────────────────────────────
+  (
+    id: "egyptian_amber",
+    entity_keys: [
+      (key: "light", value: "250"),
+      (key: "_color", value: "255 180 60"),
+      (key: "style", value: "0"),
+    ],
+    color: (255, 180, 60),
+    intensity: 250,
+    placement_class: Wall,
+    falloff: Linear,
+    readability_floor: 16,
+    count: 35,
+    costs: (
+      source_faces: 0,
+      brushes: 0,
+      entities: 1,
+      lights: 1,
+    ),
+  ),
+
+  // ── entrance_torch ─────────────────────────────────────────────────────
+  (
+    id: "entrance_torch",
+    entity_keys: [
+      (key: "light", value: "300"),
+      (key: "_color", value: "255 160 60"),
+      (key: "style", value: "1"),
+    ],
+    color: (255, 160, 60),
+    intensity: 300,
+    placement_class: Wall,
+    falloff: Linear,
+    readability_floor: 20,
+    count: 20,
+    costs: (
+      source_faces: 0,
+      brushes: 0,
+      entities: 1,
+      lights: 1,
+    ),
+  ),
+
+  // ── foundry_fire ───────────────────────────────────────────────────────
+  (
+    id: "foundry_fire",
+    entity_keys: [
+      (key: "light", value: "350"),
+      (key: "_color", value: "255 80 20"),
+      (key: "style", value: "1"),
+    ],
+    color: (255, 80, 20),
+    intensity: 350,
+    placement_class: Floor,
+    falloff: InverseSquare,
+    readability_floor: 24,
+    count: 12,
+    costs: (
+      source_faces: 0,
+      brushes: 0,
+      entities: 1,
+      lights: 1,
+    ),
+  ),
+
+  // ── grand_hall_grid ────────────────────────────────────────────────────
+  (
+    id: "grand_hall_grid",
+    entity_keys: [
+      (key: "light", value: "280"),
+      (key: "_color", value: "220 210 180"),
+      (key: "style", value: "0"),
+    ],
+    color: (220, 210, 180),
+    intensity: 280,
+    placement_class: Ceiling,
+    falloff: Linear,
+    readability_floor: 18,
+    count: 48,
+    costs: (
+      source_faces: 0,
+      brushes: 0,
+      entities: 1,
+      lights: 1,
+    ),
+  ),
+
+  // ── shrine_focus ───────────────────────────────────────────────────────
+  (
+    id: "shrine_focus",
+    entity_keys: [
+      (key: "light", value: "200"),
+      (key: "_color", value: "255 220 100"),
+      (key: "style", value: "0"),
+    ],
+    color: (255, 220, 100),
+    intensity: 200,
+    placement_class: Pendant,
+    falloff: Linear,
+    readability_floor: 14,
+    count: 16,
+    costs: (
+      source_faces: 0,
+      brushes: 0,
+      entities: 1,
+      lights: 1,
+    ),
+  ),
+
+  // ── treasury_glint ─────────────────────────────────────────────────────
+  (
+    id: "treasury_glint",
+    entity_keys: [
+      (key: "light", value: "180"),
+      (key: "_color", value: "255 230 120"),
+      (key: "style", value: "0"),
+    ],
+    color: (255, 230, 120),
+    intensity: 180,
+    placement_class: Pendant,
+    falloff: Linear,
+    readability_floor: 12,
+    count: 12,
+    costs: (
+      source_faces: 0,
+      brushes: 0,
+      entities: 1,
+      lights: 1,
+    ),
+  ),
+
+  // ── warm_hall ──────────────────────────────────────────────────────────
+  (
+    id: "warm_hall",
+    entity_keys: [
+      (key: "light", value: "220"),
+      (key: "_color", value: "255 180 100"),
+      (key: "style", value: "0"),
+    ],
+    color: (255, 180, 100),
+    intensity: 220,
+    placement_class: Ceiling,
+    falloff: Linear,
+    readability_floor: 15,
+    count: 60,
+    costs: (
+      source_faces: 0,
+      brushes: 0,
+      entities: 1,
+      lights: 1,
+    ),
+  ),
+]
+)

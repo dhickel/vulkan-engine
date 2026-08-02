@@ -1,0 +1,254 @@
+// =============================================================================
+// EnhancedV3 Richness V1 — Theme Catalog
+// =============================================================================
+// Schema version: enhanced-v3-richness-content/v1
+//
+// Complete 3-theme catalog (alphabetical by ID):
+//   ancient < brutalist < egyptian
+//
+// Every theme defines:
+//   - Semantic roles and transition descriptors
+//   - Geometry vocabulary tokens available to the theme
+//   - Named material roles with texture assignments
+//   - Full prop and light compatibility lists
+//   - Shared worst-case resource budget ceiling
+//
+// Theme is presentation data over a theme-independent semantic blueprint.
+// For the same seed/richness preset, Ancient, Egyptian, and Brutalist
+// preserve room IDs, reserved footprints, topology, critical path, spawn
+// safety, route witnesses, pacing beats, and landmarks. Theme may alter
+// only reserved interior massing, portal surrounds, materials, props, and
+// lights within the shared worst-case complexity reservation.
+// =============================================================================
+
+(
+schema_version: "enhanced-v3-richness-content/v1",
+themes: [
+  // ── ancient ────────────────────────────────────────────────────────────
+  (
+    id: "ancient",
+    semantic_roles: [
+      "wall",
+      "floor",
+      "ceiling",
+      "pillar",
+      "trim",
+      "accent",
+    ],
+    transitions: [
+      "portal_surround",
+      "corridor_trim",
+    ],
+    geometry_vocabulary: [
+      "rectangle",
+      "octagon",
+      "chamfer",
+      "composite_partition",
+      "barrel_vault",
+      "corbel",
+      "buttress",
+      "recessed_niche",
+      "engaged_column",
+      "ashlar_masonry",
+      "crenelated_gallery",
+    ],
+    material_roles: [
+      (role: "wall", texture: "wall_stone"),
+      (role: "floor", texture: "floor_flagstone"),
+      (role: "ceiling", texture: "ceiling_rough"),
+      (role: "pillar", texture: "pillar_square"),
+      (role: "trim", texture: "trim_carved"),
+      (role: "accent", texture: "accent_band"),
+    ],
+    prop_compatibility: [
+      "altar",
+      "bench",
+      "brazier",
+      "broken_pillar",
+      "cage",
+      "canopic_cluster",
+      "chain",
+      "chest",
+      "fountain_rim",
+      "hearth",
+      "rubble_cluster",
+      "sarcophagus",
+      "sconce",
+      "shelf",
+      "urn_block",
+    ],
+    light_compatibility: [
+      "brutalist_flood",
+      "cavern_gloom",
+      "cistern_cool",
+      "cold_crypt",
+      "dim_beam",
+      "egyptian_amber",
+      "entrance_torch",
+      "foundry_fire",
+      "grand_hall_grid",
+      "shrine_focus",
+      "treasury_glint",
+      "warm_hall",
+    ],
+    budget: (
+      source_faces: 8000,
+      brushes: 480,
+      entities: 120,
+      lights: 80,
+    ),
+  ),
+
+  // ── brutalist ──────────────────────────────────────────────────────────
+  (
+    id: "brutalist",
+    semantic_roles: [
+      "wall",
+      "floor",
+      "ceiling",
+      "pillar",
+      "trim",
+      "accent",
+    ],
+    transitions: [
+      "portal_surround",
+      "corridor_trim",
+    ],
+    geometry_vocabulary: [
+      "rectangle",
+      "octagon",
+      "chamfer",
+      "composite_partition",
+      "cantilever",
+      "board_form",
+      "exposed_conduit",
+      "steel_railing",
+      "tie_rod",
+      "formwork_panel",
+      "cold_cathode_cove",
+      "monolithic_slab",
+    ],
+    material_roles: [
+      (role: "wall", texture: "wall_concrete"),
+      (role: "floor", texture: "floor_slab"),
+      (role: "ceiling", texture: "ceiling_beamgrid"),
+      (role: "pillar", texture: "pillar_square"),
+      (role: "trim", texture: "trim_steel"),
+      (role: "accent", texture: "accent_dark"),
+    ],
+    prop_compatibility: [
+      "altar",
+      "bench",
+      "brazier",
+      "broken_pillar",
+      "cage",
+      "canopic_cluster",
+      "chain",
+      "chest",
+      "fountain_rim",
+      "hearth",
+      "rubble_cluster",
+      "sarcophagus",
+      "sconce",
+      "shelf",
+      "urn_block",
+    ],
+    light_compatibility: [
+      "brutalist_flood",
+      "cavern_gloom",
+      "cistern_cool",
+      "cold_crypt",
+      "dim_beam",
+      "egyptian_amber",
+      "entrance_torch",
+      "foundry_fire",
+      "grand_hall_grid",
+      "shrine_focus",
+      "treasury_glint",
+      "warm_hall",
+    ],
+    budget: (
+      source_faces: 8000,
+      brushes: 480,
+      entities: 120,
+      lights: 80,
+    ),
+  ),
+
+  // ── egyptian ──────────────────────────────────────────────────────────
+  (
+    id: "egyptian",
+    semantic_roles: [
+      "wall",
+      "floor",
+      "ceiling",
+      "pillar",
+      "trim",
+      "accent",
+    ],
+    transitions: [
+      "portal_surround",
+      "corridor_trim",
+    ],
+    geometry_vocabulary: [
+      "rectangle",
+      "octagon",
+      "chamfer",
+      "composite_partition",
+      "battered_wall",
+      "painted_beam",
+      "lotus_column",
+      "papyrus_bud_capital",
+      "dado_band",
+      "hieroglyph_frieze",
+      "offering_niche",
+      "pylon_portal",
+    ],
+    material_roles: [
+      (role: "wall", texture: "wall_sandstone"),
+      (role: "floor", texture: "floor_flagstone"),
+      (role: "ceiling", texture: "ceiling_painted"),
+      (role: "pillar", texture: "pillar_lotus"),
+      (role: "trim", texture: "trim_painted"),
+      (role: "accent", texture: "accent_gilded"),
+    ],
+    prop_compatibility: [
+      "altar",
+      "bench",
+      "brazier",
+      "broken_pillar",
+      "cage",
+      "canopic_cluster",
+      "chain",
+      "chest",
+      "fountain_rim",
+      "hearth",
+      "rubble_cluster",
+      "sarcophagus",
+      "sconce",
+      "shelf",
+      "urn_block",
+    ],
+    light_compatibility: [
+      "brutalist_flood",
+      "cavern_gloom",
+      "cistern_cool",
+      "cold_crypt",
+      "dim_beam",
+      "egyptian_amber",
+      "entrance_torch",
+      "foundry_fire",
+      "grand_hall_grid",
+      "shrine_focus",
+      "treasury_glint",
+      "warm_hall",
+    ],
+    budget: (
+      source_faces: 8000,
+      brushes: 480,
+      entities: 120,
+      lights: 80,
+    ),
+  ),
+]
+)

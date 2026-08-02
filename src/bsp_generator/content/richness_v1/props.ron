@@ -1,0 +1,582 @@
+// =============================================================================
+// EnhancedV3 Richness V1 — Prop Catalog
+// =============================================================================
+// Schema version: enhanced-v3-richness-content/v1
+// Construction quantum: 16 Quake units
+// Minimum dimension: 16
+//
+// Complete 15-prop catalog (alphabetical by ID):
+//   altar < bench < brazier < broken_pillar < cage < canopic_cluster <
+//   chain < chest < fountain_rim < hearth < rubble_cluster < sarcophagus <
+//   sconce < shelf < urn_block
+//
+// Every prop has:
+//   - Exact convex pieces (>=1)
+//   - Quantum-aligned dimensions (>=16)
+//   - Collision or detail-only behavior
+//   - Three distinct theme variants (ancient, egyptian, brutalist)
+//   - Swept occupancy for placement validation
+//   - Support contacts count
+//   - Light coupling references
+//   - Complete non-zero resource costs
+// =============================================================================
+
+(
+schema_version: "enhanced-v3-richness-content/v1",
+props: [
+  // ── altar ──────────────────────────────────────────────────────────────
+  (
+    id: "altar",
+    convex_pieces: 3,
+    dimensions: (96, 48, 80),
+    collision_behavior: Collidable,
+    theme_variants: [
+      (
+        theme: "ancient",
+        model_override: "dressed-stone altar with carved rune channels and a polished granite table surface supported by corbeled bracket legs",
+        collision_behavior: None,
+        dimensions_override: Some((96, 48, 80)),
+      ),
+      (
+        theme: "egyptian",
+        model_override: "painted sandstone altar with lotus-bud corner finials, a raised offering table, and hieroglyph-inscribed base panels",
+        collision_behavior: None,
+        dimensions_override: Some((112, 48, 80)),
+      ),
+      (
+        theme: "brutalist",
+        model_override: "monolithic cast-concrete altar with board-formed texture, chamfered top edges, and exposed form-tie indentation pattern",
+        collision_behavior: None,
+        dimensions_override: Some((96, 64, 80)),
+      ),
+    ],
+    swept_occupancy: (112, 64, 96),
+    support_contacts: 4,
+    light_coupling: ["shrine_focus", "warm_hall"],
+    costs: (
+      source_faces: 36,
+      brushes: 3,
+      entities: 1,
+      lights: 0,
+    ),
+  ),
+
+  // ── bench ──────────────────────────────────────────────────────────────
+  (
+    id: "bench",
+    convex_pieces: 1,
+    dimensions: (64, 32, 32),
+    collision_behavior: Collidable,
+    theme_variants: [
+      (
+        theme: "ancient",
+        model_override: "low stone bench with worn seating surface and roughly squared leg blocks at each end",
+        collision_behavior: None,
+        dimensions_override: Some((64, 32, 32)),
+      ),
+      (
+        theme: "egyptian",
+        model_override: "smooth mud-brick bench with plastered top surface and tapered end supports painted with dado-band motif",
+        collision_behavior: None,
+        dimensions_override: Some((80, 32, 32)),
+      ),
+      (
+        theme: "brutalist",
+        model_override: "cantilevered concrete bench slab projecting from wall with board-formed underside and exposed rebar anchors",
+        collision_behavior: None,
+        dimensions_override: Some((64, 48, 32)),
+      ),
+    ],
+    swept_occupancy: (80, 48, 48),
+    support_contacts: 2,
+    light_coupling: ["warm_hall", "dim_beam"],
+    costs: (
+      source_faces: 12,
+      brushes: 1,
+      entities: 1,
+      lights: 0,
+    ),
+  ),
+
+  // ── brazier ────────────────────────────────────────────────────────────
+  (
+    id: "brazier",
+    convex_pieces: 3,
+    dimensions: (32, 32, 64),
+    collision_behavior: DetailOnly,
+    theme_variants: [
+      (
+        theme: "ancient",
+        model_override: "wrought-iron brazier on tripod stand with a hammered copper fire bowl, ornamental scrollwork legs, and ash-grate base",
+        collision_behavior: None,
+        dimensions_override: Some((32, 32, 64)),
+      ),
+      (
+        theme: "egyptian",
+        model_override: "cast-bronze brazier on a tapered stone pedestal with lotus-petal rim, offering-tray base, and painted flame-guard ring",
+        collision_behavior: None,
+        dimensions_override: Some((48, 32, 64)),
+      ),
+      (
+        theme: "brutalist",
+        model_override: "welded-steel brazier on a raw concrete plinth, industrial-grate fire basket, exposed bolt-flange assembly, and ash-catch tray",
+        collision_behavior: None,
+        dimensions_override: Some((32, 48, 64)),
+      ),
+    ],
+    swept_occupancy: (48, 48, 80),
+    support_contacts: 1,
+    light_coupling: ["warm_hall", "entrance_torch", "foundry_fire"],
+    costs: (
+      source_faces: 36,
+      brushes: 3,
+      entities: 2,
+      lights: 1,
+    ),
+  ),
+
+  // ── broken_pillar ──────────────────────────────────────────────────────
+  (
+    id: "broken_pillar",
+    convex_pieces: 2,
+    dimensions: (48, 48, 32),
+    collision_behavior: Collidable,
+    theme_variants: [
+      (
+        theme: "ancient",
+        model_override: "fallen fluted stone column segment with a jagged fracture face, partially embedded base drum, and scattered capital fragments",
+        collision_behavior: None,
+        dimensions_override: Some((48, 48, 32)),
+      ),
+      (
+        theme: "egyptian",
+        model_override: "toppled papyrus-bud column section with painted band fragments, a clean-sheared top surface, and scattered hieroglyph-inscribed drum pieces",
+        collision_behavior: None,
+        dimensions_override: Some((64, 48, 32)),
+      ),
+      (
+        theme: "brutalist",
+        model_override: "collapsed square concrete column segment with exposed rebar ends, spalled surface aggregate, and a fractured base block with tie-rod remnants",
+        collision_behavior: None,
+        dimensions_override: Some((48, 64, 32)),
+      ),
+    ],
+    swept_occupancy: (64, 64, 48),
+    support_contacts: 3,
+    light_coupling: ["dim_beam", "cold_crypt"],
+    costs: (
+      source_faces: 24,
+      brushes: 2,
+      entities: 1,
+      lights: 0,
+    ),
+  ),
+
+  // ── cage ───────────────────────────────────────────────────────────────
+  (
+    id: "cage",
+    convex_pieces: 5,
+    dimensions: (64, 64, 96),
+    collision_behavior: Collidable,
+    theme_variants: [
+      (
+        theme: "ancient",
+        model_override: "wrought-iron cage with floor-to-ceiling vertical bars, riveted corner straps, a heavy hinged door with draw-bar lock, and stone ballast base",
+        collision_behavior: None,
+        dimensions_override: Some((64, 64, 96)),
+      ),
+      (
+        theme: "egyptian",
+        model_override: "bronze-barred cage with lotus-finial corner posts, a painted wooden door with guardian-relief panels, and a stone threshold block",
+        collision_behavior: None,
+        dimensions_override: Some((80, 64, 96)),
+      ),
+      (
+        theme: "brutalist",
+        model_override: "welded steel-mesh cage with angle-iron frame, exposed bolt-plate corner assembly, a sliding bolt door, and raw concrete footing",
+        collision_behavior: None,
+        dimensions_override: Some((64, 80, 96)),
+      ),
+    ],
+    swept_occupancy: (80, 80, 112),
+    support_contacts: 4,
+    light_coupling: ["cold_crypt", "dim_beam"],
+    costs: (
+      source_faces: 60,
+      brushes: 5,
+      entities: 1,
+      lights: 0,
+    ),
+  ),
+
+  // ── canopic_cluster ────────────────────────────────────────────────────
+  (
+    id: "canopic_cluster",
+    convex_pieces: 3,
+    dimensions: (48, 32, 48),
+    collision_behavior: DetailOnly,
+    theme_variants: [
+      (
+        theme: "ancient",
+        model_override: "cluster of three alabaster canopic jars with animal-headed stoppers on a low stone offering plinth with carved dedication text",
+        collision_behavior: None,
+        dimensions_override: Some((48, 32, 48)),
+      ),
+      (
+        theme: "egyptian",
+        model_override: "grouped painted canopic jars with gilded human-headed stoppers on a raised limestone platform with hieroglyph-inscribed dedication panels",
+        collision_behavior: None,
+        dimensions_override: Some((64, 32, 48)),
+      ),
+      (
+        theme: "brutalist",
+        model_override: "set of three sealed steel canopic vessels with bolted lid assemblies on a concrete display pedestal with recessed ID plaques",
+        collision_behavior: None,
+        dimensions_override: Some((48, 48, 48)),
+      ),
+    ],
+    swept_occupancy: (64, 48, 64),
+    support_contacts: 1,
+    light_coupling: ["egyptian_amber", "shrine_focus"],
+    costs: (
+      source_faces: 36,
+      brushes: 3,
+      entities: 1,
+      lights: 0,
+    ),
+  ),
+
+  // ── chain ──────────────────────────────────────────────────────────────
+  (
+    id: "chain",
+    convex_pieces: 1,
+    dimensions: (16, 16, 128),
+    collision_behavior: DetailOnly,
+    theme_variants: [
+      (
+        theme: "ancient",
+        model_override: "heavy wrought-iron chain with elongated oval links, a forged ceiling anchor ring, and a weighted hook terminus",
+        collision_behavior: None,
+        dimensions_override: Some((16, 16, 128)),
+      ),
+      (
+        theme: "egyptian",
+        model_override: "bronze-link chain with rectangular plate links, a ceiling-mounted stone anchor boss, and a ceremonial hook terminal",
+        collision_behavior: None,
+        dimensions_override: Some((32, 16, 128)),
+      ),
+      (
+        theme: "brutalist",
+        model_override: "galvanized steel chain with welded oval links, an eye-bolt ceiling anchor set in concrete, and a heavy-duty carabiner terminus",
+        collision_behavior: None,
+        dimensions_override: Some((16, 32, 128)),
+      ),
+    ],
+    swept_occupancy: (32, 32, 144),
+    support_contacts: 1,
+    light_coupling: ["dim_beam", "cold_crypt"],
+    costs: (
+      source_faces: 12,
+      brushes: 1,
+      entities: 1,
+      lights: 0,
+    ),
+  ),
+
+  // ── chest ──────────────────────────────────────────────────────────────
+  (
+    id: "chest",
+    convex_pieces: 2,
+    dimensions: (48, 32, 32),
+    collision_behavior: Collidable,
+    theme_variants: [
+      (
+        theme: "ancient",
+        model_override: "iron-bound oak chest with riveted strap hinges, a heavy clasp lock, and raised plinth base with corner battens",
+        collision_behavior: None,
+        dimensions_override: Some((48, 32, 32)),
+      ),
+      (
+        theme: "egyptian",
+        model_override: "cedar-wood chest with bronze corner fittings, painted panel inlay depicting offering scenes, and a lotus-bud clasp",
+        collision_behavior: None,
+        dimensions_override: Some((64, 32, 32)),
+      ),
+      (
+        theme: "brutalist",
+        model_override: "steel plate chest with welded seam construction, industrial padlock hasp, and recessed lift handles on each end",
+        collision_behavior: None,
+        dimensions_override: Some((48, 48, 32)),
+      ),
+    ],
+    swept_occupancy: (64, 48, 48),
+    support_contacts: 4,
+    light_coupling: ["treasury_glint", "warm_hall"],
+    costs: (
+      source_faces: 24,
+      brushes: 2,
+      entities: 1,
+      lights: 0,
+    ),
+  ),
+
+  // ── fountain_rim ───────────────────────────────────────────────────────
+  (
+    id: "fountain_rim",
+    convex_pieces: 4,
+    dimensions: (128, 128, 32),
+    collision_behavior: Collidable,
+    theme_variants: [
+      (
+        theme: "ancient",
+        model_override: "circular stone fountain rim with carved radial fluting, a raised basin edge of dressed ashlar blocks, and corner drain channels",
+        collision_behavior: None,
+        dimensions_override: Some((128, 128, 32)),
+      ),
+      (
+        theme: "egyptian",
+        model_override: "square sandstone basin rim with battered outer walls, a lotus-frieze band around the inner edge, and small corner offering platforms",
+        collision_behavior: None,
+        dimensions_override: Some((144, 128, 32)),
+      ),
+      (
+        theme: "brutalist",
+        model_override: "rectangular concrete basin rim with exposed aggregate finish, a steel angle-edge coping, and recessed corner drain grates",
+        collision_behavior: None,
+        dimensions_override: Some((128, 144, 32)),
+      ),
+    ],
+    swept_occupancy: (144, 144, 48),
+    support_contacts: 4,
+    light_coupling: ["cistern_cool", "dim_beam"],
+    costs: (
+      source_faces: 48,
+      brushes: 4,
+      entities: 1,
+      lights: 0,
+    ),
+  ),
+
+  // ── hearth ─────────────────────────────────────────────────────────────
+  (
+    id: "hearth",
+    convex_pieces: 4,
+    dimensions: (96, 48, 64),
+    collision_behavior: Collidable,
+    theme_variants: [
+      (
+        theme: "ancient",
+        model_override: "stone hearth with a carved mantle shelf supported on corbel brackets, a raised firebox floor of fire-brick, and a soot-stained chimney breast",
+        collision_behavior: None,
+        dimensions_override: Some((96, 48, 64)),
+      ),
+      (
+        theme: "egyptian",
+        model_override: "mud-brick hearth with a painted plaster mantle depicting flame motifs, a recessed firebox with tapered sides, and a small offering ledge",
+        collision_behavior: None,
+        dimensions_override: Some((112, 48, 64)),
+      ),
+      (
+        theme: "brutalist",
+        model_override: "concrete hearth monolith with a board-formed mantle slab, a recessed steel firebox liner, and an exposed flue cowl above the chimney breast",
+        collision_behavior: None,
+        dimensions_override: Some((96, 64, 64)),
+      ),
+    ],
+    swept_occupancy: (112, 64, 80),
+    support_contacts: 3,
+    light_coupling: ["foundry_fire", "warm_hall"],
+    costs: (
+      source_faces: 48,
+      brushes: 4,
+      entities: 1,
+      lights: 1,
+    ),
+  ),
+
+  // ── rubble_cluster ─────────────────────────────────────────────────────
+  (
+    id: "rubble_cluster",
+    convex_pieces: 3,
+    dimensions: (64, 64, 32),
+    collision_behavior: Collidable,
+    theme_variants: [
+      (
+        theme: "ancient",
+        model_override: "scattered fieldstone rubble with mixed-size angular fragments, a partially embedded broken lintel block, and gravel-fall debris",
+        collision_behavior: None,
+        dimensions_override: Some((64, 64, 32)),
+      ),
+      (
+        theme: "egyptian",
+        model_override: "fallen sandstone blocks with painted-relief fragments, a toppled corner finial piece, and scattered mud-brick debris",
+        collision_behavior: None,
+        dimensions_override: Some((80, 64, 32)),
+      ),
+      (
+        theme: "brutalist",
+        model_override: "shattered concrete fragments with exposed rebar stubs, a cracked slab section, and scattered aggregate debris with tie-rod remnants",
+        collision_behavior: None,
+        dimensions_override: Some((64, 80, 32)),
+      ),
+    ],
+    swept_occupancy: (80, 80, 48),
+    support_contacts: 6,
+    light_coupling: ["dim_beam", "cavern_gloom"],
+    costs: (
+      source_faces: 36,
+      brushes: 3,
+      entities: 1,
+      lights: 0,
+    ),
+  ),
+
+  // ── sarcophagus ────────────────────────────────────────────────────────
+  (
+    id: "sarcophagus",
+    convex_pieces: 2,
+    dimensions: (96, 48, 64),
+    collision_behavior: Collidable,
+    theme_variants: [
+      (
+        theme: "ancient",
+        model_override: "heavy stone sarcophagus with a peaked lid carved in low relief depicting a recumbent figure, corner acroteria, and a raised plinth base with dedication band",
+        collision_behavior: None,
+        dimensions_override: Some((96, 48, 64)),
+      ),
+      (
+        theme: "egyptian",
+        model_override: "painted wooden sarcophagus with gilded face-mask lid, polychrome body panels depicting journey scenes, and a low stone bier base",
+        collision_behavior: None,
+        dimensions_override: Some((112, 48, 64)),
+      ),
+      (
+        theme: "brutalist",
+        model_override: "cast-concrete burial vault with a flat slab lid, recessed steel lifting eyes at each corner, and a plain plinth base with form-tie marks",
+        collision_behavior: None,
+        dimensions_override: Some((96, 64, 64)),
+      ),
+    ],
+    swept_occupancy: (112, 64, 80),
+    support_contacts: 4,
+    light_coupling: ["cold_crypt", "shrine_focus"],
+    costs: (
+      source_faces: 24,
+      brushes: 2,
+      entities: 1,
+      lights: 0,
+    ),
+  ),
+
+  // ── sconce ─────────────────────────────────────────────────────────────
+  (
+    id: "sconce",
+    convex_pieces: 1,
+    dimensions: (16, 16, 32),
+    collision_behavior: DetailOnly,
+    theme_variants: [
+      (
+        theme: "ancient",
+        model_override: "wrought-iron wall sconce with a spiral bracket arm, a hammered copper drip pan, and a socket for torch or oil-lamp insertion",
+        collision_behavior: None,
+        dimensions_override: Some((16, 16, 32)),
+      ),
+      (
+        theme: "egyptian",
+        model_override: "carved stone wall sconce with a lotus-bud bracket, a shallow oil-reservoir basin, and painted flame-guard side wings",
+        collision_behavior: None,
+        dimensions_override: Some((32, 16, 32)),
+      ),
+      (
+        theme: "brutalist",
+        model_override: "steel bracket wall sconce with a welded angle-plate mount, a bare-bulb cage housing, and exposed conduit feed from above",
+        collision_behavior: None,
+        dimensions_override: Some((16, 32, 32)),
+      ),
+    ],
+    swept_occupancy: (32, 32, 48),
+    support_contacts: 1,
+    light_coupling: ["entrance_torch", "warm_hall", "egyptian_amber"],
+    costs: (
+      source_faces: 12,
+      brushes: 1,
+      entities: 2,
+      lights: 1,
+    ),
+  ),
+
+  // ── shelf ──────────────────────────────────────────────────────────────
+  (
+    id: "shelf",
+    convex_pieces: 1,
+    dimensions: (64, 16, 32),
+    collision_behavior: Collidable,
+    theme_variants: [
+      (
+        theme: "ancient",
+        model_override: "stone wall shelf formed by a projecting single-slab corbel with roughly dressed top surface and rounded front edge",
+        collision_behavior: None,
+        dimensions_override: Some((64, 16, 32)),
+      ),
+      (
+        theme: "egyptian",
+        model_override: "painted wooden shelf supported on carved stone corbel brackets with lotus-bud terminals and a smooth plastered top surface",
+        collision_behavior: None,
+        dimensions_override: Some((80, 16, 32)),
+      ),
+      (
+        theme: "brutalist",
+        model_override: "cantilevered concrete shelf slab projecting from a board-formed wall with a steel angle-edge coping and exposed anchor bolts",
+        collision_behavior: None,
+        dimensions_override: Some((64, 32, 32)),
+      ),
+    ],
+    swept_occupancy: (80, 32, 48),
+    support_contacts: 2,
+    light_coupling: ["dim_beam", "warm_hall"],
+    costs: (
+      source_faces: 12,
+      brushes: 1,
+      entities: 1,
+      lights: 0,
+    ),
+  ),
+
+  // ── urn_block ──────────────────────────────────────────────────────────
+  (
+    id: "urn_block",
+    convex_pieces: 2,
+    dimensions: (32, 32, 64),
+    collision_behavior: Collidable,
+    theme_variants: [
+      (
+        theme: "ancient",
+        model_override: "tall ceramic funerary urn with a narrow pedestal foot, rope-pattern neck band, twin loop handles, and a domed stopper lid on a square stone plinth",
+        collision_behavior: None,
+        dimensions_override: Some((32, 32, 64)),
+      ),
+      (
+        theme: "egyptian",
+        model_override: "painted alabaster offering urn with a flared rim, lotus-petal body relief, twin lug handles, and a gilded stopper on a tapered pedestal base",
+        collision_behavior: None,
+        dimensions_override: Some((48, 32, 64)),
+      ),
+      (
+        theme: "brutalist",
+        model_override: "spun-steel cylindrical urn with a welded base flange, bolted lid with lift ring, and a raw concrete display pedestal with recessed ID plate",
+        collision_behavior: None,
+        dimensions_override: Some((32, 48, 64)),
+      ),
+    ],
+    swept_occupancy: (48, 48, 80),
+    support_contacts: 1,
+    light_coupling: ["egyptian_amber", "treasury_glint"],
+    costs: (
+      source_faces: 24,
+      brushes: 2,
+      entities: 1,
+      lights: 0,
+    ),
+  ),
+]
+)

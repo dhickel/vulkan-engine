@@ -23,7 +23,9 @@
 //! run. Runtime generation reads only checked-in Rust constants.
 
 pub mod canonical;
+pub mod content_types;
 pub mod error;
+pub mod generated_content;
 pub mod metadata;
 pub mod request;
 
