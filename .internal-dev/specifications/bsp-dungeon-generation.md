@@ -4,7 +4,7 @@ document_type: generation-specification
 status: active
 owner: bsp-dungeon
 created: 2026-07-24
-approval: implemented — explicit room-shell/portal rendering repair and compiler/MCP evidence validated 2026-07-25; beta gate remains NO-GO on unrelated runtime-budget and NOT-RUN rows
+approval: implemented — Phase 05 compiler/controller/measurement conventions frozen 2026-08-02; Richness production exposure and unrelated beta gates remain pending
 ---
 
 # BSP Dungeon Generation Specification
@@ -870,7 +870,7 @@ Any change to the following requires owner re-review:
 - v1 or v2 corpus output (any byte drift is a blocking regression)
 - cc0_dungeon_v2 theme asset changes
 
-## 21. EnhancedV3RichnessV1 Contract (Freeze-Only — PENDING OWNER)
+## 21. EnhancedV3RichnessV1 Contract (Freeze-Only — APPROVED 2026-08-02 via autonomous-delegation directive)
 
 ### 21.1 Scope
 
@@ -933,8 +933,8 @@ baseline projection-exclusive rule:
 |---------|-------|
 | opening types | ladder shaft, drop hole, open stairwell, spiral-stair opening |
 | minimum clearance | 64×64 XY, 80-unit Z headroom at every standing surface |
-| ladder semantics | Quake `func_ladder`-style surface → app-owned climb controller |
-| drop controller | point-trace fall with landing detection → app-owned player state transition |
+| ladder semantics | compiler-preserved explicit brush-AABB descriptor → app-owned `BspPlayerMovementController` climb state; no surface-flag dependency |
+| drop controller | compiler-preserved explicit brush-AABB descriptor → app-owned fixed-step one-way-drop state and player-hull landing trace |
 | moving brush models | forbidden; Richness V1 does not emit `func_plat` or any cargo lift |
 | safety margin | 16-unit Quake hull radius preserved around every vertical opening boundary |
 
@@ -942,12 +942,16 @@ baseline projection-exclusive rule:
 
 | concept | value |
 |---------|-------|
-| controller boundary | `RichnessVerticalController` — app-owned (not generator-owned) |
-| integration target | `apps/bsp_beta` active BSP player movement path |
-| entry detection | surface contact + forward-into-normal input |
-| exit detection | reaching top/bottom terminus or jump input |
-| reset | teleport or level-transition clears controller state |
-| overlap guard | controller prevents player overlap with ladder/drop volume during active use |
+| controller boundary | `BspPlayerMovementController` in `apps/bsp_beta/src/player_navigation.rs`; app-owned, not generator-owned |
+| integration target | shipped `apps/bsp_beta` fixed-step loop for maps carrying revision-qualified Richness descriptors |
+| collision | origin line trace through compiler-preexpanded stored player hull 1 |
+| ladder entry | origin inside compiled descriptor AABB, positive forward input, and horizontal wish dot entry normal ≥ 0.5 |
+| ladder behavior | constant 1.5 engine units/s; forward/back maps to up/down; no gravity/lateral authority; retained horizontal velocity restored on exit |
+| ladder exits | top, bottom, jump, volume loss, teleport, or regeneration; exact states and velocities are frozen in `bsp-spatial-physics.md` §11 |
+| ladder overlap | priority descending, then compiled entity order, then stable ID |
+| drop behavior | entry horizontal direction retained; subsequent input ignored; gravity/terminal velocity applied until an eligible lower landing |
+| drop non-return | landing must be ≥32 Quake units below entry; characterization proves ordinary jump cannot regain upper platform |
+| reset | teleport/external synchronization and generation replacement clear velocity, active ID, diagnostics, and state to `Airborne` |
 
 ### 21.7 Cave Eligibility
 
@@ -1034,36 +1038,45 @@ Any change to the following requires owner re-review:
 - Atomic public exposure gating policy
 - Vertical opening clearance minimums or ladder/drop controller semantics
 
-### 21.14 Phase 05 Convention Qualification (PENDING OWNER)
+### 21.14 Phase 05 Convention Qualification (FROZEN 2026-08-02)
 
-Phase 05 compiled a sealed convention fixture
-(`src/bsp_generator/tests/fixtures/enhanced_v3_richness/conventions.map`)
-through the pinned ericw-tools 2.0.0-alpha3 profile and strict-reloaded the
-output through the BSP parser with zero diagnostics. The compiler conventions
-are recorded in `bsp-spatial-physics.md` §11.7. The active-loop controller
-characterization fixture (`controller.map`) drives `PlayerMover::step()`
-through step, jump, fall, air-control, headroom, ladder-volume,
-overlapping-volume, and one-way drop cells.
+The sealed convention and controller fixtures compile twice through pinned
+ericw-tools 2.0.0-alpha3 with byte-identical BSP/LIT output. Every stage is
+warning-free; leaks, skipped fill, missing textures, malformed output, and
+strict-load diagnostics fail closed. The convention fixture proves an
+authorized lowercase `hint`/`hintskip` sloped split, visible-tool-surface
+omission, independent solid-`skip` collision, independent player-hull `clip`
+collision while omitted from rendering, detail consumption,
+colored QLIT output, and exact preservation behavior for custom climb/drop entities.
+`_tb_id` remains unsupported and uses structural fingerprints. The frozen
+result table is `bsp-spatial-physics.md` §11.7.
 
-Custom entity classnames (`func_ladder`, `trigger_multiple`) and custom keys
-(`richness_convention`, `climb_direction`, `climb_height`, `drop_direction`,
-`drop_depth`, `one_way`) survive ericw-tools compilation intact. The `_tb_id`
-key is stripped by the compiler (confirmed Phase 01). The `_color` key on
-light entities is preserved and produces colored .lit output.
+The convention test stages `hint`, `hintskip`, and `clip` as deterministic
+compiler-only derivatives of the existing authorized CC0 `skip` miptex. Only
+the miptex and WAD directory identity fields differ. These assets are scoped
+to the offline qualification fixture, are never visible, have no PBR
+companions, and do not revise production theme selection or geometry.
 
-Controller constants are frozen in `bsp-spatial-physics.md` §11.6:
-`PLAYER_HALF_EXTENTS_ENGINE` = (0.4064, 0.6096, 0.4064) at default scale,
-point-trace (hull 0) against compiler-preexpanded hull 1 clipnodes,
-and `PlayerMover::step()` with optional sliding resolution.
+The controller fixture drives the actual
+`BspPlayerMovementController::fixed_step` boundary invoked from the shipped
+`apps/bsp_beta` loop, not `PlayerMover` test helpers. It freezes the 60 Hz
+standard movement constants and all ladder, overlap, drop, reset, collision,
+and non-return semantics in `bsp-spatial-physics.md` §11.
 
-A reproducible measurement harness is implemented at
-`tools/engine_pack/tests/enhanced_v3_richness_measurement.rs`. It records
-host normalization, corpus identity, warmup exclusion, sample statistics,
-stage metrics, process memory, runtime memory, package bytes, BSP lumps,
-faces/entities/batches, and artifacts. Richness ceilings are NOT yet frozen
-(no Richness maps exist).
+The measurement method in
+`tools/engine_pack/tests/enhanced_v3_richness_measurement.rs` is fail-closed:
+it canonicalizes and hashes corpus order, excludes labeled warmups, selects
+median while also recording min/max/mean/nearest-rank p95/population standard
+deviation, requires generation/qbsp/vis/light/parse/extract/load/render stage
+metrics, all 15 BSP lumps, artifact hashes/bytes, package bytes,
+faces/entities/batches, process/runtime memory, and validates a closed JSON
+schema before atomic publication. Measurement observations are canonicalized
+post-generation and cannot enter the generation-decision boundary. These are
+method rules only: Richness ceilings remain unfrozen until Richness maps exist.
 
-The `engine_pack` compiler runner now enforces concurrent stdout/stderr
-drains, one output ceiling, process-group termination, bounded timeout,
-and joined cleanup (`tools/engine_pack/src/compiler.rs`, Phase 05 adversarial
-tests).
+`engine_pack` concurrently drains stdout/stderr under one combined output
+ceiling, applies a bounded timeout, places each process in a Unix process
+group, terminates the whole group on timeout/output breach and after direct
+child exit, and joins both reader threads. Adversarial tests cover hangs,
+combined noisy streams, nonzero exits, descendant termination, and the
+successful-parent/inherited-pipe case.

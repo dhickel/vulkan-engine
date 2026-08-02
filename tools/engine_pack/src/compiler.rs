@@ -855,7 +855,8 @@ fn terminate_process_group(child: &mut Child, stage_name: &str) -> Result<(), Co
     let wait_result = child.wait();
     if kill_result == -1 {
         let err = std::io::Error::last_os_error();
-        if err.kind() != std::io::ErrorKind::InvalidInput {
+        // ESRCH means the group is already empty, which is the desired state.
+        if err.raw_os_error() != Some(libc::ESRCH) {
             return Err(CompilerError::Io {
                 message: format!("failed to terminate process group for {stage_name}"),
                 source: err,
@@ -1153,6 +1154,10 @@ fn run_direct_process(
             message: format!("failed to poll {stage_name}"),
             source: e,
         })? {
+            // A compiler may exit after spawning a descendant that inherited
+            // its output pipes. Terminate any remaining group members before
+            // joining readers, otherwise cleanup can block without a bound.
+            terminate_process_group(&mut child, stage_name)?;
             break status;
         }
         if started.elapsed() >= timeout {
@@ -1202,6 +1207,7 @@ fn read_stream_bounded(stream: &mut impl Read, limit: usize) -> std::io::Result<
     read_stream_bounded_with_signal(stream, limit, None)
 }
 
+#[cfg(test)]
 fn read_stream_bounded_with_signal(
     stream: &mut impl Read,
     limit: usize,
@@ -2193,6 +2199,58 @@ light_sha256 = "0000000000000000000000000000000000000000000000000000000000000000
             String::from_utf8_lossy(&output.stderr).contains("simulated"),
             "stderr must be captured"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_parent_cannot_leave_inherited_pipes_hanging() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let work = tempfile::tempdir().expect("tempdir");
+        let script = work.path().join("orphan-pipes.sh");
+        let pid_path = work.path().join("descendant.pid");
+        std::fs::write(
+            &script,
+            b"#!/bin/sh\nsleep 60 &\necho $! > \"$1\"\nexit 0\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let started = Instant::now();
+        let output = run_direct_process(
+            &script,
+            &[pid_path.to_string_lossy().into_owned()],
+            Some(work.path()),
+            &minimal_env(),
+            10,
+            1024,
+            "orphan-pipe-test",
+        )
+        .expect("successful parent output");
+        assert!(output.status.success());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "reader joins must remain bounded after the direct child exits"
+        );
+        let pid: u32 = std::fs::read_to_string(&pid_path)
+            .expect("descendant pid")
+            .trim()
+            .parse()
+            .expect("numeric pid");
+        for _ in 0..50 {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"));
+            if stat
+                .as_deref()
+                .map(|value| value.split_whitespace().nth(2) == Some("Z"))
+                .unwrap_or(true)
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("descendant {pid} survived successful-parent cleanup");
     }
 
     #[cfg(unix)]

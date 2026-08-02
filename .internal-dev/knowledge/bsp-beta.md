@@ -126,6 +126,11 @@ Recurring evidence, assumptions, gotchas, and corrections for the BSP Map Suppor
 - Every emitted face texture must be cross-checked against WAD directory names. The dungeon generator's `generator_brick` closure texture was absent from the CC0 theme WAD, while compile/reload tests still passed with warnings.
 - BSP visual diagnosis on 2026-07-25 showed that a known-good map rendered correctly through the same WAD/lightmap renderer path; generated fragmentation came from authoring geometry/entity placement rather than global brush winding or PBR companions. Evidence: `.internal-dev/captures/diagnostic/findings.md`.
 
+### 15. Active Movement Evidence Must Reach the Shipped Loop
+- `PlayerMover` existing in `player_navigation.rs` did not mean the BSP beta used it; before Phase 05, `main.rs` translated the camera through `FPSController`. A helper characterization is not active-path evidence. Trace construction from mount data through loop state, input sampling, fixed-step invocation, and camera publication.
+- Maps with revision-qualified Richness descriptors now use `BspPlayerMovementController`; maps without them intentionally retain free-camera translation. Regeneration must replace controller collision/descriptors atomically because compiled entity indexes, model bounds, and stable volume IDs are generation-local.
+- Overlapping ladder volumes do not become safe merely by rejecting unordered iteration. Freeze a total order (priority, compiled entity source order, stable ID) and test the selected ID. One-way drops similarly need a lower-landing threshold and a post-landing jump witness; checking only that the state eventually becomes grounded does not prove non-return.
+
 ## Engine Relevance
 - The existing engine has all integration foundations (slot+generation handles, fence-aware retirement, neutral geometry DTOs, `SceneBounds::Known`, transactional scene persistence, Rapier collider shapes).
 - The `AssetKind` enum must gain a `Bsp` variant for package integration.

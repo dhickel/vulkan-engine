@@ -1,568 +1,475 @@
-//! Phase 05 — Active-loop controller movement characterization.
+//! Phase 05 — active BSP fixed-step movement contract.
 //!
-//! Drives the actual `apps/bsp_beta` PlayerMover (the active
-//! BspPlayerMovementController path) through every cell in the
-//! controller.map fixture. Records measured step, jump, fall,
-//! air-control, headroom, ladder-volume, overlapping-volume, and
-//! one-way drop behavior. Freezes controller constants and state
-//! semantics for bsp-spatial-physics.md §11.
-//!
-//! # Design
-//!
-//! Every test uses the real PlayerMover struct from bsp_beta, calls
-//! the actual step() method against the compiled controller fixture's
-//! clipnodes, and records the resulting position. No mock, stub, or
-//! helper-only path is substituted.
+//! The fixture is compiled twice with the pinned ericw profile. Every behavior
+//! test then drives `BspPlayerMovementController::fixed_step`, the same boundary
+//! called by `apps/bsp_beta/src/main.rs`; `PlayerMover` is not used here.
 
 use bsp::coords::QuakeToEngine;
 use bsp::LoadOptions;
-use bsp_beta::player_navigation::PlayerMover;
+use bsp_beta::player_navigation::{
+    BspMovementState, BspMovementWorld, BspPlayerMovementController, MovementInput,
+    AIR_CONTROL_FACTOR, BSP_FIXED_DT, GRAVITY_ENGINE, JUMP_SPEED_ENGINE, LADDER_SPEED_ENGINE,
+    PLAYER_HALF_EXTENTS_ENGINE, PLAYER_HALF_HEIGHT_QUAKE, STEP_HEIGHT_QUAKE,
+    TERMINAL_FALL_SPEED_ENGINE, VOLUME_ENTRY_DOT, WALK_SPEED_ENGINE,
+};
 use glam::Vec3;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-// ── Fixture resolution ───────────────────────────────────────────────────
+#[derive(Clone)]
+struct FixtureArtifacts {
+    bsp: Vec<u8>,
+    lit: Vec<u8>,
+}
 
-fn controller_fixture_path() -> std::path::PathBuf {
+static FIXTURE: OnceLock<Result<FixtureArtifacts, String>> = OnceLock::new();
+
+fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../src/bsp_generator/tests/fixtures/enhanced_v3_richness/controller.map")
+        .join("../..")
+        .join(relative)
 }
 
-fn wad_path() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../src/bsp_generator/themes/cc0_dungeon_v2/cc0_dungeon_v2.wad")
+fn fixture_map_path() -> PathBuf {
+    repo_path("src/bsp_generator/tests/fixtures/enhanced_v3_richness/controller.map")
 }
 
-fn palette_path() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../src/bsp_generator/themes/cc0_dungeon_v2/palette.lmp")
+fn wad_path() -> PathBuf {
+    repo_path("src/bsp_generator/themes/cc0_dungeon_v2/cc0_dungeon_v2.wad")
 }
 
-fn tool_dir() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/dhickel".to_string());
-    std::path::PathBuf::from(home).join(".local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin")
+fn palette_path() -> PathBuf {
+    repo_path("src/bsp_generator/themes/cc0_dungeon_v2/palette.lmp")
 }
 
-fn tools_available() -> bool {
-    let dir = tool_dir();
-    dir.join("qbsp").is_file() && dir.join("vis").is_file() && dir.join("light").is_file()
+fn profile_path() -> PathBuf {
+    repo_path("tools/bsp_authoring/ericw-q1-bsp2-generated-profile.toml")
 }
 
-/// Compile the controller fixture through ericw-tools and return (bsp, lit) bytes.
-fn compile_controller_fixture() -> Result<(Vec<u8>, Vec<u8>), String> {
-    use std::process::Command;
+fn tool_dir() -> PathBuf {
+    std::env::var_os("ERICW_TOOLS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "/nonexistent".into()))
+                .join(".local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin")
+        })
+}
 
+fn pinned_profile_and_tools() -> Result<(bsp::CompilerProfile, PathBuf), String> {
+    let profile_text = std::fs::read_to_string(profile_path())
+        .map_err(|error| format!("read pinned profile: {error}"))?;
+    let profile = engine_pack::compiler::parse_compiler_profile(&profile_text)?;
+    let tools = tool_dir();
+    for executable in [
+        &profile.qbsp_executable,
+        &profile.vis_executable,
+        &profile.light_executable,
+    ] {
+        if !tools.join(executable).is_file() {
+            return Err(format!(
+                "pinned tool is unavailable: {}",
+                tools.join(executable).display()
+            ));
+        }
+    }
+    let expected = profile
+        .expected_hashes
+        .as_ref()
+        .ok_or("pinned profile has no executable hashes")?;
+    for (name, expected_hash) in [
+        (&profile.qbsp_executable, &expected.qbsp_sha256),
+        (&profile.vis_executable, &expected.vis_sha256),
+        (&profile.light_executable, &expected.light_sha256),
+    ] {
+        let actual = engine_pack::compiler::sha256_file(&tools.join(name))
+            .map_err(|error| format!("hash {name}: {error}"))?;
+        if actual != *expected_hash {
+            return Err(format!(
+                "pinned tool hash mismatch for {name}: expected {expected_hash}, got {actual}"
+            ));
+        }
+    }
+    Ok((profile, tools))
+}
+
+fn compile_once(label: &str) -> Result<FixtureArtifacts, String> {
+    let (profile, tools) = pinned_profile_and_tools()?;
     let work = tempfile::Builder::new()
-        .prefix("controller-fixture-")
+        .prefix(&format!("richness-controller-{label}-"))
         .tempdir()
-        .map_err(|e| format!("tempdir: {e}"))?;
-
-    let map_src = controller_fixture_path();
-    std::fs::copy(&map_src, work.path().join("generated.map"))
-        .map_err(|e| format!("copy map: {e}"))?;
-    let wad = wad_path();
-    let wad_name = wad.file_name().ok_or("no wad basename")?;
-    std::fs::copy(&wad, work.path().join(wad_name)).map_err(|e| format!("copy wad: {e}"))?;
-    std::fs::copy(palette_path(), work.path().join("palette.lmp"))
-        .map_err(|e| format!("copy palette: {e}"))?;
-
-    let td = tool_dir();
-    let run = |exe: &str, args: &[&str]| -> Result<(), String> {
-        let output = Command::new(td.join(exe))
-            .args(args)
-            .current_dir(work.path())
-            .output()
-            .map_err(|e| format!("spawn {exe}: {e}"))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("{exe} failed: {stderr}"));
-        }
-        let combined = format!(
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .to_ascii_lowercase();
-        if combined.contains("warning") && !combined.contains("0 warning") {
-            return Err(format!("{exe} warning: {combined}"));
-        }
-        Ok(())
-    };
-
-    run("qbsp", &["-bsp2", "generated.map"])?;
-    run("vis", &["generated.bsp"])?;
-    run("light", &["-threads", "1", "-lit", "generated.bsp"])?;
-
-    let bsp =
-        std::fs::read(work.path().join("generated.bsp")).map_err(|e| format!("read bsp: {e}"))?;
-    let lit =
-        std::fs::read(work.path().join("generated.lit")).map_err(|e| format!("read lit: {e}"))?;
-    Ok((bsp, lit))
+        .map_err(|error| format!("tempdir: {error}"))?;
+    let result = engine_pack::compiler::compile_map(
+        &fixture_map_path(),
+        &profile,
+        work.path(),
+        &palette_path(),
+        Some(&tools),
+        &[wad_path()],
+    )
+    .map_err(|error| format!("supervised compile: {error}"))?;
+    let bsp = result.bsp_data;
+    let lit = result
+        .lit_data
+        .ok_or("pinned light stage produced no required LIT")?;
+    if bsp.get(..4) != Some(b"BSP2") {
+        return Err("controller fixture is not BSP2".into());
+    }
+    if lit.get(..8).map(|header| &header[..4]) != Some(b"QLIT") {
+        return Err("controller fixture is not QLIT v1".into());
+    }
+    Ok(FixtureArtifacts { bsp, lit })
 }
 
-/// Load the controller fixture BSP for movement testing.
-fn load_controller_world(bsp_data: &[u8], lit_data: &[u8]) -> Result<bsp::BspWorld, String> {
-    let wad_name = wad_path()
-        .file_name()
-        .ok_or("no wad basename")?
-        .to_string_lossy()
-        .into_owned();
+fn compile_fixture_twice() -> Result<FixtureArtifacts, String> {
+    let first = compile_once("a")?;
+    let second = compile_once("b")?;
+    if first.bsp != second.bsp {
+        return Err("controller BSP bytes differ across pinned recompiles".into());
+    }
+    if first.lit != second.lit {
+        return Err("controller LIT bytes differ across pinned recompiles".into());
+    }
+    Ok(first)
+}
+
+fn artifacts() -> &'static FixtureArtifacts {
+    FIXTURE
+        .get_or_init(compile_fixture_twice)
+        .as_ref()
+        .unwrap_or_else(|error| panic!("controller fixture qualification failed: {error}"))
+}
+
+fn load_world() -> bsp::BspWorld {
+    let artifacts = artifacts();
     let options = LoadOptions {
         strict: true,
-        palette: Some(std::fs::read(palette_path()).map_err(|e| format!("palette: {e}"))?),
-        lit_data: Some(lit_data.to_vec()),
+        palette: Some(std::fs::read(palette_path()).expect("read palette")),
+        lit_data: Some(artifacts.lit.clone()),
         wad_archives: vec![(
-            wad_name,
-            std::fs::read(wad_path()).map_err(|e| format!("wad: {e}"))?,
+            "cc0_dungeon_v2.wad".into(),
+            std::fs::read(wad_path()).expect("read WAD"),
         )],
         texture_overrides: Vec::new(),
-        source_identity: "controller-fixture".to_string(),
+        source_identity: "enhanced-v3-richness-controller".into(),
     };
-    bsp::BspLoader::load(bsp_data, &options).map_err(|r| format!("load: {r}"))
-}
-
-fn qte() -> QuakeToEngine {
-    QuakeToEngine::default()
+    let world = bsp::BspLoader::load(&artifacts.bsp, &options)
+        .unwrap_or_else(|report| panic!("strict controller reload failed: {report}"));
+    assert!(world.diagnostics.is_empty(), "strict reload diagnostics");
+    world
 }
 
 fn engine_pos(qx: f32, qy: f32, qz: f32) -> Vec3 {
-    qte().position(qx, qy, qz)
+    QuakeToEngine::default().position(qx, qy, qz)
 }
 
-fn quake_pos(eng: Vec3) -> Vec3 {
-    let inv = 1.0 / qte().scale;
-    Vec3::new(eng.x * inv, -eng.z * inv, eng.y * inv)
+fn engine_direction(qx: f32, qy: f32) -> Vec3 {
+    let direction = Vec3::new(qx, 0.0, -qy);
+    direction.normalize_or_zero()
 }
 
-fn engine_delta(qx: f32, qy: f32, qz: f32) -> Vec3 {
-    let s = qte().scale;
-    Vec3::new(s * qx, s * qz, -s * qy)
+fn quake_pos(engine: Vec3) -> Vec3 {
+    let scale = QuakeToEngine::default().scale;
+    Vec3::new(engine.x / scale, -engine.z / scale, engine.y / scale)
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────
-
-#[test]
-fn controller_fixture_compiles_and_loads() {
-    if !tools_available() {
-        eprintln!("SKIP: ericw-tools not available");
-        return;
-    }
-    let (bsp, lit) = compile_controller_fixture().expect("compile controller fixture");
-    assert!(&bsp[..4] == b"BSP2", "must produce BSP2");
-    let world = load_controller_world(&bsp, &lit).expect("load controller world");
-    assert!(!world.entities.is_empty(), "must have entities");
-    assert!(!world.clipnodes.is_empty(), "must have clipnodes");
-    assert!(!world.leaves.is_empty(), "must have leaves");
-}
-
-#[test]
-fn step_cell_characterization() {
-    if !tools_available() {
-        eprintln!("SKIP: ericw-tools not available");
-        return;
-    }
-    let (bsp, lit) = compile_controller_fixture().expect("compile");
-    let world = load_controller_world(&bsp, &lit).expect("load");
-    let qte = qte();
-
-    // Cell 0,0: step cell — interior X=32..256, Y=32..256
-    // Step platform 1 at Z=16..32 (16-unit step)
-    // Step platform 2 at Z=16..40 (24-unit step)
-    let start = engine_pos(64.0, 144.0, 56.0); // center of cell, at player eye height
-    let mut mover = PlayerMover::new(start);
+fn controller(world: &bsp::BspWorld, position: Vec3) -> BspPlayerMovementController {
+    let movement_world = BspMovementWorld::from_bsp(world, QuakeToEngine::default().scale)
+        .expect("qualified movement descriptors");
+    let controller = BspPlayerMovementController::new(position, movement_world);
     assert!(
-        mover.validate_position(&world.nodes, &world.leaves, &world.planes),
-        "start position must be clear"
-    );
-
-    // Move north toward step platform 1 (at Y=64..208, Z top=32)
-    let step_approach = engine_delta(0.0, -80.0, 0.0); // south in Quake = -Y
-    mover.step(
-        step_approach,
-        &world.clipnodes,
-        &world.planes,
-        &world.models,
-        &world.nodes,
-        &world.leaves,
-        &world.planes,
-        &qte,
-        false,
-    );
-    let pos = quake_pos(mover.position);
-    eprintln!(
-        "step-cell: after approach, pos=({:.1}, {:.1}, {:.1})",
-        pos.x, pos.y, pos.z
-    );
-    assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
-
-    // Try to step up — a positive Z delta (up in engine = +Y)
-    let step_up = Vec3::new(0.0, qte.scale * 24.0, 0.0); // 24-unit step in engine units
-    mover.step(
-        step_up,
-        &world.clipnodes,
-        &world.planes,
-        &world.models,
-        &world.nodes,
-        &world.leaves,
-        &world.planes,
-        &qte,
-        false,
-    );
-    let pos = quake_pos(mover.position);
-    eprintln!(
-        "step-cell: after step-up attempt, pos=({:.1}, {:.1}, {:.1})",
-        pos.x, pos.y, pos.z
-    );
-}
-
-#[test]
-fn jump_cell_characterization() {
-    if !tools_available() {
-        eprintln!("SKIP: ericw-tools not available");
-        return;
-    }
-    let (bsp, lit) = compile_controller_fixture().expect("compile");
-    let world = load_controller_world(&bsp, &lit).expect("load");
-    let qte = qte();
-
-    // Cell 0,1: jump cell — two raised platforms at Z=16..64 with 64-unit gap
-    let start = engine_pos(344.0, 104.0, 56.0); // on north platform
-    let mut mover = PlayerMover::new(start);
-    assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
-
-    // Try to jump gap — horizontal + vertical delta
-    let jump_delta = engine_delta(64.0, 0.0, 48.0); // east + up
-    mover.step(
-        jump_delta,
-        &world.clipnodes,
-        &world.planes,
-        &world.models,
-        &world.nodes,
-        &world.leaves,
-        &world.planes,
-        &qte,
-        false,
-    );
-    let pos = quake_pos(mover.position);
-    eprintln!(
-        "jump-cell: after jump attempt, pos=({:.1}, {:.1}, {:.1})",
-        pos.x, pos.y, pos.z
-    );
-    assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
-}
-
-#[test]
-fn fall_cell_characterization() {
-    if !tools_available() {
-        eprintln!("SKIP: ericw-tools not available");
-        return;
-    }
-    let (bsp, lit) = compile_controller_fixture().expect("compile");
-    let world = load_controller_world(&bsp, &lit).expect("load");
-    let qte = qte();
-
-    // Cell 0,2: fall cell — elevated platform at Z=16..96, clear space below
-    let start = engine_pos(688.0, 144.0, 128.0); // on top of platform
-    let mut mover = PlayerMover::new(start);
-    assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
-
-    // Walk off platform edge (east, then down)
-    let walk_off = engine_delta(120.0, 0.0, -80.0);
-    mover.step(
-        walk_off,
-        &world.clipnodes,
-        &world.planes,
-        &world.models,
-        &world.nodes,
-        &world.leaves,
-        &world.planes,
-        &qte,
-        false,
-    );
-    let pos = quake_pos(mover.position);
-    eprintln!(
-        "fall-cell: after walk-off, pos=({:.1}, {:.1}, {:.1})",
-        pos.x, pos.y, pos.z
-    );
-    assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
-}
-
-#[test]
-fn air_control_cell_characterization() {
-    if !tools_available() {
-        eprintln!("SKIP: ericw-tools not available");
-        return;
-    }
-    let (bsp, lit) = compile_controller_fixture().expect("compile");
-    let world = load_controller_world(&bsp, &lit).expect("load");
-    let qte = qte();
-
-    // Cell 0,3: air-control cell — central platform at Z=16..48
-    let start = engine_pos(960.0, 136.0, 80.0); // on platform
-    let mut mover = PlayerMover::new(start);
-    assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
-
-    // Move off platform into open air
-    let off_platform = engine_delta(80.0, 0.0, 0.0);
-    mover.step(
-        off_platform,
-        &world.clipnodes,
-        &world.planes,
-        &world.models,
-        &world.nodes,
-        &world.leaves,
-        &world.planes,
-        &qte,
-        false,
-    );
-    let pos = quake_pos(mover.position);
-    eprintln!(
-        "air-control-cell: after move, pos=({:.1}, {:.1}, {:.1})",
-        pos.x, pos.y, pos.z
-    );
-    assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
-}
-
-#[test]
-fn headroom_cell_characterization() {
-    if !tools_available() {
-        eprintln!("SKIP: ericw-tools not available");
-        return;
-    }
-    let (bsp, lit) = compile_controller_fixture().expect("compile");
-    let world = load_controller_world(&bsp, &lit).expect("load");
-    let qte = qte();
-
-    // Cell 1,0: headroom cell — beams at Z=64..80 and Z=120..136
-    // Beam at Z=64 leaves 48-unit clearance from floor
-    // Player height is 48 units (symmetric hull ±24 from origin at Z=56)
-    let start = engine_pos(144.0, 416.0, 56.0);
-    let mut mover = PlayerMover::new(start);
-    assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
-
-    // Try to walk under the beam at Z=64
-    let under_beam = engine_delta(160.0, 0.0, 0.0);
-    mover.step(
-        under_beam,
-        &world.clipnodes,
-        &world.planes,
-        &world.models,
-        &world.nodes,
-        &world.leaves,
-        &world.planes,
-        &qte,
-        false,
-    );
-    let pos = quake_pos(mover.position);
-    eprintln!(
-        "headroom-cell: under beam attempt, pos=({:.1}, {:.1}, {:.1})",
-        pos.x, pos.y, pos.z
-    );
-    assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
-}
-
-#[test]
-fn ladder_volume_cell_characterization() {
-    if !tools_available() {
-        eprintln!("SKIP: ericw-tools not available");
-        return;
-    }
-    let (bsp, lit) = compile_controller_fixture().expect("compile");
-    let world = load_controller_world(&bsp, &lit).expect("load");
-    let qte = qte();
-
-    // Cell 1,1: ladder-volume cell — vertical brush along west wall at Z=16..208
-    // Check that the volume is solid (provides collision for climb surface)
-    let start = engine_pos(320.0, 416.0, 56.0);
-    let mut mover = PlayerMover::new(start);
-    assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
-
-    // The ladder brush at X=304..336, Y=400..432. Try to walk into it.
-    let into_ladder = engine_delta(0.0, -80.0, 0.0); // move south toward ladder
-    mover.step(
-        into_ladder,
-        &world.clipnodes,
-        &world.planes,
-        &world.models,
-        &world.nodes,
-        &world.leaves,
-        &world.planes,
-        &qte,
-        false,
-    );
-    let pos = quake_pos(mover.position);
-    eprintln!(
-        "ladder-cell: approach ladder, pos=({:.1}, {:.1}, {:.1})",
-        pos.x, pos.y, pos.z
-    );
-    assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
-
-    // Ladder brush occupies X=304..336, Y=400..432 — verify it's solid
-    let ladder_center = engine_pos(320.0, 416.0, 100.0);
-    let contents = bsp::point_contents(ladder_center, &world.nodes, &world.leaves, &world.planes);
-    eprintln!(
-        "ladder-cell: point_contents at ladder center = {:?}",
-        contents
-    );
-}
-
-#[test]
-fn overlapping_volume_cell_characterization() {
-    if !tools_available() {
-        eprintln!("SKIP: ericw-tools not available");
-        return;
-    }
-    let (bsp, lit) = compile_controller_fixture().expect("compile");
-    let world = load_controller_world(&bsp, &lit).expect("load");
-    let qte = qte();
-
-    // Cell 1,2: overlapping volumes
-    // Lower volume: X=608..672, Y=352..480, Z=32..96
-    // Upper volume: X=640..704, Y=352..480, Z=80..144
-    // They overlap at Z=80..96
-    let start = engine_pos(640.0, 416.0, 56.0);
-    let mut mover = PlayerMover::new(start);
-    assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
-
-    // Check overlap region
-    let overlap = engine_pos(656.0, 416.0, 88.0);
-    let contents = bsp::point_contents(overlap, &world.nodes, &world.leaves, &world.planes);
-    eprintln!("overlap-cell: point_contents at overlap = {:?}", contents);
-
-    // Try to move through the lower volume
-    let through_lower = engine_delta(0.0, -80.0, 0.0);
-    mover.step(
-        through_lower,
-        &world.clipnodes,
-        &world.planes,
-        &world.models,
-        &world.nodes,
-        &world.leaves,
-        &world.planes,
-        &qte,
-        false,
-    );
-    let pos = quake_pos(mover.position);
-    eprintln!(
-        "overlap-cell: after move, pos=({:.1}, {:.1}, {:.1})",
-        pos.x, pos.y, pos.z
-    );
-    assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
-}
-
-#[test]
-fn one_way_drop_cell_characterization() {
-    if !tools_available() {
-        eprintln!("SKIP: ericw-tools not available");
-        return;
-    }
-    let (bsp, lit) = compile_controller_fixture().expect("compile");
-    let world = load_controller_world(&bsp, &lit).expect("load");
-    let qte = qte();
-
-    // Cell 1,3: one-way drop cell — platform at Z=16..128
-    // Player can walk onto platform, drop off north edge
-    let start = engine_pos(960.0, 416.0, 56.0); // on platform
-    let mut mover = PlayerMover::new(start);
-    assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
-
-    // Walk north to platform edge, then drop
-    let walk_north = engine_delta(0.0, -120.0, 0.0);
-    mover.step(
-        walk_north,
-        &world.clipnodes,
-        &world.planes,
-        &world.models,
-        &world.nodes,
-        &world.leaves,
-        &world.planes,
-        &qte,
-        false,
-    );
-    let pos = quake_pos(mover.position);
-    eprintln!(
-        "drop-cell: approach edge, pos=({:.1}, {:.1}, {:.1})",
-        pos.x, pos.y, pos.z
-    );
-    assert!(mover.validate_position(&world.nodes, &world.leaves, &world.planes));
-
-    // Now drop down — negative vertical movement
-    let drop_down = engine_delta(0.0, 0.0, -100.0);
-    mover.step(
-        drop_down,
-        &world.clipnodes,
-        &world.planes,
-        &world.models,
-        &world.nodes,
-        &world.leaves,
-        &world.planes,
-        &qte,
-        false,
-    );
-    let pos = quake_pos(mover.position);
-    eprintln!(
-        "drop-cell: after drop, pos=({:.1}, {:.1}, {:.1})",
-        pos.x, pos.y, pos.z
-    );
-
-    // Try to move back up (reverse the drop) — should be blocked by platform
-    let attempt_up = engine_delta(0.0, 0.0, 100.0);
-    let pre_up = mover.position;
-    mover.step(
-        attempt_up,
-        &world.clipnodes,
-        &world.planes,
-        &world.models,
-        &world.nodes,
-        &world.leaves,
-        &world.planes,
-        &qte,
-        false,
-    );
-    let post_up = quake_pos(mover.position);
-    eprintln!(
-        "drop-cell: after attempt-up, pos=({:.1}, {:.1}, {:.1})",
-        post_up.x, post_up.y, post_up.z
-    );
-    // Verify non-return semantics: player should not be able to ascend back onto platform
-    let moved_up = (mover.position - pre_up).length();
-    eprintln!(
-        "drop-cell: vertical return displacement = {:.4} engine units",
-        moved_up
-    );
-}
-
-// ── Controller contract freeze ───────────────────────────────────────────
-
-#[test]
-fn freeze_controller_constants() {
-    // These constants are the frozen contract for bsp-spatial-physics.md §11.
-    // Changing any of them requires owner re-review.
-
-    use bsp_beta::player_navigation::PLAYER_HALF_EXTENTS_ENGINE;
-
-    // Player hull half-extents: ±(16, 16, 24) Quake units → engine units
-    let s = qte().scale;
-    assert!(
-        (PLAYER_HALF_EXTENTS_ENGINE.x - s * 16.0).abs() < 1e-6,
-        "PLAYER_HALF_EXTENTS_ENGINE.x must be 16 * scale"
+        controller.is_active(),
+        "fixture must activate the shipped BSP controller"
     );
     assert!(
-        (PLAYER_HALF_EXTENTS_ENGINE.y - s * 24.0).abs() < 1e-6,
-        "PLAYER_HALF_EXTENTS_ENGINE.y must be 24 * scale (Z extent → engine Y)"
+        controller.validate_position(),
+        "player hull must start clear"
     );
     assert!(
-        (PLAYER_HALF_EXTENTS_ENGINE.z - s * 16.0).abs() < 1e-6,
-        "PLAYER_HALF_EXTENTS_ENGINE.z must be 16 * scale (Y extent → engine -Z)"
+        controller.point_is_clear(),
+        "point witness must start clear"
+    );
+    controller
+}
+
+fn advance(controller: &mut BspPlayerMovementController, ticks: usize, input: MovementInput) {
+    for _ in 0..ticks {
+        controller.fixed_step(input, BSP_FIXED_DT);
+        assert!(
+            controller.validate_position(),
+            "player hull entered solid space"
+        );
+        assert!(
+            controller.point_is_clear(),
+            "player point entered solid space"
+        );
+    }
+}
+
+#[test]
+fn controller_fixture_is_warning_free_deterministic_and_strict() {
+    let world = load_world();
+    assert!(!world.clipnodes.is_empty());
+    assert!(!world.faces.is_empty());
+    assert!(!world.vis_data.is_empty());
+    let raw = String::from_utf8_lossy(&world.entity_raw);
+    for witness in [
+        "ladder-primary",
+        "overlap-low",
+        "overlap-high",
+        "overlap-high-late",
+        "drop-primary",
+        "enhanced-v3-richness-conventions/v1",
+    ] {
+        assert!(raw.contains(witness), "compiled entities lost '{witness}'");
+    }
+}
+
+#[test]
+fn active_step_cell_climbs_bounded_platform() {
+    let world = load_world();
+    let mut mover = controller(&world, engine_pos(32.0, 144.0, 40.0));
+    advance(
+        &mut mover,
+        100,
+        MovementInput::new(engine_direction(1.0, 0.0), 1.0, false),
+    );
+    let position = quake_pos(mover.position());
+    assert!(
+        position.x > 72.0,
+        "step cell did not move onto platform: {position:?}"
+    );
+    assert!(
+        position.z >= 55.0,
+        "24-unit step policy did not raise player: {position:?}"
+    );
+}
+
+#[test]
+fn active_jump_and_fall_cells_integrate_vertical_motion() {
+    let world = load_world();
+    let start = engine_pos(352.0, 104.0, 89.0);
+    let mut jumper = controller(&world, start);
+    advance(&mut jumper, 1, MovementInput::new(Vec3::ZERO, 0.0, true));
+    advance(&mut jumper, 12, MovementInput::default());
+    assert!(
+        quake_pos(jumper.position()).z > 96.0,
+        "jump impulse did not raise the active controller"
+    );
+    advance(&mut jumper, 120, MovementInput::default());
+    assert!(matches!(jumper.state(), BspMovementState::Grounded));
+    assert!((quake_pos(jumper.position()).z - 89.0).abs() < 1.5);
+
+    let mut faller = controller(&world, engine_pos(688.0, 144.0, 121.0));
+    advance(
+        &mut faller,
+        150,
+        MovementInput::new(engine_direction(1.0, 0.0), 1.0, false),
+    );
+    let landed = quake_pos(faller.position());
+    assert!(
+        landed.x > 736.0,
+        "fall cell never cleared the platform edge: {landed:?}"
+    );
+    assert!(
+        landed.z < 48.0,
+        "fall cell did not land on the lower floor: {landed:?}"
+    );
+    assert!(matches!(faller.state(), BspMovementState::Grounded));
+}
+
+#[test]
+fn active_air_control_and_headroom_are_bounded() {
+    let world = load_world();
+    let mut mover = controller(&world, engine_pos(944.0, 136.0, 73.0));
+    advance(&mut mover, 1, MovementInput::new(Vec3::ZERO, 0.0, true));
+    advance(
+        &mut mover,
+        1,
+        MovementInput::new(engine_direction(1.0, 0.0), 1.0, false),
+    );
+    assert!(matches!(mover.state(), BspMovementState::Airborne));
+    assert!(
+        (mover.velocity().x - WALK_SPEED_ENGINE * AIR_CONTROL_FACTOR).abs() < 1.0e-4,
+        "air control must acquire exactly the frozen fraction"
     );
 
-    eprintln!(
-        "FROZEN: PLAYER_HALF_EXTENTS_ENGINE = {:?} (scale={})",
-        PLAYER_HALF_EXTENTS_ENGINE, s
+    let mut headroom = controller(&world, engine_pos(200.0, 496.0, 41.0));
+    advance(&mut headroom, 1, MovementInput::new(Vec3::ZERO, 0.0, true));
+    advance(&mut headroom, 20, MovementInput::default());
+    assert!(
+        quake_pos(headroom.position()).z <= 65.0,
+        "low beam allowed player head penetration"
     );
-    eprintln!(
-        "FROZEN: trace strategy = point-trace (hull 0) against compiler-preexpanded hull 1 clipnodes"
+    assert!(
+        headroom
+            .take_diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "BspMovementBlocked"),
+        "headroom collision must emit BspMovementBlocked"
     );
-    eprintln!("FROZEN: sliding = optional (resolve_sliding param)");
-    eprintln!("FROZEN: step method = PlayerMover::step() with delta + clipnode trace");
-    eprintln!("FROZEN: position validation = point_contents check against nodes/leaves/planes");
+}
+
+#[test]
+fn active_ladder_entry_input_exit_collision_and_reset_contract() {
+    let world = load_world();
+    let movement_world =
+        BspMovementWorld::from_bsp(&world, QuakeToEngine::default().scale).expect("movement world");
+    let mut mover =
+        BspPlayerMovementController::new(engine_pos(432.0, 416.0, 40.0), movement_world.clone());
+    let toward_ladder = MovementInput::new(engine_direction(-1.0, 0.0), 1.0, false);
+    let away_from_ladder = MovementInput::new(engine_direction(1.0, 0.0), 1.0, false);
+    // An opposed entry direction must not activate the volume merely because
+    // the origin happens to lie inside its compiler-preserved bounds.
+    mover.fixed_step(away_from_ladder, BSP_FIXED_DT);
+    assert!(
+        !matches!(mover.state(), BspMovementState::Climbing { .. }),
+        "ladder entry must require the frozen approach direction"
+    );
+
+    let mut retained_horizontal = 0.0;
+    for _ in 0..120 {
+        mover.fixed_step(toward_ladder, BSP_FIXED_DT);
+        if mover.active_volume_id() == Some("ladder-primary") {
+            break;
+        }
+        retained_horizontal = mover.velocity().x;
+    }
+    assert_eq!(mover.active_volume_id(), Some("ladder-primary"));
+    assert!(
+        retained_horizontal < 0.0,
+        "approach must establish retained velocity"
+    );
+    let entry_z = mover.position().y;
+    advance(&mut mover, 20, toward_ladder);
+    assert!(mover.position().y > entry_z);
+    assert!((mover.velocity().y - LADDER_SPEED_ENGINE).abs() < 1.0e-5);
+
+    // Lateral-only intent has no ladder authority and must leave horizontal
+    // position unchanged while the vertical ladder speed is zero.
+    let before_lateral = mover.position();
+    mover.fixed_step(
+        MovementInput::new(engine_direction(0.0, 1.0), 0.0, false),
+        BSP_FIXED_DT,
+    );
+    assert_eq!(mover.position(), before_lateral);
+    assert_eq!(mover.velocity(), Vec3::ZERO);
+
+    mover.fixed_step(MovementInput::new(Vec3::ZERO, 0.0, true), BSP_FIXED_DT);
+    assert!(matches!(mover.state(), BspMovementState::Airborne));
+    assert!(
+        (mover.velocity().x - retained_horizontal).abs() < 1.0e-5,
+        "jump exit must restore the exact retained horizontal velocity"
+    );
+
+    mover.teleport(engine_pos(392.0, 416.0, 40.0));
+    mover.fixed_step(toward_ladder, BSP_FIXED_DT);
+    assert_eq!(mover.active_volume_id(), Some("ladder-primary"));
+    mover.fixed_step(
+        MovementInput::new(engine_direction(1.0, 0.0), -1.0, false),
+        BSP_FIXED_DT,
+    );
+    assert!(matches!(mover.state(), BspMovementState::Grounded));
+
+    mover.teleport(engine_pos(392.0, 416.0, 184.0));
+    mover.fixed_step(toward_ladder, BSP_FIXED_DT);
+    assert!(matches!(mover.state(), BspMovementState::Airborne));
+    assert!(
+        mover.take_diagnostics().iter().any(|diagnostic| {
+            diagnostic.code == "BspMovementBlocked"
+                && diagnostic.volume_id.as_deref() == Some("ladder-primary")
+        }),
+        "top collision must stop ladder velocity and identify the selected volume"
+    );
+
+    mover.teleport(engine_pos(392.0, 416.0, 40.0));
+    assert!(matches!(mover.state(), BspMovementState::Airborne));
+    assert_eq!(mover.velocity(), Vec3::ZERO);
+    mover.fixed_step(toward_ladder, BSP_FIXED_DT);
+    assert_eq!(mover.active_volume_id(), Some("ladder-primary"));
+    mover.reset_for_regeneration(engine_pos(800.0, 144.0, 80.0), movement_world);
+    assert!(matches!(mover.state(), BspMovementState::Airborne));
+    assert_eq!(mover.active_volume_id(), None);
+    assert_eq!(mover.velocity(), Vec3::ZERO);
+}
+
+#[test]
+fn overlapping_ladders_use_priority_then_entity_order() {
+    let world = load_world();
+    let mut mover = controller(&world, engine_pos(704.0, 416.0, 40.0));
+    mover.fixed_step(
+        MovementInput::new(engine_direction(-1.0, 0.0), 1.0, false),
+        BSP_FIXED_DT,
+    );
+    assert_eq!(
+        mover.active_volume_id(),
+        Some("overlap-high"),
+        "priority must beat overlap-low and compiled entity order must beat overlap-high-late"
+    );
+}
+
+#[test]
+fn one_way_drop_locks_input_lands_and_cannot_return() {
+    let world = load_world();
+    let mut mover = controller(&world, engine_pos(984.0, 400.0, 152.0));
+    let enter = MovementInput::new(engine_direction(1.0, 0.0), 1.0, false);
+    mover.fixed_step(enter, BSP_FIXED_DT);
+    assert_eq!(mover.active_volume_id(), Some("drop-primary"));
+    let retained_x = mover.velocity().x;
+
+    let reverse_input = MovementInput::new(engine_direction(-1.0, 0.0), -1.0, true);
+    let mut landed = false;
+    for _ in 0..240 {
+        mover.fixed_step(reverse_input, BSP_FIXED_DT);
+        if matches!(mover.state(), BspMovementState::Grounded) {
+            landed = true;
+            break;
+        }
+    }
+    assert!(landed, "drop did not reach the lower landing");
+    let lower = quake_pos(mover.position());
+    assert!(
+        lower.x > 1024.0,
+        "drop did not retain entry direction: {lower:?}"
+    );
+    assert!(lower.z < 48.0, "drop did not reach lower floor: {lower:?}");
+    assert!(
+        retained_x > 0.0,
+        "drop entry must retain forward horizontal velocity"
+    );
+
+    let mut maximum_z = lower.z;
+    for tick in 0..180 {
+        let jump = tick == 0;
+        mover.fixed_step(
+            MovementInput::new(engine_direction(-1.0, 0.0), -1.0, jump),
+            BSP_FIXED_DT,
+        );
+        maximum_z = maximum_z.max(quake_pos(mover.position()).z);
+    }
+    assert!(
+        maximum_z < 128.0,
+        "normal jump unexpectedly returned to the upper drop platform: max z={maximum_z}"
+    );
+    assert!(
+        quake_pos(mover.position()).x > 1008.0,
+        "collision checks allowed return through the platform side"
+    );
+}
+
+#[test]
+fn frozen_controller_constants_are_decision_ready() {
+    let scale = QuakeToEngine::default().scale;
+    assert!((PLAYER_HALF_EXTENTS_ENGINE.x - 16.0 * scale).abs() < 1.0e-6);
+    assert!((PLAYER_HALF_EXTENTS_ENGINE.y - 24.0 * scale).abs() < 1.0e-6);
+    assert!((PLAYER_HALF_EXTENTS_ENGINE.z - 16.0 * scale).abs() < 1.0e-6);
+    assert_eq!(PLAYER_HALF_HEIGHT_QUAKE, 24.0);
+    assert_eq!(BSP_FIXED_DT, 1.0 / 60.0);
+    assert_eq!(WALK_SPEED_ENGINE, 1.0);
+    assert_eq!(STEP_HEIGHT_QUAKE, 24.0);
+    assert_eq!(JUMP_SPEED_ENGINE, 4.0);
+    assert_eq!(GRAVITY_ENGINE, 9.8);
+    assert_eq!(TERMINAL_FALL_SPEED_ENGINE, 20.0);
+    assert_eq!(AIR_CONTROL_FACTOR, 0.25);
+    assert_eq!(LADDER_SPEED_ENGINE, 1.5);
+    assert_eq!(VOLUME_ENTRY_DOT, 0.5);
 }

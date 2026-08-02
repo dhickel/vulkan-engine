@@ -333,6 +333,102 @@ pub fn theme_paths() -> (PathBuf, PathBuf) {
     )
 }
 
+/// Build the compiler-only convention WAD closure. `hint`, `hintskip`, and
+/// `clip` are exact derivatives of the authorized CC0 `skip` miptex with only their
+/// internal/directory identities changed. They are staged only for this
+/// offline qualification fixture.
+pub fn qualified_theme_wad_bytes(wad_path: &Path) -> Result<Vec<u8>, String> {
+    let bytes = std::fs::read(wad_path).map_err(|e| format!("read WAD: {e}"))?;
+    if bytes.len() < 12 || &bytes[..4] != b"WAD2" {
+        return Err("theme WAD is not WAD2".into());
+    }
+    let read_i32 = |at: usize| -> Result<i32, String> {
+        let raw: [u8; 4] = bytes
+            .get(at..at + 4)
+            .ok_or("truncated WAD integer")?
+            .try_into()
+            .expect("four-byte slice");
+        Ok(i32::from_le_bytes(raw))
+    };
+    let count =
+        usize::try_from(read_i32(4)?).map_err(|_| "negative WAD entry count".to_string())?;
+    let directory_offset =
+        usize::try_from(read_i32(8)?).map_err(|_| "negative WAD directory offset".to_string())?;
+    let directory_end = directory_offset
+        .checked_add(count.checked_mul(32).ok_or("WAD directory overflow")?)
+        .ok_or("WAD directory overflow")?;
+    if directory_end > bytes.len() {
+        return Err("WAD directory is truncated".into());
+    }
+
+    let mut skip = None;
+    let mut existing = Vec::new();
+    for index in 0..count {
+        let base = directory_offset + index * 32;
+        let name = &bytes[base + 16..base + 32];
+        let end = name.iter().position(|byte| *byte == 0).unwrap_or(16);
+        existing.push(name[..end].to_vec());
+        if &name[..end] == b"skip" {
+            skip = Some(base);
+        }
+    }
+    let missing: Vec<&[u8]> = [
+        b"hint".as_slice(),
+        b"hintskip".as_slice(),
+        b"clip".as_slice(),
+    ]
+    .into_iter()
+    .filter(|name| !existing.iter().any(|current| current == name))
+    .collect();
+    if missing.is_empty() {
+        return Ok(bytes);
+    }
+    let skip = skip.ok_or("authorized theme WAD has no exact lowercase skip miptex")?;
+    let file_offset =
+        usize::try_from(read_i32(skip)?).map_err(|_| "negative skip file offset".to_string())?;
+    let disk_size =
+        usize::try_from(read_i32(skip + 4)?).map_err(|_| "negative skip disk size".to_string())?;
+    let file_end = file_offset
+        .checked_add(disk_size)
+        .ok_or("skip lump overflow")?;
+    if file_end > directory_offset
+        || disk_size < 40
+        || bytes[skip + 12] != 0x44
+        || bytes[skip + 13] != 0
+    {
+        return Err("authorized skip entry is not an in-bounds uncompressed miptex".into());
+    }
+
+    let skip_data = &bytes[file_offset..file_end];
+    let mut out = bytes[..directory_offset].to_vec();
+    let mut generated = Vec::new();
+    for name in &missing {
+        let offset = out.len();
+        let mut data = skip_data.to_vec();
+        data[..16].fill(0);
+        data[..name.len()].copy_from_slice(name);
+        out.extend_from_slice(&data);
+        generated.push((*name, offset));
+    }
+    let new_directory_offset = i32::try_from(out.len())
+        .map_err(|_| "qualified WAD directory offset exceeds i32".to_string())?;
+    out.extend_from_slice(&bytes[directory_offset..directory_end]);
+    for (name, offset) in generated {
+        let offset = i32::try_from(offset)
+            .map_err(|_| "qualified WAD lump offset exceeds i32".to_string())?;
+        let mut record = bytes[skip..skip + 32].to_vec();
+        record[..4].copy_from_slice(&offset.to_le_bytes());
+        record[16..32].fill(0);
+        record[16..16 + name.len()].copy_from_slice(name);
+        out.extend_from_slice(&record);
+    }
+    let new_count = i32::try_from(count + missing.len())
+        .map_err(|_| "qualified WAD entry count exceeds i32".to_string())?;
+    out[4..8].copy_from_slice(&new_count.to_le_bytes());
+    out[8..12].copy_from_slice(&new_directory_offset.to_le_bytes());
+    Ok(out)
+}
+
 // ── Stage runner ─────────────────────────────────────────────────────────
 
 pub fn create_staging_dir(label: &str) -> Result<tempfile::TempDir, String> {
@@ -567,7 +663,11 @@ pub fn compile_map(
     std::fs::copy(map_path, work_dir.join("generated.map"))
         .map_err(|e| format!("copy map: {e}"))?;
     let wad_name = wad_path.file_name().ok_or("WAD path has no basename")?;
-    std::fs::copy(wad_path, work_dir.join(wad_name)).map_err(|e| format!("copy WAD: {e}"))?;
+    std::fs::write(
+        work_dir.join(wad_name),
+        qualified_theme_wad_bytes(wad_path)?,
+    )
+    .map_err(|e| format!("write qualified WAD: {e}"))?;
     std::fs::copy(palette_path, work_dir.join("palette.lmp"))
         .map_err(|e| format!("copy palette: {e}"))?;
 
@@ -680,10 +780,7 @@ pub fn strict_reload_with_paths(
         strict: true,
         palette: Some(std::fs::read(palette_path).map_err(|e| format!("read palette: {e}"))?),
         lit_data: Some(lit_data.to_vec()),
-        wad_archives: vec![(
-            wad_name,
-            std::fs::read(wad_path).map_err(|e| format!("read WAD: {e}"))?,
-        )],
+        wad_archives: vec![(wad_name, qualified_theme_wad_bytes(wad_path)?)],
         texture_overrides: Vec::new(),
         source_identity: "enhanced-v3-richness-convention".to_string(),
     };

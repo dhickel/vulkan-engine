@@ -22,6 +22,9 @@ use std::time::{Duration, Instant};
 use bsp_beta::generation::{self, GenConfig, GenWorker};
 use bsp_beta::m3_gui::{Action as M3Action, GuiAction, GuiMode, M3Gui};
 use bsp_beta::physics_bridge::PhysicsBridge;
+use bsp_beta::player_navigation::{
+    BspMovementWorld, BspPlayerMovementController, MovementInput, BSP_FIXED_DT,
+};
 use bsp_beta::runtime_bridge::RuntimeBridge;
 use bsp_beta::scene_sync::{sync_snapshot_to_scene, EntityNodeMap};
 use bsp_beta::snapshot::{InlineModelInfo, ModelMappings, SnapshotProducer};
@@ -34,7 +37,7 @@ use engine::camera::{Camera, FPSController};
 use engine::events::{runtime_event_bus, EventBus};
 use engine::frame::{FixedStepClock, FixedStepConfig, FrameClock};
 use engine::input::{
-    ActionMap, InputActionEventEmitter, InputSystem, LayerDescriptor, LayerPriority,
+    ActionId, ActionMap, InputActionEventEmitter, InputSystem, LayerDescriptor, LayerPriority,
 };
 use engine::render::camera_view_for_size;
 use engine_events::DispatchReport;
@@ -50,7 +53,7 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowBuilder};
 
 const APP_WINDOW_TITLE: &str = "BSP Beta — Phase 05";
-const FIXED_DT: f32 = 1.0 / 60.0;
+const FIXED_DT: f32 = BSP_FIXED_DT;
 
 // ─── Error ────────────────────────────────────────────────────────────
 
@@ -307,6 +310,8 @@ fn run() -> Result<(), AppError> {
     log::info!("Effective import:\n{}", effective_import_summary(&import));
 
     let proof_world = import.world.clone();
+    let movement_world = BspMovementWorld::from_bsp(&proof_world, args.scale)
+        .map_err(|error| AppError::BridgeProof(format!("movement descriptors: {error}")))?;
     let mut coordinator = BspCoordinator::new();
     coordinator.register_bridge("physics", Box::new(PhysicsBridge::new()));
     coordinator.register_bridge("runtime", Box::new(RuntimeBridge::new()));
@@ -357,13 +362,13 @@ fn run() -> Result<(), AppError> {
     }
 
     let result = if args.mcp {
-        run_mcp(&mut coordinator)
+        run_mcp(&mut coordinator, movement_world)
     } else if args.headless {
-        run_headless(&args, &mut coordinator)
+        run_headless(&args, &mut coordinator, movement_world)
     } else if let Some(ref generated) = generated {
-        run_m3_generate_windowed(&mut coordinator, generated, args.scale)
+        run_m3_generate_windowed(&mut coordinator, generated, args.scale, movement_world)
     } else {
-        run_windowed(&mut coordinator)
+        run_windowed(&mut coordinator, movement_world)
     };
     cleanup_generated_launch(generated.as_ref());
     result
@@ -695,7 +700,10 @@ fn bsp_acceptance_camera(
 
 // ─── Windowed mode ─────────────────────────────────────────────────────
 
-fn run_windowed(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
+fn run_windowed(
+    coordinator: &mut BspCoordinator,
+    movement_world: BspMovementWorld,
+) -> Result<(), AppError> {
     let event_loop = match EventLoop::new() {
         Ok(event_loop) => event_loop,
         Err(error) => {
@@ -801,7 +809,8 @@ fn run_windowed(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
     let model_mappings = ModelMappings::default();
 
     // ── Camera + Input + Snapshot ──────────────────────────────────────
-    let mut loop_state = AppLoopState::new(Camera::new(player_start), model_mappings);
+    let mut loop_state =
+        AppLoopState::new(Camera::new(player_start), model_mappings, movement_world);
     loop_state.inline_model_infos = inline_model_infos;
     loop_state.entity_classnames = entity_classnames;
     loop_state.entity_source_models = entity_source_models;
@@ -906,6 +915,7 @@ fn run_windowed(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
 /// would silently retain state from the old world (or nothing at all).
 struct MountedAppState {
     spawn: Vec3,
+    movement_world: BspMovementWorld,
     inline_model_infos: Vec<InlineModelInfo>,
     entity_classnames: std::collections::HashMap<u32, String>,
     entity_source_models: std::collections::HashMap<u32, String>,
@@ -914,9 +924,11 @@ struct MountedAppState {
 fn capture_staged_app_state(
     extracted: &bsp::extract::ExtractedBsp,
     fallback: Vec3,
+    movement_world: BspMovementWorld,
 ) -> MountedAppState {
     MountedAppState {
         spawn: bsp_player_start(extracted, fallback),
+        movement_world,
         inline_model_infos: extracted
             .inline_models
             .iter()
@@ -958,6 +970,9 @@ fn capture_staged_app_state(
 fn apply_mounted_app_state(loop_state: &mut AppLoopState, mounted: MountedAppState) {
     loop_state.camera = Camera::new(mounted.spawn);
     loop_state.fps_controller = FPSController::new(0.002, 1.0);
+    loop_state
+        .movement_controller
+        .reset_for_regeneration(mounted.spawn, mounted.movement_world);
     loop_state.inline_model_infos = mounted.inline_model_infos;
     loop_state.entity_classnames = mounted.entity_classnames;
     loop_state.entity_source_models = mounted.entity_source_models;
@@ -978,11 +993,19 @@ fn commit_generated_package(
 ) -> Result<MountedAppState, String> {
     let import =
         authorize_generated_package(package_dir, scale).map_err(|error| error.to_string())?;
+    let movement_world = BspMovementWorld::from_bsp(&import.world, scale)
+        .map_err(|error| format!("movement descriptors: {error}"))?;
     if let Err(error) = coordinator.prepare_authorized_import(import) {
         rollback_and_retire(coordinator, renderer);
         return Err(format!("prepare: {error}"));
     }
-    mount_staged_candidate(coordinator, renderer, scene, Vec3::new(0.0, 2.0, 5.0))
+    mount_staged_candidate(
+        coordinator,
+        renderer,
+        scene,
+        Vec3::new(0.0, 2.0, 5.0),
+        movement_world,
+    )
 }
 
 fn mount_staged_candidate(
@@ -990,11 +1013,12 @@ fn mount_staged_candidate(
     renderer: &mut Renderer,
     scene: &mut Scene,
     fallback_spawn: Vec3,
+    movement_world: BspMovementWorld,
 ) -> Result<MountedAppState, String> {
     let extracted = coordinator
         .staged_extraction()
         .ok_or_else(|| "no staged extraction".to_string())?;
-    let app_state = capture_staged_app_state(extracted, fallback_spawn);
+    let app_state = capture_staged_app_state(extracted, fallback_spawn, movement_world);
     let mount = match renderer.prepare_bsp_mount(extracted) {
         Ok(mount) => mount,
         Err(error) => {
@@ -1572,6 +1596,7 @@ fn run_m3_generate_windowed(
     coordinator: &mut BspCoordinator,
     generated: &GeneratedLaunch,
     scale: f32,
+    movement_world: BspMovementWorld,
 ) -> Result<(), AppError> {
     let event_loop = match EventLoop::new() {
         Ok(event_loop) => event_loop,
@@ -1616,9 +1641,14 @@ fn run_m3_generate_windowed(
         &mut renderer,
         &mut scene,
         Vec3::new(0.0, 2.0, 5.0),
+        movement_world.clone(),
     )
     .map_err(AppError::BridgeProof)?;
-    let mut loop_state = AppLoopState::new(Camera::new(initial.spawn), ModelMappings::default());
+    let mut loop_state = AppLoopState::new(
+        Camera::new(initial.spawn),
+        ModelMappings::default(),
+        movement_world,
+    );
     apply_mounted_app_state(&mut loop_state, initial);
     install_app_fps_input(&mut loop_state.input);
 
@@ -2104,6 +2134,7 @@ fn prepare_headless_runtime(
     coordinator: &mut BspCoordinator,
     mcp_map_data: Option<&bsp::extract::ExtractedBsp>,
     args: &cli::CliArgs,
+    movement_world: BspMovementWorld,
 ) -> Result<HeadlessRuntime, AppError> {
     let is_acceptance = args.acceptance_camera.is_some();
     let config = RendererConfig {
@@ -2185,7 +2216,8 @@ fn prepare_headless_runtime(
         return Err(AppError::BspRuntime(error));
     }
 
-    let mut loop_state = AppLoopState::new(headless_camera, ModelMappings::default());
+    let mut loop_state =
+        AppLoopState::new(headless_camera, ModelMappings::default(), movement_world);
     loop_state.inline_model_infos = inline_model_infos;
     loop_state.entity_classnames = entity_classnames;
     loop_state.entity_source_models = entity_source_models;
@@ -2198,7 +2230,11 @@ fn prepare_headless_runtime(
     })
 }
 
-fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result<(), AppError> {
+fn run_headless(
+    args: &cli::CliArgs,
+    coordinator: &mut BspCoordinator,
+    movement_world: BspMovementWorld,
+) -> Result<(), AppError> {
     let is_acceptance = args.acceptance_camera.is_some();
     let (vp_width, vp_height) = if is_acceptance {
         log::info!(
@@ -2220,7 +2256,7 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
         mut scene,
         mut loop_state,
         ..
-    } = match prepare_headless_runtime(coordinator, None, args) {
+    } = match prepare_headless_runtime(coordinator, None, args, movement_world) {
         Ok(runtime) => runtime,
         Err(error) => {
             if let Err(rollback) = coordinator.rollback() {
@@ -2424,7 +2460,10 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
     }
 }
 
-fn run_mcp(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
+fn run_mcp(
+    coordinator: &mut BspCoordinator,
+    movement_world: BspMovementWorld,
+) -> Result<(), AppError> {
     log::info!("Starting BSP beta MCP mode (headless 1920×1080)");
     // Capture extraction before it gets consumed.
     let extracted_clone = match coordinator.staged_extraction() {
@@ -2447,6 +2486,7 @@ fn run_mcp(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
         coordinator,
         Some(&extracted_clone),
         &cli::CliArgs::default(),
+        movement_world,
     ) {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -2488,6 +2528,7 @@ fn run_mcp(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
 struct AppLoopState {
     camera: Camera,
     fps_controller: FPSController,
+    movement_controller: BspPlayerMovementController,
     input: InputSystem,
     action_events: InputActionEventEmitter,
     events: EventBus,
@@ -2513,10 +2554,17 @@ struct AppLoopState {
 }
 
 impl AppLoopState {
-    fn new(camera: Camera, model_mappings: ModelMappings) -> Self {
+    fn new(
+        camera: Camera,
+        model_mappings: ModelMappings,
+        movement_world: BspMovementWorld,
+    ) -> Self {
+        let movement_controller =
+            BspPlayerMovementController::new(camera.get_position(), movement_world);
         Self {
             camera,
             fps_controller: FPSController::new(0.002, 1.0),
+            movement_controller,
             input: InputSystem::new(),
             action_events: InputActionEventEmitter::new(),
             events: runtime_event_bus(),
@@ -2535,6 +2583,27 @@ impl AppLoopState {
             gameplay_input_enabled: true,
         }
     }
+}
+
+fn active_movement_input(
+    snapshot: &engine::input::InputSnapshot,
+    camera: &Camera,
+) -> MovementInput {
+    let forward_axis = snapshot.action_value(&ActionId::new("move.forward"))
+        - snapshot.action_value(&ActionId::new("move.backward"));
+    let right_axis = snapshot.action_value(&ActionId::new("move.right"))
+        - snapshot.action_value(&ActionId::new("move.left"));
+    let camera_to_world = camera.get_view_matrix().inverse();
+    let mut forward = camera_to_world.transform_vector3(Vec3::NEG_Z);
+    forward.y = 0.0;
+    forward = forward.normalize_or_zero();
+    let right = forward.cross(Vec3::Y).normalize_or_zero();
+    let wish_direction = forward * forward_axis + right * right_axis;
+    MovementInput::new(
+        wish_direction,
+        forward_axis,
+        snapshot.action_just_pressed(&ActionId::new("move.up")),
+    )
 }
 
 fn render_app_frame(
@@ -2560,12 +2629,30 @@ fn render_app_frame(
     } else {
         begin_report.frame.delta_seconds.min(FIXED_DT)
     };
+    let mut fixed_movement_input = None;
     if state.gameplay_input_enabled {
-        state.fps_controller.update_from_snapshot(
-            state.input.snapshot(),
-            simulated_dt,
-            &mut state.camera,
-        );
+        if state.movement_controller.is_active() {
+            state
+                .movement_controller
+                .synchronize_external_position(state.camera.get_position());
+            // Rotation is sampled once per display frame. Translation remains
+            // owned by the fixed-step Richness boundary below.
+            state.fps_controller.update_from_snapshot(
+                state.input.snapshot(),
+                0.0,
+                &mut state.camera,
+            );
+            fixed_movement_input =
+                Some(active_movement_input(state.input.snapshot(), &state.camera));
+        } else {
+            // Direct/baseline maps without qualified Richness descriptors keep
+            // the existing free-camera behavior unchanged.
+            state.fps_controller.update_from_snapshot(
+                state.input.snapshot(),
+                simulated_dt,
+                &mut state.camera,
+            );
+        }
     }
 
     if !fixed_update.dropped_time.is_zero() {
@@ -2577,6 +2664,12 @@ fn render_app_frame(
 
     // ── Snapshot production at each fixed step ───────────────────────
     for _step in 0..fixed_update.steps {
+        if let Some(input) = fixed_movement_input {
+            state.movement_controller.fixed_step(input, FIXED_DT);
+            state
+                .camera
+                .set_position(state.movement_controller.position());
+        }
         if let Some(ref mut runtime) = state.runtime_bridge {
             let snapshot = state.snapshot_producer.produce(
                 FIXED_DT,
@@ -2588,6 +2681,15 @@ fn render_app_frame(
 
             sync_snapshot_to_scene(snapshot.as_ref(), &state.entity_node_map, scene);
         }
+    }
+
+    for diagnostic in state.movement_controller.take_diagnostics() {
+        log::warn!(
+            "{} volume={:?}: {}",
+            diagnostic.code,
+            diagnostic.volume_id,
+            diagnostic.detail
+        );
     }
 
     renderer.pump_asset_tasks(32)?;

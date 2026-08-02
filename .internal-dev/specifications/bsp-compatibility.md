@@ -4,7 +4,7 @@ document_type: compatibility-specification
 status: active
 owner: bsp-beta
 created: 2026-07-23
-approval: evidence-finalized — Phase 01 contract reconciliation; all executed cells recorded in §12
+approval: evidence-finalized — Phase 05 convention, compiler-supervisor, and measurement method cells frozen 2026-08-02; production Richness profile remains gated
 ---
 
 # BSP Compatibility Specification
@@ -544,7 +544,7 @@ The Enhanced v3 architectural proof (`DECISION-20260731-01`) demonstrated:
 - 24/24 v1+v2 corpus entries byte-identical to baseline
 - Live GPU startup: swapchain acquired, 21,574 frames, 0 errors
 
-## 14. EnhancedV3RichnessV1 Compatibility Profile (Freeze-Only — PENDING OWNER)
+## 14. EnhancedV3RichnessV1 Compatibility Profile (Freeze-Only — APPROVED 2026-08-02 via autonomous-delegation directive)
 
 ### 14.1 Scope
 
@@ -609,11 +609,13 @@ diagnostics are required.
 
 ### 14.7 Evidence Basis
 
-No RichnessV1 implementation evidence exists. The Phase 01 baseline-v3 freeze
-provides the authoritative baseline hashes that RichnessV1 must not disturb.
-All RichnessV1 evidence rows are marked PENDING in `bsp-acceptance.md` §18.
+No production Richness generator/profile exposure exists. The Phase 01
+baseline-v3 freeze remains authoritative and Richness must not disturb it.
+Phase 05 now supplies frozen compiler-convention, active controller, process
+supervisor, and measurement-method evidence only; it does not satisfy later
+Richness content/profile acceptance rows in `bsp-acceptance.md` §18.
 
-## 15. Phase 05 Convention Evidence (PENDING OWNER)
+## 15. Phase 05 Convention Evidence (FROZEN 2026-08-02)
 
 ### 15.1 Convention Fixture
 
@@ -622,40 +624,69 @@ All RichnessV1 evidence rows are marked PENDING in `bsp-acceptance.md` §18.
 | conventions.map | `src/bsp_generator/tests/fixtures/enhanced_v3_richness/conventions.map` |
 | compiler | ericw-tools 2.0.0-alpha3 (pinned) |
 | profile | `ericw-q1-bsp2-generated` |
-| WAD | `cc0_dungeon_v2.wad` |
+| WAD | qualified fixture closure from authorized `cc0_dungeon_v2.wad` |
+| tool miptex authorization | production lowercase `skip`; fixture-scoped lowercase `hint`, `hintskip`, and `clip` deterministically clone the exact CC0 skip pixels/mips and alter only internal/directory identity fields |
 | palette | `palette.lmp` (project-authored) |
-| source brushes | ≥ 50 (exceeds tiny-map hull crash threshold) |
+| source construction | sealed structural room with independently addressable convention cells; compiler-safe for all pinned hulls |
+| failure policy | any warning, leak/pointfile, skipped fill, missing texture, signal/nonzero exit, malformed BSP/LIT, or strict-load diagnostic fails the test |
 
 ### 15.2 Compiler Transformation Evidence
 
 | convention | source | compiler output | strict reload |
 |-----------|--------|----------------|---------------|
-| skip-textured faces | skip-textured floor grate and partition brush | Faces with skip texture omitted from renderable face set; brush volume contributes to clipnodes | BSP2 reload: 0 diagnostics, faces < source brush count × 6 |
-| func_detail compiler control | func_detail entity with bs_accent brush | Compiler consumes the control and merges its brush into the world model; it does not preserve an inline-model entity | func_detail absent from entity_raw; one world model and nonempty PVS |
-| clip/skip collision separation | skip-textured pillar (Z=16..224) adjacent to bs_accent pillar | Skip-textured brush faces omitted from rendering; solid volume blocks point_contents | point_contents at pillar center returns Solid |
-| colored light entity | light entity with _color "1.0 0.3 0.1" | Light entity preserved; .lit file contains nonzero RGB payload for affected luxels | .lit QLIT v1 header + RGB payload; _color key preserved in entity_raw |
-| custom entity classname | func_ladder with custom keys (climb_direction, climb_height, richness_convention) | Entity preserved with unknown classname; custom keys survive | func_ladder present in entity_raw; all custom keys preserved |
-| custom trigger entity | trigger_multiple with custom keys (drop_direction, drop_depth, one_way, richness_convention) | trigger_multiple recognized as trigger; custom keys preserved | trigger_multiple present in entity_raw; all custom keys preserved |
-| _tb_id key | `_tb_id` on the custom climb entity | Compiler strips the key from the compiled entity lump | _tb_id absent from entity_raw |
+| hint/hintskip portal | one exact lowercase sloped `hint` plane with five `hintskip` sides, all on 16-unit coordinates | independently addressable plane survives as a BSP split; all hint/hintskip faces omitted | exact split plane present; zero visible tool faces; 0 diagnostics |
+| skip omission and collision | separate exact lowercase skip cells, including a solid pillar | skip surfaces omitted while solid skip brush still contributes stored collision | zero visible skip faces; pillar center is solid |
+| clip omission and collision | separate exact lowercase clip solid pillar | clip surfaces are omitted from rendering and hull-0 leaf point contents while retained in the player stored-hull collision tree | zero visible clip faces; hull-0 point is non-solid; player stored-hull point is start-solid |
+| func_detail compiler control | func_detail entity with bs_accent brush | compiler consumes control and merges brush into world model | func_detail absent; one world model and nonempty PVS |
+| colored light entity | light entity with `_color "1.0 0.3 0.1"` | key retained and colored QLIT v1 payload emitted | key present; valid nonempty LIT RGB payload |
+| custom climb point entity | `func_ladder` with origin and climb metadata | unknown classname and custom keys retained; no surface flag or inline-model claim | exact classname/keys present |
+| custom drop point entity | `trigger_multiple` with origin and one-way metadata | trigger classname and custom keys retained | exact classname/keys present |
+| active climb/drop brush descriptors | `controller.map` revision-qualified `trigger_multiple` brush entities with IDs, normals, priorities, and one-way keys | inline-model bounds and keys retained | app parses compiled AABBs and drives the active controller |
+| `_tb_id` key | `_tb_id` source identity | compiler strips it | absent; structural fingerprint reconciliation remains required |
 
 ### 15.3 Supported/Unsupported Summary
 
 | convention | status | structural equivalent (if unsupported) |
 |-----------|--------|---------------------------------------|
-| skip-textured face omission | SUPPORTED | — |
+| hint/hintskip split and surface omission | SUPPORTED | — |
+| skip face omission and independent solid collision | SUPPORTED | — |
+| clip face omission and independent player-hull collision | SUPPORTED | — |
 | func_detail compiler control | SUPPORTED | — |
-| skip-textured collision pillar | SUPPORTED | — |
-| colored light (_color key) | SUPPORTED | — |
-| custom entity classname preservation | SUPPORTED | — |
-| custom key preservation | SUPPORTED | — |
-| _tb_id preservation | UNSUPPORTED | Fingerprint-based entity reconciliation (§10) |
-| func_ladder surface volume semantics | UNSUPPORTED (ericw-tools does not generate ladder surface flags) | App-owned climb-volume brush construction (bsp-spatial-physics.md §11.4) |
+| colored light (`_color`) | SUPPORTED | — |
+| custom climb/drop classname and key preservation | SUPPORTED | — |
+| revision-qualified trigger brush-model bounds | SUPPORTED | app-owned descriptor parsing |
+| `_tb_id` preservation | UNSUPPORTED | fingerprint-based entity reconciliation (§10) |
+| `func_ladder` surface-flag semantics | UNSUPPORTED / not used | compiled brush-AABB climb descriptor (`bsp-spatial-physics.md` §11) |
 
 ### 15.4 Deterministic Recompile
 
-Two independent `qbsp → vis → light` compiles of conventions.map in separate
-temp directories produced byte-identical BSP and LIT output. SHA-256 hashes
-match across runs. This confirms the pinned compiler/profile combination
-is deterministic for the convention fixture.
+Two independent `qbsp → vis → light` compiles of `conventions.map` in
+separate temp directories produce byte-identical BSP and LIT bytes. The
+controller fixture applies the same duplicate-compile gate before active-path
+movement characterization. Both strict-load with zero diagnostics.
 
-**Acceptance**: PENDING OWNER — the root orchestrator records the owner decision.
+### 15.5 Compiler Supervisor and Measurement Compatibility
+
+The `engine_pack` runner uses shell-free commands, a cleared explicit
+environment, concurrent pipe drains, one combined byte ceiling, bounded
+polling timeout, Unix process groups, whole-group termination, and joined
+reader cleanup. Group cleanup also runs after a successful direct-child exit,
+preventing an inherited descendant pipe from hanging the caller. Adversarial
+hang, noisy-combined-stream, nonzero-exit, descendant, and orphaned-pipe tests
+are mandatory.
+
+The Phase 05 measurement report has closed identity
+`enhanced-v3-richness-measurement/v1`. It requires canonical corpus SHA-256,
+explicit warmup/sample labels, the median selected statistic, all eight frozen
+stages, all 15 BSP lumps, artifact sizes/hashes, package size,
+faces/entities/batches, and process/runtime memory. The harness validates the
+closed JSON schema before atomic write and fails on missing observations,
+wrong run count, duplicate/missing stages or lumps, inconsistent byte counts,
+or timeout breach. Measurement output is observational only and is
+canonicalized after generation decisions. No compatibility ceiling is inferred
+from the synthetic Phase 05 observations.
+
+The Phase 05 tables are accepted and frozen by the implementation
+authorization. Any compiler version/hash/profile change, tool-miptex identity
+change, convention result change, measurement schema/method change, or
+controller semantic change requires owner re-review.
