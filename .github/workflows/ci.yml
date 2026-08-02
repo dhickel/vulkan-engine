@@ -191,3 +191,27 @@ jobs:
         run: echo "LIBCLANG_PATH=$(dirname "$(find /usr/lib/llvm-* -name libclang.so -print -quit)")" >> "$GITHUB_ENV"
       - name: Test remaining workspace packages
         run: cargo test -p engine -p launch_shared -p engine_pack -p dungeon_dogfood
+
+  # ── Richness golden vectors x86-64 ────────────────────────────────────
+  richness-vectors-x86_64:
+    name: richness golden vectors (x86-64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test richness golden vectors (debug)
+        run: cargo test -p bsp_generator --lib richness::vectors
+      - name: cargo test richness golden vectors (release)
+        run: cargo test --release -p bsp_generator --lib richness::vectors
+
+  # ── Richness golden vectors AArch64 ───────────────────────────────────
+  richness-vectors-aarch64:
+    name: richness golden vectors (AArch64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test richness golden vectors (debug)
+        run: cargo test -p bsp_generator --lib richness::vectors
+      - name: cargo test richness golden vectors (release)
+        run: cargo test --release -p bsp_generator --lib richness::vectors

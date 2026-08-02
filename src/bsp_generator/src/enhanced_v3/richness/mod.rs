@@ -22,12 +22,18 @@
 //! Rust file is checked in and byte-compared with a fresh code-generation
 //! run. Runtime generation reads only checked-in Rust constants.
 
-pub mod canonical;
-pub mod content_types;
-pub mod error;
-pub mod generated_content;
-pub mod metadata;
-pub mod request;
+pub(crate) mod canonical;
+pub(crate) mod content_types;
+pub(crate) mod error;
+pub(crate) mod fields;
+pub(crate) mod fixed;
+pub(crate) mod generated_content;
+pub(crate) mod metadata;
+pub(crate) mod request;
+pub(crate) mod sampling;
+
+#[cfg(test)]
+mod vectors;
 
 // No public re-exports — richness parent module stays crate-private until
 // the atomic release phase.
