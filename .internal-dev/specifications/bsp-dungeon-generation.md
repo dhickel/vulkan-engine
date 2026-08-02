@@ -869,3 +869,167 @@ Any change to the following requires owner re-review:
 - v3 approved capability set (promoting a deferred capability)
 - v1 or v2 corpus output (any byte drift is a blocking regression)
 - cc0_dungeon_v2 theme asset changes
+
+## 21. EnhancedV3RichnessV1 Contract (Freeze-Only — PENDING OWNER)
+
+### 21.1 Scope
+
+The EnhancedV3RichnessV1 contract is a separate immutable contract domain
+`dungeon-gen/v3-richness/v1` that extends EnhancedV3 output with gameplay-
+relevant content (archetypes, props, lighting recipes, theme variation,
+cave cells, multi-storey vertical openings, ladder/drop controller
+semantics). It is additive to — and structurally isolated from — the
+baseline v3 generation profile. No Richness implementation code, CLI, GUI,
+or public surface is authorized by this freeze; this section records the
+contract that subsequent sprint phases must implement.
+
+### 21.2 Profile Identity
+
+| field | value |
+|-------|-------|
+| domain separator | `"dungeon-gen/v3-richness/v1"` |
+| framing | `SHA-256(domain \|\| seed_le_bytes \|\| stage_tag)` |
+| relationship to v3 | additive extension; v3 map geometry byte stream is unchanged |
+| baseline-v3 manifest | remains `enhanced-v3-corpus/v1` — not renamed to imply Richness |
+| algorithm revision | `enhanced-v3-richness-algorithm/v1` |
+| content revision | `enhanced-v3-richness-content/v1` |
+| preset revision | `enhanced-v3-richness-presets/v1` |
+| theme revision | `enhanced-v3-richness-themes/v1` |
+| asset revision | `enhanced-v3-richness-assets/v1` |
+| convention revision | `enhanced-v3-richness-conventions/v1` |
+| v3 RNG | `"dungeon-gen/v3"` domain independent from `"dungeon-gen/v3-richness/v1"` |
+
+### 21.3 Request and Profile Tag Strategy
+
+| concept | value |
+|---------|-------|
+| request tag | `"richness-v1"` — reserved; `GenerationProfile::from_tag` returns `None` until final owner-authorized exposure |
+| profile variant | `GenerationProfile::EnhancedV3RichnessV1` — planned additive enum member, not yet created |
+| dispatch | `dungeon_gen --class richness-v1` is reserved and rejected until final exposure |
+| packaging | `engine_pack enhanced-dungeon-v3-richness` is reserved and rejected until final exposure |
+| explorer | `dungeon_explore.sh --class richness-v1` is reserved and rejected until final exposure |
+| implementation domain | `src/bsp_generator/src/enhanced_v3_richness/` (not yet created) |
+| baseline V3Config | frozen — Richness must not alter `V3Config`, `V3Preset`, or `NormalClass` |
+| tags | baseline M1/M2 tags, CLI documents, and package manifests remain frozen |
+
+### 21.4 Same-XY Multi-Storey Reservation Rules
+
+Richness V1 introduces explicit composite reservations that may occupy the same
+XY projection across both layers. This is a controlled exception to the
+baseline projection-exclusive rule:
+
+| rule | value |
+|------|-------|
+| composite reservation type | `RichnessCompositeReservation` owning both lower and upper layers |
+| connecting void | every intervening Z span between reserved layers is explicitly owned |
+| ordinary baseline footprints | remain projection-exclusive (unchanged from §20.6) |
+| overlap prohibition | two distinct composite reservations must not overlap in XY |
+| composite-vs-ordinary | a composite reservation and an ordinary footprint must not overlap in XY |
+| stair transitions | composite reservations may host vertical openings; baseline stair reservations remain independent |
+
+### 21.5 Vertical Openings
+
+| concept | value |
+|---------|-------|
+| opening types | ladder shaft, drop hole, open stairwell, spiral-stair opening |
+| minimum clearance | 64×64 XY, 80-unit Z headroom at every standing surface |
+| ladder semantics | Quake `func_ladder`-style surface → app-owned climb controller |
+| drop controller | point-trace fall with landing detection → app-owned player state transition |
+| moving brush models | forbidden; Richness V1 does not emit `func_plat` or any cargo lift |
+| safety margin | 16-unit Quake hull radius preserved around every vertical opening boundary |
+
+### 21.6 Ladder/Drop Controller Semantics
+
+| concept | value |
+|---------|-------|
+| controller boundary | `RichnessVerticalController` — app-owned (not generator-owned) |
+| integration target | `apps/bsp_beta` active BSP player movement path |
+| entry detection | surface contact + forward-into-normal input |
+| exit detection | reaching top/bottom terminus or jump input |
+| reset | teleport or level-transition clears controller state |
+| overlap guard | controller prevents player overlap with ladder/drop volume during active use |
+
+### 21.7 Cave Eligibility
+
+| concept | value |
+|---------|-------|
+| cave cell type | `CaveCell` — additional non-room navigable cell |
+| eligibility predicate | seed-and-layout-dependent, not theme-dependent |
+| minimum cave cells per Richness preset | 2 (Sparse/Moderate), 4 (Rich) |
+| maximum cave cells | 6 |
+| cave BSP role | carved subtractive void with unadorned stone trim |
+| cave lighting | minimum ambient `_minlight 32` within cave bounds |
+
+### 21.8 Theme Invariance
+
+| rule | value |
+|------|-------|
+| blueprint candidate keys | invariant under theme selection |
+| cave decisions | theme must not gate, suppress, or redirect cave placement |
+| archetype selection | theme colors/skins archetypes but does not gate their eligibility |
+| route topology | invariant under theme selection |
+| assembly graph | invariant under theme selection |
+| compliance gate | a v3 blueprint regenerated with a different theme must produce identical `.map` geometry bytes |
+
+### 21.9 Exact Content Counts
+
+| category | count |
+|----------|-------|
+| archetypes (gameplay-bearing prefabs) | exactly 30 shared semantic archetypes |
+| props (decorative non-collidable entities) | exactly 15 shared semantic props |
+| lighting recipes | exactly 12 shared semantic recipes |
+| themes | 3 (CC0 Dungeon v2, plus two additional project-authored CC0 themes) |
+| cave cell archetypes | 4 (spawn cave, dead-end gallery, junction grotto, transition tunnel) |
+| vertical opening archetypes | 4 (ladder shaft, drop hole, open stairwell, spiral-stair opening) |
+
+### 21.10 Source and Compiled Budgets
+
+| metric | budget |
+|--------|--------|
+| Richness entity ceiling | < 500 (extends M2 baseline) |
+| Richness compiled face ceiling | < 15,000 (extends M2 baseline) |
+| Richness light entity ceiling | < 100 |
+| Richness static batch ceiling | < 800 |
+| per-archetype source brush budget | < 64 brushes |
+| per-prop source brush budget | < 16 brushes |
+| per-theme WAD budget | < 64 miptex identities |
+| per-theme companion PNG budget | < 128 files (basecolor × normal × gloss per identity) |
+
+### 21.11 Stable Errors
+
+| error variant | condition |
+|---------------|----------|
+| `RichnessThemeAssetMissing` | a required theme WAD, palette, or companion PNG is absent at generation time |
+| `RichnessArchetypeBudgetExceeded` | per-archetype brush count exceeds budget |
+| `RichnessPlacementExhausted` | no valid placement found within bounded attempts |
+| `RichnessCaveEligibilityFailed` | seed/layout cannot place minimum cave cells |
+| `RichnessVerticalOpeningBlocked` | composite reservation rejected due to conflict with ordinary footprint |
+| `RichnessThemeInvarianceViolated` | theme selection altered blueprint candidate keys or cave decisions |
+
+All errors are typed, never panics, and never produce partial output. A
+`RichnessThemeInvarianceViolated` error is a generator-level assertion failure
+and blocks publication.
+
+### 21.12 Atomic Public Exposure
+
+| rule | value |
+|------|-------|
+| `GenerationProfile::EnhancedV3RichnessV1` | exposed only when all RichnessV1 acceptance gates pass |
+| `from_tag("richness-v1")` | returns `None` until the acceptance gate is approved |
+| CLI dispatch | `dungeon_gen --class richness-v1` rejected with "not yet available" until approved |
+| package command | `engine_pack enhanced-dungeon-v3-richness` rejected until approved |
+| public API surface | no `RichnessConfig`, `RichnessPreset`, or `RichnessMetadata` type exposed until approved |
+
+### 21.13 Re-Review Triggers
+
+Any change to the following requires owner re-review:
+
+- RichnessV1 domain separator, revision identifiers, or stage tag spelling
+- Same-XY multi-storey reservation rules
+- Cave eligibility predicate
+- Theme invariance rule (particularly the compliance gate)
+- Exact content counts (archetypes/props/lighting recipes/themes)
+- Source or compiled budgets
+- Stable error variants
+- Atomic public exposure gating policy
+- Vertical opening clearance minimums or ladder/drop controller semantics

@@ -543,3 +543,72 @@ The Enhanced v3 architectural proof (`DECISION-20260731-01`) demonstrated:
 - Dense M2 fixture: 2,404 faces, 6 entities, 4 batches — all within ceilings
 - 24/24 v1+v2 corpus entries byte-identical to baseline
 - Live GPU startup: swapchain acquired, 21,574 frames, 0 errors
+
+## 14. EnhancedV3RichnessV1 Compatibility Profile (Freeze-Only — PENDING OWNER)
+
+### 14.1 Scope
+
+The EnhancedV3RichnessV1 profile (`GenerationProfile::EnhancedV3RichnessV1`,
+tag `"richness-v1"`) extends EnhancedV3 output with gameplay content. It is an
+additive profile structurally isolated from Legacy v1, Enhanced v2, and
+EnhancedV3 baseline. This section records the compatibility contract; no
+implementation code, CLI, GUI, or public surface exists as of this freeze.
+
+### 14.2 Profile Identity
+
+| field | value |
+|-------|-------|
+| `GenerationProfile` variant | `EnhancedV3RichnessV1` (not yet created) |
+| production tag | `"richness-v1"` — returns `None` from `from_tag` until owner-authorized |
+| CLI | `dungeon_gen --class richness-v1` (rejected until authorized) |
+| packaging | `engine_pack enhanced-dungeon-v3-richness` (rejected until authorized) |
+| relation to baseline v3 | additive extension; v3 map geometry byte stream unchanged |
+
+### 14.3 RNG Domain
+
+| property | value |
+|----------|-------|
+| domain separator | `"dungeon-gen/v3-richness/v1"` |
+| framing | `SHA-256(domain \|\| seed_le \|\| stage_tag)` |
+| stage tags | `richness-archetype`, `richness-prop`, `richness-lighting`, `richness-cave`, `richness-opening`, `richness-theme` (6 frozen tags) |
+| isolation from v1 | cryptographically independent from `"dungeon-gen/v1"` |
+| isolation from v2 | cryptographically independent from `"dungeon-gen/v2"` |
+| isolation from v3 | cryptographically independent from `"dungeon-gen/v3"` |
+
+### 14.4 Compiler Compatibility
+
+Identical to the frozen BSP2 compiler profile (§12.1) and EnhancedV3
+compiler contract (§13.3). RichnessV1 output targets the same pinned
+ericw-tools 2.0.0-alpha3 profile with `-bsp2 -threads 1` compilation.
+Warning-free `qbsp`/`vis`/`light` stages and strict reload with zero
+diagnostics are required.
+
+### 14.5 Theme Invariance Compatibility
+
+| rule | value |
+|------|-------|
+| map geometry bytes | invariant under theme selection |
+| blueprint candidate keys | invariant under theme selection |
+| cave decisions | invariant under theme selection |
+| route topology | invariant under theme selection |
+| compliance gate | `RichnessThemeInvarianceViolated` error if theme changes any geometry decision |
+
+### 14.6 Frozen Compatibility Baseline
+
+| contract | requirement |
+|----------|------------|
+| Legacy v1 12-entry corpus | byte-identical to frozen baseline |
+| Enhanced v2 12-entry corpus | byte-identical to frozen baseline |
+| EnhancedV3 12-entry corpus | byte-identical to Phase 01 baseline-freeze manifest |
+| baseline V3Config constructors | unchanged |
+| baseline V3Config equality | unchanged |
+| baseline metadata schema | unchanged |
+| profile tags | `"legacy-v1"`, `"enhanced-v2"`, `"m3"` remain recognized; `"richness-v1"` gated |
+| CLI documents | unchanged |
+| package fingerprints | unchanged |
+
+### 14.7 Evidence Basis
+
+No RichnessV1 implementation evidence exists. The Phase 01 baseline-v3 freeze
+provides the authoritative baseline hashes that RichnessV1 must not disturb.
+All RichnessV1 evidence rows are marked PENDING in `bsp-acceptance.md` §18.

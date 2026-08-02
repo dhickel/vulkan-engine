@@ -1219,6 +1219,7 @@ fn compatibility_closure_all_24_entries() {
 fn enhanced_v3_unrecognized_in_production() {
     assert!(GenerationProfile::from_tag("enhanced-v3").is_none());
     assert!(GenerationProfile::from_tag("v3").is_none());
+    assert!(GenerationProfile::from_tag("richness-v1").is_none());
 
     // Verify only two production profiles exist
     let tags: Vec<&str> = [

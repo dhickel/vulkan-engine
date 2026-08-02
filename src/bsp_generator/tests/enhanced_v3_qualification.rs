@@ -19,6 +19,7 @@
 //! 12 corpus entries → compile → freeze manifest
 //! ```
 
+use bsp::{BspLoader, LoadOptions};
 use bsp_generator::enhanced_v3::{self, V3Config, V3Preset};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -35,6 +36,7 @@ const EXTENTS: [u32; 3] = [1024, 2048, 3072];
 // ── Corpus constants ─────────────────────────────────────────────────────
 
 const CORPUS_SIZE: usize = 12;
+const BASELINE_V3_MANIFEST_FROZEN_AT: &str = "2026-08-02";
 
 fn corpus_entries() -> Vec<(u64, V3Preset, u32)> {
     let seeds = [0u64, 42, 99, 255];
@@ -68,6 +70,14 @@ fn repo_root() -> PathBuf {
 
 fn corpus_manifest_path() -> PathBuf {
     crate_dir().join("tests/fixtures/enhanced_v3_corpus/manifest.json")
+}
+
+fn write_atomic(path: &Path, contents: &str) {
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&temporary, contents)
+        .unwrap_or_else(|error| panic!("write {}: {error}", temporary.display()));
+    std::fs::rename(&temporary, path)
+        .unwrap_or_else(|error| panic!("publish {}: {error}", path.display()));
 }
 
 fn qualification_report_path() -> PathBuf {
@@ -399,7 +409,7 @@ fn parse_bsp_counts(bsp_bytes: &[u8]) -> (Option<u32>, Option<u32>) {
 
     let face_count = get_lump(7).map(|(_, len)| if len > 0 { len / 20 } else { 0 });
 
-    let entity_count = get_lump(14).and_then(|(off, len)| {
+    let entity_count = get_lump(0).and_then(|(off, len)| {
         if len == 0 {
             return Some(0);
         }
@@ -415,9 +425,61 @@ fn parse_bsp_counts(bsp_bytes: &[u8]) -> (Option<u32>, Option<u32>) {
     (face_count, entity_count)
 }
 
+fn git_text(args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo_root())
+        .output()
+        .unwrap_or_else(|error| panic!("run git {}: {error}", args.join(" ")));
+    assert!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git output must be UTF-8")
+        .trim()
+        .to_string()
+}
+
+fn strict_reload_freeze(
+    bsp_data: &[u8],
+    lit_data: &[u8],
+    wad_path: &Path,
+    palette_path: &Path,
+) -> Result<(u32, u32), String> {
+    let palette = std::fs::read(palette_path).map_err(|error| format!("read palette: {error}"))?;
+    let wad_name = wad_path
+        .file_name()
+        .ok_or("WAD path has no file name")?
+        .to_string_lossy()
+        .into_owned();
+    let wad = std::fs::read(wad_path).map_err(|error| format!("read WAD: {error}"))?;
+    let options = LoadOptions {
+        strict: true,
+        palette: Some(palette),
+        lit_data: Some(lit_data.to_vec()),
+        wad_archives: vec![(wad_name, wad)],
+        texture_overrides: Vec::new(),
+        source_identity: "generated.map".to_string(),
+    };
+    let world = BspLoader::load(bsp_data, &options)
+        .map_err(|report| format!("strict reload failed: {report}"))?;
+    if world.diagnostics.is_empty() {
+        Ok((world.faces.len() as u32, world.entities.len() as u32))
+    } else {
+        Err(format!(
+            "strict reload emitted diagnostics: {:?}",
+            world.diagnostics
+        ))
+    }
+}
+
 // ── Fast qualification sweep (32 seeds) ──────────────────────────
 
 #[test]
+#[ignore = "baseline authority is regenerated only by phase01_baseline_freeze_12_cells"]
 fn qualification_sweep_and_corpus_freeze() {
     qualification_sweep_impl(0..32, 288)
 }
@@ -850,6 +912,473 @@ fn corpus_entries_deterministic() {
             }
         }
     }
+}
+
+// ── Phase 01 Baseline Freeze — focused 12-cell regeneration ─────────────
+
+/// Focused baseline-only manifest regeneration entry point executing exactly
+/// the 12 corpus cells (Sparse/Moderate/Rich × seeds 0/42/99/255). Each cell
+/// is generated twice in independent temporary roots, compiled through the
+/// pinned ericw-tools BSP2 profile with full warning/leak analysis, and the
+/// manifest is written with map/metadata/BSP/LIT hashes, counts, spawn,
+/// bounds, grammar families, and compiled lump metrics.
+///
+/// This test replaces the broader qualification sweep for baseline freezing.
+/// It fails on any compiler warning, leak, skipped fill, or strict-load
+/// diagnostic.
+#[test]
+fn phase01_baseline_freeze_12_cells() {
+    let tools_dir = ericw_tools_dir();
+    assert!(
+        tools_available(&tools_dir),
+        "ericw-tools is required for the baseline freeze at {}",
+        tools_dir.display()
+    );
+
+    let task_base_commit = git_text(&["rev-parse", "HEAD"]);
+    let dirty_tree_before_freeze = git_text(&["status", "--porcelain=v1"]);
+    assert!(
+        !dirty_tree_before_freeze
+            .lines()
+            .any(|line| line.contains("src/bsp_generator/src/")),
+        "baseline freeze requires task-base generator sources; found source drift:\n{dirty_tree_before_freeze}"
+    );
+
+    let corpus = corpus_entries();
+    assert_eq!(corpus.len(), CORPUS_SIZE);
+
+    // Compute tool hashes for provenance
+    let tool_hashes: std::collections::BTreeMap<String, String> = ["qbsp", "vis", "light"]
+        .iter()
+        .map(|name| {
+            let path = tools_dir.join(name);
+            let data = std::fs::read(&path).unwrap_or_default();
+            (name.to_string(), sha256_hex(&data))
+        })
+        .collect();
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_string();
+
+    let theme_wad_path = theme_dir().join("cc0_dungeon_v2.wad");
+    let palette_path = theme_dir().join("palette.lmp");
+    let theme_wad_hash = sha256_hex(&std::fs::read(&theme_wad_path).unwrap());
+    let palette_hash = sha256_hex(&std::fs::read(&palette_path).unwrap());
+
+    let mut manifest_entries: Vec<CorpusManifestEntry> = Vec::with_capacity(CORPUS_SIZE);
+
+    for (seed, preset, extent) in &corpus {
+        let config =
+            V3Config::new(*seed, *preset, *extent).expect("corpus entry config must be valid");
+        let id = format!("v3-{}-seed-{}", preset.tag(), seed);
+        eprintln!("\n=== {id} ===");
+
+        // ── Generation: run twice, prove identity ───────────────────
+        let out1 = enhanced_v3::run_pipeline(&config).expect("first run must succeed");
+        let out2 = enhanced_v3::run_pipeline(&config).expect("second run must succeed");
+
+        assert_eq!(
+            out1.map_text, out2.map_text,
+            "{id}: map text non-deterministic"
+        );
+        assert_eq!(
+            out1.metadata, out2.metadata,
+            "{id}: metadata non-deterministic"
+        );
+
+        let map_sha256 = sha256_hex(out1.map_text.as_bytes());
+        let meta_json_a = metadata_to_json_value(&out1.metadata).to_string();
+        let meta_json_b = metadata_to_json_value(&out2.metadata).to_string();
+        assert_eq!(
+            meta_json_a, meta_json_b,
+            "{id}: serialized metadata non-deterministic"
+        );
+        let meta_sha256 = sha256_hex(meta_json_a.as_bytes());
+
+        eprintln!("  map SHA-256: {}", map_sha256);
+        eprintln!("  metadata SHA-256: {}", meta_sha256);
+
+        // ── Compilation: dual-root, warning/leak/strict-load gates ──
+        let (bsp_sha256, lit_sha256, compiled_faces, compiled_entities, compiler_ok) =
+            compile_and_freeze_cell(
+                &out1.map_text,
+                &meta_json_a,
+                &out2.map_text,
+                &meta_json_b,
+                &id,
+                &tools_dir,
+                &theme_wad_path,
+                &palette_path,
+            );
+
+        assert!(compiler_ok, "{id}: compilation must succeed");
+
+        eprintln!("  BSP SHA-256: {}", bsp_sha256.as_deref().unwrap_or("NONE"));
+        eprintln!("  LIT SHA-256: {}", lit_sha256.as_deref().unwrap_or("NONE"));
+
+        let bounds = out1.metadata.bounds();
+        let spawn = out1.metadata.spawn_origin();
+
+        manifest_entries.push(CorpusManifestEntry {
+            id: id.clone(),
+            seed: *seed,
+            preset: preset.tag().to_string(),
+            extent: *extent,
+            map_sha256: map_sha256.clone(),
+            metadata_sha256: meta_sha256.clone(),
+            bsp_sha256,
+            lit_sha256,
+            room_count: out1.metadata.room_count(),
+            actual_faces: out1.metadata.actual_faces(),
+            actual_entities: out1.metadata.actual_entities(),
+            actual_brushes: out1.metadata.actual_brushes(),
+            spawn_origin: [spawn.0, spawn.1, spawn.2],
+            light_count: out1.metadata.light_count(),
+            bounds: [bounds.0, bounds.1, bounds.2, bounds.3, bounds.4, bounds.5],
+            has_upper_layer: out1.metadata.has_upper_layer(),
+            grammar_families: out1.metadata.grammar_families().to_vec(),
+            compiled_faces,
+            compiled_entities,
+        });
+    }
+
+    // ── Write deterministic manifest ─────────────────────────────────
+    let manifest = CorpusManifest {
+        schema: "enhanced-v3-corpus/v1".to_string(),
+        frozen_at: BASELINE_V3_MANIFEST_FROZEN_AT.to_string(),
+        generator: "bsp_generator/enhanced_v3".to_string(),
+        entries: manifest_entries,
+    };
+
+    let manifest_json = serde_json::to_string_pretty(&manifest).expect("serialize manifest");
+    assert_eq!(
+        manifest_json,
+        serde_json::to_string_pretty(&manifest).expect("re-serialize manifest"),
+        "baseline manifest serialization drifted within the focused freeze"
+    );
+    write_atomic(&corpus_manifest_path(), &manifest_json);
+
+    // ── Write provenance sidecar ────────────────────────────────────
+    let provenance_path = corpus_manifest_path()
+        .parent()
+        .unwrap()
+        .join("baseline-freeze-provenance.json");
+    let provenance = serde_json::json!({
+        "schema": "enhanced-v3-baseline-freeze-provenance/v1",
+        "frozen_at": timestamp,
+        "generator": "bsp_generator/enhanced_v3",
+        "task_base_commit": task_base_commit,
+        "dirty_tree_before_freeze": dirty_tree_before_freeze.lines().collect::<Vec<_>>(),
+        "compiler": "ericw-tools 2.0.0-alpha3",
+        "tool_hashes": tool_hashes,
+        "theme_wad_sha256": theme_wad_hash,
+        "palette_sha256": palette_hash,
+        "command_vectors": [
+            { "program": "qbsp", "args": ["-bsp2", "-threads", "1", "generated.map"] },
+            { "program": "vis", "args": ["-threads", "1", "generated.bsp"] },
+            { "program": "light", "args": ["-threads", "1", "-lit", "generated.bsp"] }
+        ],
+        "compile_profile": {
+            "qbsp_args": ["-bsp2", "-threads", "1"],
+            "vis_args": ["-threads", "1"],
+            "light_args": ["-threads", "1", "-lit"]
+        },
+        "cell_count": CORPUS_SIZE,
+        "cells": manifest.entries.iter().map(|e| serde_json::json!({
+            "id": e.id,
+            "seed": e.seed,
+            "preset": e.preset,
+            "extent": e.extent,
+            "map_sha256": e.map_sha256,
+            "metadata_sha256": e.metadata_sha256,
+            "bsp_sha256": e.bsp_sha256,
+            "lit_sha256": e.lit_sha256,
+            "compiled_faces": e.compiled_faces,
+            "compiled_entities": e.compiled_entities,
+            "room_count": e.room_count,
+            "source_faces": e.actual_faces,
+            "source_entities": e.actual_entities,
+            "source_brushes": e.actual_brushes,
+            "spawn_origin": e.spawn_origin,
+            "light_count": e.light_count,
+            "bounds": e.bounds,
+            "grammar_families": e.grammar_families,
+        })).collect::<Vec<_>>(),
+    });
+    write_atomic(
+        &provenance_path,
+        &serde_json::to_string_pretty(&provenance).expect("serialize provenance"),
+    );
+
+    // ── Budget assertions ───────────────────────────────────────────
+    for entry in &manifest.entries {
+        assert!(
+            entry.actual_faces < 10000,
+            "{}: faces {} exceeds budget",
+            entry.id,
+            entry.actual_faces
+        );
+        assert!(
+            entry.actual_entities < 300,
+            "{}: entities {} exceeds budget",
+            entry.id,
+            entry.actual_entities
+        );
+    }
+
+    eprintln!(
+        "\n=== Baseline Freeze Complete: {} entries ===",
+        manifest.entries.len()
+    );
+    eprintln!("Manifest: {}", corpus_manifest_path().display());
+    eprintln!("Provenance: {}", provenance_path.display());
+}
+
+/// Compile a cell through the pinned BSP2 profile with full warning/leak
+/// analysis and dual-root determinism. Returns compiled hashes and metrics.
+fn compile_and_freeze_cell(
+    map_text_a: &str,
+    metadata_json_a: &str,
+    map_text_b: &str,
+    metadata_json_b: &str,
+    cell_id: &str,
+    tools_dir: &Path,
+    wad_path: &Path,
+    palette_path: &Path,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<u32>,
+    Option<u32>,
+    bool,
+) {
+    let tmp_a = unique_tmp_dir(&format!("freeze-{cell_id}-a"));
+    let tmp_b = unique_tmp_dir(&format!("freeze-{cell_id}-b"));
+
+    let compile_pass = |tmp: &Path,
+                        label: &str,
+                        map_text: &str,
+                        metadata_json: &str|
+     -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, u32, u32), String> {
+        // Persist both source artifacts in each independent root before compiling.
+        let map_path = tmp.join("generated.map");
+        let metadata_path = tmp.join("metadata.json");
+        std::fs::write(&map_path, map_text).map_err(|e| format!("write map: {e}"))?;
+        std::fs::write(&metadata_path, metadata_json)
+            .map_err(|e| format!("write metadata: {e}"))?;
+
+        // Copy WAD and palette
+        let wad_basename = wad_path.file_name().unwrap().to_str().unwrap();
+        std::fs::copy(wad_path, tmp.join(wad_basename)).map_err(|e| format!("copy WAD: {e}"))?;
+        std::fs::copy(palette_path, tmp.join("palette.lmp"))
+            .map_err(|e| format!("copy palette: {e}"))?;
+
+        // qbsp
+        run_compiler_stage_strict(
+            tools_dir,
+            "qbsp",
+            &["-bsp2", "-threads", "1", "generated.map"],
+            tmp,
+            &format!("qbsp-{label}"),
+        )?;
+
+        let bsp_path = tmp.join("generated.bsp");
+        if !bsp_path.exists() {
+            return Err(format!("qbsp did not produce generated.bsp"));
+        }
+
+        // vis
+        run_compiler_stage_strict(
+            tools_dir,
+            "vis",
+            &["-threads", "1", "generated.bsp"],
+            tmp,
+            &format!("vis-{label}"),
+        )?;
+
+        // light
+        run_compiler_stage_strict(
+            tools_dir,
+            "light",
+            &["-threads", "1", "-lit", "generated.bsp"],
+            tmp,
+            &format!("light-{label}"),
+        )?;
+
+        // Any pointfile or leak portal is a leak, including an empty artifact.
+        for leak_name in ["generated.pts", "generated.leak.prt"] {
+            let leak_path = tmp.join(leak_name);
+            if leak_path.exists() {
+                return Err(format!("leak detected — {} exists", leak_path.display()));
+            }
+        }
+
+        let map_data = std::fs::read(&map_path).map_err(|e| format!("read map: {e}"))?;
+        let metadata_data =
+            std::fs::read(&metadata_path).map_err(|e| format!("read metadata: {e}"))?;
+        let bsp_data = std::fs::read(&bsp_path).map_err(|e| format!("read BSP: {e}"))?;
+
+        // Verify BSP2 magic
+        if bsp_data.len() < 4 || &bsp_data[0..4] != b"BSP2" {
+            return Err("BSP magic not BSP2".to_string());
+        }
+
+        let lit_path = tmp.join("generated.lit");
+        let lit_data = std::fs::read(&lit_path)
+            .map_err(|e| format!("light did not produce required LIT artifact: {e}"))?;
+        let (compiled_faces, compiled_entities) =
+            strict_reload_freeze(&bsp_data, &lit_data, wad_path, palette_path)?;
+
+        Ok((
+            map_data,
+            metadata_data,
+            bsp_data,
+            lit_data,
+            compiled_faces,
+            compiled_entities,
+        ))
+    };
+
+    let (map_a, metadata_a, bsp_a, lit_a, faces_a, entities_a) =
+        match compile_pass(&tmp_a, "a", map_text_a, metadata_json_a) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("  FAIL compile-a: {e}");
+                let _ = std::fs::remove_dir_all(&tmp_a);
+                let _ = std::fs::remove_dir_all(&tmp_b);
+                return (None, None, None, None, false);
+            }
+        };
+
+    let (map_b, metadata_b, bsp_b, lit_b, faces_b, entities_b) =
+        match compile_pass(&tmp_b, "b", map_text_b, metadata_json_b) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("  FAIL compile-b: {e}");
+                let _ = std::fs::remove_dir_all(&tmp_a);
+                let _ = std::fs::remove_dir_all(&tmp_b);
+                return (None, None, None, None, false);
+            }
+        };
+
+    // Determinism: all source and compiled artifacts are byte-identical across roots.
+    if map_a != map_b {
+        eprintln!("  FAIL: map not byte-identical across independent roots");
+        let _ = std::fs::remove_dir_all(&tmp_a);
+        let _ = std::fs::remove_dir_all(&tmp_b);
+        return (None, None, None, None, false);
+    }
+    if metadata_a != metadata_b {
+        eprintln!("  FAIL: metadata not byte-identical across independent roots");
+        let _ = std::fs::remove_dir_all(&tmp_a);
+        let _ = std::fs::remove_dir_all(&tmp_b);
+        return (None, None, None, None, false);
+    }
+    if bsp_a != bsp_b {
+        eprintln!("  FAIL: BSP not byte-identical across independent roots");
+        let _ = std::fs::remove_dir_all(&tmp_a);
+        let _ = std::fs::remove_dir_all(&tmp_b);
+        return (None, None, None, None, false);
+    }
+    if lit_a != lit_b {
+        eprintln!("  FAIL: LIT not byte-identical across independent roots");
+        let _ = std::fs::remove_dir_all(&tmp_a);
+        let _ = std::fs::remove_dir_all(&tmp_b);
+        return (None, None, None, None, false);
+    }
+
+    assert_eq!(
+        (faces_a, entities_a),
+        (faces_b, entities_b),
+        "{cell_id}: strict-loaded BSP lump metrics differ across roots"
+    );
+    let bsp_hash = sha256_hex(&bsp_a);
+    let lit_hash = Some(sha256_hex(&lit_a));
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&tmp_a);
+    let _ = std::fs::remove_dir_all(&tmp_b);
+
+    eprintln!("  compile PASS: BSP {}B, LIT {}B", bsp_a.len(), lit_a.len());
+
+    (
+        Some(bsp_hash),
+        lit_hash,
+        Some(faces_a),
+        Some(entities_a),
+        true,
+    )
+}
+
+fn unique_tmp_dir(label: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "enhanced-v3-freeze-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn run_compiler_stage_strict(
+    tool_dir: &Path,
+    exe_name: &str,
+    args: &[&str],
+    work_dir: &Path,
+    stage_name: &str,
+) -> Result<String, String> {
+    let exe_path = tool_dir.join(exe_name);
+    let mut cmd = std::process::Command::new(&exe_path);
+    cmd.args(args).current_dir(work_dir);
+
+    // Minimized environment for determinism
+    cmd.env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        cmd.env("PATH", path);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        cmd.env("HOME", home);
+    }
+    if let Some(tmp) = std::env::var_os("TMPDIR") {
+        cmd.env("TMPDIR", tmp);
+    }
+    if let Some(tmp) = std::env::var_os("TEMP") {
+        cmd.env("TEMP", tmp);
+    }
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to spawn {stage_name}: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        let code = output.status.code().unwrap_or(-1);
+        return Err(format!(
+            "{stage_name} failed (exit {code}):\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+
+    // Warning detection (strict: any warning fails)
+    let combined = format!("{stdout}\n{stderr}");
+    let normalized = combined.to_ascii_lowercase();
+    if normalized.contains("warning:")
+        || normalized.contains("no entities in empty space")
+        || normalized.contains("no filling performed")
+    {
+        return Err(format!(
+            "{stage_name} reported a compiler warning:\n{combined}"
+        ));
+    }
+
+    Ok(stdout)
 }
 
 // ── Source budget spot test ─────────────────────────────────────────────

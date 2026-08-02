@@ -519,3 +519,104 @@ evidence quality.
 | Windowed startup smoke | PASS (task-local) | Timeout-bound `--m3-generate` runs reached swapchain creation, BSP upload, and repeated frame recording without fatal errors |
 | Automated F1/F2 interaction and click-through proof | NOT_RUN | The task-local live smoke did not inject menu hotkeys or pointer actions; source and focused tests do not substitute for an automated interactive run |
 | Resize/minimize/surface-loss lifecycle | NOT_RUN | Formal WSI lifecycle evidence remains separate and unexecuted |
+
+## 18. EnhancedV3RichnessV1 Acceptance (Freeze-Only — PENDING OWNER)
+
+### 18.1 Scope
+
+The EnhancedV3RichnessV1 contract (`dungeon-gen/v3-richness/v1`) extends
+EnhancedV3 output with gameplay-relevant content. This section records the
+acceptance criteria for the Richness V1 sprint; every row is marked PENDING
+until the owner authorizes the contract and the implementation passes its
+evidence gates. No Richness implementation code exists as of this freeze.
+
+### 18.2 RichnessV1 Corpus Matrix
+
+| requirement | minimum | status |
+|-------------|--------|--------|
+| total entries | 36 (3 presets × 4 seeds × 3 themes) | PENDING |
+| Sparse preset seeds × themes | 4 seeds (0, 42, 99, 255) × 3 themes = 12 entries | PENDING |
+| Moderate preset seeds × themes | 4 seeds × 3 themes = 12 entries | PENDING |
+| Rich preset seeds × themes | 4 seeds × 3 themes = 12 entries | PENDING |
+| deterministic replay | all 36 entries byte-identical across repeated generation | PENDING |
+| warning-free compilation | all 36 entries 0 warnings across qbsp/vis/light | PENDING |
+| strict reload | all 36 entries 0 diagnostics | PENDING |
+| budget compliance | all entries within Richness face/entity/batch ceilings | PENDING |
+
+### 18.3 Focused Fixture Inventory
+
+| fixture class | minimum count | status |
+|---------------|--------------|--------|
+| archetype unit fixtures | 30 (one per archetype) | PENDING |
+| prop unit fixtures | 15 (one per prop) | PENDING |
+| cave cell fixtures | 4 | PENDING |
+| vertical opening fixtures | 4 | PENDING |
+| theme-isolation fixtures | 3 (one per theme, same seed/layout) | PENDING |
+
+### 18.4 Platform Determinism
+
+| target | requirement | status |
+|--------|-----------|--------|
+| x86-64 Linux | byte-identical map/metadata/BSP/LIT across independent runs | PENDING (Phase 01 baseline-v3 freeze is PASS; RichnessV1 pending) |
+| AArch64 Linux | byte-identical map/metadata across x86-64 and AArch64 | PENDING |
+
+### 18.5 Compiler/PVS/Collision Inspection
+
+| inspection | requirement | status |
+|-----------|-----------|--------|
+| compiler warning analysis | all 36 entries produce 0 warnings across qbsp/vis/light | PENDING |
+| PVS coverage | spawn leaf reaches ≥ 80% of all non-solid leaves | PENDING |
+| collision clearance | every archetype/cave/opening cell pass hull-1 trace at authored dimensions | PENDING |
+| pointfile leak check | all 36 entries zero non-empty .pts files | PENDING |
+
+### 18.6 Reference Captures
+
+| capture | requirement | status |
+|---------|-----------|--------|
+| per-theme spawn viewpoint | one 1280×720 draw capture per theme at authored spawn camera | PENDING |
+| per-archetype close-up | one capture per archetype showing distinctive geometry | PENDING |
+| cave interior | one capture per cave cell type | PENDING |
+| vertical opening | one capture per vertical opening type | PENDING |
+
+### 18.7 Theme Assets
+
+| asset | requirement | status |
+|-------|-----------|--------|
+| CC0 Dungeon v2 (theme 1) | SHA-256 unchanged from baseline | PENDING |
+| Theme 2 WAD + companions | project-authored CC0, deterministic build | PENDING |
+| Theme 3 WAD + companions | project-authored CC0, deterministic build | PENDING |
+| palette per theme | 768-byte project-authored palette, one per theme | PENDING |
+| companion completeness | all normal/gloss PNGs present for every miptex identity | PENDING |
+
+### 18.8 Package Size
+
+| metric | budget | status |
+|--------|--------|--------|
+| per-theme WAD | < 4 MiB | PENDING |
+| per-theme companion PNGs | < 32 MiB | PENDING |
+| total Richness package | < 128 MiB | PENDING |
+
+### 18.9 Runtime Metrics
+
+| metric | budget | status |
+|--------|--------|--------|
+| Richness BSP parse time | < 400 ms (M2 × content multiplier) | PENDING |
+| Richness BSP GPU upload | < 200 ms | PENDING |
+| Richness frame time (H2, 1080p) | < 16.7 ms (60 fps) static world | PENDING |
+
+### 18.10 Live WSI
+
+| scenario | requirement | status |
+|----------|-----------|--------|
+| windowed startup (H2) | swapchain acquired, ≥ 60 frames rendered, 0 errors | PENDING |
+| resize | map remains visible, no artifacts | PENDING |
+| minimize/restore | BSP state preserved across swapchain rebuild | PENDING |
+| surface loss recovery | BSP reload not required after surface recovery | PENDING |
+
+### 18.11 Owner Authorization Gate
+
+| gate | status |
+|------|--------|
+| baseline-v3 manifest frozen at task-base hashes | **PENDING OWNER** — evidence generated; awaiting owner acceptance |
+| RichnessV1 contract approved | **PENDING OWNER** |
+| `from_tag("richness-v1")` authorized | **PENDING OWNER** — returns `None` until owner approval |

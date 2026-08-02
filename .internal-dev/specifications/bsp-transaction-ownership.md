@@ -729,3 +729,69 @@ or coordinator validation failure leaves the active BSP and app state unchanged.
 `Apply & Close` is presentation intent keyed to the exact request ID; it is
 fulfilled only after Domain A commit succeeds and has no authority to publish a
 partial candidate.
+
+## 16. EnhancedV3RichnessV1 Transaction and Ownership (Freeze-Only — PENDING OWNER)
+
+### 16.1 Scope
+
+Richness V1 is a pure-function generation extension: `(seed, preset, theme,
+config) → (.map, metadata, richness_manifest)`. It introduces no new
+transaction domain, coordinator, or ownership class. This section records
+the ownership contract; no implementation exists as of this freeze.
+
+### 16.2 Crate and Module Ownership
+
+| resource | location | role |
+|----------|----------|------|
+| Richness V1 generator | `src/bsp_generator/src/enhanced_v3_richness/` (not yet created) | archetype, prop, cave, vertical-opening, and lighting-recipe placement |
+| v3 baseline generator | `src/bsp_generator/src/enhanced_v3/` | unchanged; richness consumes v3 map geometry as an immutable input |
+| theme asset pack (×3) | `src/bsp_generator/themes/cc0_dungeon_v2/` plus two new theme directories | read-only; richness selects but never mutates themes |
+| engine_pack packaging | `tools/engine_pack/src/` | `enhanced-dungeon-v3-richness` command (rejected until authorized) |
+
+### 16.3 Dependency Rules
+
+| rule | constraint |
+|------|-----------|
+| `enhanced_v3_richness` depends on | `enhanced_v3` (read-only map geometry), shared `bsp_generator` infrastructure; does NOT depend on `enhanced` (v2) |
+| `enhanced_v3` does NOT depend on | `enhanced_v3_richness` |
+| runtime loading | uses existing `bsp_runtime` coordinator and two-step transaction (§4); no new coordinator |
+| physics integration | uses existing `BspAppBridge` hooks (§6); no new bridge |
+
+### 16.4 Resource Ownership
+
+Richness V1 creates no new resource types. Its output — `.map` text,
+metadata JSON, compiled `.bsp`/`.lit`, companion PNGs — follows the same
+owner-authorized publication pipeline as EnhancedV3.
+
+| resource | creator | owner |
+|----------|---------|-------|
+| richness `.map` text | `enhanced_v3_richness::emit()` (not yet created) | `bsp_generator` |
+| richness metadata JSON | `enhanced_v3_richness::metadata()` (not yet created) | `bsp_generator` |
+| richness manifest JSON | `enhanced_v3_richness::manifest()` (not yet created) | `bsp_generator` — records archetype/prop/cave/opening/recipe placements |
+| compiled `.bsp`/`.lit` | `engine_pack enhanced-dungeon-v3-richness` (not yet created) | `engine_pack` |
+
+### 16.5 Transaction Isolation
+
+- Richness V1 generation is a pure function; it is stateless, deterministic,
+  and requires no runtime transaction.
+- Richness V1 compilation and publication reuse the existing BSP2 compiler
+  infrastructure and `engine_pack` atomic filesystem publication (§4.6).
+- Richness V1 BSP loading at runtime uses the existing `bsp_runtime`
+  coordinator and two-step prepare/validate/commit transaction (§4). No new
+  transaction domain is created.
+
+### 16.6 Ownership Freeze
+
+The following must remain true through all Richness V1 phases:
+
+| contract | requirement |
+|----------|------------|
+| v1 12-entry corpus | byte-identical to frozen baseline |
+| v2 12-entry corpus | byte-identical to frozen baseline |
+| v3 12-entry corpus | byte-identical to Phase 01 baseline-freeze manifest |
+| v3 RNG domain | `"dungeon-gen/v3"` unchanged |
+| v3 stage tags | 4 tags unchanged |
+| theme assets | all SHA-256 hashes must match baselines |
+| `GenerationProfile` tags | `"legacy-v1"`, `"enhanced-v2"`, `"m3"` unchanged |
+| compiler profile | `ericw-q1-bsp2-generated` args frozen |
+| `"richness-v1"` tag | gated — returns `None` until owner-authorized |

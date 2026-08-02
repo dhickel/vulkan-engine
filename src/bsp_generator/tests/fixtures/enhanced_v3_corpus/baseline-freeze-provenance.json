@@ -1,0 +1,497 @@
+{
+  "cell_count": 12,
+  "cells": [
+    {
+      "bounds": [
+        0,
+        0,
+        0,
+        1472,
+        2000,
+        368
+      ],
+      "bsp_sha256": "172245b581f54d73d026dd0806fc56a0ba53e6f561bf9153437a5e60bae607b0",
+      "compiled_entities": 14,
+      "compiled_faces": 2799,
+      "extent": 2048,
+      "grammar_families": [
+        "portal-chamber"
+      ],
+      "id": "v3-sparse-seed-0",
+      "light_count": 12,
+      "lit_sha256": "9c334f0b520c83085d818accd2dd85fdae5a84f2b3be3a62e6070585ad3c3946",
+      "map_sha256": "de1a15491ffeb4d3aaa2f1e833198b9f133faf561ffaa845fda47db242be7ccd",
+      "metadata_sha256": "78ef3408583b1e106b81a0319d387ec97b4cd2dd16b7cc875239aecc8913ff71",
+      "preset": "sparse",
+      "room_count": 12,
+      "seed": 0,
+      "source_brushes": 310,
+      "source_entities": 14,
+      "source_faces": 1877,
+      "spawn_origin": [
+        224,
+        128,
+        48
+      ]
+    },
+    {
+      "bounds": [
+        0,
+        0,
+        0,
+        1472,
+        2000,
+        368
+      ],
+      "bsp_sha256": "aca7aa3064a1a044479284daf35ba4cd8f496ec235fa52477e2d0325a05312d3",
+      "compiled_entities": 14,
+      "compiled_faces": 2677,
+      "extent": 2048,
+      "grammar_families": [
+        "portal-chamber"
+      ],
+      "id": "v3-sparse-seed-42",
+      "light_count": 12,
+      "lit_sha256": "42690dfdbd644b5ee0660d70519cc982c20e24437492ba59f8b228a5d05aff2a",
+      "map_sha256": "8f43a8ea036d494a44d480d49d0150661ce9091c54f8dbcbe6483548c4e37534",
+      "metadata_sha256": "0d94ebd6c9db0e2752186f2ce10dc5cb04aa7971847464609ae3fa5c712251da",
+      "preset": "sparse",
+      "room_count": 12,
+      "seed": 42,
+      "source_brushes": 315,
+      "source_entities": 14,
+      "source_faces": 1909,
+      "spawn_origin": [
+        224,
+        128,
+        48
+      ]
+    },
+    {
+      "bounds": [
+        0,
+        0,
+        0,
+        1472,
+        2000,
+        368
+      ],
+      "bsp_sha256": "d0ae612a724deceda4eb8c76e9d6f0a8f94e836b4cd1031fa0b3b8309c18d7e9",
+      "compiled_entities": 14,
+      "compiled_faces": 2998,
+      "extent": 2048,
+      "grammar_families": [
+        "portal-chamber"
+      ],
+      "id": "v3-sparse-seed-99",
+      "light_count": 12,
+      "lit_sha256": "fa5e14cd9d0486b59242b85c9ff168bac375a969a02b7493ca25eee1dc7f5929",
+      "map_sha256": "d575d38c8be33c67bfea1d1735ca06b3bf07efcadd72f6ef440b18f1520e8342",
+      "metadata_sha256": "d9354dbb474f80a0bee4619ef25d4196ff0a32b233a1925f6c9e2aac14faf76a",
+      "preset": "sparse",
+      "room_count": 12,
+      "seed": 99,
+      "source_brushes": 314,
+      "source_entities": 14,
+      "source_faces": 1909,
+      "spawn_origin": [
+        1248,
+        704,
+        48
+      ]
+    },
+    {
+      "bounds": [
+        0,
+        0,
+        0,
+        1424,
+        1968,
+        368
+      ],
+      "bsp_sha256": "0f5235b94a8c53c2211e7ff008802642f75f361d46910e70ad01a142abfee596",
+      "compiled_entities": 14,
+      "compiled_faces": 2521,
+      "extent": 2048,
+      "grammar_families": [
+        "portal-chamber"
+      ],
+      "id": "v3-sparse-seed-255",
+      "light_count": 12,
+      "lit_sha256": "5cc5ed33eefe466f7917f10a5e4be9802ab6a7c32662d8f87bc4c5cf1415a3da",
+      "map_sha256": "015d52a17c3d748b804c6f433953a6ba9be3750775faf4699fb506adeff4ffbf",
+      "metadata_sha256": "ee2bf5db3543cc6934b56972d642e0f523afd9507bb90021861c98aaabf57d2e",
+      "preset": "sparse",
+      "room_count": 12,
+      "seed": 255,
+      "source_brushes": 309,
+      "source_entities": 14,
+      "source_faces": 1879,
+      "spawn_origin": [
+        224,
+        416,
+        48
+      ]
+    },
+    {
+      "bounds": [
+        0,
+        0,
+        0,
+        1472,
+        2016,
+        368
+      ],
+      "bsp_sha256": "bddab063f811898f9771ff424de07445d61975736ac4c12ec7d5d13f3cb16db1",
+      "compiled_entities": 22,
+      "compiled_faces": 3932,
+      "extent": 2048,
+      "grammar_families": [
+        "buttressed-hall",
+        "column-grove",
+        "portal-chamber"
+      ],
+      "id": "v3-moderate-seed-0",
+      "light_count": 20,
+      "lit_sha256": "ed3347b5dff88fa0cfa04c0616d8869396fcd71163bc700eacdadfc084180b8c",
+      "map_sha256": "68283a728a6e4a7bc72e088eb02baab32a1b61e6d9c2af10db23e935e1bf754d",
+      "metadata_sha256": "b8370b09c1d44f5c1298667a55b3f692471018f0c7530e6e9e61ab577db3d912",
+      "preset": "moderate",
+      "room_count": 20,
+      "seed": 0,
+      "source_brushes": 555,
+      "source_entities": 22,
+      "source_faces": 3351,
+      "spawn_origin": [
+        224,
+        80,
+        48
+      ]
+    },
+    {
+      "bounds": [
+        0,
+        0,
+        0,
+        1472,
+        2016,
+        368
+      ],
+      "bsp_sha256": "1ee474de9ebc315a3c90477cf509764d1e67f32e33d280d1c8aac5bba0df9547",
+      "compiled_entities": 22,
+      "compiled_faces": 4057,
+      "extent": 2048,
+      "grammar_families": [
+        "buttressed-hall",
+        "column-grove",
+        "portal-chamber"
+      ],
+      "id": "v3-moderate-seed-42",
+      "light_count": 20,
+      "lit_sha256": "b14604b1699f044f0a0e31d65a9f5c524a6a5aedea71b46e7b92b51a70749cfb",
+      "map_sha256": "85cdcd7caa80dc4fbd9bc8d12d1089ef50278f6e689de89519c1a384dacb6d66",
+      "metadata_sha256": "644b2003c0608ecfd9813b0fe8f0c08116b094b14ed4f6dea886331e62862a99",
+      "preset": "moderate",
+      "room_count": 20,
+      "seed": 42,
+      "source_brushes": 549,
+      "source_entities": 22,
+      "source_faces": 3319,
+      "spawn_origin": [
+        224,
+        80,
+        48
+      ]
+    },
+    {
+      "bounds": [
+        0,
+        0,
+        0,
+        1472,
+        2016,
+        368
+      ],
+      "bsp_sha256": "7737924358ea1cf55a051d554708dc341d35b149625cc7b25fe52ddd780fd9c1",
+      "compiled_entities": 22,
+      "compiled_faces": 4079,
+      "extent": 2048,
+      "grammar_families": [
+        "buttressed-hall",
+        "column-grove",
+        "portal-chamber"
+      ],
+      "id": "v3-moderate-seed-99",
+      "light_count": 20,
+      "lit_sha256": "06f9ca5845ec43a17c3759ac53791222ef58544103acf30baf7459336235d507",
+      "map_sha256": "7ff03faf1755ca320a3a9cd22163ea775cca6bc1f51d9907915d5be0639e61b7",
+      "metadata_sha256": "c425f353e30a4ef1e7167591eef140a6a05008cdb4fbaadabc882f6c3b2ee461",
+      "preset": "moderate",
+      "room_count": 20,
+      "seed": 99,
+      "source_brushes": 541,
+      "source_entities": 22,
+      "source_faces": 3276,
+      "spawn_origin": [
+        224,
+        80,
+        48
+      ]
+    },
+    {
+      "bounds": [
+        0,
+        0,
+        0,
+        1472,
+        2016,
+        368
+      ],
+      "bsp_sha256": "82a5760453977e910901e4555a4ac055801524a0d2b5c8ffbc48a15f8845d31c",
+      "compiled_entities": 22,
+      "compiled_faces": 3608,
+      "extent": 2048,
+      "grammar_families": [
+        "buttressed-hall",
+        "column-grove",
+        "portal-chamber"
+      ],
+      "id": "v3-moderate-seed-255",
+      "light_count": 20,
+      "lit_sha256": "ba4831257306687f3438322d75934071002cbc789bc2a02a7170a11834149d9c",
+      "map_sha256": "f6cc66daf8e6f5d2ee7c12c1acff90a4590417c648eb8e2eb036a119cb62d6af",
+      "metadata_sha256": "28fda28eda1e8d5b97b3c1412650fc2cd37995e4585c48f7927a4e497ab20de1",
+      "preset": "moderate",
+      "room_count": 20,
+      "seed": 255,
+      "source_brushes": 544,
+      "source_entities": 22,
+      "source_faces": 3290,
+      "spawn_origin": [
+        224,
+        256,
+        48
+      ]
+    },
+    {
+      "bounds": [
+        0,
+        0,
+        0,
+        1984,
+        2976,
+        368
+      ],
+      "bsp_sha256": "800b99f665f753734554a867e764c311df0a48cb488919e8d4702fd2be71db2e",
+      "compiled_entities": 30,
+      "compiled_faces": 6164,
+      "extent": 3072,
+      "grammar_families": [
+        "buttressed-hall",
+        "column-grove",
+        "fractured-vault",
+        "monolithic-chamber",
+        "portal-chamber",
+        "terraced-shrine"
+      ],
+      "id": "v3-rich-seed-0",
+      "light_count": 28,
+      "lit_sha256": "2bab2bba3d3e73cef846f683071e879736a67fc1823d79b6b478cebe4b7abdfc",
+      "map_sha256": "878fd2734457fa5c056b9273d1ff4c0331aad4c165b0ed72872655bb87b532bc",
+      "metadata_sha256": "289b15cac284822cb424fb2cdee5351909bd989c7bdc22cc1a48b0e0556d365e",
+      "preset": "rich",
+      "room_count": 28,
+      "seed": 0,
+      "source_brushes": 798,
+      "source_entities": 30,
+      "source_faces": 4822,
+      "spawn_origin": [
+        224,
+        80,
+        48
+      ]
+    },
+    {
+      "bounds": [
+        0,
+        0,
+        0,
+        1984,
+        2992,
+        368
+      ],
+      "bsp_sha256": "c28752c1be51dfdf3688f4c7af1d4fc5b38b588dbb124ac215c1d7ae1ff9a6ec",
+      "compiled_entities": 30,
+      "compiled_faces": 6714,
+      "extent": 3072,
+      "grammar_families": [
+        "buttressed-hall",
+        "column-grove",
+        "fractured-vault",
+        "monolithic-chamber",
+        "portal-chamber",
+        "terraced-shrine"
+      ],
+      "id": "v3-rich-seed-42",
+      "light_count": 28,
+      "lit_sha256": "44f59f0d532f8335561639e8ba46ddd192e0b39a0ead5eef6acb092ece196dab",
+      "map_sha256": "ef9315d3bfae415be097fb823583afcdd6d1408ea1ab9f60bc2bf561b6181bf2",
+      "metadata_sha256": "5b81ece2fb3d7406c46e7c2afd5df45b646972e646b8647a57aa28710b54415c",
+      "preset": "rich",
+      "room_count": 28,
+      "seed": 42,
+      "source_brushes": 793,
+      "source_entities": 30,
+      "source_faces": 4800,
+      "spawn_origin": [
+        224,
+        80,
+        48
+      ]
+    },
+    {
+      "bounds": [
+        0,
+        0,
+        0,
+        1984,
+        2992,
+        368
+      ],
+      "bsp_sha256": "a9f3def805e3638f9f0ca3945eee853a37e888e20114c3acf07fcc1e37f32ee1",
+      "compiled_entities": 30,
+      "compiled_faces": 6800,
+      "extent": 3072,
+      "grammar_families": [
+        "buttressed-hall",
+        "column-grove",
+        "fractured-vault",
+        "monolithic-chamber",
+        "portal-chamber",
+        "terraced-shrine"
+      ],
+      "id": "v3-rich-seed-99",
+      "light_count": 28,
+      "lit_sha256": "4527b579af4108db4f9ba48b8165a94ce692876dc3f60c430209c706908526b1",
+      "map_sha256": "d729dcccc16a07b1c08b3766584a77a7853e854e09a8ed5684e358e6d724c032",
+      "metadata_sha256": "98f5b6ebf59ced453917115fe15889dc80d2a43d0063d0e214bfd27736ff859c",
+      "preset": "rich",
+      "room_count": 28,
+      "seed": 99,
+      "source_brushes": 796,
+      "source_entities": 30,
+      "source_faces": 4819,
+      "spawn_origin": [
+        1760,
+        464,
+        48
+      ]
+    },
+    {
+      "bounds": [
+        0,
+        0,
+        0,
+        1984,
+        2992,
+        368
+      ],
+      "bsp_sha256": "223b16f45adebf6c55b6f76532182e5132b87d2cccf5fe95f942f5df6f3f03fc",
+      "compiled_entities": 30,
+      "compiled_faces": 6333,
+      "extent": 3072,
+      "grammar_families": [
+        "buttressed-hall",
+        "column-grove",
+        "fractured-vault",
+        "monolithic-chamber",
+        "portal-chamber",
+        "terraced-shrine"
+      ],
+      "id": "v3-rich-seed-255",
+      "light_count": 28,
+      "lit_sha256": "b9b478d243b05234baedd3a509d9402f0cbb9f2bdc2918c55aef283ff7311280",
+      "map_sha256": "f27a96e4791e34abc07518601245c2e14c3d3ad590b35cc392c6ab104c3df637",
+      "metadata_sha256": "2724ac843f814f03198e30e1aafa9ece807e177f05d1d753916e5b67e4916ed4",
+      "preset": "rich",
+      "room_count": 28,
+      "seed": 255,
+      "source_brushes": 788,
+      "source_entities": 30,
+      "source_faces": 4761,
+      "spawn_origin": [
+        224,
+        272,
+        48
+      ]
+    }
+  ],
+  "command_vectors": [
+    {
+      "args": [
+        "-bsp2",
+        "-threads",
+        "1",
+        "generated.map"
+      ],
+      "program": "qbsp"
+    },
+    {
+      "args": [
+        "-threads",
+        "1",
+        "generated.bsp"
+      ],
+      "program": "vis"
+    },
+    {
+      "args": [
+        "-threads",
+        "1",
+        "-lit",
+        "generated.bsp"
+      ],
+      "program": "light"
+    }
+  ],
+  "compile_profile": {
+    "light_args": [
+      "-threads",
+      "1",
+      "-lit"
+    ],
+    "qbsp_args": [
+      "-bsp2",
+      "-threads",
+      "1"
+    ],
+    "vis_args": [
+      "-threads",
+      "1"
+    ]
+  },
+  "compiler": "ericw-tools 2.0.0-alpha3",
+  "dirty_tree_before_freeze": [
+    "M .internal-dev/specifications/api.md",
+    " M .internal-dev/specifications/bsp-acceptance.md",
+    " M .internal-dev/specifications/bsp-compatibility.md",
+    " M .internal-dev/specifications/bsp-dungeon-generation.md",
+    " M .internal-dev/specifications/bsp-transaction-ownership.md",
+    " M .internal-dev/specifications/decisions.md",
+    " M src/bsp_generator/tests/enhanced_v3_compatibility.rs",
+    " M src/bsp_generator/tests/enhanced_v3_qualification.rs",
+    " M src/bsp_generator/tests/fixtures/enhanced_v3_corpus/manifest.json",
+    "?? src/bsp_generator/tests/fixtures/enhanced_v3_corpus/baseline-freeze-provenance.json"
+  ],
+  "frozen_at": "1785656453",
+  "generator": "bsp_generator/enhanced_v3",
+  "palette_sha256": "1fc70b9759784bbab3fb0af1e644e15565fd3f3062dea50d9c96703e1194b9a2",
+  "schema": "enhanced-v3-baseline-freeze-provenance/v1",
+  "task_base_commit": "8203a7f84c1a8ef2952aa06634469b68dab7d417",
+  "theme_wad_sha256": "b899ae8165744fdc2d92f9fe4d03d5b52c33ebfddc228822c70790e120cd3496",
+  "tool_hashes": {
+    "light": "1210ee9bed8990f67e3be7e28fbfd8d210329b052ac57dba017200d2da1ca5e5",
+    "qbsp": "4a05974acf9e59f73a9c8f4e8236f3d1e0961be477dae002837e166278882f17",
+    "vis": "f7f429e0ad9bebbb0ebdefea8d6cd5e13a6ad6ff9f6893126772e00b66e364ea"
+  }
+}
