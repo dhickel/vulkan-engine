@@ -23,6 +23,7 @@
 //! run. Runtime generation reads only checked-in Rust constants.
 
 pub(crate) mod canonical;
+pub(crate) mod complexity;
 pub(crate) mod content_types;
 pub(crate) mod error;
 pub(crate) mod fields;
@@ -37,6 +38,7 @@ pub(crate) mod reservation;
 pub(crate) mod sampling;
 pub(crate) mod solver;
 pub(crate) mod topology;
+pub(crate) mod variation;
 pub(crate) mod zones;
 
 #[cfg(test)]

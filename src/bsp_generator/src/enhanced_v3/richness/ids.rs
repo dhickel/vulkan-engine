@@ -179,6 +179,92 @@ typed_id!(
     TurnId,
     "Typed identifier for a committed turn / junction reservation."
 );
+typed_id!(
+    WallChainId,
+    "Typed identifier for a shared structural wall chain."
+);
+
+// ── Semantic ID ────────────────────────────────────────────────────────────
+
+/// A unified key across all committed semantic identity namespaces.
+///
+/// Used to key variation and complexity decisions so that reservations,
+/// routes, portals, turns, beats, zones, and archetype requests share one
+/// key domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum SemanticId {
+    Reservation(ReservationId),
+    Route(RouteId),
+    Portal(PortalId),
+    Turn(TurnId),
+    Beat(BeatId),
+    Zone(ZoneId),
+    ArchetypeRequest(ArchetypeRequestId),
+}
+
+impl SemanticId {
+    /// Stable tag prefix for diagnostics.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Reservation(_) => "reservation",
+            Self::Route(_) => "route",
+            Self::Portal(_) => "portal",
+            Self::Turn(_) => "turn",
+            Self::Beat(_) => "beat",
+            Self::Zone(_) => "zone",
+            Self::ArchetypeRequest(_) => "archetype_request",
+        }
+    }
+
+    /// Raw u32 for hashing and ordering.
+    pub fn raw(self) -> u32 {
+        match self {
+            Self::Reservation(id) => id.raw(),
+            Self::Route(id) => id.raw(),
+            Self::Portal(id) => id.raw(),
+            Self::Turn(id) => id.raw(),
+            Self::Beat(id) => id.raw(),
+            Self::Zone(id) => id.raw(),
+            Self::ArchetypeRequest(id) => id.raw(),
+        }
+    }
+}
+
+impl From<ReservationId> for SemanticId {
+    fn from(id: ReservationId) -> Self {
+        Self::Reservation(id)
+    }
+}
+impl From<RouteId> for SemanticId {
+    fn from(id: RouteId) -> Self {
+        Self::Route(id)
+    }
+}
+impl From<PortalId> for SemanticId {
+    fn from(id: PortalId) -> Self {
+        Self::Portal(id)
+    }
+}
+impl From<TurnId> for SemanticId {
+    fn from(id: TurnId) -> Self {
+        Self::Turn(id)
+    }
+}
+impl From<BeatId> for SemanticId {
+    fn from(id: BeatId) -> Self {
+        Self::Beat(id)
+    }
+}
+impl From<ZoneId> for SemanticId {
+    fn from(id: ZoneId) -> Self {
+        Self::Zone(id)
+    }
+}
+impl From<ArchetypeRequestId> for SemanticId {
+    fn from(id: ArchetypeRequestId) -> Self {
+        Self::ArchetypeRequest(id)
+    }
+}
 
 // ── Archetype index ────────────────────────────────────────────────────────
 
