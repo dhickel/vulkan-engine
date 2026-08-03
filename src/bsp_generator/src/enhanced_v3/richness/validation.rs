@@ -27,7 +27,11 @@ use super::error::{RichnessError, RichnessErrorCategory, RichnessErrorCode};
 use super::geometry as richness_geom;
 use super::ids::{BrushAssemblyId, OpeningAssemblyId, ReservationId};
 use super::support::{validate_support_dag, SupportDag};
-use super::visibility::{validate_no_aligned_openings, validate_visibility_caps, VisibilityPlan};
+use super::theme::ThemeDefinition;
+use super::visibility::{
+    validate_compiler_conventions, validate_no_aligned_openings, validate_visibility_caps,
+    VisibilityPlan,
+};
 use crate::enhanced_v3::geometry::ConvexBrush;
 
 // ── Validator result ──────────────────────────────────────────────────────
@@ -87,6 +91,17 @@ impl Default for ValidationReport {
     }
 }
 
+fn validation_error(
+    code: RichnessErrorCode,
+    category: RichnessErrorCategory,
+    path: &str,
+    context: impl Into<String>,
+) -> RichnessError {
+    RichnessError::new(
+        code, 0, "?", "?", "?", "?", "?", "?", "?", path, category, context,
+    )
+}
+
 // ── Run all validators ────────────────────────────────────────────────────
 
 /// Run the complete validator set on an assembly.
@@ -94,6 +109,7 @@ pub(crate) fn validate_assembly(
     ir: &AssemblyIR,
     visibility: &VisibilityPlan,
     complexity: Option<&ComplexityPlan>,
+    theme: &ThemeDefinition,
 ) -> ValidationReport {
     let mut report = ValidationReport::new();
 
@@ -110,7 +126,7 @@ pub(crate) fn validate_assembly(
     report.record("grid_alignment", validate_grid_alignment(ir));
 
     // 5. Textures
-    report.record("textures", validate_textures(ir));
+    report.record("textures", validate_textures(ir, theme));
 
     // 6. Protected routes
     report.record("protected_routes", validate_protected_routes(ir));
@@ -135,6 +151,12 @@ pub(crate) fn validate_assembly(
     // 11. Aligned openings
     report.record("aligned_openings", validate_no_aligned_openings(visibility));
 
+    // 12. Exact Phase-05 compiler convention records
+    report.record(
+        "compiler_conventions",
+        validate_compiler_conventions(visibility),
+    );
+
     report
 }
 
@@ -143,75 +165,72 @@ pub(crate) fn validate_assembly(
 /// Every partition volume is owned exactly once. Openings are omissions
 /// from a unique ownership partition. No volume is claimed by two owners.
 pub(crate) fn validate_sealing_ownership(ir: &AssemblyIR) -> Result<(), RichnessError> {
-    // Every opening must reference a valid owner brush that exists.
     for opening in ir.openings.values() {
-        if !ir.brushes.contains_key(&opening.owner_brush_id) {
-            return Err(RichnessError::new(
-                RichnessErrorCode::ValueOutOfRange,
-                0,
-                "?",
-                "?",
-                "?",
-                "?",
-                "?",
-                "?",
-                "?",
-                "validation.sealing",
-                RichnessErrorCategory::PlacementTopologyExhaustion,
-                format!(
-                    "opening {:?} references non-existent owner brush {:?}",
-                    opening.id.raw(),
-                    opening.owner_brush_id.raw()
-                ),
-            ));
-        }
-    }
-
-    // Every opening's bounds must be fully inside its owner brush's bounds.
-    for opening in ir.openings.values() {
-        let owner = &ir.brushes[&opening.owner_brush_id];
-        let owner_bb = owner.brush.aabb().map_err(|e| {
-            RichnessError::new(
-                RichnessErrorCode::ValueOutOfRange,
-                0,
-                "?",
-                "?",
-                "?",
-                "?",
-                "?",
-                "?",
-                "?",
-                "validation.sealing",
-                RichnessErrorCategory::PlacementTopologyExhaustion,
-                format!("owner brush {:?} has invalid AABB: {e}", owner.id.raw()),
-            )
-        })?;
-        let ((omin_x, omin_y, omin_z), (omax_x, omax_y, omax_z)) = owner_bb;
-        let (ox0, oy0, oz0, ox1, oy1, oz1) = opening.bounds;
-
-        if ox0 < omin_x
-            || ox1 > omax_x
-            || oy0 < omin_y
-            || oy1 > omax_y
-            || oz0 < omin_z
-            || oz1 > omax_z
+        if opening.wall_segment_ids.is_empty()
+            || !opening.wall_segment_ids.contains(&opening.owner_brush_id)
         {
-            return Err(RichnessError::new(
-                RichnessErrorCode::ValueOutOfRange, 0,
-                "?", "?", "?", "?", "?", "?", "?",
+            return Err(validation_error(
+                RichnessErrorCode::SemanticInfeasible,
+                RichnessErrorCategory::SemanticInfeasibility,
                 "validation.sealing",
-                RichnessErrorCategory::PlacementTopologyExhaustion,
+                format!("opening {} has no unique canonical owner", opening.id.raw()),
+            ));
+        }
+        for segment_id in &opening.wall_segment_ids {
+            let segment = ir.brushes.get(segment_id).ok_or_else(|| {
+                validation_error(
+                    RichnessErrorCode::SemanticInfeasible,
+                    RichnessErrorCategory::SemanticInfeasibility,
+                    "validation.sealing",
+                    format!(
+                        "opening {} references missing wall segment {}",
+                        opening.id.raw(),
+                        segment_id.raw()
+                    ),
+                )
+            })?;
+            if segment.role != opening.wall_role {
+                return Err(validation_error(
+                    RichnessErrorCode::SemanticInfeasible,
+                    RichnessErrorCategory::SemanticInfeasibility,
+                    "validation.sealing",
+                    format!(
+                        "opening {} segment {} has role {}, expected {}",
+                        opening.id.raw(),
+                        segment_id.raw(),
+                        segment.role.tag(),
+                        opening.wall_role.tag()
+                    ),
+                ));
+            }
+            if segment.owner != opening.owner {
+                return Err(validation_error(
+                    RichnessErrorCode::SemanticInfeasible,
+                    RichnessErrorCategory::SemanticInfeasibility,
+                    "validation.sealing",
+                    format!(
+                        "opening {} segment {} belongs to a different ownership partition",
+                        opening.id.raw(),
+                        segment_id.raw(),
+                    ),
+                ));
+            }
+        }
+
+        let (px0, py0, pz0, px1, py1, pz1) = opening.owner_partition_bounds;
+        let (ox0, oy0, oz0, ox1, oy1, oz1) = opening.bounds;
+        if ox0 < px0 || ox1 > px1 || oy0 < py0 || oy1 > py1 || oz0 < pz0 || oz1 > pz1 {
+            return Err(validation_error(
+                RichnessErrorCode::SemanticInfeasible,
+                RichnessErrorCategory::SemanticInfeasibility,
+                "validation.sealing",
                 format!(
-                    "opening {:?} bounds ({},{},{})-({},{},{}) not contained in owner brush {:?} bounds ({},{},{})-({},{},{})",
-                    opening.id.raw(),
-                    ox0, oy0, oz0, ox1, oy1, oz1,
-                    owner.id.raw(),
-                    omin_x, omin_y, omin_z, omax_x, omax_y, omax_z
+                    "opening {} escaped its one-owner wall partition",
+                    opening.id.raw()
                 ),
             ));
         }
     }
-
     Ok(())
 }
 
@@ -254,15 +273,65 @@ pub(crate) fn validate_grid_alignment(ir: &AssemblyIR) -> Result<(), RichnessErr
 /// variation plan. The actual `.map` emission maps these to concrete
 /// miptex names. We validate that the role indices correspond to known
 /// material roles from the generated constants.
-pub(crate) fn validate_textures(ir: &AssemblyIR) -> Result<(), RichnessError> {
-    // At assembly IR level, textures are not yet bound to faces.
-    // We validate that every brush has a role whose tag maps to a known
-    // material role family. The actual texture names are bound during
-    // .map emission.
+pub(crate) fn validate_textures(
+    ir: &AssemblyIR,
+    theme: &ThemeDefinition,
+) -> Result<(), RichnessError> {
+    let authorized: BTreeSet<_> = theme.all_wad_identities().into_iter().collect();
     for brush in ir.brushes.values() {
-        let _ = brush.role.tag(); // verify role is valid
+        let assigned = ir.material_roles.get(&brush.id).copied().ok_or_else(|| {
+            validation_error(
+                RichnessErrorCode::AssetRoleMissing,
+                RichnessErrorCategory::AssetRoleMissing,
+                "validation.textures",
+                format!("brush {} has no theme material role", brush.id.raw()),
+            )
+        })?;
+        let expected = brush.role.semantic_role();
+        if assigned != expected {
+            return Err(validation_error(
+                RichnessErrorCode::AssetRoleMissing,
+                RichnessErrorCategory::AssetRoleMissing,
+                "validation.textures",
+                format!(
+                    "brush {} role {} requires {:?}, found {:?}",
+                    brush.id.raw(),
+                    brush.role.tag(),
+                    expected,
+                    assigned
+                ),
+            ));
+        }
+        if !theme.roles.contains(&assigned) || !authorized.contains(assigned.wad_identity()) {
+            return Err(validation_error(
+                RichnessErrorCode::AssetRoleMissing,
+                RichnessErrorCategory::AssetRoleMissing,
+                "validation.textures",
+                format!(
+                    "theme {} does not authorize role {:?} / miptex {}",
+                    theme.name,
+                    assigned,
+                    assigned.wad_identity()
+                ),
+            ));
+        }
+        let (basecolor, normal, gloss) = theme.companion_filenames(assigned);
+        let prefix = assigned.wad_identity();
+        if !basecolor.starts_with(prefix)
+            || !normal.starts_with(prefix)
+            || !gloss.starts_with(prefix)
+        {
+            return Err(validation_error(
+                RichnessErrorCode::AssetRoleMissing,
+                RichnessErrorCategory::AssetRoleMissing,
+                "validation.textures",
+                format!(
+                    "theme {} has role-invalid companions for {prefix}",
+                    theme.name
+                ),
+            ));
+        }
     }
-    // All brushes are validated at construction — this check is structural.
     Ok(())
 }
 
@@ -276,10 +345,14 @@ pub(crate) fn validate_protected_routes(ir: &AssemblyIR) -> Result<(), RichnessE
     for opening in ir.openings.values() {
         if opening.portal_id.is_some() {
             let (ox0, oy0, oz0, ox1, oy1, oz1) = opening.bounds;
-            let width = (ox1 - ox0).abs();
-            let height = (oz1 - oz0).abs();
+            let width = match opening.wall_role {
+                BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => ox1 - ox0,
+                BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => oy1 - oy0,
+                _ => -1,
+            };
+            let height = oz1 - oz0;
 
-            if width < 64 && height < 80 {
+            if width != 64 || height != 80 {
                 return Err(RichnessError::new(
                     RichnessErrorCode::ValueOutOfRange,
                     0,
@@ -293,7 +366,7 @@ pub(crate) fn validate_protected_routes(ir: &AssemblyIR) -> Result<(), RichnessE
                     "validation.protected_routes",
                     RichnessErrorCategory::PlacementTopologyExhaustion,
                     format!(
-                        "portal opening {:?} throat is {}×{} (requires minimum 64×80)",
+                        "portal opening {:?} throat is {}×{} (requires exact 64×80)",
                         opening.id.raw(),
                         width,
                         height
@@ -301,61 +374,23 @@ pub(crate) fn validate_protected_routes(ir: &AssemblyIR) -> Result<(), RichnessE
                 ));
             }
 
-            // Check no brush overlaps the throat volume except frame brushes.
-            // The throat is the clear opening: it should be free of non-frame brushes.
-            // (Frame brushes are portal posts/lintels/surrounds that are adjacent,
-            // not inside the throat.)
-            for brush in ir.brushes.values() {
-                if opening.frame_brush_ids.contains(&brush.id) {
-                    continue;
-                }
-                // Skip the wall owner brush too — it has the opening omitted.
-                if brush.id == opening.owner_brush_id {
-                    continue;
-                }
-
-                // Check if brush AABB overlaps the throat AABB
-                let brush_bb = brush.brush.aabb().map_err(|e| {
-                    RichnessError::new(
-                        RichnessErrorCode::ValueOutOfRange,
-                        0,
-                        "?",
-                        "?",
-                        "?",
-                        "?",
-                        "?",
-                        "?",
-                        "?",
+            let throat =
+                ConvexBrush::make_box((ox0, ox1), (oy0, oy1), (oz0, oz1)).map_err(|error| {
+                    validation_error(
+                        RichnessErrorCode::SemanticInfeasible,
+                        RichnessErrorCategory::SemanticInfeasibility,
                         "validation.protected_routes",
-                        RichnessErrorCategory::PlacementTopologyExhaustion,
-                        format!("brush {:?} AABB error: {e}", brush.id.raw()),
+                        format!("invalid throat solid: {error}"),
                     )
                 })?;
-                let ((bmin_x, bmin_y, bmin_z), (bmax_x, bmax_y, bmax_z)) = brush_bb;
-
-                if bmin_x < ox1
-                    && bmax_x > ox0
-                    && bmin_y < oy1
-                    && bmax_y > oy0
-                    && bmin_z < oz1
-                    && bmax_z > oz0
-                {
-                    // Potential intrusion — could be false positive for AABB-only check
-                    // For now, flag it
-                    return Err(RichnessError::new(
-                        RichnessErrorCode::ValueOutOfRange,
-                        0,
-                        "?",
-                        "?",
-                        "?",
-                        "?",
-                        "?",
-                        "?",
-                        "?",
+            for brush in ir.brushes.values() {
+                if richness_geom::brushes_overlap(&brush.brush, &throat)? {
+                    return Err(validation_error(
+                        RichnessErrorCode::SemanticInfeasible,
+                        RichnessErrorCategory::SemanticInfeasibility,
                         "validation.protected_routes",
-                        RichnessErrorCategory::PlacementTopologyExhaustion,
                         format!(
-                            "brush {:?} ({}) intrudes into portal opening {:?} throat",
+                            "brush {} ({}) intrudes into exact throat for opening {}",
                             brush.id.raw(),
                             brush.role.tag(),
                             opening.id.raw()
@@ -411,59 +446,48 @@ pub(crate) fn validate_overlap(ir: &AssemblyIR) -> Result<(), RichnessError> {
         }
     }
 
-    // Second: validate that openings are actual omissions.
-    // If a wall brush still overlaps its own opening throat area, the
-    // opening is not properly omitted — the wall must be split.
+    // Second: every owning wall segment and frame must be disjoint from the
+    // exact omitted volume. Boundary contact is legal; positive volume is not.
     for opening in ir.openings.values() {
-        let owner = &ir.brushes[&opening.owner_brush_id];
-        let owner_bb = owner.brush.aabb().map_err(|e| {
-            RichnessError::new(
-                RichnessErrorCode::ValueOutOfRange,
-                0,
-                "?",
-                "?",
-                "?",
-                "?",
-                "?",
-                "?",
-                "?",
+        let (x0, y0, z0, x1, y1, z1) = opening.bounds;
+        let omitted = ConvexBrush::make_box((x0, x1), (y0, y1), (z0, z1)).map_err(|error| {
+            validation_error(
+                RichnessErrorCode::SemanticInfeasible,
+                RichnessErrorCategory::SemanticInfeasibility,
                 "validation.overlap",
-                RichnessErrorCategory::PlacementTopologyExhaustion,
-                format!("owner AABB: {e}"),
+                format!("opening {} has invalid bounds: {error}", opening.id.raw()),
             )
         })?;
-
-        let ((omin_x, omin_y, omin_z), (omax_x, omax_y, omax_z)) = owner_bb;
-
-        // Verify the opening center is within the wall brush bounds
-        let opening_center_x = (opening.bounds.0 + opening.bounds.3) / 2;
-        let opening_center_y = (opening.bounds.1 + opening.bounds.4) / 2;
-        let opening_center_z = (opening.bounds.2 + opening.bounds.5) / 2;
-        if opening_center_x < omin_x
-            || opening_center_x > omax_x
-            || opening_center_y < omin_y
-            || opening_center_y > omax_y
-            || opening_center_z < omin_z
-            || opening_center_z > omax_z
+        for brush_id in opening
+            .wall_segment_ids
+            .iter()
+            .chain(opening.frame_brush_ids.iter())
         {
-            return Err(RichnessError::new(
-                RichnessErrorCode::ValueOutOfRange,
-                0,
-                "?",
-                "?",
-                "?",
-                "?",
-                "?",
-                "?",
-                "?",
-                "validation.overlap",
-                RichnessErrorCategory::PlacementTopologyExhaustion,
-                format!(
-                    "opening {:?} center not within owner brush {:?}",
-                    opening.id.raw(),
-                    opening.owner_brush_id.raw()
-                ),
-            ));
+            let brush = ir.brushes.get(brush_id).ok_or_else(|| {
+                validation_error(
+                    RichnessErrorCode::SemanticInfeasible,
+                    RichnessErrorCategory::SemanticInfeasibility,
+                    "validation.overlap",
+                    format!(
+                        "opening {} references missing brush {}",
+                        opening.id.raw(),
+                        brush_id.raw()
+                    ),
+                )
+            })?;
+            if richness_geom::brushes_overlap(&brush.brush, &omitted)? {
+                return Err(validation_error(
+                    RichnessErrorCode::SemanticInfeasible,
+                    RichnessErrorCategory::SemanticInfeasibility,
+                    "validation.overlap",
+                    format!(
+                        "brush {} ({}) occupies opening {}",
+                        brush.id.raw(),
+                        brush.role.tag(),
+                        opening.id.raw()
+                    ),
+                ));
+            }
         }
     }
 
@@ -484,12 +508,16 @@ pub(crate) fn validate_actual_vs_reserved_cost(
 ) -> Result<(), RichnessError> {
     // Count actual costs from assembly
     let actual = BudgetReservation {
-        faces: ir.brushes.values().map(|b| b.cost.face_count).sum::<u32>() as u32,
+        faces: ir
+            .brushes
+            .values()
+            .map(|brush| brush.brush.faces.len() as u32)
+            .sum(),
         brushes: ir.brushes.len() as u32,
         entities: ir.entities.len() as u32,
         lights: 0, // lights not yet placed in assembly phase
         vertical_openings: 0,
-        support_contacts: ir.supports.len() as u32,
+        support_contacts: actual_support_budget_units(ir),
         package_assets: 0,
         compiler_lumps: 15, // always 15 for BSP2
         renderer_batches: 0,
@@ -515,6 +543,48 @@ pub(crate) fn validate_actual_vs_reserved_cost(
     Ok(())
 }
 
+/// Count emitted support assemblies in the same units reserved by Phase 08.
+///
+/// The exact support DAG deliberately contains one proof edge per brush. The
+/// complexity catalog reserves coarser authored support assemblies: one world
+/// anchor and one shell/ceiling transfer per room, one frame assembly per
+/// portal, and one unit per independently emitted massing/support piece.
+/// Keeping these counts separate preserves per-brush geometric proof without
+/// charging every convex decomposition piece as a new authored support recipe.
+fn actual_support_budget_units(ir: &AssemblyIR) -> u32 {
+    let mut floor_owners = BTreeSet::new();
+    let mut ceiling_owners = BTreeSet::new();
+    let mut independent = 0u32;
+
+    for brush in ir.brushes.values() {
+        match brush.role {
+            BrushAssemblyRole::FloorSlab => {
+                floor_owners.insert(brush.owner.clone());
+            }
+            BrushAssemblyRole::CeilingSlab => {
+                ceiling_owners.insert(brush.owner.clone());
+            }
+            BrushAssemblyRole::NorthWall
+            | BrushAssemblyRole::SouthWall
+            | BrushAssemblyRole::EastWall
+            | BrushAssemblyRole::WestWall
+            | BrushAssemblyRole::DiagNEWall
+            | BrushAssemblyRole::DiagNWWall
+            | BrushAssemblyRole::DiagSEWall
+            | BrushAssemblyRole::DiagSWWall
+            | BrushAssemblyRole::PortalPost
+            | BrushAssemblyRole::PortalLintel
+            | BrushAssemblyRole::PortalSurround => {}
+            _ => independent = independent.saturating_add(1),
+        }
+    }
+
+    (floor_owners.len() as u32)
+        .saturating_add(ceiling_owners.len() as u32)
+        .saturating_add(ir.portal_assemblies.len() as u32)
+        .saturating_add(independent)
+}
+
 // ── Convenience function ──────────────────────────────────────────────────
 
 /// Run all validators and panic if any fail (for test use).
@@ -522,8 +592,9 @@ pub(crate) fn assert_all_valid(
     ir: &AssemblyIR,
     visibility: &VisibilityPlan,
     complexity: Option<&ComplexityPlan>,
+    theme: &ThemeDefinition,
 ) {
-    let report = validate_assembly(ir, visibility, complexity);
+    let report = validate_assembly(ir, visibility, complexity, theme);
     for check in &report.checks {
         if !check.passed {
             panic!(
@@ -636,13 +707,15 @@ mod tests {
         SemanticAttribution, SupportRecord, SupportTarget,
     };
     use crate::enhanced_v3::richness::ids::{
-        ArchetypeRequestId, BeatId, OpeningAssemblyId, PortalId, ReservationId, ZoneId,
+        ArchetypeIndex, ArchetypeRequestId, BeatId, OpeningAssemblyId, ReservationId, ZoneId,
     };
+    use crate::enhanced_v3::richness::theme::THEME_ANCIENT;
 
     fn make_attr() -> SemanticAttribution {
         SemanticAttribution::from_reservation(
             ReservationId::new(0),
             Some(ArchetypeRequestId::new(0)),
+            Some(ArchetypeIndex::new(0)),
             Some(BeatId::new(0)),
             Some(ZoneId::new(0)),
         )
@@ -690,6 +763,9 @@ mod tests {
             OpeningRecord {
                 id: OpeningAssemblyId::new(0),
                 owner_brush_id: BrushAssemblyId::new(99),
+                wall_segment_ids: vec![BrushAssemblyId::new(99)],
+                owner_partition_bounds: (0, 0, 16, 64, 16, 160),
+                wall_role: BrushAssemblyRole::NorthWall,
                 owner: attr,
                 bounds: (0, 0, 16, 64, 16, 96),
                 portal_id: None,
@@ -722,7 +798,18 @@ mod tests {
     #[test]
     fn validate_textures_passes() {
         let (ir, _) = make_simple_assembly();
-        assert!(validate_textures(&ir).is_ok());
+        for theme in super::super::theme::all_themes() {
+            assert!(validate_textures(&ir, theme).is_ok());
+        }
+    }
+
+    #[test]
+    fn validate_textures_rejects_role_invalid_assignment() {
+        let (mut ir, floor_id) = make_simple_assembly();
+        ir.material_roles
+            .insert(floor_id, super::super::theme::SemanticRole::Wall);
+        let error = validate_textures(&ir, &THEME_ANCIENT).unwrap_err();
+        assert_eq!(error.code, RichnessErrorCode::AssetRoleMissing);
     }
 
     #[test]
@@ -765,7 +852,7 @@ mod tests {
     fn validation_report_aggregates_results() {
         let (ir, _) = make_simple_assembly();
         let vis = VisibilityPlan::new();
-        let report = validate_assembly(&ir, &vis, None);
+        let report = validate_assembly(&ir, &vis, None, &THEME_ANCIENT);
 
         assert!(report.all_passed);
         for check in &report.checks {
@@ -801,7 +888,7 @@ mod tests {
 
         let vis = VisibilityPlan::new();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            assert_all_valid(&ir, &vis, None);
+            assert_all_valid(&ir, &vis, None, &THEME_ANCIENT);
         }));
         assert!(result.is_err(), "assert_all_valid should panic on overlap");
     }

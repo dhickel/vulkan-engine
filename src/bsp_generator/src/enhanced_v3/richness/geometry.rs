@@ -13,7 +13,9 @@
 //! - No floats; exact rational arithmetic through the baseline kernel.
 //! - Crate-private; canonical ordering.
 
-use crate::enhanced_v3::geometry::{self, BrushFace, CanonicalPlane, ConvexBrush};
+use crate::enhanced_v3::geometry::{
+    self, BrushFace, CanonicalPlane, ConvexBrush, Point3, Rational,
+};
 use crate::enhanced_v3::richness::error::{
     RichnessError, RichnessErrorCategory, RichnessErrorCode,
 };
@@ -60,6 +62,44 @@ pub(crate) fn footprint_quake_bounds(fp: &Footprint3D) -> (i128, i128, i128, i12
         fp.x1 as i128 * QUANTUM,
         fp.y1 as i128 * QUANTUM,
     )
+}
+
+/// Exact slab/wall elevations for a reservation footprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VerticalBounds {
+    pub floor_min: i128,
+    pub floor_max: i128,
+    pub wall_min: i128,
+    pub wall_max: i128,
+    pub ceiling_min: i128,
+    pub ceiling_max: i128,
+}
+
+pub(crate) fn footprint_vertical_bounds(fp: &Footprint3D) -> Result<VerticalBounds, RichnessError> {
+    use super::footprint::{ROOM_HEIGHT, UPPER_FLOOR_Z};
+
+    let lower = fp.occupies_lower;
+    let upper = fp.occupies_upper;
+    let (base, top) = match (lower, upper) {
+        (true, false) => (0, ROOM_HEIGHT as i128),
+        (false, true) => (UPPER_FLOOR_Z as i128, (UPPER_FLOOR_Z + ROOM_HEIGHT) as i128),
+        (true, true) => (0, (UPPER_FLOOR_Z + ROOM_HEIGHT) as i128),
+        (false, false) => {
+            return Err(geometry_error(
+                RichnessErrorCode::SemanticInfeasible,
+                "vertical_bounds",
+                "room footprint occupies no vertical layer",
+            ));
+        }
+    };
+    Ok(VerticalBounds {
+        floor_min: base,
+        floor_max: base + QUANTUM,
+        wall_min: base + QUANTUM,
+        wall_max: top - QUANTUM,
+        ceiling_min: top - QUANTUM,
+        ceiling_max: top,
+    })
 }
 
 /// Convert grid X coordinate to Quake i128.
@@ -160,15 +200,32 @@ pub(crate) fn validate_containment(
     let qy0 = fp.y0 as i128 * QUANTUM;
     let qx1 = fp.x1 as i128 * QUANTUM;
     let qy1 = fp.y1 as i128 * QUANTUM;
-    let qz_max = CEILING_Z_MAX;
+    let vertical = footprint_vertical_bounds(fp)?;
 
-    if min_x < qx0 || max_x > qx1 || min_y < qy0 || max_y > qy1 || min_z < 0 || max_z > qz_max {
+    if min_x < qx0
+        || max_x > qx1
+        || min_y < qy0
+        || max_y > qy1
+        || min_z < vertical.floor_min
+        || max_z > vertical.ceiling_max
+    {
         return Err(geometry_error(
             RichnessErrorCode::ValueOutOfRange,
             "containment",
             format!(
-                "brush ({},{},{})-({},{},{}) not contained in footprint ({},{})-({},{}) z=[0,{}]",
-                min_x, min_y, min_z, max_x, max_y, max_z, qx0, qy0, qx1, qy1, qz_max
+                "brush ({},{},{})-({},{},{}) not contained in footprint ({},{})-({},{}) z=[{},{}]",
+                min_x,
+                min_y,
+                min_z,
+                max_x,
+                max_y,
+                max_z,
+                qx0,
+                qy0,
+                qx1,
+                qy1,
+                vertical.floor_min,
+                vertical.ceiling_max
             ),
         ));
     }
@@ -203,14 +260,19 @@ fn geometry_error(
 /// Spans x0..x1, y0..y1, z=0..16. Owns the full partition beneath walls.
 pub(crate) fn make_floor_slab(fp: &Footprint3D) -> Result<ConvexBrush, RichnessError> {
     let (qx0, qy0, qx1, qy1) = footprint_quake_bounds(fp);
-    let brush =
-        ConvexBrush::make_box((qx0, qx1), (qy0, qy1), (FLOOR_Z_MIN, FLOOR_Z_MAX)).map_err(|e| {
-            geometry_error(
-                RichnessErrorCode::ValueOutOfRange,
-                "floor_slab",
-                format!("{e}"),
-            )
-        })?;
+    let vertical = footprint_vertical_bounds(fp)?;
+    let brush = ConvexBrush::make_box(
+        (qx0, qx1),
+        (qy0, qy1),
+        (vertical.floor_min, vertical.floor_max),
+    )
+    .map_err(|e| {
+        geometry_error(
+            RichnessErrorCode::ValueOutOfRange,
+            "floor_slab",
+            format!("{e}"),
+        )
+    })?;
     validate_brush(&brush)?;
     Ok(brush)
 }
@@ -220,14 +282,19 @@ pub(crate) fn make_floor_slab(fp: &Footprint3D) -> Result<ConvexBrush, RichnessE
 /// Spans x0..x1, y0..y1, z=160..176. Owns the full partition above walls.
 pub(crate) fn make_ceiling_slab(fp: &Footprint3D) -> Result<ConvexBrush, RichnessError> {
     let (qx0, qy0, qx1, qy1) = footprint_quake_bounds(fp);
-    let brush = ConvexBrush::make_box((qx0, qx1), (qy0, qy1), (CEILING_Z_MIN, CEILING_Z_MAX))
-        .map_err(|e| {
-            geometry_error(
-                RichnessErrorCode::ValueOutOfRange,
-                "ceiling_slab",
-                format!("{e}"),
-            )
-        })?;
+    let vertical = footprint_vertical_bounds(fp)?;
+    let brush = ConvexBrush::make_box(
+        (qx0, qx1),
+        (qy0, qy1),
+        (vertical.ceiling_min, vertical.ceiling_max),
+    )
+    .map_err(|e| {
+        geometry_error(
+            RichnessErrorCode::ValueOutOfRange,
+            "ceiling_slab",
+            format!("{e}"),
+        )
+    })?;
     validate_brush(&brush)?;
     Ok(brush)
 }
@@ -237,10 +304,11 @@ pub(crate) fn make_ceiling_slab(fp: &Footprint3D) -> Result<ConvexBrush, Richnes
 /// Build a north wall (y0..y0+16, full x span, z=16..160).
 pub(crate) fn make_north_wall(fp: &Footprint3D) -> Result<ConvexBrush, RichnessError> {
     let (qx0, qy0, qx1, _qy1) = footprint_quake_bounds(fp);
+    let vertical = footprint_vertical_bounds(fp)?;
     let brush = ConvexBrush::make_box(
         (qx0, qx1),
         (qy0, qy0 + WALL_THICKNESS),
-        (WALL_Z_MIN, WALL_Z_MAX),
+        (vertical.wall_min, vertical.wall_max),
     )
     .map_err(|e| {
         geometry_error(
@@ -256,10 +324,11 @@ pub(crate) fn make_north_wall(fp: &Footprint3D) -> Result<ConvexBrush, RichnessE
 /// Build a south wall (y1-16..y1, full x span, z=16..160).
 pub(crate) fn make_south_wall(fp: &Footprint3D) -> Result<ConvexBrush, RichnessError> {
     let (qx0, _qy0, qx1, qy1) = footprint_quake_bounds(fp);
+    let vertical = footprint_vertical_bounds(fp)?;
     let brush = ConvexBrush::make_box(
         (qx0, qx1),
         (qy1 - WALL_THICKNESS, qy1),
-        (WALL_Z_MIN, WALL_Z_MAX),
+        (vertical.wall_min, vertical.wall_max),
     )
     .map_err(|e| {
         geometry_error(
@@ -277,10 +346,11 @@ pub(crate) fn make_south_wall(fp: &Footprint3D) -> Result<ConvexBrush, RichnessE
 /// The y span is shortened to avoid corner overlap with N/S walls.
 pub(crate) fn make_west_wall(fp: &Footprint3D) -> Result<ConvexBrush, RichnessError> {
     let (qx0, qy0, _qx1, qy1) = footprint_quake_bounds(fp);
+    let vertical = footprint_vertical_bounds(fp)?;
     let brush = ConvexBrush::make_box(
         (qx0, qx0 + WALL_THICKNESS),
         (qy0 + WALL_THICKNESS, qy1 - WALL_THICKNESS),
-        (WALL_Z_MIN, WALL_Z_MAX),
+        (vertical.wall_min, vertical.wall_max),
     )
     .map_err(|e| {
         geometry_error(
@@ -298,10 +368,11 @@ pub(crate) fn make_west_wall(fp: &Footprint3D) -> Result<ConvexBrush, RichnessEr
 /// The y span is shortened to avoid corner overlap with N/S walls.
 pub(crate) fn make_east_wall(fp: &Footprint3D) -> Result<ConvexBrush, RichnessError> {
     let (_qx0, qy0, qx1, qy1) = footprint_quake_bounds(fp);
+    let vertical = footprint_vertical_bounds(fp)?;
     let brush = ConvexBrush::make_box(
         (qx1 - WALL_THICKNESS, qx1),
         (qy0 + WALL_THICKNESS, qy1 - WALL_THICKNESS),
-        (WALL_Z_MIN, WALL_Z_MAX),
+        (vertical.wall_min, vertical.wall_max),
     )
     .map_err(|e| {
         geometry_error(
@@ -325,7 +396,6 @@ pub(crate) fn make_east_wall(fp: &Footprint3D) -> Result<ConvexBrush, RichnessEr
 ///
 /// Column is 16×16 (one quantum), from floor top to ceiling bottom.
 pub(crate) fn make_column(x0: i128, y0: i128) -> Result<ConvexBrush, RichnessError> {
-    debug_assert!(x0 % QUANTUM == 0 && y0 % QUANTUM == 0);
     let brush = ConvexBrush::make_box(
         (x0, x0 + QUANTUM),
         (y0, y0 + QUANTUM),
@@ -338,7 +408,6 @@ pub(crate) fn make_column(x0: i128, y0: i128) -> Result<ConvexBrush, RichnessErr
 
 /// Build a 32×32 pillar at the given grid-aligned minimum corner.
 pub(crate) fn make_pillar(x0: i128, y0: i128) -> Result<ConvexBrush, RichnessError> {
-    debug_assert!(x0 % QUANTUM == 0 && y0 % QUANTUM == 0);
     let w = QUANTUM * 2; // 32 units
     let brush = ConvexBrush::make_box((x0, x0 + w), (y0, y0 + w), (WALL_Z_MIN, WALL_Z_MAX))
         .map_err(|e| {
@@ -534,8 +603,6 @@ pub(crate) fn make_portal_post(
     x1: i128,
     y1: i128,
 ) -> Result<ConvexBrush, RichnessError> {
-    debug_assert!(x0 % QUANTUM == 0 && y0 % QUANTUM == 0);
-    debug_assert!(x1 % QUANTUM == 0 && y1 % QUANTUM == 0);
     let brush =
         ConvexBrush::make_box((x0, x1), (y0, y1), (WALL_Z_MIN, WALL_Z_MAX)).map_err(|e| {
             geometry_error(
@@ -558,8 +625,6 @@ pub(crate) fn make_portal_lintel(
     x1: i128,
     y1: i128,
 ) -> Result<ConvexBrush, RichnessError> {
-    debug_assert!(x0 % QUANTUM == 0 && y0 % QUANTUM == 0);
-    debug_assert!(x1 % QUANTUM == 0 && y1 % QUANTUM == 0);
     let lintel_z0 = WALL_Z_MIN + 80; // throat height = 80, starting from wall bottom (16)
     let lintel_z1 = lintel_z0 + WALL_THICKNESS; // 16u thick
     let brush = ConvexBrush::make_box((x0, x1), (y0, y1), (lintel_z0, lintel_z1)).map_err(|e| {
@@ -585,7 +650,6 @@ pub(crate) fn make_surround_frame(
     z0: i128,
     z1: i128,
 ) -> Result<ConvexBrush, RichnessError> {
-    debug_assert!(x0 % QUANTUM == 0 && y0 % QUANTUM == 0);
     let brush = ConvexBrush::make_box((x0, x1), (y0, y1), (z0, z1)).map_err(|e| {
         geometry_error(
             RichnessErrorCode::ValueOutOfRange,
@@ -609,7 +673,6 @@ pub(crate) fn make_stepped_course(
     z0: i128,
     z1: i128,
 ) -> Result<ConvexBrush, RichnessError> {
-    debug_assert!(x0 % QUANTUM == 0 && y0 % QUANTUM == 0);
     let brush = ConvexBrush::make_box((x0, x1), (y0, y1), (z0, z1)).map_err(|e| {
         geometry_error(
             RichnessErrorCode::ValueOutOfRange,
@@ -633,7 +696,6 @@ pub(crate) fn make_liner(
     z_min: i128,
     z_max: i128,
 ) -> Result<ConvexBrush, RichnessError> {
-    debug_assert!(x0 % QUANTUM == 0 && y0 % QUANTUM == 0);
     let brush = ConvexBrush::make_box((x0, x1), (y0, y1), (z_min, z_max))
         .map_err(|e| geometry_error(RichnessErrorCode::ValueOutOfRange, "liner", format!("{e}")))?;
     validate_brush(&brush)?;
@@ -649,7 +711,6 @@ pub(crate) fn make_pilaster(
     x1: i128,
     y1: i128,
 ) -> Result<ConvexBrush, RichnessError> {
-    debug_assert!(x0 % QUANTUM == 0 && y0 % QUANTUM == 0);
     let brush =
         ConvexBrush::make_box((x0, x1), (y0, y1), (WALL_Z_MIN, WALL_Z_MAX)).map_err(|e| {
             geometry_error(
@@ -674,7 +735,6 @@ pub(crate) fn make_recess_volume(
     z0: i128,
     z1: i128,
 ) -> Result<ConvexBrush, RichnessError> {
-    debug_assert!(x0 % QUANTUM == 0 && y0 % QUANTUM == 0);
     let brush = ConvexBrush::make_box((x0, x1), (y0, y1), (z0, z1)).map_err(|e| {
         geometry_error(
             RichnessErrorCode::ValueOutOfRange,
@@ -695,7 +755,6 @@ pub(crate) fn make_buttress(
     x1: i128,
     y1: i128,
 ) -> Result<ConvexBrush, RichnessError> {
-    debug_assert!(x0 % QUANTUM == 0 && y0 % QUANTUM == 0);
     let brush =
         ConvexBrush::make_box((x0, x1), (y0, y1), (WALL_Z_MIN, WALL_Z_MAX)).map_err(|e| {
             geometry_error(
@@ -718,8 +777,13 @@ pub(crate) fn make_sill(
     y1: i128,
     sill_height: i128,
 ) -> Result<ConvexBrush, RichnessError> {
-    debug_assert!(x0 % QUANTUM == 0 && y0 % QUANTUM == 0);
-    debug_assert!(sill_height >= 48 && sill_height <= 64);
+    if !(48..=64).contains(&sill_height) {
+        return Err(geometry_error(
+            RichnessErrorCode::ValueOutOfRange,
+            "sill",
+            format!("sill height {sill_height} is outside 48..=64"),
+        ));
+    }
     let brush = ConvexBrush::make_box((x0, x1), (y0, y1), (WALL_Z_MIN, WALL_Z_MIN + sill_height))
         .map_err(|e| {
         geometry_error(RichnessErrorCode::ValueOutOfRange, "sill", format!("{e}"))
@@ -739,7 +803,6 @@ pub(crate) fn make_partial_wall(
     z_min: i128,
     z_max: i128,
 ) -> Result<ConvexBrush, RichnessError> {
-    debug_assert!(x0 % QUANTUM == 0 && y0 % QUANTUM == 0);
     let brush = ConvexBrush::make_box((x0, x1), (y0, y1), (z_min, z_max)).map_err(|e| {
         geometry_error(
             RichnessErrorCode::ValueOutOfRange,
@@ -753,81 +816,115 @@ pub(crate) fn make_partial_wall(
 
 // ── Contact detection ─────────────────────────────────────────────────────
 
-/// Compute the positive-area contact polygon between two brush faces.
-///
-/// For two brushes a and b, compute whether they have a positive-area face
-/// contact. Returns the contact area bounding box and the interface kind
-/// if contact exists.
-pub(crate) fn face_contact_bounds(
-    a: &ConvexBrush,
-    b: &ConvexBrush,
-) -> Option<(i128, i128, i128, i128, i128, i128)> {
-    // Get AABBs for quick rejection
-    let a_bb = a.aabb().ok()?;
-    let b_bb = b.aabb().ok()?;
-    let ((amin_x, amin_y, amin_z), (amax_x, amax_y, amax_z)) = a_bb;
-    let ((bmin_x, bmin_y, bmin_z), (bmax_x, bmax_y, bmax_z)) = b_bb;
+/// Exact positive-area face contact shared by two convex brushes.
+#[derive(Debug, Clone)]
+pub(crate) struct ExactFaceContact {
+    pub plane: CanonicalPlane,
+    pub vertices: Vec<Point3>,
+    pub area_squared: Rational,
+}
 
-    // Check for AABB overlap (with zero-width contact allowed)
-    let ox0 = amin_x.max(bmin_x);
-    let oy0 = amin_y.max(bmin_y);
-    let oz0 = amin_z.max(bmin_z);
-    let ox1 = amax_x.min(bmax_x);
-    let oy1 = amax_y.min(bmax_y);
-    let oz1 = amax_z.min(bmax_z);
+fn opposite_oriented(a: &CanonicalPlane, b: &CanonicalPlane) -> bool {
+    a.nx == -b.nx && a.ny == -b.ny && a.nz == -b.nz && a.d == -b.d
+}
 
-    if ox0 <= ox1 && oy0 <= oy1 && oz0 <= oz1 {
-        // Check for positive area in at least two dimensions
-        let dims_ok = ((ox0 < ox1) as u8) + ((oy0 < oy1) as u8) + ((oz0 < oz1) as u8);
-        if dims_ok >= 2 {
-            // Contact area in XY plane: (ox1-ox0)*(oy1-oy0)
-            let area_xy = (ox1 - ox0) * (oy1 - oy0);
-            let area_xz = (ox1 - ox0) * (oz1 - oz0);
-            let area_yz = (oy1 - oy0) * (oz1 - oz0);
-            if area_xy > 0 || area_xz > 0 || area_yz > 0 {
-                return Some((ox0, oy0, oz0, ox1, oy1, oz1));
+/// Find an exact shared face. AABB intersection is only a broad phase; the
+/// accepted contact must be bounded by coincident, oppositely oriented brush
+/// planes and have positive exact polygon area.
+pub(crate) fn exact_face_contact(a: &ConvexBrush, b: &ConvexBrush) -> Option<ExactFaceContact> {
+    let ((amin_x, amin_y, amin_z), (amax_x, amax_y, amax_z)) = a.aabb().ok()?;
+    let ((bmin_x, bmin_y, bmin_z), (bmax_x, bmax_y, bmax_z)) = b.aabb().ok()?;
+    if amin_x > bmax_x
+        || bmin_x > amax_x
+        || amin_y > bmax_y
+        || bmin_y > amax_y
+        || amin_z > bmax_z
+        || bmin_z > amax_z
+    {
+        return None;
+    }
+
+    let mut faces = a.faces.clone();
+    faces.extend(b.faces.iter().cloned());
+    let intersection = geometry::half_space_vertices(&faces).ok()?;
+
+    for a_face in &a.faces {
+        for b_face in &b.faces {
+            if !opposite_oriented(&a_face.plane, &b_face.plane) {
+                continue;
+            }
+            let vertices: Vec<_> = intersection
+                .iter()
+                .copied()
+                .filter(|vertex| {
+                    a_face
+                        .plane
+                        .signed_distance_rational(vertex)
+                        .is_ok_and(|distance| distance == Rational::ZERO)
+                })
+                .collect();
+            if vertices.len() < 3 {
+                continue;
+            }
+            let area_squared = geometry::polygon_area_squared(&vertices, &a_face.plane).ok()?;
+            if area_squared > Rational::ZERO {
+                return Some(ExactFaceContact {
+                    plane: a_face.plane.clone(),
+                    vertices,
+                    area_squared,
+                });
             }
         }
     }
     None
 }
 
-/// Whether two brushes share a positive-area face contact on a cardinal plane.
+fn rational_floor(value: Rational) -> i128 {
+    value.num.div_euclid(value.den)
+}
+
+fn rational_ceil(value: Rational) -> Option<i128> {
+    let floor = rational_floor(value);
+    floor.checked_add(i128::from(value.num.rem_euclid(value.den) != 0))
+}
+
+/// Integer envelope of the exact positive-area contact polygon.
+pub(crate) fn face_contact_bounds(
+    a: &ConvexBrush,
+    b: &ConvexBrush,
+) -> Option<(i128, i128, i128, i128, i128, i128)> {
+    let contact = exact_face_contact(a, b)?;
+    let min_x = contact.vertices.iter().map(|p| rational_floor(p.x)).min()?;
+    let min_y = contact.vertices.iter().map(|p| rational_floor(p.y)).min()?;
+    let min_z = contact.vertices.iter().map(|p| rational_floor(p.z)).min()?;
+    let max_x = contact
+        .vertices
+        .iter()
+        .map(|p| rational_ceil(p.x))
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .max()?;
+    let max_y = contact
+        .vertices
+        .iter()
+        .map(|p| rational_ceil(p.y))
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .max()?;
+    let max_z = contact
+        .vertices
+        .iter()
+        .map(|p| rational_ceil(p.z))
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .max()?;
+    Some((min_x, min_y, min_z, max_x, max_y, max_z))
+}
+
+/// Whether two brushes share an exact positive-area face contact, including
+/// approved XY-45 diagonal planes.
 pub(crate) fn has_positive_area_contact(a: &ConvexBrush, b: &ConvexBrush) -> bool {
-    // Get AABBs
-    let a_bb = match a.aabb() {
-        Ok(bb) => bb,
-        Err(_) => return false,
-    };
-    let b_bb = match b.aabb() {
-        Ok(bb) => bb,
-        Err(_) => return false,
-    };
-    let ((amin_x, amin_y, amin_z), (amax_x, amax_y, amax_z)) = a_bb;
-    let ((bmin_x, bmin_y, bmin_z), (bmax_x, bmax_y, bmax_z)) = b_bb;
-
-    // Quick reject: no AABB overlap (allow face-touching, hence <=)
-    let ox0 = amin_x.max(bmin_x);
-    let oy0 = amin_y.max(bmin_y);
-    let oz0 = amin_z.max(bmin_z);
-    let ox1 = amax_x.min(bmax_x);
-    let oy1 = amax_y.min(bmax_y);
-    let oz1 = amax_z.min(bmax_z);
-
-    if ox0 > ox1 || oy0 > oy1 || oz0 > oz1 {
-        return false;
-    }
-
-    // Positive area in at least one axis pair (allow zero-area in one axis for face contact)
-    let dims_ok = ((ox0 < ox1) as u8) + ((oy0 < oy1) as u8) + ((oz0 < oz1) as u8);
-    if dims_ok < 2 {
-        return false; // edge or point contact, not positive area
-    }
-
-    let area_xy = (ox1 - ox0) * (oy1 - oy0);
-    let area_xz = (ox1 - ox0) * (oz1 - oz0);
-    let area_yz = (oy1 - oy0) * (oz1 - oz0);
-    area_xy > 0 || area_xz > 0 || area_yz > 0
+    exact_face_contact(a, b).is_some()
 }
 
 /// Derive the interface kind from two brush roles.
@@ -860,9 +957,14 @@ pub(crate) fn derive_interface_kind(
             BrushAssemblyRole::EastWall,
             BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall,
         ) => Some(InterfaceKind::WallToWallCorner),
-        // Diagonal/wall
-        (r1, _r2) if r1.is_wall() && names_diag(_r2) => Some(InterfaceKind::WallToDiagJoint),
-        (r1, _r2) if r1.is_wall() && names_diag(r1) => Some(InterfaceKind::WallToDiagJoint),
+        // Split runs on one cardinal wall retain an explicit structural joint.
+        (r1, r2) if r1 == r2 && is_cardinal_wall(r1) => Some(InterfaceKind::WallSegmentJoint),
+        // Adjacent room slab partitions meet without overlap.
+        (r1, r2) if r1 == r2 && r1.is_slab() => Some(InterfaceKind::SlabRunJoint),
+        // A diagonal joint is valid only between one diagonal wall and one
+        // cardinal wall. Other diagonal contacts remain undeclared.
+        (r1, r2) if is_cardinal_wall(r1) && names_diag(r2) => Some(InterfaceKind::WallToDiagJoint),
+        (r1, r2) if names_diag(r1) && is_cardinal_wall(r2) => Some(InterfaceKind::WallToDiagJoint),
         // Column/floor
         (BrushAssemblyRole::InteriorColumn, BrushAssemblyRole::FloorSlab) => {
             Some(InterfaceKind::ColumnToFloor)
@@ -900,6 +1002,18 @@ pub(crate) fn derive_interface_kind(
         // Portal lintel/wall
         (BrushAssemblyRole::PortalLintel, r) if r.is_wall() => Some(InterfaceKind::LintelToWall),
         (r, BrushAssemblyRole::PortalLintel) if r.is_wall() => Some(InterfaceKind::LintelToWall),
+        // Pieces of one portal frame.
+        (BrushAssemblyRole::PortalSurround, BrushAssemblyRole::PortalSurround) => {
+            Some(InterfaceKind::PortalFrameJoint)
+        }
+        (r1, r2) if r1 != r2 && is_portal_frame(r1) && is_portal_frame(r2) => {
+            Some(InterfaceKind::PortalFrameJoint)
+        }
+        // Portal surround/floor
+        (BrushAssemblyRole::PortalSurround, BrushAssemblyRole::FloorSlab)
+        | (BrushAssemblyRole::FloorSlab, BrushAssemblyRole::PortalSurround) => {
+            Some(InterfaceKind::SurroundToFloor)
+        }
         // Portal surround/wall
         (BrushAssemblyRole::PortalSurround, r) if r.is_wall() => {
             Some(InterfaceKind::SurroundToWall)
@@ -958,6 +1072,27 @@ fn names_diag(r: super::assembly::BrushAssemblyRole) -> bool {
             | BrushAssemblyRole::DiagNWWall
             | BrushAssemblyRole::DiagSEWall
             | BrushAssemblyRole::DiagSWWall
+    )
+}
+
+fn is_cardinal_wall(r: super::assembly::BrushAssemblyRole) -> bool {
+    use super::assembly::BrushAssemblyRole;
+    matches!(
+        r,
+        BrushAssemblyRole::NorthWall
+            | BrushAssemblyRole::SouthWall
+            | BrushAssemblyRole::EastWall
+            | BrushAssemblyRole::WestWall
+    )
+}
+
+fn is_portal_frame(r: super::assembly::BrushAssemblyRole) -> bool {
+    use super::assembly::BrushAssemblyRole;
+    matches!(
+        r,
+        BrushAssemblyRole::PortalPost
+            | BrushAssemblyRole::PortalLintel
+            | BrushAssemblyRole::PortalSurround
     )
 }
 

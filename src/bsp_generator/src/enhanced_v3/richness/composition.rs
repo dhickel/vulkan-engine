@@ -26,18 +26,26 @@ use crate::enhanced_v3::richness::error::{
 use super::assembly::{
     AssemblyIR, BrushAssembly, BrushAssemblyRole, BudgetDimension, CostSource, InterfaceKind,
     InterfaceRecord, OpeningRecord, PortalAssembly, PortalStyle, SemanticAttribution,
-    SupportRecord, SupportTarget,
+    SharedWallChainAssembly, SupportRecord, SupportTarget,
 };
+use super::complexity::ComplexityPlan;
 use super::content_types::ShapeRule;
 use super::footprint::Footprint3D;
 use super::generated_content;
 use super::geometry as richness_geom;
 use super::ids::{
-    ArchetypeRequestId, BeatId, BrushAssemblyId, OpeningAssemblyId, PortalId, ReservationId,
-    WallChainId, ZoneId,
+    ArchetypeIndex, ArchetypeRequestId, BeatId, BrushAssemblyId, OpeningAssemblyId, PortalId,
+    ReservationId, WallChainId, ZoneId,
 };
+use super::request::RichnessTheme;
 use super::reservation::ReservationRecord;
+use super::solver::FullGenerationResult;
+use super::support::derive_support_records;
+use super::theme::{THEME_ANCIENT, THEME_BRUTALIST, THEME_EGYPTIAN};
+use super::topology::{CommittedPortal, CommittedRoute, Dir};
+use super::validation::validate_assembly;
 use super::variation::{WallChainRecord, WallMass, WallMassTreatment, WallShaping};
+use super::visibility::VisibilityPlan;
 
 // ── Macro composition entry point ─────────────────────────────────────────
 
@@ -47,6 +55,7 @@ use super::variation::{WallChainRecord, WallMass, WallMassTreatment, WallShaping
 /// with semantic attribution, cost tracking, and support records.
 pub(crate) fn compose_all_rooms(
     reservations: &BTreeMap<ReservationId, ReservationRecord>,
+    request_archetypes: &BTreeMap<ArchetypeRequestId, ArchetypeIndex>,
 ) -> Result<AssemblyIR, RichnessError> {
     let mut ir = AssemblyIR::new();
 
@@ -60,7 +69,22 @@ pub(crate) fn compose_all_rooms(
             continue;
         }
 
-        compose_single_room(record, &mut ir)?;
+        let request_id = record.request_id.ok_or_else(|| {
+            missing_archetype_error(record, "room reservation has no archetype request identity")
+        })?;
+        let archetype = request_archetypes
+            .get(&request_id)
+            .copied()
+            .ok_or_else(|| {
+                missing_archetype_error(
+                    record,
+                    format!(
+                        "request {} has no explicit archetype identity",
+                        request_id.raw()
+                    ),
+                )
+            })?;
+        compose_single_room(record, archetype, &mut ir)?;
     }
 
     Ok(ir)
@@ -81,30 +105,32 @@ fn is_room_reservation(record: &ReservationRecord) -> bool {
 /// Compose a single room from its reservation into the assembly IR.
 fn compose_single_room(
     record: &ReservationRecord,
+    archetype: ArchetypeIndex,
     ir: &mut AssemblyIR,
 ) -> Result<(), RichnessError> {
-    let request_id = record.request_id;
-    let arch_idx: usize = request_id
-        .map(|rid| rid.raw() as usize % generated_content::ARCHETYPE_COUNT)
-        .unwrap_or(1); // default to antechamber (simple rectangle) if no request
-
-    if arch_idx >= generated_content::ARCHETYPE_COUNT {
-        return Err(composition_error(
-            "archetype_index",
-            format!(
-                "archetype index {} out of range (max {})",
-                arch_idx,
-                generated_content::ARCHETYPE_COUNT
-            ),
-        ));
-    }
-
-    let shape = generated_content::ARCHETYPE_SHAPE[arch_idx];
+    let request_id = record.request_id.ok_or_else(|| {
+        missing_archetype_error(record, "room reservation has no archetype request identity")
+    })?;
+    let arch_idx = archetype.raw() as usize;
+    let shape = generated_content::ARCHETYPE_SHAPE
+        .get(arch_idx)
+        .copied()
+        .ok_or_else(|| {
+            missing_archetype_error(
+                record,
+                format!(
+                    "archetype index {} is absent from the frozen {}-entry catalog",
+                    arch_idx,
+                    generated_content::ARCHETYPE_COUNT
+                ),
+            )
+        })?;
     let fp = &record.footprint;
 
     let attr = SemanticAttribution::from_reservation(
         record.id,
-        request_id,
+        Some(request_id),
+        Some(archetype),
         record.beat_id,
         record.zone_id,
     );
@@ -118,6 +144,206 @@ fn compose_single_room(
         ShapeRule::Chamfer => compose_chamfered(fp, &attr, cost, arch_idx, ir),
         ShapeRule::Octagon => compose_octagonal(fp, &attr, cost, arch_idx, ir),
         ShapeRule::CompositePartition => compose_composite_partition(fp, &attr, cost, arch_idx, ir),
+    }
+}
+
+/// Complete crate-private Phase-09 output produced from real Phase-07
+/// placement reservations and committed topology routes.
+#[derive(Debug, Clone)]
+pub(crate) struct StructuralComposition {
+    pub assembly: AssemblyIR,
+    pub visibility: VisibilityPlan,
+}
+
+/// Reachable structural composition path for an already solved Richness map.
+///
+/// This deliberately remains isolated from baseline V3. It consumes the final
+/// topology journal (including route-owned throat reservations), uses the
+/// placement result's explicit request→archetype identities, materializes both
+/// cardinal portal endpoints for every committed horizontal route, then seals
+/// exact interfaces and support records. Vertical-route witnesses feed the
+/// visibility records here; their floor/ceiling apertures belong to Phase 10.
+pub(crate) fn compose_solved_generation(
+    generation: &FullGenerationResult,
+    theme: RichnessTheme,
+    complexity: &ComplexityPlan,
+) -> Result<StructuralComposition, RichnessError> {
+    let reservations = &generation.topology.journal.reservations;
+    let mut assembly = compose_all_rooms(reservations, &generation.placement.request_archetypes)?;
+    materialize_canonical_shared_walls(reservations, &mut assembly)?;
+
+    let (style, theme_definition) = match theme {
+        RichnessTheme::Ancient => (PortalStyle::AncientPostLintel, &THEME_ANCIENT),
+        RichnessTheme::Egyptian => (PortalStyle::EgyptianSteppedSurround, &THEME_EGYPTIAN),
+        RichnessTheme::Brutalist => (PortalStyle::BrutalistRevealSurround, &THEME_BRUTALIST),
+    };
+    for route in &generation.topology.routes {
+        materialize_route_portals(
+            route,
+            style,
+            reservations,
+            &generation.placement.request_archetypes,
+            &mut assembly,
+        )?;
+    }
+
+    coalesce_overlapping_portal_frames(&mut assembly)?;
+    enforce_opening_omission(&assembly)?;
+    derive_all_interfaces(&mut assembly)?;
+    derive_support_records(&mut assembly)?;
+    let visibility = VisibilityPlan::build_from_assembly_and_routes(
+        &assembly,
+        &generation.topology.routes,
+        &generation.topology.vertical_routes,
+    );
+    let report = validate_assembly(&assembly, &visibility, Some(complexity), theme_definition);
+    if !report.all_passed {
+        let failures = report
+            .checks
+            .iter()
+            .filter(|check| !check.passed)
+            .map(|check| {
+                format!(
+                    "{}: {}",
+                    check.name,
+                    check.message.as_deref().unwrap_or("unknown failure")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(composition_error(
+            "pipeline.validation",
+            format!("structural composition failed validation: {failures}"),
+        ));
+    }
+    Ok(StructuralComposition {
+        assembly,
+        visibility,
+    })
+}
+
+fn materialize_route_portals(
+    route: &CommittedRoute,
+    style: PortalStyle,
+    reservations: &BTreeMap<ReservationId, ReservationRecord>,
+    request_archetypes: &BTreeMap<ArchetypeRequestId, ArchetypeIndex>,
+    ir: &mut AssemblyIR,
+) -> Result<(), RichnessError> {
+    for portal in [&route.source_portal, &route.target_portal] {
+        let endpoint = reservations
+            .get(&portal.endpoint_reservation_id)
+            .ok_or_else(|| {
+                composition_error(
+                    "pipeline.portal.endpoint",
+                    format!(
+                        "portal {} references missing endpoint reservation {}",
+                        portal.id.raw(),
+                        portal.endpoint_reservation_id.raw()
+                    ),
+                )
+            })?;
+        let request_id = endpoint.request_id.ok_or_else(|| {
+            missing_archetype_error(endpoint, "portal endpoint has no archetype request")
+        })?;
+        let archetype = request_archetypes
+            .get(&request_id)
+            .copied()
+            .ok_or_else(|| {
+                missing_archetype_error(endpoint, "portal endpoint archetype identity is missing")
+            })?;
+        let attr = SemanticAttribution::from_reservation(
+            endpoint.id,
+            Some(request_id),
+            Some(archetype),
+            endpoint.beat_id,
+            endpoint.zone_id,
+        );
+        let (wall_id, wall_role) = find_portal_wall(ir, portal)?;
+        let throat = committed_throat_anchor(portal)?;
+        build_portal(
+            portal.id,
+            style,
+            wall_id,
+            throat,
+            wall_role,
+            &attr,
+            CostSource {
+                dimension: BudgetDimension::SourceFaces,
+                face_count: 6,
+            },
+            ir,
+        )?;
+    }
+    Ok(())
+}
+
+fn committed_throat_anchor(
+    portal: &CommittedPortal,
+) -> Result<(i128, i128, i128, i128), RichnessError> {
+    if portal.headroom != 80 {
+        return Err(composition_error(
+            "pipeline.portal.headroom",
+            format!(
+                "portal {} committed headroom {} instead of 80",
+                portal.id.raw(),
+                portal.headroom
+            ),
+        ));
+    }
+    let (span_min, span_max) = match portal.wall {
+        Dir::North | Dir::South => (portal.witness.x0, portal.witness.x1),
+        Dir::East | Dir::West => (portal.witness.y0, portal.witness.y1),
+    };
+    let z0 = portal.anchor_cell.quake_z_min() as i128 + richness_geom::QUANTUM;
+    let anchor = (
+        span_min as i128 * richness_geom::QUANTUM,
+        z0,
+        span_max as i128 * richness_geom::QUANTUM,
+        z0 + portal.headroom as i128,
+    );
+    validate_portal_request(portal.id, anchor, wall_role_for_dir(portal.wall))?;
+    Ok(anchor)
+}
+
+fn find_portal_wall(
+    ir: &AssemblyIR,
+    portal: &CommittedPortal,
+) -> Result<(BrushAssemblyId, BrushAssemblyRole), RichnessError> {
+    let requested_role = wall_role_for_dir(portal.wall);
+    if let Some(brush) = ir.brushes.values().find(|brush| {
+        brush.owner.reservation_id == portal.endpoint_reservation_id && brush.role == requested_role
+    }) {
+        return Ok((brush.id, requested_role));
+    }
+    if let Some(chain) = ir.shared_wall_chains.values().find(|chain| {
+        chain.owner_reservation_id == portal.endpoint_reservation_id
+            || chain.sharing_reservation_id == portal.endpoint_reservation_id
+    }) {
+        let brush = ir.brushes.get(&chain.owner_brush_id).ok_or_else(|| {
+            composition_error(
+                "pipeline.portal.wall",
+                format!("shared wall chain {} lost its owner brush", chain.id.raw()),
+            )
+        })?;
+        return Ok((brush.id, brush.role));
+    }
+    Err(composition_error(
+        "pipeline.portal.wall",
+        format!(
+            "portal {} found no materialized {} for reservation {}",
+            portal.id.raw(),
+            requested_role.tag(),
+            portal.endpoint_reservation_id.raw()
+        ),
+    ))
+}
+
+fn wall_role_for_dir(direction: Dir) -> BrushAssemblyRole {
+    match direction {
+        Dir::North => BrushAssemblyRole::NorthWall,
+        Dir::South => BrushAssemblyRole::SouthWall,
+        Dir::East => BrushAssemblyRole::EastWall,
+        Dir::West => BrushAssemblyRole::WestWall,
     }
 }
 
@@ -193,6 +419,260 @@ pub(crate) fn materialize_shared_wall_chain(
     Ok(())
 }
 
+/// Collapse touching room-wall pairs into canonical one-owner runs.
+///
+/// Each shared run is clipped exactly from both cardinal wall brushes. The
+/// sharing copy is removed and both semantic rooms reference the owner's
+/// unchanged canonical boundary plane through `SharedWallChainAssembly`.
+pub(crate) fn materialize_canonical_shared_walls(
+    reservations: &BTreeMap<ReservationId, ReservationRecord>,
+    ir: &mut AssemblyIR,
+) -> Result<(), RichnessError> {
+    let rooms: Vec<_> = reservations
+        .values()
+        .filter(|record| record.committed && is_room_reservation(record))
+        .collect();
+
+    for (index, a) in rooms.iter().enumerate() {
+        for b in rooms.iter().skip(index + 1) {
+            if !layers_overlap(&a.footprint, &b.footprint) {
+                continue;
+            }
+            let Some((a_role, b_role)) = touching_wall_roles(&a.footprint, &b.footprint) else {
+                continue;
+            };
+            let (owner, owner_role, sharing, sharing_role) = if a.id < b.id {
+                (*a, a_role, *b, b_role)
+            } else {
+                (*b, b_role, *a, a_role)
+            };
+
+            let owner_ids: Vec<_> = ir
+                .brushes
+                .values()
+                .filter(|brush| brush.owner.reservation_id == owner.id && brush.role == owner_role)
+                .map(|brush| brush.id)
+                .collect();
+            let sharing_ids: Vec<_> = ir
+                .brushes
+                .values()
+                .filter(|brush| {
+                    brush.owner.reservation_id == sharing.id && brush.role == sharing_role
+                })
+                .map(|brush| brush.id)
+                .collect();
+
+            let mut contact = None;
+            for owner_id in &owner_ids {
+                for sharing_id in &sharing_ids {
+                    let Some(owner_brush) = ir.brushes.get(owner_id) else {
+                        continue;
+                    };
+                    let Some(sharing_brush) = ir.brushes.get(sharing_id) else {
+                        continue;
+                    };
+                    if let Some(exact) =
+                        richness_geom::exact_face_contact(&owner_brush.brush, &sharing_brush.brush)
+                    {
+                        contact = Some((*owner_id, *sharing_id, exact));
+                        break;
+                    }
+                }
+                if contact.is_some() {
+                    break;
+                }
+            }
+            let Some((owner_id, sharing_id, exact)) = contact else {
+                return Err(composition_error(
+                    "shared_wall.contact",
+                    format!(
+                        "touching reservations {} and {} have no identical positive-area wall plane",
+                        owner.id.raw(),
+                        sharing.id.raw()
+                    ),
+                ));
+            };
+
+            let span = contact_span(&exact.vertices, owner_role)?;
+            let owner_run = split_cardinal_wall_run(ir, owner_id, owner_role, span)?;
+            let sharing_run = split_cardinal_wall_run(ir, sharing_id, sharing_role, span)?;
+            ir.remove_brush(sharing_run);
+            ir.supports.retain(|_, support| {
+                support.child != sharing_run
+                    && !matches!(support.parent, SupportTarget::Brush(id) if id == sharing_run)
+            });
+            ir.interfaces.retain(|_, interface| {
+                interface.brush_a != sharing_run && interface.brush_b != sharing_run
+            });
+
+            let id = ir.alloc_wall_chain_id();
+            ir.insert_shared_wall_chain(SharedWallChainAssembly {
+                id,
+                owner_reservation_id: owner.id,
+                sharing_reservation_id: sharing.id,
+                owner_brush_id: owner_run,
+                shared_plane: exact.plane,
+                span,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn layers_overlap(a: &Footprint3D, b: &Footprint3D) -> bool {
+    (a.occupies_lower && b.occupies_lower) || (a.occupies_upper && b.occupies_upper)
+}
+
+fn touching_wall_roles(
+    a: &Footprint3D,
+    b: &Footprint3D,
+) -> Option<(BrushAssemblyRole, BrushAssemblyRole)> {
+    let x_overlap = a.x0.max(b.x0) < a.x1.min(b.x1);
+    let y_overlap = a.y0.max(b.y0) < a.y1.min(b.y1);
+    if a.x1 == b.x0 && y_overlap {
+        Some((BrushAssemblyRole::EastWall, BrushAssemblyRole::WestWall))
+    } else if b.x1 == a.x0 && y_overlap {
+        Some((BrushAssemblyRole::WestWall, BrushAssemblyRole::EastWall))
+    } else if a.y1 == b.y0 && x_overlap {
+        Some((BrushAssemblyRole::SouthWall, BrushAssemblyRole::NorthWall))
+    } else if b.y1 == a.y0 && x_overlap {
+        Some((BrushAssemblyRole::NorthWall, BrushAssemblyRole::SouthWall))
+    } else {
+        None
+    }
+}
+
+fn contact_span(
+    vertices: &[crate::enhanced_v3::geometry::Point3],
+    role: BrushAssemblyRole,
+) -> Result<(i128, i128), RichnessError> {
+    let coordinate = |point: &crate::enhanced_v3::geometry::Point3| match role {
+        BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => point.x,
+        BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => point.y,
+        _ => crate::enhanced_v3::geometry::Rational::ZERO,
+    };
+    let min = vertices
+        .iter()
+        .map(coordinate)
+        .min()
+        .ok_or_else(|| composition_error("shared_wall.span", "empty contact polygon"))?;
+    let max = vertices
+        .iter()
+        .map(coordinate)
+        .max()
+        .ok_or_else(|| composition_error("shared_wall.span", "empty contact polygon"))?;
+    if min.den != 1 || max.den != 1 || min.num >= max.num {
+        return Err(composition_error(
+            "shared_wall.span",
+            format!("shared wall contact has non-integral or empty span {min}..{max}"),
+        ));
+    }
+    Ok((min.num, max.num))
+}
+
+fn split_cardinal_wall_run(
+    ir: &mut AssemblyIR,
+    brush_id: BrushAssemblyId,
+    role: BrushAssemblyRole,
+    (span_min, span_max): (i128, i128),
+) -> Result<BrushAssemblyId, RichnessError> {
+    let original = ir
+        .brushes
+        .get(&brush_id)
+        .cloned()
+        .ok_or_else(|| composition_error("shared_wall.split", "wall brush not found"))?;
+    let ((x0, y0, _z0), (x1, y1, _z1)) = original
+        .brush
+        .aabb()
+        .map_err(|error| composition_error("shared_wall.split", format!("AABB: {error}")))?;
+    let (brush_min, brush_max) = match role {
+        BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => (x0, x1),
+        BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => (y0, y1),
+        _ => {
+            return Err(composition_error(
+                "shared_wall.split",
+                "shared run is not cardinal",
+            ));
+        }
+    };
+    if span_min < brush_min || span_max > brush_max {
+        return Err(composition_error(
+            "shared_wall.split",
+            "shared run escaped its wall brush",
+        ));
+    }
+    if span_min == brush_min && span_max == brush_max {
+        return Ok(brush_id);
+    }
+
+    let intervals = [
+        (brush_min, span_min, false),
+        (span_min, span_max, true),
+        (span_max, brush_max, false),
+    ];
+    let mut run_id = None;
+    let mut replacements = Vec::new();
+    for (start, end, is_run) in intervals {
+        if start >= end {
+            continue;
+        }
+        let mut faces = original.brush.faces.clone();
+        let (lower, upper) = match role {
+            BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => (
+                CanonicalPlane::new(1, 0, 0, start),
+                CanonicalPlane::new(-1, 0, 0, -end),
+            ),
+            BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => (
+                CanonicalPlane::new(0, 1, 0, start),
+                CanonicalPlane::new(0, -1, 0, -end),
+            ),
+            _ => {
+                return Err(composition_error(
+                    "shared_wall.split",
+                    "shared run changed to a non-cardinal role",
+                ));
+            }
+        };
+        faces.push(
+            BrushFace::new(lower.map_err(|error| {
+                composition_error("shared_wall.split", format!("lower plane: {error}"))
+            })?)
+            .map_err(|error| {
+                composition_error("shared_wall.split", format!("lower face: {error}"))
+            })?,
+        );
+        faces.push(
+            BrushFace::new(upper.map_err(|error| {
+                composition_error("shared_wall.split", format!("upper plane: {error}"))
+            })?)
+            .map_err(|error| {
+                composition_error("shared_wall.split", format!("upper face: {error}"))
+            })?,
+        );
+        let brush = validated_halfspace_brush(faces, "shared_wall.split")?;
+        let id = ir.alloc_brush_id();
+        ir.insert_brush(BrushAssembly {
+            id,
+            brush,
+            role,
+            owner: original.owner.clone(),
+            cost: original.cost,
+            support: original.support.clone(),
+        });
+        replacements.push(id);
+        if is_run {
+            run_id = Some(id);
+        }
+    }
+
+    ir.remove_brush(brush_id);
+    ir.supports.retain(|_, support| support.child != brush_id);
+    ir.interfaces
+        .retain(|_, interface| interface.brush_a != brush_id && interface.brush_b != brush_id);
+    let _ = replacements;
+    run_id.ok_or_else(|| composition_error("shared_wall.split", "shared run was not emitted"))
+}
+
 // ── Session B: portal construction ───────────────────────────────────────
 
 /// Build a portal at the given anchor location with the specified style.
@@ -208,28 +688,39 @@ pub(crate) fn build_portal(
     cost: CostSource,
     ir: &mut AssemblyIR,
 ) -> Result<PortalAssembly, RichnessError> {
-    // Verify the wall is cardinal (reject diagonal)
-    if !matches!(
-        wall_role,
-        BrushAssemblyRole::NorthWall
-            | BrushAssemblyRole::SouthWall
-            | BrushAssemblyRole::EastWall
-            | BrushAssemblyRole::WestWall
-    ) {
+    validate_portal_request(portal_id, throat_anchor, wall_role)?;
+
+    let wall = ir
+        .brushes
+        .get(&wall_brush_id)
+        .ok_or_else(|| composition_error("portal.wall", "wall brush not found"))?;
+    if wall.role != wall_role {
         return Err(composition_error(
-            "portal",
+            "portal.wall",
             format!(
-                "portal {:?}: wall role {:?} is not cardinal",
+                "portal {} requested {} but brush {} has role {}",
                 portal_id.raw(),
-                wall_role.tag()
+                wall_role.tag(),
+                wall_brush_id.raw(),
+                wall.role.tag()
             ),
         ));
     }
+    let wall_owner = wall.owner.clone();
+    let wall_segment_ids: Vec<_> = ir
+        .brushes
+        .values()
+        .filter(|candidate| candidate.owner == wall_owner && candidate.role == wall_role)
+        .map(|candidate| candidate.id)
+        .collect();
+    let partition_bounds = union_brush_bounds(ir, &wall_segment_ids)?;
+    validate_throat_within_partition(throat_anchor, wall_role, partition_bounds)?;
 
-    match style {
+    let mut portal = match style {
         PortalStyle::AncientPostLintel => build_ancient_post_lintel(
             portal_id,
             wall_brush_id,
+            partition_bounds,
             throat_anchor,
             wall_role,
             attr,
@@ -239,6 +730,7 @@ pub(crate) fn build_portal(
         PortalStyle::EgyptianSteppedSurround => build_egyptian_stepped_surround(
             portal_id,
             wall_brush_id,
+            partition_bounds,
             throat_anchor,
             wall_role,
             attr,
@@ -248,12 +740,264 @@ pub(crate) fn build_portal(
         PortalStyle::BrutalistRevealSurround => build_brutalist_reveal_surround(
             portal_id,
             wall_brush_id,
+            partition_bounds,
             throat_anchor,
             wall_role,
             attr,
             cost,
             ir,
         ),
+    }?;
+
+    let mut replacement_ids = Vec::new();
+    for segment_id in wall_segment_ids {
+        replacement_ids.extend(split_wall_around_opening(
+            ir,
+            segment_id,
+            portal.throat_bounds,
+        )?);
+    }
+    replacement_ids.sort_unstable();
+    replacement_ids.dedup();
+    let owner_brush_id = replacement_ids.first().copied().ok_or_else(|| {
+        composition_error(
+            "portal.wall_split",
+            format!(
+                "portal {} removed its complete owning wall",
+                portal_id.raw()
+            ),
+        )
+    })?;
+
+    let opening = ir
+        .openings
+        .get_mut(&portal.opening_id)
+        .ok_or_else(|| composition_error("portal.opening", "opening record disappeared"))?;
+    opening.owner_brush_id = owner_brush_id;
+    opening.wall_segment_ids = replacement_ids;
+    opening.owner_partition_bounds = partition_bounds;
+    portal.wall_brush_id = owner_brush_id;
+    ir.portal_assemblies.push(portal.clone());
+    Ok(portal)
+}
+
+fn coalesce_overlapping_portal_frames(ir: &mut AssemblyIR) -> Result<(), RichnessError> {
+    type MergeKey = (
+        BrushAssemblyRole,
+        SemanticAttribution,
+        u8,
+        (i128, i128),
+        (i128, i128),
+    );
+    let mut groups: BTreeMap<MergeKey, Vec<(BrushAssemblyId, i128, i128)>> = BTreeMap::new();
+    for brush in ir.brushes.values().filter(|brush| {
+        matches!(
+            brush.role,
+            BrushAssemblyRole::PortalPost
+                | BrushAssemblyRole::PortalLintel
+                | BrushAssemblyRole::PortalSurround
+        )
+    }) {
+        let ((x0, y0, z0), (x1, y1, z1)) = brush
+            .brush
+            .aabb()
+            .map_err(|error| composition_error("portal.frame_merge", format!("AABB: {error}")))?;
+        let dimensions = [x1 - x0, y1 - y0, z1 - z0];
+        let axis = (0..3)
+            .max_by_key(|axis| (dimensions[*axis], std::cmp::Reverse(*axis)))
+            .unwrap_or(0);
+        let (fixed_a, fixed_b, start, end) = match axis {
+            0 => ((y0, y1), (z0, z1), x0, x1),
+            1 => ((x0, x1), (z0, z1), y0, y1),
+            _ => ((x0, x1), (y0, y1), z0, z1),
+        };
+        groups
+            .entry((
+                brush.role,
+                brush.owner.clone(),
+                axis as u8,
+                fixed_a,
+                fixed_b,
+            ))
+            .or_default()
+            .push((brush.id, start, end));
+    }
+
+    for ((role, owner, axis, fixed_a, fixed_b), mut intervals) in groups {
+        intervals.sort_by_key(|(id, start, end)| (*start, *end, *id));
+        let mut index = 0;
+        while index < intervals.len() {
+            let mut end = intervals[index].2;
+            let mut merged = vec![intervals[index].0];
+            let start = intervals[index].1;
+            index += 1;
+            while index < intervals.len() && intervals[index].1 < end {
+                end = end.max(intervals[index].2);
+                merged.push(intervals[index].0);
+                index += 1;
+            }
+            if merged.len() == 1 {
+                continue;
+            }
+
+            let first = ir.brushes.get(&merged[0]).cloned().ok_or_else(|| {
+                composition_error("portal.frame_merge", "frame brush disappeared")
+            })?;
+            let (x, y, z) = match axis {
+                0 => ((start, end), fixed_a, fixed_b),
+                1 => (fixed_a, (start, end), fixed_b),
+                _ => (fixed_a, fixed_b, (start, end)),
+            };
+            let brush = ConvexBrush::make_box(x, y, z).map_err(|error| {
+                composition_error("portal.frame_merge", format!("merged frame: {error}"))
+            })?;
+            let new_id = ir.alloc_brush_id();
+            for old_id in &merged {
+                ir.remove_brush(*old_id);
+            }
+            ir.insert_brush(BrushAssembly {
+                id: new_id,
+                brush,
+                role,
+                owner: owner.clone(),
+                cost: first.cost,
+                support: first.support.clone(),
+            });
+            replace_frame_ids(ir, &merged, new_id);
+        }
+    }
+    Ok(())
+}
+
+fn replace_frame_ids(
+    ir: &mut AssemblyIR,
+    old_ids: &[BrushAssemblyId],
+    replacement: BrushAssemblyId,
+) {
+    let replace = |ids: &mut Vec<BrushAssemblyId>| {
+        if ids.iter().any(|id| old_ids.contains(id)) {
+            ids.retain(|id| !old_ids.contains(id));
+            ids.push(replacement);
+            ids.sort_unstable();
+            ids.dedup();
+        }
+    };
+    for opening in ir.openings.values_mut() {
+        replace(&mut opening.frame_brush_ids);
+    }
+    for portal in &mut ir.portal_assemblies {
+        replace(&mut portal.post_ids);
+        replace(&mut portal.lintel_ids);
+        replace(&mut portal.surround_ids);
+    }
+}
+
+fn validate_portal_request(
+    portal_id: PortalId,
+    (span_min, z_min, span_max, z_max): (i128, i128, i128, i128),
+    wall_role: BrushAssemblyRole,
+) -> Result<(), RichnessError> {
+    if !matches!(
+        wall_role,
+        BrushAssemblyRole::NorthWall
+            | BrushAssemblyRole::SouthWall
+            | BrushAssemblyRole::EastWall
+            | BrushAssemblyRole::WestWall
+    ) {
+        return Err(composition_error(
+            "portal.wall_role",
+            format!(
+                "portal {} cannot use non-cardinal wall role {}",
+                portal_id.raw(),
+                wall_role.tag()
+            ),
+        ));
+    }
+    if span_max.checked_sub(span_min) != Some(64) || z_max.checked_sub(z_min) != Some(80) {
+        return Err(composition_error(
+            "portal.throat",
+            format!(
+                "portal {} throat must be ordered exact 64x80; got span=({span_min},{span_max}) z=({z_min},{z_max})",
+                portal_id.raw()
+            ),
+        ));
+    }
+    if [span_min, z_min, span_max, z_max]
+        .iter()
+        .any(|value| value.rem_euclid(richness_geom::QUANTUM) != 0)
+    {
+        return Err(composition_error(
+            "portal.throat",
+            format!("portal {} throat is not 16-unit aligned", portal_id.raw()),
+        ));
+    }
+    Ok(())
+}
+
+fn union_brush_bounds(
+    ir: &AssemblyIR,
+    brush_ids: &[BrushAssemblyId],
+) -> Result<(i128, i128, i128, i128, i128, i128), RichnessError> {
+    let mut bounds: Option<(i128, i128, i128, i128, i128, i128)> = None;
+    for brush_id in brush_ids {
+        let brush = ir
+            .brushes
+            .get(brush_id)
+            .ok_or_else(|| composition_error("portal.wall", "wall segment not found"))?;
+        let ((x0, y0, z0), (x1, y1, z1)) = brush
+            .brush
+            .aabb()
+            .map_err(|error| composition_error("portal.wall", format!("wall AABB: {error}")))?;
+        bounds = Some(match bounds {
+            None => (x0, y0, z0, x1, y1, z1),
+            Some((bx0, by0, bz0, bx1, by1, bz1)) => (
+                bx0.min(x0),
+                by0.min(y0),
+                bz0.min(z0),
+                bx1.max(x1),
+                by1.max(y1),
+                bz1.max(z1),
+            ),
+        });
+    }
+    bounds.ok_or_else(|| composition_error("portal.wall", "wall partition has no segments"))
+}
+
+fn validate_throat_within_partition(
+    (s0, z0, s1, z1): (i128, i128, i128, i128),
+    wall_role: BrushAssemblyRole,
+    (x0, y0, wall_z0, x1, y1, wall_z1): (i128, i128, i128, i128, i128, i128),
+) -> Result<(), RichnessError> {
+    let span_contains = match wall_role {
+        BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => s0 >= x0 && s1 <= x1,
+        BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => s0 >= y0 && s1 <= y1,
+        _ => false,
+    };
+    if !span_contains || z0 < wall_z0 || z1 > wall_z1 {
+        return Err(composition_error(
+            "portal.throat",
+            "exact portal throat escapes the owning wall partition",
+        ));
+    }
+    Ok(())
+}
+
+fn frame_depth_range(
+    wall_role: BrushAssemblyRole,
+    bounds: (i128, i128, i128, i128, i128, i128),
+    layer: i128,
+) -> Result<((i128, i128), (i128, i128)), RichnessError> {
+    let (x0, y0, _z0, x1, y1, _z1) = bounds;
+    let offset = richness_geom::WALL_THICKNESS * layer;
+    match wall_role {
+        BrushAssemblyRole::NorthWall => Ok(((x0, x1), (y1 + offset, y1 + offset + 16))),
+        BrushAssemblyRole::SouthWall => Ok(((x0, x1), (y0 - offset - 16, y0 - offset))),
+        BrushAssemblyRole::WestWall => Ok(((x1 + offset, x1 + offset + 16), (y0, y1))),
+        BrushAssemblyRole::EastWall => Ok(((x0 - offset - 16, x0 - offset), (y0, y1))),
+        _ => Err(composition_error(
+            "portal.frame_depth",
+            "portal frame depth requires a cardinal wall",
+        )),
     }
 }
 
@@ -265,19 +1009,15 @@ pub(crate) fn build_portal(
 fn build_ancient_post_lintel(
     portal_id: PortalId,
     wall_brush_id: BrushAssemblyId,
+    wall_bounds: (i128, i128, i128, i128, i128, i128),
     throat_anchor: (i128, i128, i128, i128), // (span_min, z_min, span_max, z_max)
     wall_role: BrushAssemblyRole,
     attr: &SemanticAttribution,
     cost: CostSource,
     ir: &mut AssemblyIR,
 ) -> Result<PortalAssembly, RichnessError> {
+    validate_portal_request(portal_id, throat_anchor, wall_role)?;
     let (s0, z0, s1, z1) = throat_anchor;
-    let throat_w = (s1 - s0).abs();
-    let throat_h = (z1 - z0).abs();
-
-    assert_eq!(throat_w, 64, "throat width must be 64, got {throat_w}");
-    assert_eq!(throat_h, 80, "throat height must be 80, got {throat_h}");
-
     let post_w = richness_geom::WALL_THICKNESS;
     let post_z0 = z0;
     let post_z1 = z1;
@@ -287,32 +1027,33 @@ fn build_ancient_post_lintel(
     let mut post_ids = Vec::new();
     let mut lintel_ids = Vec::new();
 
-    let wall_brush = ir
-        .brushes
-        .get(&wall_brush_id)
-        .ok_or_else(|| composition_error("portal", "wall brush not found"))?;
-    let bb = wall_brush
-        .brush
-        .aabb()
-        .map_err(|e| composition_error("portal", format!("wall AABB: {e}")))?;
-    let ((_wx0, wy0, _wz0), (_wx1, wy1, _wz1)) = bb;
+    let bb = (
+        (wall_bounds.0, wall_bounds.1, wall_bounds.2),
+        (wall_bounds.3, wall_bounds.4, wall_bounds.5),
+    );
+    let (frame_x, frame_y) = frame_depth_range(wall_role, wall_bounds, 0)?;
+    let ((wx0, wy0, _wz0), (wx1, wy1, _wz1)) = bb;
 
     let throat_bounds = match wall_role {
         BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => {
-            (s0 - post_w, wy0, post_z0, s1 + post_w, wy1, lintel_z1)
+            (s0, wy0, post_z0, s1, wy1, post_z1)
         }
         BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => {
-            let ((wx0, _wy0, _wz), (wx1, _wy1, _wz1)) = bb;
-            (wx0, s0 - post_w, post_z0, wx1, s1 + post_w, lintel_z1)
+            (wx0, s0, post_z0, wx1, s1, post_z1)
         }
-        _ => unreachable!("portal only on cardinal walls"),
+        _ => {
+            return Err(composition_error(
+                "portal.wall_role",
+                "ancient portal requires a cardinal wall",
+            ));
+        }
     };
 
     match wall_role {
         BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => {
             let post_id = build_and_insert_box(
                 (s0 - post_w, s0),
-                (wy0, wy1),
+                frame_y,
                 (post_z0, post_z1),
                 BrushAssemblyRole::PortalPost,
                 attr,
@@ -322,7 +1063,7 @@ fn build_ancient_post_lintel(
             post_ids.push(post_id);
             let post_id = build_and_insert_box(
                 (s1, s1 + post_w),
-                (wy0, wy1),
+                frame_y,
                 (post_z0, post_z1),
                 BrushAssemblyRole::PortalPost,
                 attr,
@@ -332,7 +1073,7 @@ fn build_ancient_post_lintel(
             post_ids.push(post_id);
             let lintel_id = build_and_insert_box(
                 (s0 - post_w, s1 + post_w),
-                (wy0, wy1),
+                frame_y,
                 (lintel_z0, lintel_z1),
                 BrushAssemblyRole::PortalLintel,
                 attr,
@@ -342,9 +1083,8 @@ fn build_ancient_post_lintel(
             lintel_ids.push(lintel_id);
         }
         BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => {
-            let ((wx0, _wy0, _wz0), (wx1, _wy1, _wz1)) = bb;
             let post_id = build_and_insert_box(
-                (wx0, wx1),
+                frame_x,
                 (s0 - post_w, s0),
                 (post_z0, post_z1),
                 BrushAssemblyRole::PortalPost,
@@ -354,7 +1094,7 @@ fn build_ancient_post_lintel(
             )?;
             post_ids.push(post_id);
             let post_id = build_and_insert_box(
-                (wx0, wx1),
+                frame_x,
                 (s1, s1 + post_w),
                 (post_z0, post_z1),
                 BrushAssemblyRole::PortalPost,
@@ -364,7 +1104,7 @@ fn build_ancient_post_lintel(
             )?;
             post_ids.push(post_id);
             let lintel_id = build_and_insert_box(
-                (wx0, wx1),
+                frame_x,
                 (s0 - post_w, s1 + post_w),
                 (lintel_z0, lintel_z1),
                 BrushAssemblyRole::PortalLintel,
@@ -374,13 +1114,21 @@ fn build_ancient_post_lintel(
             )?;
             lintel_ids.push(lintel_id);
         }
-        _ => unreachable!("portal only on cardinal walls"),
+        _ => {
+            return Err(composition_error(
+                "portal.wall_role",
+                "ancient portal requires a cardinal wall",
+            ));
+        }
     }
 
     let opening_id = ir.alloc_opening_id();
     let opening = OpeningRecord {
         id: opening_id,
         owner_brush_id: wall_brush_id,
+        wall_segment_ids: vec![wall_brush_id],
+        owner_partition_bounds: wall_bounds,
+        wall_role,
         owner: attr.clone(),
         bounds: throat_bounds,
         portal_id: Some(portal_id),
@@ -408,89 +1156,61 @@ fn build_ancient_post_lintel(
 fn build_egyptian_stepped_surround(
     portal_id: PortalId,
     wall_brush_id: BrushAssemblyId,
+    wall_bounds: (i128, i128, i128, i128, i128, i128),
     throat_anchor: (i128, i128, i128, i128), // (span_min, z_min, span_max, z_max)
     wall_role: BrushAssemblyRole,
     attr: &SemanticAttribution,
     cost: CostSource,
     ir: &mut AssemblyIR,
 ) -> Result<PortalAssembly, RichnessError> {
+    validate_portal_request(portal_id, throat_anchor, wall_role)?;
     let (s0, z0, s1, z1) = throat_anchor;
-    let throat_w = (s1 - s0).abs();
-    let throat_h = (z1 - z0).abs();
-    assert_eq!(throat_w, 64, "throat width must be 64");
-    assert_eq!(throat_h, 80, "throat height must be 80");
-
     let step = 16i128;
     let post_z0 = z0;
     let post_z1 = z1;
-
-    let wall_brush = ir
-        .brushes
-        .get(&wall_brush_id)
-        .ok_or_else(|| composition_error("portal", "wall brush not found"))?;
-    let bb = wall_brush
-        .brush
-        .aabb()
-        .map_err(|e| composition_error("portal", format!("wall AABB: {e}")))?;
-
+    let (wall_x0, wall_y0, _wall_z0, wall_x1, wall_y1, _wall_z1) = wall_bounds;
     let mut surround_ids = Vec::new();
 
     let throat_bounds = match wall_role {
         BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => {
-            let ((_wx0, wy0, _wz0), (_wx1, wy1, _wz1)) = bb;
-            let out = step * 3;
             for layer in 0..3 {
-                let off = step * (layer + 1);
-                let z_bot_top = z1 + off - step;
-                // Left post
+                let (_frame_x, frame_y) = frame_depth_range(wall_role, wall_bounds, layer)?;
                 surround_ids.push(build_and_insert_box(
-                    (s0 - off, s0 - off + step),
-                    (wy0, wy1),
+                    (s0 - step, s0),
+                    frame_y,
                     (post_z0, post_z1),
                     BrushAssemblyRole::PortalSurround,
                     attr,
                     cost,
                     ir,
                 )?);
-                // Right post
                 surround_ids.push(build_and_insert_box(
-                    (s1 + off - step, s1 + off),
-                    (wy0, wy1),
+                    (s1, s1 + step),
+                    frame_y,
                     (post_z0, post_z1),
                     BrushAssemblyRole::PortalSurround,
                     attr,
                     cost,
                     ir,
                 )?);
-                // Lintel course
                 surround_ids.push(build_and_insert_box(
-                    (s0 - off, s1 + off),
-                    (wy0, wy1),
-                    (z_bot_top, z_bot_top + step),
+                    (s0 - step, s1 + step),
+                    frame_y,
+                    (z1, z1 + step),
                     BrushAssemblyRole::PortalSurround,
                     attr,
                     cost,
                     ir,
                 )?);
             }
-            let _ = out;
-            (
-                s0 - step * 3,
-                wy0,
-                post_z0,
-                s1 + step * 3,
-                wy1,
-                z1 + step * 3,
-            )
+            (s0, wall_y0, post_z0, s1, wall_y1, post_z1)
         }
         BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => {
-            let ((wx0, _wy0, _wz0), (wx1, _wy1, _wz1)) = bb;
             for layer in 0..3 {
-                let off = step * (layer + 1);
-                let z_bot_top = z1 + off - step;
+                let (frame_x, _frame_y) = frame_depth_range(wall_role, wall_bounds, layer)?;
                 surround_ids.push(build_and_insert_box(
-                    (wx0, wx1),
-                    (s0 - off, s0 - off + step),
+                    frame_x,
+                    (s0 - step, s0),
                     (post_z0, post_z1),
                     BrushAssemblyRole::PortalSurround,
                     attr,
@@ -498,8 +1218,8 @@ fn build_egyptian_stepped_surround(
                     ir,
                 )?);
                 surround_ids.push(build_and_insert_box(
-                    (wx0, wx1),
-                    (s1 + off - step, s1 + off),
+                    frame_x,
+                    (s1, s1 + step),
                     (post_z0, post_z1),
                     BrushAssemblyRole::PortalSurround,
                     attr,
@@ -507,31 +1227,32 @@ fn build_egyptian_stepped_surround(
                     ir,
                 )?);
                 surround_ids.push(build_and_insert_box(
-                    (wx0, wx1),
-                    (s0 - off, s1 + off),
-                    (z_bot_top, z_bot_top + step),
+                    frame_x,
+                    (s0 - step, s1 + step),
+                    (z1, z1 + step),
                     BrushAssemblyRole::PortalSurround,
                     attr,
                     cost,
                     ir,
                 )?);
             }
-            (
-                wx0,
-                s0 - step * 3,
-                post_z0,
-                wx1,
-                s1 + step * 3,
-                z1 + step * 3,
-            )
+            (wall_x0, s0, post_z0, wall_x1, s1, post_z1)
         }
-        _ => unreachable!(),
+        _ => {
+            return Err(composition_error(
+                "portal.wall_role",
+                "Egyptian portal requires a cardinal wall",
+            ));
+        }
     };
 
     let opening_id = ir.alloc_opening_id();
     let opening = OpeningRecord {
         id: opening_id,
         owner_brush_id: wall_brush_id,
+        wall_segment_ids: vec![wall_brush_id],
+        owner_partition_bounds: wall_bounds,
+        wall_role,
         owner: attr.clone(),
         bounds: throat_bounds,
         portal_id: Some(portal_id),
@@ -555,41 +1276,30 @@ fn build_egyptian_stepped_surround(
 fn build_brutalist_reveal_surround(
     portal_id: PortalId,
     wall_brush_id: BrushAssemblyId,
+    wall_bounds: (i128, i128, i128, i128, i128, i128),
     throat_anchor: (i128, i128, i128, i128), // (span_min, z_min, span_max, z_max)
     wall_role: BrushAssemblyRole,
     attr: &SemanticAttribution,
     cost: CostSource,
     ir: &mut AssemblyIR,
 ) -> Result<PortalAssembly, RichnessError> {
+    validate_portal_request(portal_id, throat_anchor, wall_role)?;
     let (s0, z0, s1, z1) = throat_anchor;
-    let throat_w = (s1 - s0).abs();
-    let throat_h = (z1 - z0).abs();
-    assert_eq!(throat_w, 64, "throat width must be 64");
-    assert_eq!(throat_h, 80, "throat height must be 80");
-
     let reveal_depth = 16i128;
     let surround_thickness = 16i128;
 
-    let wall_brush = ir
-        .brushes
-        .get(&wall_brush_id)
-        .ok_or_else(|| composition_error("portal", "wall brush not found"))?;
-    let bb = wall_brush
-        .brush
-        .aabb()
-        .map_err(|e| composition_error("portal", format!("wall AABB: {e}")))?;
-
+    let (wall_x0, wall_y0, _wall_z0, wall_x1, wall_y1, _wall_z1) = wall_bounds;
+    let (frame_x, frame_y) = frame_depth_range(wall_role, wall_bounds, 0)?;
     let mut surround_ids = Vec::new();
     let lintel_z0 = z1;
     let lintel_z1 = lintel_z0 + reveal_depth;
 
     let throat_bounds = match wall_role {
         BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => {
-            let ((_wx0, wy0, _wz0), (_wx1, wy1, _wz1)) = bb;
             // Reveal channels
             surround_ids.push(build_and_insert_box(
                 (s0 - reveal_depth, s0),
-                (wy0, wy1),
+                frame_y,
                 (z0, z1),
                 BrushAssemblyRole::PortalSurround,
                 attr,
@@ -598,7 +1308,7 @@ fn build_brutalist_reveal_surround(
             )?);
             surround_ids.push(build_and_insert_box(
                 (s1, s1 + reveal_depth),
-                (wy0, wy1),
+                frame_y,
                 (z0, z1),
                 BrushAssemblyRole::PortalSurround,
                 attr,
@@ -607,7 +1317,7 @@ fn build_brutalist_reveal_surround(
             )?);
             surround_ids.push(build_and_insert_box(
                 (s0 - reveal_depth, s1 + reveal_depth),
-                (wy0, wy1),
+                frame_y,
                 (lintel_z0, lintel_z1),
                 BrushAssemblyRole::PortalSurround,
                 attr,
@@ -617,7 +1327,7 @@ fn build_brutalist_reveal_surround(
             // Surround mass
             surround_ids.push(build_and_insert_box(
                 (s0 - reveal_depth - surround_thickness, s0 - reveal_depth),
-                (wy0, wy1),
+                frame_y,
                 (z0, z1),
                 BrushAssemblyRole::PortalSurround,
                 attr,
@@ -626,7 +1336,7 @@ fn build_brutalist_reveal_surround(
             )?);
             surround_ids.push(build_and_insert_box(
                 (s1 + reveal_depth, s1 + reveal_depth + surround_thickness),
-                (wy0, wy1),
+                frame_y,
                 (z0, z1),
                 BrushAssemblyRole::PortalSurround,
                 attr,
@@ -638,27 +1348,18 @@ fn build_brutalist_reveal_surround(
                     s0 - reveal_depth - surround_thickness,
                     s1 + reveal_depth + surround_thickness,
                 ),
-                (wy0, wy1),
+                frame_y,
                 (lintel_z1, lintel_z1 + surround_thickness),
                 BrushAssemblyRole::PortalSurround,
                 attr,
                 cost,
                 ir,
             )?);
-            let outer = reveal_depth + surround_thickness;
-            (
-                s0 - outer,
-                wy0,
-                z0,
-                s1 + outer,
-                wy1,
-                lintel_z1 + surround_thickness,
-            )
+            (s0, wall_y0, z0, s1, wall_y1, z1)
         }
         BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => {
-            let ((wx0, _wy0, _wz0), (wx1, _wy1, _wz1)) = bb;
             surround_ids.push(build_and_insert_box(
-                (wx0, wx1),
+                frame_x,
                 (s0 - reveal_depth, s0),
                 (z0, z1),
                 BrushAssemblyRole::PortalSurround,
@@ -667,7 +1368,7 @@ fn build_brutalist_reveal_surround(
                 ir,
             )?);
             surround_ids.push(build_and_insert_box(
-                (wx0, wx1),
+                frame_x,
                 (s1, s1 + reveal_depth),
                 (z0, z1),
                 BrushAssemblyRole::PortalSurround,
@@ -676,7 +1377,7 @@ fn build_brutalist_reveal_surround(
                 ir,
             )?);
             surround_ids.push(build_and_insert_box(
-                (wx0, wx1),
+                frame_x,
                 (s0 - reveal_depth, s1 + reveal_depth),
                 (lintel_z0, lintel_z1),
                 BrushAssemblyRole::PortalSurround,
@@ -685,7 +1386,7 @@ fn build_brutalist_reveal_surround(
                 ir,
             )?);
             surround_ids.push(build_and_insert_box(
-                (wx0, wx1),
+                frame_x,
                 (s0 - reveal_depth - surround_thickness, s0 - reveal_depth),
                 (z0, z1),
                 BrushAssemblyRole::PortalSurround,
@@ -694,7 +1395,7 @@ fn build_brutalist_reveal_surround(
                 ir,
             )?);
             surround_ids.push(build_and_insert_box(
-                (wx0, wx1),
+                frame_x,
                 (s1 + reveal_depth, s1 + reveal_depth + surround_thickness),
                 (z0, z1),
                 BrushAssemblyRole::PortalSurround,
@@ -703,7 +1404,7 @@ fn build_brutalist_reveal_surround(
                 ir,
             )?);
             surround_ids.push(build_and_insert_box(
-                (wx0, wx1),
+                frame_x,
                 (
                     s0 - reveal_depth - surround_thickness,
                     s1 + reveal_depth + surround_thickness,
@@ -714,23 +1415,23 @@ fn build_brutalist_reveal_surround(
                 cost,
                 ir,
             )?);
-            let outer = reveal_depth + surround_thickness;
-            (
-                wx0,
-                s0 - outer,
-                z0,
-                wx1,
-                s1 + outer,
-                lintel_z1 + surround_thickness,
-            )
+            (wall_x0, s0, z0, wall_x1, s1, z1)
         }
-        _ => unreachable!(),
+        _ => {
+            return Err(composition_error(
+                "portal.wall_role",
+                "Brutalist portal requires a cardinal wall",
+            ));
+        }
     };
 
     let opening_id = ir.alloc_opening_id();
     let opening = OpeningRecord {
         id: opening_id,
         owner_brush_id: wall_brush_id,
+        wall_segment_ids: vec![wall_brush_id],
+        owner_partition_bounds: wall_bounds,
+        wall_role,
         owner: attr.clone(),
         bounds: throat_bounds,
         portal_id: Some(portal_id),
@@ -777,6 +1478,7 @@ pub(crate) fn apply_wall_mass_treatments(
         .aabb()
         .map_err(|e| composition_error("wall_mass", format!("wall AABB: {e}")))?;
     let ((wx0, wy0, wz0), (wx1, wy1, wz1)) = bb;
+    let mut wall_segment_ids = vec![wall_brush_id];
 
     for treatment in &chain.mass_treatments {
         // Check against protected segments
@@ -792,6 +1494,8 @@ pub(crate) fn apply_wall_mass_treatments(
             }
         }
 
+        let (tx0, ty0, tx1, ty1) =
+            wall_treatment_bounds(wall_role, (wx0, wy0, wx1, wy1), treatment.segment)?;
         match treatment.kind {
             WallMass::None => {}
             WallMass::Liner16 | WallMass::Liner32 => {
@@ -800,18 +1504,17 @@ pub(crate) fn apply_wall_mass_treatments(
                 } else {
                     16i128
                 };
-                let offset = treatment.kind.offset_units() as i128;
-                // Build liner on the interior face of the wall
+                // A liner starts on the clear-volume face of the structural
+                // wall, so it contacts rather than overlaps its owner.
                 build_liner_on_wall(
                     wall_role,
-                    wx0,
-                    wy0,
-                    wx1,
-                    wy1,
+                    tx0,
+                    ty0,
+                    tx1,
+                    ty1,
                     wz0,
                     wz1,
                     thickness,
-                    offset,
                     attr,
                     cost,
                     ir,
@@ -819,30 +1522,40 @@ pub(crate) fn apply_wall_mass_treatments(
                 )?;
             }
             WallMass::Recess16 => {
-                // Recess: negative carving inward — omitted volume from wall
-                // We create an opening record instead of a brush
-                let opening_id = ir.alloc_opening_id();
+                // A recess is a genuine omission from the wall partition,
+                // never a decorative opening record over solid geometry.
                 let recess_bounds =
-                    compute_recess_bounds(wall_role, wx0, wy0, wx1, wy1, wz0, wz1, 16i128);
-                let opening = OpeningRecord {
+                    compute_recess_bounds(wall_role, tx0, ty0, tx1, ty1, wz0, wz1, 16i128);
+                let opening_id = ir.alloc_opening_id();
+                ir.insert_opening(OpeningRecord {
                     id: opening_id,
                     owner_brush_id: wall_brush_id,
+                    wall_segment_ids: wall_segment_ids.clone(),
+                    owner_partition_bounds: (wx0, wy0, wz0, wx1, wy1, wz1),
+                    wall_role,
                     owner: attr.clone(),
                     bounds: recess_bounds,
                     portal_id: None,
                     frame_brush_ids: Vec::new(),
                     portal_style: None,
-                };
-                ir.insert_opening(opening);
+                });
+                let mut next_segments = Vec::new();
+                for segment_id in wall_segment_ids {
+                    next_segments.extend(split_wall_around_opening(ir, segment_id, recess_bounds)?);
+                }
+                next_segments.sort_unstable();
+                next_segments.dedup();
+                wall_segment_ids = next_segments;
             }
             WallMass::Buttress16 => {
-                // Buttress: external mass on the outside face
+                // Buttresses are attached on the exterior face and therefore
+                // share only an exact face with the structural wall.
                 build_buttress_on_wall(
                     wall_role,
-                    wx0,
-                    wy0,
-                    wx1,
-                    wy1,
+                    tx0,
+                    ty0,
+                    tx1,
+                    ty1,
                     wz0,
                     wz1,
                     attr,
@@ -867,29 +1580,25 @@ fn build_liner_on_wall(
     wz0: i128,
     wz1: i128,
     thickness: i128,
-    _offset: i128,
     attr: &SemanticAttribution,
     cost: CostSource,
     ir: &mut AssemblyIR,
     created_ids: &mut Vec<BrushAssemblyId>,
 ) -> Result<(), RichnessError> {
     match wall_role {
-        BrushAssemblyRole::NorthWall => {
-            // Wall spans X, liner sits on south/inner face (y=wy1-thickness)
-            build_and_insert_box(
-                (wx0, wx1),
-                (wy1 - thickness, wy1),
-                (wz0, wz1),
-                BrushAssemblyRole::WallLiner,
-                attr,
-                cost,
-                ir,
-            )
-            .map(|id| created_ids.push(id))
-        }
+        BrushAssemblyRole::NorthWall => build_and_insert_box(
+            (wx0, wx1),
+            (wy1, wy1 + thickness),
+            (wz0, wz1),
+            BrushAssemblyRole::WallLiner,
+            attr,
+            cost,
+            ir,
+        )
+        .map(|id| created_ids.push(id)),
         BrushAssemblyRole::SouthWall => build_and_insert_box(
             (wx0, wx1),
-            (wy0, wy0 + thickness),
+            (wy0 - thickness, wy0),
             (wz0, wz1),
             BrushAssemblyRole::WallLiner,
             attr,
@@ -898,7 +1607,7 @@ fn build_liner_on_wall(
         )
         .map(|id| created_ids.push(id)),
         BrushAssemblyRole::EastWall => build_and_insert_box(
-            (wx1 - thickness, wx1),
+            (wx0 - thickness, wx0),
             (wy0, wy1),
             (wz0, wz1),
             BrushAssemblyRole::WallLiner,
@@ -908,7 +1617,7 @@ fn build_liner_on_wall(
         )
         .map(|id| created_ids.push(id)),
         BrushAssemblyRole::WestWall => build_and_insert_box(
-            (wx0, wx0 + thickness),
+            (wx1, wx1 + thickness),
             (wy0, wy1),
             (wz0, wz1),
             BrushAssemblyRole::WallLiner,
@@ -939,7 +1648,7 @@ fn build_buttress_on_wall(
     match wall_role {
         BrushAssemblyRole::NorthWall => build_and_insert_box(
             (wx0, wx1),
-            (wy0, wy0 + bw),
+            (wy0 - bw, wy0),
             (wz0, wz1),
             BrushAssemblyRole::Buttress,
             attr,
@@ -949,7 +1658,7 @@ fn build_buttress_on_wall(
         .map(|id| created_ids.push(id)),
         BrushAssemblyRole::SouthWall => build_and_insert_box(
             (wx0, wx1),
-            (wy1 - bw, wy1),
+            (wy1, wy1 + bw),
             (wz0, wz1),
             BrushAssemblyRole::Buttress,
             attr,
@@ -958,7 +1667,7 @@ fn build_buttress_on_wall(
         )
         .map(|id| created_ids.push(id)),
         BrushAssemblyRole::EastWall => build_and_insert_box(
-            (wx1 - bw, wx1),
+            (wx1, wx1 + bw),
             (wy0, wy1),
             (wz0, wz1),
             BrushAssemblyRole::Buttress,
@@ -968,7 +1677,7 @@ fn build_buttress_on_wall(
         )
         .map(|id| created_ids.push(id)),
         BrushAssemblyRole::WestWall => build_and_insert_box(
-            (wx0, wx0 + bw),
+            (wx0 - bw, wx0),
             (wy0, wy1),
             (wz0, wz1),
             BrushAssemblyRole::Buttress,
@@ -982,6 +1691,46 @@ fn build_buttress_on_wall(
             "buttress only on cardinal walls",
         )),
     }
+}
+
+/// Restrict a variation treatment to its committed chain segment.
+fn wall_treatment_bounds(
+    wall_role: BrushAssemblyRole,
+    (wx0, wy0, wx1, wy1): (i128, i128, i128, i128),
+    (segment_start, segment_end): (i32, i32),
+) -> Result<(i128, i128, i128, i128), RichnessError> {
+    let start = i128::from(segment_start);
+    let end = i128::from(segment_end);
+    if start >= end
+        || start.rem_euclid(richness_geom::QUANTUM) != 0
+        || end.rem_euclid(richness_geom::QUANTUM) != 0
+    {
+        return Err(composition_error(
+            "wall_mass.segment",
+            format!("wall mass segment {start}..{end} is not a non-empty 16-unit interval"),
+        ));
+    }
+    let within = match wall_role {
+        BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => start >= wx0 && end <= wx1,
+        BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => start >= wy0 && end <= wy1,
+        _ => false,
+    };
+    if !within {
+        return Err(composition_error(
+            "wall_mass.segment",
+            format!("wall mass segment {start}..{end} escapes its committed wall run"),
+        ));
+    }
+    Ok(match wall_role {
+        BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => (start, wy0, end, wy1),
+        BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => (wx0, start, wx1, end),
+        _ => {
+            return Err(composition_error(
+                "wall_mass.segment",
+                "wall mass requires a cardinal wall run",
+            ));
+        }
+    })
 }
 
 fn compute_recess_bounds(
@@ -1011,6 +1760,7 @@ fn compute_recess_bounds(
 /// interface record. Rejects undeclared contact (two brushes touching with
 /// positive-area face overlap but no matching interface kind) and overlap.
 pub(crate) fn derive_all_interfaces(ir: &mut AssemblyIR) -> Result<(), RichnessError> {
+    ir.interfaces.clear();
     let brush_ids: Vec<BrushAssemblyId> = ir.brushes.keys().copied().collect();
 
     for i in 0..brush_ids.len() {
@@ -1025,11 +1775,17 @@ pub(crate) fn derive_all_interfaces(ir: &mut AssemblyIR) -> Result<(), RichnessE
                 return Err(composition_error(
                     "interfaces",
                     format!(
-                        "brushes {:?} ({}) and {:?} ({}) have positive-volume overlap",
+                        "brushes {} ({}, reservation {}) {:?} {:?} and {} ({}, reservation {}) {:?} {:?} have positive-volume overlap",
                         id_a.raw(),
                         brush_a.role.tag(),
+                        brush_a.owner.reservation_id.raw(),
+                        brush_a.brush.aabb().ok(),
+                        brush_a.brush.faces.iter().map(|face| (&face.plane, face.role)).collect::<Vec<_>>(),
                         id_b.raw(),
-                        brush_b.role.tag()
+                        brush_b.role.tag(),
+                        brush_b.owner.reservation_id.raw(),
+                        brush_b.brush.aabb().ok(),
+                        brush_b.brush.faces.iter().map(|face| (&face.plane, face.role)).collect::<Vec<_>>()
                     ),
                 ));
             }
@@ -1037,8 +1793,12 @@ pub(crate) fn derive_all_interfaces(ir: &mut AssemblyIR) -> Result<(), RichnessE
             // Check for positive-area face contact
             if richness_geom::has_positive_area_contact(&brush_a.brush, &brush_b.brush) {
                 // Derive the interface kind
-                if let Some(kind) = richness_geom::derive_interface_kind(brush_a.role, brush_b.role)
-                {
+                let kind = richness_geom::derive_interface_kind(brush_a.role, brush_b.role)
+                    .or_else(|| {
+                        declared_portal_frame_contact(ir, id_a, id_b)
+                            .then_some(InterfaceKind::PortalFrameJoint)
+                    });
+                if let Some(kind) = kind {
                     let if_id = ir.alloc_interface_id();
                     ir.insert_interface(InterfaceRecord {
                         id: if_id,
@@ -1065,6 +1825,18 @@ pub(crate) fn derive_all_interfaces(ir: &mut AssemblyIR) -> Result<(), RichnessE
     }
 
     Ok(())
+}
+
+fn declared_portal_frame_contact(ir: &AssemblyIR, a: BrushAssemblyId, b: BrushAssemblyId) -> bool {
+    let a_is_frame = ir
+        .openings
+        .values()
+        .any(|opening| opening.frame_brush_ids.contains(&a));
+    let b_is_frame = ir
+        .openings
+        .values()
+        .any(|opening| opening.frame_brush_ids.contains(&b));
+    a_is_frame && b_is_frame
 }
 
 // ── Session B: wall chain gap validation ──────────────────────────────────
@@ -1470,8 +2242,9 @@ fn compose_chamfered(
     // So: N wall at y ∈ [qy1-16, qy1]
     // NW corner = (qx0, qy1), NE corner = (qx1, qy1)
 
-    let wall_z_min = richness_geom::WALL_Z_MIN;
-    let wall_z_max = richness_geom::WALL_Z_MAX;
+    let vertical = richness_geom::footprint_vertical_bounds(fp)?;
+    let wall_z_min = vertical.wall_min;
+    let wall_z_max = vertical.wall_max;
     let wall_t = richness_geom::WALL_THICKNESS;
 
     compose_chamfered_north_wall(
@@ -1875,9 +2648,29 @@ fn build_and_insert_wall(
 
 // ── Error helper ──────────────────────────────────────────────────────────
 
+fn missing_archetype_error(
+    record: &ReservationRecord,
+    context: impl Into<String>,
+) -> RichnessError {
+    RichnessError::new(
+        RichnessErrorCode::SemanticInfeasible,
+        0,
+        "?",
+        "?",
+        "?",
+        "?",
+        "?",
+        "?",
+        "?",
+        "composition.archetype",
+        RichnessErrorCategory::SemanticInfeasibility,
+        format!("reservation {}: {}", record.id.raw(), context.into()),
+    )
+}
+
 fn composition_error(path: &str, context: impl Into<String>) -> RichnessError {
     RichnessError::new(
-        RichnessErrorCode::PlacementExhausted,
+        RichnessErrorCode::SemanticInfeasible,
         0,
         "?",
         "?",
@@ -1887,7 +2680,7 @@ fn composition_error(path: &str, context: impl Into<String>) -> RichnessError {
         "?",
         "?",
         path,
-        RichnessErrorCategory::PlacementTopologyExhaustion,
+        RichnessErrorCategory::SemanticInfeasibility,
         context,
     )
 }
@@ -1907,6 +2700,72 @@ fn composition_error(path: &str, context: impl Into<String>) -> RichnessError {
 /// - E/W wall: split in Y (left/right of opening) and optionally Z.
 ///
 /// Returns the IDs of the replacement wall segments.
+fn validated_halfspace_brush(
+    mut faces: Vec<BrushFace>,
+    path: &str,
+) -> Result<ConvexBrush, RichnessError> {
+    faces.sort_unstable();
+    faces.dedup();
+    let vertices = geometry::half_space_vertices(&faces)
+        .map_err(|error| composition_error(path, format!("vertices: {error}")))?;
+    faces.retain(|face| {
+        let on_plane: Vec<_> = vertices
+            .iter()
+            .copied()
+            .filter(|vertex| {
+                face.plane
+                    .signed_distance_rational(vertex)
+                    .is_ok_and(|distance| distance == crate::enhanced_v3::geometry::Rational::ZERO)
+            })
+            .collect();
+        on_plane.len() >= 3
+            && geometry::polygon_area_squared(&on_plane, &face.plane)
+                .is_ok_and(|area| area > crate::enhanced_v3::geometry::Rational::ZERO)
+    });
+    let mut brush = ConvexBrush::new(faces)
+        .map_err(|error| composition_error(path, format!("brush: {error}")))?;
+    brush
+        .validate_and_cache()
+        .map_err(|error| composition_error(path, format!("validate: {error}")))?;
+    richness_geom::validate_brush(&brush)?;
+    Ok(brush)
+}
+
+fn clip_brush_to_box(
+    original: &ConvexBrush,
+    x: (i128, i128),
+    y: (i128, i128),
+    z: (i128, i128),
+) -> Result<ConvexBrush, RichnessError> {
+    if x.0 >= x.1 || y.0 >= y.1 || z.0 >= z.1 {
+        return Err(composition_error(
+            "wall_split.clip",
+            "clip box has non-positive extent",
+        ));
+    }
+    let planes = [
+        CanonicalPlane::new(1, 0, 0, x.0),
+        CanonicalPlane::new(-1, 0, 0, -x.1),
+        CanonicalPlane::new(0, 1, 0, y.0),
+        CanonicalPlane::new(0, -1, 0, -y.1),
+        CanonicalPlane::new(0, 0, 1, z.0),
+        CanonicalPlane::new(0, 0, -1, -z.1),
+    ];
+    let mut faces = original.faces.clone();
+    for plane in planes {
+        let plane = plane
+            .map_err(|error| composition_error("wall_split.clip", format!("plane: {error}")))?;
+        if !faces.iter().any(|face| face.plane == plane) {
+            faces.push(
+                BrushFace::new(plane).map_err(|error| {
+                    composition_error("wall_split.clip", format!("face: {error}"))
+                })?,
+            );
+        }
+    }
+    validated_halfspace_brush(faces, "wall_split.clip")
+}
+
 pub(crate) fn split_wall_around_opening(
     ir: &mut AssemblyIR,
     wall_brush_id: BrushAssemblyId,
@@ -1941,10 +2800,22 @@ pub(crate) fn split_wall_around_opening(
         ));
     }
 
+    let wall_geometry = wall.brush.clone();
     let attr = wall.owner.clone();
     let cost = wall.cost;
     let support = wall.support.clone();
 
+    let intersects = ox0 < wx1 && ox1 > wx0 && oy0 < wy1 && oy1 > wy0 && oz0 < wz1 && oz1 > wz0;
+    if !intersects {
+        return Ok(vec![wall_brush_id]);
+    }
+
+    let split_x0 = ox0.max(wx0);
+    let split_x1 = ox1.min(wx1);
+    let split_y0 = oy0.max(wy0);
+    let split_y1 = oy1.min(wy1);
+    let split_z0 = oz0.max(wz0);
+    let split_z1 = oz1.min(wz1);
     let mut new_ids = Vec::new();
 
     if is_ns {
@@ -1953,9 +2824,8 @@ pub(crate) fn split_wall_around_opening(
         // handled by floor/ceiling slabs — we only split X for portal openings).
 
         // Left segment: [wx0, ox0]
-        if ox0 > wx0 {
-            let brush = ConvexBrush::make_box((wx0, ox0), (wy0, wy1), (wz0, wz1))
-                .map_err(|e| composition_error("wall_split", format!("left segment: {e}")))?;
+        if split_x0 > wx0 {
+            let brush = clip_brush_to_box(&wall_geometry, (wx0, split_x0), (wy0, wy1), (wz0, wz1))?;
             let id = ir.alloc_brush_id();
             ir.insert_brush(BrushAssembly {
                 id,
@@ -1975,9 +2845,8 @@ pub(crate) fn split_wall_around_opening(
         }
 
         // Right segment: [ox1, wx1]
-        if ox1 < wx1 {
-            let brush = ConvexBrush::make_box((ox1, wx1), (wy0, wy1), (wz0, wz1))
-                .map_err(|e| composition_error("wall_split", format!("right segment: {e}")))?;
+        if split_x1 < wx1 {
+            let brush = clip_brush_to_box(&wall_geometry, (split_x1, wx1), (wy0, wy1), (wz0, wz1))?;
             let id = ir.alloc_brush_id();
             ir.insert_brush(BrushAssembly {
                 id,
@@ -1997,14 +2866,18 @@ pub(crate) fn split_wall_around_opening(
         }
 
         // Below opening: if opening starts above wall bottom
-        if oz0 > wz0 {
-            let brush = ConvexBrush::make_box((ox0, ox1), (wy0, wy1), (wz0, oz0))
-                .map_err(|e| composition_error("wall_split", format!("below opening: {e}")))?;
+        if split_z0 > wz0 {
+            let brush = clip_brush_to_box(
+                &wall_geometry,
+                (split_x0, split_x1),
+                (wy0, wy1),
+                (wz0, split_z0),
+            )?;
             let id = ir.alloc_brush_id();
             ir.insert_brush(BrushAssembly {
                 id,
                 brush,
-                role: BrushAssemblyRole::Sill,
+                role: wall_role,
                 owner: attr.clone(),
                 cost,
                 support: support.clone(),
@@ -2019,14 +2892,18 @@ pub(crate) fn split_wall_around_opening(
         }
 
         // Above opening: if opening ends below wall top
-        if oz1 < wz1 {
-            let brush = ConvexBrush::make_box((ox0, ox1), (wy0, wy1), (oz1, wz1))
-                .map_err(|e| composition_error("wall_split", format!("above opening: {e}")))?;
+        if split_z1 < wz1 {
+            let brush = clip_brush_to_box(
+                &wall_geometry,
+                (split_x0, split_x1),
+                (wy0, wy1),
+                (split_z1, wz1),
+            )?;
             let id = ir.alloc_brush_id();
             ir.insert_brush(BrushAssembly {
                 id,
                 brush,
-                role: BrushAssemblyRole::PortalLintel,
+                role: wall_role,
                 owner: attr,
                 cost,
                 support: support.clone(),
@@ -2041,9 +2918,8 @@ pub(crate) fn split_wall_around_opening(
         }
     } else {
         // E/W wall. Split in Y.
-        if oy0 > wy0 {
-            let brush = ConvexBrush::make_box((wx0, wx1), (wy0, oy0), (wz0, wz1))
-                .map_err(|e| composition_error("wall_split", format!("left segment: {e}")))?;
+        if split_y0 > wy0 {
+            let brush = clip_brush_to_box(&wall_geometry, (wx0, wx1), (wy0, split_y0), (wz0, wz1))?;
             let id = ir.alloc_brush_id();
             ir.insert_brush(BrushAssembly {
                 id,
@@ -2062,9 +2938,8 @@ pub(crate) fn split_wall_around_opening(
             new_ids.push(id);
         }
 
-        if oy1 < wy1 {
-            let brush = ConvexBrush::make_box((wx0, wx1), (oy1, wy1), (wz0, wz1))
-                .map_err(|e| composition_error("wall_split", format!("right segment: {e}")))?;
+        if split_y1 < wy1 {
+            let brush = clip_brush_to_box(&wall_geometry, (wx0, wx1), (split_y1, wy1), (wz0, wz1))?;
             let id = ir.alloc_brush_id();
             ir.insert_brush(BrushAssembly {
                 id,
@@ -2083,14 +2958,18 @@ pub(crate) fn split_wall_around_opening(
             new_ids.push(id);
         }
 
-        if oz0 > wz0 {
-            let brush = ConvexBrush::make_box((wx0, wx1), (oy0, oy1), (wz0, oz0))
-                .map_err(|e| composition_error("wall_split", format!("below opening: {e}")))?;
+        if split_z0 > wz0 {
+            let brush = clip_brush_to_box(
+                &wall_geometry,
+                (wx0, wx1),
+                (split_y0, split_y1),
+                (wz0, split_z0),
+            )?;
             let id = ir.alloc_brush_id();
             ir.insert_brush(BrushAssembly {
                 id,
                 brush,
-                role: BrushAssemblyRole::Sill,
+                role: wall_role,
                 owner: attr.clone(),
                 cost,
                 support: support.clone(),
@@ -2104,14 +2983,18 @@ pub(crate) fn split_wall_around_opening(
             new_ids.push(id);
         }
 
-        if oz1 < wz1 {
-            let brush = ConvexBrush::make_box((wx0, wx1), (oy0, oy1), (oz1, wz1))
-                .map_err(|e| composition_error("wall_split", format!("above opening: {e}")))?;
+        if split_z1 < wz1 {
+            let brush = clip_brush_to_box(
+                &wall_geometry,
+                (wx0, wx1),
+                (split_y0, split_y1),
+                (split_z1, wz1),
+            )?;
             let id = ir.alloc_brush_id();
             ir.insert_brush(BrushAssembly {
                 id,
                 brush,
-                role: BrushAssemblyRole::PortalLintel,
+                role: wall_role,
                 owner: attr,
                 cost,
                 support: support.clone(),
@@ -2126,8 +3009,31 @@ pub(crate) fn split_wall_around_opening(
         }
     }
 
-    // Remove the original wall brush
-    ir.brushes.remove(&wall_brush_id);
+    // Remove the original segment and stale edges. Exact interfaces/supports
+    // are rebuilt after all omissions are materialized.
+    ir.remove_brush(wall_brush_id);
+    ir.supports.retain(|_, support| {
+        support.child != wall_brush_id
+            && !matches!(support.parent, SupportTarget::Brush(id) if id == wall_brush_id)
+    });
+    ir.interfaces.retain(|_, interface| {
+        interface.brush_a != wall_brush_id && interface.brush_b != wall_brush_id
+    });
+
+    for opening in ir.openings.values_mut() {
+        if !opening.wall_segment_ids.contains(&wall_brush_id) {
+            continue;
+        }
+        opening.wall_segment_ids.retain(|id| *id != wall_brush_id);
+        opening.wall_segment_ids.extend(new_ids.iter().copied());
+        opening.wall_segment_ids.sort_unstable();
+        opening.wall_segment_ids.dedup();
+        if opening.owner_brush_id == wall_brush_id {
+            if let Some(replacement) = opening.wall_segment_ids.first().copied() {
+                opening.owner_brush_id = replacement;
+            }
+        }
+    }
 
     Ok(new_ids)
 }
@@ -2140,73 +3046,49 @@ pub(crate) fn split_wall_around_opening(
 /// the opening throat.
 pub(crate) fn enforce_opening_omission(ir: &AssemblyIR) -> Result<(), RichnessError> {
     for opening in ir.openings.values() {
-        let owner_id = opening.owner_brush_id;
+        if !opening.wall_segment_ids.contains(&opening.owner_brush_id)
+            || !ir.brushes.contains_key(&opening.owner_brush_id)
+        {
+            return Err(composition_error(
+                "opening_omission.owner",
+                format!(
+                    "opening {} has no live canonical owner segment",
+                    opening.id.raw()
+                ),
+            ));
+        }
 
-        // Check if the owner brush still exists
-        if let Some(owner) = ir.brushes.get(&owner_id) {
-            let bb = owner
-                .brush
-                .aabb()
-                .map_err(|e| composition_error("opening_omission", format!("AABB: {e}")))?;
-            let ((bmin_x, bmin_y, bmin_z), (bmax_x, bmax_y, bmax_z)) = bb;
-            let (ox0, oy0, oz0, ox1, oy1, oz1) = opening.bounds;
-
-            // If the wall was properly split, the owner brush's AABB should
-            // not intersect the opening bounds except at boundaries.
-            // We do a strict check: the wall AABB must not wholly contain
-            // the opening bounds.
-            let contains = bmin_x <= ox0
-                && bmax_x >= ox1
-                && bmin_y <= oy0
-                && bmax_y >= oy1
-                && bmin_z <= oz0
-                && bmax_z >= oz1;
-
-            if contains {
+        let (x0, y0, z0, x1, y1, z1) = opening.bounds;
+        let throat = ConvexBrush::make_box((x0, x1), (y0, y1), (z0, z1))
+            .map_err(|error| composition_error("opening_omission", format!("throat: {error}")))?;
+        for brush_id in opening
+            .wall_segment_ids
+            .iter()
+            .chain(opening.frame_brush_ids.iter())
+        {
+            let brush = ir.brushes.get(brush_id).ok_or_else(|| {
+                composition_error(
+                    "opening_omission",
+                    format!(
+                        "opening {} references missing brush {}",
+                        opening.id.raw(),
+                        brush_id.raw()
+                    ),
+                )
+            })?;
+            if richness_geom::brushes_overlap(&brush.brush, &throat)? {
                 return Err(composition_error(
                     "opening_omission",
                     format!(
-                        "wall brush {:?} still contains opening {:?} — wall must be split around opening",
-                        owner_id.raw(),
+                        "brush {} ({}) intrudes into exact throat for opening {}",
+                        brush_id.raw(),
+                        brush.role.tag(),
                         opening.id.raw()
                     ),
                 ));
             }
         }
-
-        // Also check that frame brush positions don't intrude into the throat.
-        // Frame brushes (posts, lintel, surround) are adjacent, not occupying.
-        for &frame_id in &opening.frame_brush_ids {
-            if let Some(frame) = ir.brushes.get(&frame_id) {
-                let bb = frame.brush.aabb().map_err(|e| {
-                    composition_error("opening_omission", format!("frame AABB: {e}"))
-                })?;
-                let ((fmin_x, fmin_y, fmin_z), (fmax_x, fmax_y, fmax_z)) = bb;
-                let (ox0, oy0, oz0, ox1, oy1, oz1) = opening.bounds;
-
-                // We allow frame brushes to be AT the throat boundary but not inside.
-                // The simple check: if frame is entirely inside the throat, reject.
-                let inside_throat = fmin_x >= ox0
-                    && fmax_x <= ox1
-                    && fmin_y >= oy0
-                    && fmax_y <= oy1
-                    && fmin_z >= oz0
-                    && fmax_z <= oz1;
-
-                if inside_throat {
-                    return Err(composition_error(
-                        "opening_omission",
-                        format!(
-                            "frame brush {:?} is entirely inside portal throat of opening {:?}",
-                            frame_id.raw(),
-                            opening.id.raw()
-                        ),
-                    ));
-                }
-            }
-        }
     }
-
     Ok(())
 }
 
@@ -2284,7 +3166,10 @@ mod tests {
     use super::super::ids::{
         ArchetypeRequestId, BeatId, PortalId, ReservationId, WallChainId, ZoneId,
     };
+    use super::super::pacing::build_pacing_blueprint;
+    use super::super::request::{RichnessDocumentV1, RichnessPreset, RichnessTheme};
     use super::super::reservation::{ReservationKind, ReservationRecord};
+    use super::super::solver::solve_placement_and_topology;
     use super::super::topology::Dir;
     use super::super::variation::{WallChainRecord, WallMass, WallMassTreatment, WallShaping};
     use super::*;
@@ -2293,6 +3178,7 @@ mod tests {
         SemanticAttribution::from_reservation(
             ReservationId::new(0),
             Some(ArchetypeRequestId::new(0)),
+            Some(ArchetypeIndex::new(0)),
             Some(BeatId::new(0)),
             Some(ZoneId::new(0)),
         )
@@ -2303,6 +3189,149 @@ mod tests {
         let qw = (w * 16) as i32;
         let qh = (h * 16) as i32;
         Footprint3D::single_layer(0, 0, qw, qh, 0)
+    }
+
+    #[test]
+    fn solved_phase07_output_reaches_composition_pipeline() {
+        let document =
+            RichnessDocumentV1::new(0, 2048, RichnessPreset::Sparse, RichnessTheme::Ancient)
+                .unwrap();
+        let resolved = super::super::request::ResolvedRichnessRequestV1::resolve(document).unwrap();
+        let blueprint = build_pacing_blueprint(&resolved).unwrap();
+        let generation = solve_placement_and_topology(blueprint.clone(), resolved).unwrap();
+        let expected_portals = 2 * generation.topology.routes.len();
+
+        for (theme_variant, theme) in [
+            RichnessTheme::Ancient,
+            RichnessTheme::Egyptian,
+            RichnessTheme::Brutalist,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let complexity = super::super::complexity::build_complexity_plan(
+                RichnessPreset::Sparse,
+                theme_variant as u32,
+                &blueprint,
+                &generation.topology,
+            );
+            assert!(complexity.is_within_budget(), "{:?}", complexity.errors);
+            let composition = compose_solved_generation(&generation, theme, &complexity).unwrap();
+            assert_eq!(
+                composition.assembly.portal_assemblies.len(),
+                expected_portals
+            );
+            assert_eq!(composition.assembly.openings.len(), expected_portals);
+            assert!(!composition.visibility.semantic_leaves.is_empty());
+            assert!(!composition.visibility.semantic_pvs.is_empty());
+            for brush in composition.assembly.brushes.values() {
+                if let Some(request_id) = brush.owner.request_id {
+                    assert_eq!(
+                        brush.owner.archetype,
+                        generation
+                            .placement
+                            .request_archetypes
+                            .get(&request_id)
+                            .copied()
+                    );
+                }
+            }
+            for opening in composition.assembly.openings.values() {
+                let width = match opening.wall_role {
+                    BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => {
+                        opening.bounds.3 - opening.bounds.0
+                    }
+                    BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => {
+                        opening.bounds.4 - opening.bounds.1
+                    }
+                    _ => 0,
+                };
+                assert_eq!(width, 64);
+                assert_eq!(opening.bounds.5 - opening.bounds.2, 80);
+            }
+        }
+    }
+
+    #[test]
+    fn composition_rejects_missing_explicit_archetype_identity() {
+        let record = ReservationRecord {
+            id: ReservationId::new(7),
+            kind: ReservationKind::StandardRoom,
+            footprint: make_test_fp(16, 16),
+            beat_id: Some(BeatId::new(1)),
+            request_id: Some(ArchetypeRequestId::new(99)),
+            zone_id: Some(ZoneId::new(0)),
+            pit_pair_room_id: None,
+            composite_children: Vec::new(),
+            owning_route_id: None,
+            clearance_height: None,
+            committed: true,
+            cost_faces: 0,
+            cost_brushes: 0,
+            cost_entities: 0,
+            cost_lights: 0,
+        };
+        let reservations = [(record.id, record)].into_iter().collect();
+        let error = compose_all_rooms(&reservations, &BTreeMap::new()).unwrap_err();
+        assert_eq!(error.code, RichnessErrorCode::SemanticInfeasible);
+        assert_eq!(error.path, "composition.archetype");
+    }
+
+    #[test]
+    fn touching_rooms_materialize_one_shared_wall_plane() {
+        let make_record = |id: u32, request: u32, x0: i32, x1: i32| ReservationRecord {
+            id: ReservationId::new(id),
+            kind: ReservationKind::StandardRoom,
+            footprint: Footprint3D::single_layer(x0, 0, x1, 256, 0),
+            beat_id: Some(BeatId::new(id)),
+            request_id: Some(ArchetypeRequestId::new(request)),
+            zone_id: Some(ZoneId::new(0)),
+            pit_pair_room_id: None,
+            composite_children: Vec::new(),
+            owning_route_id: None,
+            clearance_height: None,
+            committed: true,
+            cost_faces: 0,
+            cost_brushes: 0,
+            cost_entities: 0,
+            cost_lights: 0,
+        };
+        let reservations: BTreeMap<_, _> = [
+            (ReservationId::new(0), make_record(0, 40, 0, 256)),
+            (ReservationId::new(1), make_record(1, 41, 256, 512)),
+        ]
+        .into_iter()
+        .collect();
+        let archetypes = [
+            (ArchetypeRequestId::new(40), ArchetypeIndex::new(1)),
+            (ArchetypeRequestId::new(41), ArchetypeIndex::new(1)),
+        ]
+        .into_iter()
+        .collect();
+        let mut ir = compose_all_rooms(&reservations, &archetypes).unwrap();
+        materialize_canonical_shared_walls(&reservations, &mut ir).unwrap();
+
+        assert_eq!(ir.shared_wall_chains.len(), 1);
+        let chain = ir.shared_wall_chains.values().next().unwrap();
+        assert_eq!(chain.owner_reservation_id, ReservationId::new(0));
+        assert_eq!(chain.sharing_reservation_id, ReservationId::new(1));
+        let owner = &ir.brushes[&chain.owner_brush_id];
+        assert!(owner
+            .brush
+            .faces
+            .iter()
+            .any(|face| face.plane == chain.shared_plane));
+        assert_eq!(
+            ir.brushes
+                .values()
+                .filter(|brush| {
+                    brush.owner.reservation_id == ReservationId::new(1)
+                        && brush.role == BrushAssemblyRole::WestWall
+                })
+                .count(),
+            0
+        );
+        validate_no_overlaps(&ir).unwrap();
     }
 
     #[test]
@@ -2418,7 +3447,7 @@ mod tests {
         };
 
         let mut ir = AssemblyIR::new();
-        compose_single_room(&record, &mut ir).unwrap();
+        compose_single_room(&record, ArchetypeIndex::new(1), &mut ir).unwrap();
         assert_eq!(ir.brush_count(), 6); // Rectangle produces 6
     }
 
@@ -2445,7 +3474,7 @@ mod tests {
         };
 
         let mut ir = AssemblyIR::new();
-        compose_single_room(&record, &mut ir).unwrap();
+        compose_single_room(&record, ArchetypeIndex::new(2), &mut ir).unwrap();
         // Octagon produces 10 brushes (floor + ceiling + 4 cardinal + 4 diagonal)
         assert!(
             ir.brush_count() >= 8,
@@ -2474,6 +3503,7 @@ mod tests {
             let attr = SemanticAttribution::from_reservation(
                 ReservationId::new(0),
                 Some(ArchetypeRequestId::new(arch_idx as u32)),
+                Some(ArchetypeIndex::new(arch_idx as u32)),
                 Some(BeatId::new(0)),
                 Some(ZoneId::new(0)),
             );
@@ -2625,8 +3655,9 @@ mod tests {
         // Throat anchor: (span_min, z_min, span_max, z_max) = (X=80, Z=16, X=144, Z=96) => 64 wide, 80 tall
         let throat_anchor = (80i128, 16i128, 144i128, 96i128);
 
-        let result = build_ancient_post_lintel(
+        let result = build_portal(
             portal_id,
+            PortalStyle::AncientPostLintel,
             wall_id,
             throat_anchor,
             BrushAssemblyRole::NorthWall,
@@ -2673,8 +3704,9 @@ mod tests {
 
         let portal_id = PortalId::new(1);
         let throat_anchor = (80i128, 16i128, 144i128, 96i128);
-        let result = build_egyptian_stepped_surround(
+        let result = build_portal(
             portal_id,
+            PortalStyle::EgyptianSteppedSurround,
             wall_id,
             throat_anchor,
             BrushAssemblyRole::NorthWall,
@@ -2722,8 +3754,9 @@ mod tests {
 
         let portal_id = PortalId::new(2);
         let throat_anchor = (80i128, 16i128, 144i128, 96i128);
-        let result = build_brutalist_reveal_surround(
+        let result = build_portal(
             portal_id,
+            PortalStyle::BrutalistRevealSurround,
             wall_id,
             throat_anchor,
             BrushAssemblyRole::NorthWall,
@@ -2781,7 +3814,7 @@ mod tests {
         );
         assert!(result.is_err(), "diagonal portal should be rejected");
         let err = result.unwrap_err();
-        assert!(err.context.contains("not cardinal"));
+        assert!(err.context.contains("non-cardinal"));
     }
 
     #[test]
@@ -2848,8 +3881,9 @@ mod tests {
         });
 
         let throat_anchor = (96i128, 16i128, 160i128, 96i128);
-        build_ancient_post_lintel(
+        build_portal(
             PortalId::new(0),
+            PortalStyle::AncientPostLintel,
             wall_left, // use left wall as the associated brush
             throat_anchor,
             BrushAssemblyRole::NorthWall,
@@ -2920,6 +3954,70 @@ mod tests {
         );
         assert!(result.is_err(), "mass treatment should be rejected");
         assert!(result.unwrap_err().context.contains("overlaps protected"));
+    }
+
+    #[test]
+    fn wall_mass_materializes_disjoint_liner_and_recess_omission() {
+        let attr = make_test_attr();
+        let cost = CostSource {
+            dimension: BudgetDimension::SourceFaces,
+            face_count: 6,
+        };
+        let chain = WallChainRecord {
+            id: WallChainId::new(0),
+            owner: SemanticId::Reservation(ReservationId::new(0)),
+            shared_with: Vec::new(),
+            cardinal_direction: Dir::North,
+            shaping: [WallShaping::None, WallShaping::None],
+            mass_treatments: vec![
+                WallMassTreatment {
+                    segment: (0, 16),
+                    kind: WallMass::Liner16,
+                    quantum_count: 1,
+                },
+                WallMassTreatment {
+                    segment: (32, 48),
+                    kind: WallMass::Recess16,
+                    quantum_count: 1,
+                },
+            ],
+            portal_anchors: Vec::new(),
+            protected_segments: Vec::new(),
+            structural_thickness: 16,
+            exterior_envelope: false,
+        };
+        let mut ir = AssemblyIR::new();
+        let wall_id = ir.alloc_brush_id();
+        ir.insert_brush(BrushAssembly {
+            id: wall_id,
+            brush: ConvexBrush::make_box(
+                (0, 256),
+                (240, 256),
+                (richness_geom::WALL_Z_MIN, richness_geom::WALL_Z_MAX),
+            )
+            .unwrap(),
+            role: BrushAssemblyRole::NorthWall,
+            owner: attr.clone(),
+            cost,
+            support: SupportTarget::World,
+        });
+
+        apply_wall_mass_treatments(
+            &chain,
+            wall_id,
+            BrushAssemblyRole::NorthWall,
+            &attr,
+            cost,
+            &mut ir,
+        )
+        .unwrap();
+
+        assert!(ir.brushes.values().any(|brush| {
+            brush.role == BrushAssemblyRole::WallLiner && brush.brush.aabb().unwrap().0 .1 == 256
+        }));
+        assert_eq!(ir.openings.len(), 1);
+        enforce_opening_omission(&ir).unwrap();
+        validate_no_overlaps(&ir).unwrap();
     }
 
     #[test]
@@ -3037,8 +4135,9 @@ mod tests {
         });
 
         let throat_anchor = (96i128, 16i128, 160i128, 96i128); // X=96..160 (64 wide), Z=16..96 (80 tall)
-        let portal = build_ancient_post_lintel(
+        let portal = build_portal(
             PortalId::new(0),
+            PortalStyle::AncientPostLintel,
             wall_id,
             throat_anchor,
             BrushAssemblyRole::NorthWall,
@@ -3048,23 +4147,13 @@ mod tests {
         )
         .unwrap();
 
-        // Opening bounds: (x0, y0, z0, x1, y1, z1)
-        // For N wall with throat at X=96..160: post_w=16, so bounds X = 96-16=80 to 160+16=176
-        // Z bounds: 16 to 96+16=112 (throat+lintel)
+        // Opening bounds describe only the protected clear throat. Frame
+        // extents are separate brushes and must never inflate this witness.
         let opening = &ir.openings[&portal.opening_id];
-        let throat_width = (opening.bounds.3 - opening.bounds.0).abs();
-        let throat_height_ok = (opening.bounds.5 - opening.bounds.2).abs();
-        // Total frame width = 64 + 2*16 = 96. Total frame height = 80 + 16 = 96.
-        assert!(
-            throat_width >= 96,
-            "frame width {} should be >= 96",
-            throat_width
-        );
-        assert!(
-            throat_height_ok >= 96,
-            "frame height {} should be >= 96",
-            throat_height_ok
-        );
+        assert_eq!(opening.bounds, (96, 240, 16, 160, 256, 96));
+        assert_eq!(opening.bounds.3 - opening.bounds.0, 64);
+        assert_eq!(opening.bounds.5 - opening.bounds.2, 80);
+        enforce_opening_omission(&ir).unwrap();
     }
 
     #[test]

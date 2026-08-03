@@ -18,13 +18,14 @@
 
 use std::collections::BTreeMap;
 
-use crate::enhanced_v3::geometry::ConvexBrush;
+use crate::enhanced_v3::geometry::{CanonicalPlane, ConvexBrush};
 
 use super::generated_content;
 use super::ids::{
     ArchetypeIndex, ArchetypeRequestId, BeatId, BrushAssemblyId, EntityAssemblyId,
-    InterfaceAssemblyId, OpeningAssemblyId, ReservationId, SupportAssemblyId, ZoneId,
+    InterfaceAssemblyId, OpeningAssemblyId, ReservationId, SupportAssemblyId, WallChainId, ZoneId,
 };
+use super::theme::SemanticRole;
 
 // ── Semantic attribution ──────────────────────────────────────────────────
 
@@ -51,11 +52,10 @@ impl SemanticAttribution {
     pub fn from_reservation(
         reservation_id: ReservationId,
         request_id: Option<ArchetypeRequestId>,
+        archetype: Option<ArchetypeIndex>,
         beat_id: Option<BeatId>,
         zone_id: Option<ZoneId>,
     ) -> Self {
-        let archetype = request_id
-            .map(|rid| ArchetypeIndex::new(rid.raw() % generated_content::ARCHETYPE_COUNT as u32));
         Self {
             reservation_id,
             request_id,
@@ -65,10 +65,13 @@ impl SemanticAttribution {
         }
     }
 
-    /// The stable archetype ID string, if known.
+    /// The stable archetype ID string, if known and present in the frozen catalog.
     pub fn archetype_id_str(&self) -> Option<&'static str> {
-        self.archetype
-            .map(|a| generated_content::ARCHETYPE_IDS[a.raw() as usize])
+        self.archetype.and_then(|archetype| {
+            generated_content::ARCHETYPE_IDS
+                .get(archetype.raw() as usize)
+                .copied()
+        })
     }
 }
 
@@ -223,6 +226,35 @@ impl BrushAssemblyRole {
     pub fn owns_full_partition(self) -> bool {
         matches!(self, Self::FloorSlab | Self::CeilingSlab)
     }
+
+    /// The authored theme role that is legal for this structural brush role.
+    pub fn semantic_role(self) -> SemanticRole {
+        match self {
+            Self::FloorSlab => SemanticRole::Floor,
+            Self::CeilingSlab => SemanticRole::Ceiling,
+            Self::NorthWall
+            | Self::SouthWall
+            | Self::EastWall
+            | Self::WestWall
+            | Self::DiagNEWall
+            | Self::DiagNWWall
+            | Self::DiagSEWall
+            | Self::DiagSWWall
+            | Self::WallLiner
+            | Self::WallRecess
+            | Self::PartialWall => SemanticRole::Wall,
+            Self::PortalPost | Self::PortalLintel | Self::PortalSurround => SemanticRole::Portal,
+            Self::OffsetShaft => SemanticRole::Vertical,
+            Self::InteriorColumn
+            | Self::InteriorMass
+            | Self::VaultRib
+            | Self::MonolithSolid
+            | Self::Pilaster
+            | Self::Buttress
+            | Self::Sill
+            | Self::BentApproach => SemanticRole::Accent,
+        }
+    }
 }
 
 // ── Assembly brush ────────────────────────────────────────────────────────
@@ -343,6 +375,14 @@ pub(crate) enum InterfaceKind {
     ShaftToFloor,
     /// Offset shaft contacts wall.
     ShaftToWall,
+    /// Two split segments belonging to one cardinal wall partition.
+    WallSegmentJoint,
+    /// Adjacent floor or ceiling slab runs.
+    SlabRunJoint,
+    /// Two pieces of one portal frame contact.
+    PortalFrameJoint,
+    /// Portal surround rests on a floor slab.
+    SurroundToFloor,
     /// Shared wall contacts shared wall (same chain, adjacent rooms).
     SharedWallContact,
 }
@@ -370,11 +410,19 @@ pub(crate) struct SupportRecord {
 pub(crate) struct OpeningRecord {
     /// Unique opening ID.
     pub id: OpeningAssemblyId,
-    /// The wall/slab brush that owns this opening omission.
+    /// Canonical brush identity for the one logical wall partition that owns
+    /// this omission. It is one of `wall_segment_ids` after splitting.
     pub owner_brush_id: BrushAssemblyId,
+    /// All emitted wall segments that realize the owning partition.
+    pub wall_segment_ids: Vec<BrushAssemblyId>,
+    /// Bounds of the unsplit owning wall partition.
+    pub owner_partition_bounds: (i128, i128, i128, i128, i128, i128),
+    /// Cardinal wall containing the omission.
+    pub wall_role: BrushAssemblyRole,
     /// The semantic owner of the opening.
     pub owner: SemanticAttribution,
-    /// Bounds of the opening in Quake coordinates (x0, y0, x1, y1, z0, z1).
+    /// Exact clear-throat bounds in Quake coordinates
+    /// `(x0, y0, z0, x1, y1, z1)`.
     pub bounds: (i128, i128, i128, i128, i128, i128),
     /// The portal this opening connects to.
     pub portal_id: Option<super::ids::PortalId>,
@@ -424,12 +472,26 @@ pub(crate) struct PortalAssembly {
     pub lintel_ids: Vec<BrushAssemblyId>,
     /// Surround brush IDs.
     pub surround_ids: Vec<BrushAssemblyId>,
-    /// The wall brush that owns the opening omission.
+    /// Canonical segment of the wall partition that owns the omission.
     pub wall_brush_id: BrushAssemblyId,
     /// The opening omission ID.
     pub opening_id: OpeningAssemblyId,
-    /// Witness bounds of the portal throat (must be exactly 64×80).
+    /// Witness bounds of the clear portal throat (exactly 64×80).
     pub throat_bounds: (i128, i128, i128, i128, i128, i128),
+}
+
+/// One physical wall run shared by two touching room reservations.
+///
+/// The owner brush is emitted once. Both rooms consume `shared_plane`; no
+/// second wall brush or independently rounded plane is permitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SharedWallChainAssembly {
+    pub id: WallChainId,
+    pub owner_reservation_id: ReservationId,
+    pub sharing_reservation_id: ReservationId,
+    pub owner_brush_id: BrushAssemblyId,
+    pub shared_plane: CanonicalPlane,
+    pub span: (i128, i128),
 }
 
 // ── Assembly IR ────────────────────────────────────────────────────────────
@@ -452,6 +514,10 @@ pub(crate) struct AssemblyIR {
     pub openings: BTreeMap<OpeningAssemblyId, OpeningRecord>,
     /// All constructed portal assemblies (session B).
     pub portal_assemblies: Vec<PortalAssembly>,
+    /// Canonical one-owner shared-wall runs.
+    pub shared_wall_chains: BTreeMap<WallChainId, SharedWallChainAssembly>,
+    /// Concrete theme-role assignment for every emitted brush.
+    pub material_roles: BTreeMap<BrushAssemblyId, SemanticRole>,
 
     // ── ID allocators ──────────────────────────────────────────────────
     next_brush_id: u32,
@@ -459,6 +525,7 @@ pub(crate) struct AssemblyIR {
     next_interface_id: u32,
     next_support_id: u32,
     next_opening_id: u32,
+    next_wall_chain_id: u32,
 }
 
 impl AssemblyIR {
@@ -471,11 +538,14 @@ impl AssemblyIR {
             supports: BTreeMap::new(),
             openings: BTreeMap::new(),
             portal_assemblies: Vec::new(),
+            shared_wall_chains: BTreeMap::new(),
+            material_roles: BTreeMap::new(),
             next_brush_id: 0,
             next_entity_id: 0,
             next_interface_id: 0,
             next_support_id: 0,
             next_opening_id: 0,
+            next_wall_chain_id: 0,
         }
     }
 
@@ -511,13 +581,27 @@ impl AssemblyIR {
         id
     }
 
+    pub fn alloc_wall_chain_id(&mut self) -> WallChainId {
+        let id = WallChainId::new(self.next_wall_chain_id);
+        self.next_wall_chain_id += 1;
+        id
+    }
+
     // ── Insertion ──────────────────────────────────────────────────────
 
-    /// Insert a brush and return its ID.
-    pub fn insert_brush(&mut self, brush: BrushAssembly) -> BrushAssemblyId {
+    /// Insert a brush, bind its role-valid theme material, and return its ID.
+    pub fn insert_brush(&mut self, mut brush: BrushAssembly) -> BrushAssemblyId {
         let id = brush.id;
+        brush.cost.face_count = brush.brush.faces.len() as u32;
+        self.material_roles.insert(id, brush.role.semantic_role());
         self.brushes.insert(id, brush);
         id
+    }
+
+    /// Remove a brush and every directly keyed assignment for it.
+    pub fn remove_brush(&mut self, id: BrushAssemblyId) -> Option<BrushAssembly> {
+        self.material_roles.remove(&id);
+        self.brushes.remove(&id)
     }
 
     /// Insert an entity and return its ID.
@@ -545,6 +629,12 @@ impl AssemblyIR {
     pub fn insert_opening(&mut self, opening: OpeningRecord) -> OpeningAssemblyId {
         let id = opening.id;
         self.openings.insert(id, opening);
+        id
+    }
+
+    pub fn insert_shared_wall_chain(&mut self, chain: SharedWallChainAssembly) -> WallChainId {
+        let id = chain.id;
+        self.shared_wall_chains.insert(id, chain);
         id
     }
 
@@ -611,6 +701,7 @@ mod tests {
         let attr = SemanticAttribution::from_reservation(
             ReservationId::new(0),
             Some(ArchetypeRequestId::new(2)),
+            Some(ArchetypeIndex::new(2)),
             Some(BeatId::new(1)),
             Some(ZoneId::new(0)),
         );
@@ -623,6 +714,7 @@ mod tests {
     fn semantic_attribution_no_request_has_no_archetype() {
         let attr = SemanticAttribution::from_reservation(
             ReservationId::new(1),
+            None,
             None,
             Some(BeatId::new(2)),
             None,
@@ -706,7 +798,8 @@ mod tests {
     fn assembly_ir_insert_brush_roundtrip() {
         let mut ir = AssemblyIR::new();
 
-        let attr = SemanticAttribution::from_reservation(ReservationId::new(0), None, None, None);
+        let attr =
+            SemanticAttribution::from_reservation(ReservationId::new(0), None, None, None, None);
 
         let cb = ConvexBrush::make_box((0, 256), (0, 256), (0, 16)).unwrap();
         let brush_id = ir.alloc_brush_id();
@@ -731,8 +824,10 @@ mod tests {
     fn brushes_for_reservation_filters_correctly() {
         let mut ir = AssemblyIR::new();
 
-        let attr_a = SemanticAttribution::from_reservation(ReservationId::new(0), None, None, None);
-        let attr_b = SemanticAttribution::from_reservation(ReservationId::new(1), None, None, None);
+        let attr_a =
+            SemanticAttribution::from_reservation(ReservationId::new(0), None, None, None, None);
+        let attr_b =
+            SemanticAttribution::from_reservation(ReservationId::new(1), None, None, None, None);
 
         let cb = ConvexBrush::make_box((0, 64), (0, 64), (0, 16)).unwrap();
 

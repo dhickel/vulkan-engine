@@ -21,6 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::assembly::{AssemblyIR, BrushAssembly, BrushAssemblyRole, SemanticAttribution};
 use super::error::{RichnessError, RichnessErrorCategory, RichnessErrorCode};
 use super::ids::{BrushAssemblyId, OpeningAssemblyId, PortalId, ReservationId};
+use super::topology::CommittedRoute;
 
 // ── Occluder kind ─────────────────────────────────────────────────────────
 
@@ -98,10 +99,6 @@ pub(crate) enum CompilerConvention {
     HintSplit,
     /// `skip` texture: adds solid collision volume with no visible faces.
     SkipSolid,
-    /// `clip` texture: adds collision only in stored hull-1 (player), not
-    /// in hull-0 leaf contents. Phase 05 proven by player-hull start-solid
-    /// witness.
-    ClipCollision,
     /// `func_detail` entity: brush joins world model, classname is consumed.
     /// Does not create an inline model. Phase 05 proven by entity preservation
     /// test.
@@ -111,11 +108,38 @@ pub(crate) enum CompilerConvention {
 impl CompilerConvention {
     pub fn tag(self) -> &'static str {
         match self {
-            Self::HintSplit => "hint_split",
-            Self::SkipSolid => "skip_solid",
-            Self::ClipCollision => "clip_collision",
+            Self::HintSplit => "hint",
+            Self::SkipSolid => "skip",
             Self::FuncDetail => "func_detail",
         }
+    }
+}
+
+/// Concrete, Phase-05-qualified compiler emission for one brush.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CompilerConventionRecord {
+    pub brush_id: BrushAssemblyId,
+    pub convention: CompilerConvention,
+    /// Exact primary miptex or entity classname.
+    pub primary: &'static str,
+    /// Exact companion miptex (`hintskip` for a `hint` split), if required.
+    pub secondary: Option<&'static str>,
+}
+
+impl CompilerConventionRecord {
+    fn from_intent(intent: &OcclusionIntent) -> Option<Self> {
+        let convention = intent.convention?;
+        let (primary, secondary) = match convention {
+            CompilerConvention::HintSplit => ("hint", Some("hintskip")),
+            CompilerConvention::SkipSolid => ("skip", None),
+            CompilerConvention::FuncDetail => ("func_detail", None),
+        };
+        Some(Self {
+            brush_id: intent.brush_id,
+            convention,
+            primary,
+            secondary,
+        })
     }
 }
 
@@ -163,6 +187,12 @@ pub(crate) struct VerticalMergeRecord {
 pub(crate) struct VisibilityPlan {
     /// All occlusion intents, ordered canonically by brush ID.
     pub occluders: BTreeMap<BrushAssemblyId, OcclusionIntent>,
+    /// Exact compiler-emission records, keyed by brush ID.
+    pub compiler_records: BTreeMap<BrushAssemblyId, CompilerConventionRecord>,
+    /// Planned semantic leaf records keyed by room reservation.
+    pub semantic_leaves: BTreeMap<ReservationId, SemanticLeafAttribution>,
+    /// Planned semantic PVS adjacency keyed by room reservation.
+    pub semantic_pvs: BTreeMap<ReservationId, SemanticPvsAttribution>,
     /// All vertical merges (capped at 2/room, 6/cluster).
     pub vertical_merges: Vec<VerticalMergeRecord>,
     /// Count of merges per room reservation.
@@ -184,6 +214,9 @@ impl VisibilityPlan {
     pub fn new() -> Self {
         Self {
             occluders: BTreeMap::new(),
+            compiler_records: BTreeMap::new(),
+            semantic_leaves: BTreeMap::new(),
+            semantic_pvs: BTreeMap::new(),
             vertical_merges: Vec::new(),
             merge_count_per_room: BTreeMap::new(),
             merge_count_per_cluster: BTreeMap::new(),
@@ -196,6 +229,9 @@ impl VisibilityPlan {
 
     /// Record an occlusion intent for a brush.
     pub fn record_occluder(&mut self, intent: OcclusionIntent) {
+        if let Some(record) = CompilerConventionRecord::from_intent(&intent) {
+            self.compiler_records.insert(intent.brush_id, record);
+        }
         self.occluders.insert(intent.brush_id, intent);
     }
 
@@ -263,28 +299,28 @@ impl VisibilityPlan {
                 let a = &openings[i];
                 let b = &openings[j];
 
-                // Check if openings are on opposite walls and aligned
-                let ax_mid = (a.bounds.0 + a.bounds.3) / 2;
-                let ay_mid = (a.bounds.1 + a.bounds.4) / 2;
-                let bx_mid = (b.bounds.0 + b.bounds.3) / 2;
-                let by_mid = (b.bounds.1 + b.bounds.4) / 2;
-
-                // Aligned in X (same wall run, opposite directions)
-                let x_aligned = (ax_mid - bx_mid).abs() <= 64;
-                // Aligned in Y
-                let y_aligned = (ay_mid - by_mid).abs() <= 64;
-
-                if x_aligned && y_aligned {
-                    let msg = format!(
-                        "openings {:?} and {:?} are aligned (mid x=({},{}), y=({},{}))",
+                if a.owner.reservation_id != b.owner.reservation_id {
+                    continue;
+                }
+                let north_south = matches!(
+                    (a.wall_role, b.wall_role),
+                    (BrushAssemblyRole::NorthWall, BrushAssemblyRole::SouthWall)
+                        | (BrushAssemblyRole::SouthWall, BrushAssemblyRole::NorthWall)
+                );
+                let east_west = matches!(
+                    (a.wall_role, b.wall_role),
+                    (BrushAssemblyRole::EastWall, BrushAssemblyRole::WestWall)
+                        | (BrushAssemblyRole::WestWall, BrushAssemblyRole::EastWall)
+                );
+                let aligned = (north_south && a.bounds.0 < b.bounds.3 && b.bounds.0 < a.bounds.3)
+                    || (east_west && a.bounds.1 < b.bounds.4 && b.bounds.1 < a.bounds.4);
+                if aligned {
+                    self.rejections.push(format!(
+                        "opposite-wall openings {} and {} align in reservation {}",
                         a.id.raw(),
                         b.id.raw(),
-                        ax_mid,
-                        bx_mid,
-                        ay_mid,
-                        by_mid
-                    );
-                    self.rejections.push(msg);
+                        a.owner.reservation_id.raw()
+                    ));
                 }
             }
         }
@@ -354,7 +390,107 @@ impl VisibilityPlan {
         }
 
         plan.check_aligned_openings(ir);
+        plan.populate_semantic_records(ir, &[]);
         plan
+    }
+
+    /// Build visibility records from the assembly and the real committed
+    /// horizontal/vertical route graph.
+    pub fn build_from_assembly_and_routes(
+        ir: &AssemblyIR,
+        routes: &[CommittedRoute],
+        vertical_routes: &[CommittedRoute],
+    ) -> Self {
+        let mut plan = Self::build_from_assembly(ir);
+        let all_routes: Vec<_> = routes.iter().chain(vertical_routes.iter()).collect();
+        plan.populate_semantic_records(ir, &all_routes);
+
+        for route in vertical_routes {
+            let cluster_id = ir
+                .brushes_for_reservation(route.source)
+                .first()
+                .and_then(|brush| brush.owner.zone_id)
+                .map_or(0, |zone| zone.raw());
+            let _ = plan.try_merge(
+                (route.source, route.target),
+                cluster_id,
+                format!("vertical route {}", route.id.raw()),
+            );
+        }
+        plan
+    }
+
+    fn populate_semantic_records(&mut self, ir: &AssemblyIR, routes: &[&CommittedRoute]) {
+        self.semantic_leaves.clear();
+        self.semantic_pvs.clear();
+
+        let reservations: BTreeSet<_> = ir
+            .brushes
+            .values()
+            .map(|brush| brush.owner.reservation_id)
+            .collect();
+        let mut adjacency: BTreeMap<ReservationId, BTreeSet<ReservationId>> = reservations
+            .iter()
+            .map(|reservation| (*reservation, BTreeSet::new()))
+            .collect();
+        let mut portals: BTreeMap<ReservationId, BTreeSet<PortalId>> = BTreeMap::new();
+        for route in routes {
+            adjacency
+                .entry(route.source)
+                .or_default()
+                .insert(route.target);
+            adjacency
+                .entry(route.target)
+                .or_default()
+                .insert(route.source);
+            portals
+                .entry(route.source)
+                .or_default()
+                .insert(route.source_portal.id);
+            portals
+                .entry(route.target)
+                .or_default()
+                .insert(route.target_portal.id);
+        }
+
+        for reservation_id in reservations {
+            let visible_openings: Vec<_> = ir
+                .openings
+                .values()
+                .filter(|opening| opening.owner.reservation_id == reservation_id)
+                .map(|opening| opening.id)
+                .collect();
+            let blocking_occluders: Vec<_> = self
+                .occluders
+                .values()
+                .filter(|intent| intent.owner.reservation_id == reservation_id)
+                .map(|intent| intent.brush_id)
+                .collect();
+            self.semantic_leaves.insert(
+                reservation_id,
+                SemanticLeafAttribution {
+                    reservation_id,
+                    visible_openings,
+                    blocking_occluders,
+                },
+            );
+            self.semantic_pvs.insert(
+                reservation_id,
+                SemanticPvsAttribution {
+                    reservation_id,
+                    potentially_visible_reservations: adjacency
+                        .remove(&reservation_id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect(),
+                    through_portals: portals
+                        .remove(&reservation_id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect(),
+                },
+            );
+        }
     }
 
     /// All brush IDs that contribute to occlusion.
@@ -468,6 +604,63 @@ pub(crate) fn validate_visibility_caps(plan: &VisibilityPlan) -> Result<(), Rich
     Ok(())
 }
 
+/// Validate that every emitted convention record uses exactly one of the
+/// Phase-05-qualified forms: `hint`+`hintskip`, `skip`, or `func_detail`.
+pub(crate) fn validate_compiler_conventions(plan: &VisibilityPlan) -> Result<(), RichnessError> {
+    for intent in plan.occluders.values() {
+        let Some(convention) = intent.convention else {
+            continue;
+        };
+        let record = plan.compiler_records.get(&intent.brush_id).ok_or_else(|| {
+            visibility_error(
+                "visibility.compiler",
+                format!(
+                    "brush {} has convention intent but no emission record",
+                    intent.brush_id.raw()
+                ),
+            )
+        })?;
+        let valid = match convention {
+            CompilerConvention::HintSplit => {
+                record.primary == "hint" && record.secondary == Some("hintskip")
+            }
+            CompilerConvention::SkipSolid => record.primary == "skip" && record.secondary.is_none(),
+            CompilerConvention::FuncDetail => {
+                record.primary == "func_detail" && record.secondary.is_none()
+            }
+        };
+        if record.convention != convention || !valid {
+            return Err(visibility_error(
+                "visibility.compiler",
+                format!(
+                    "brush {} has unqualified compiler emission {:?}/{:?}",
+                    intent.brush_id.raw(),
+                    record.primary,
+                    record.secondary
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn visibility_error(path: &str, context: impl Into<String>) -> RichnessError {
+    RichnessError::new(
+        RichnessErrorCode::UnsupportedConvention,
+        0,
+        "?",
+        "?",
+        "?",
+        "?",
+        "?",
+        "?",
+        "?",
+        path,
+        RichnessErrorCategory::ConventionUnsupported,
+        context,
+    )
+}
+
 /// Validate no unintended aligned openings.
 pub(crate) fn validate_no_aligned_openings(plan: &VisibilityPlan) -> Result<(), RichnessError> {
     for rejection in &plan.rejections {
@@ -506,6 +699,14 @@ pub(crate) struct SemanticLeafAttribution {
     pub blocking_occluders: Vec<BrushAssemblyId>,
 }
 
+/// Semantic adjacency that a later compiled PVS cluster must preserve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SemanticPvsAttribution {
+    pub reservation_id: ReservationId,
+    pub potentially_visible_reservations: Vec<ReservationId>,
+    pub through_portals: Vec<PortalId>,
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -517,13 +718,15 @@ mod tests {
         SemanticAttribution, SupportTarget,
     };
     use crate::enhanced_v3::richness::ids::{
-        ArchetypeRequestId, BeatId, OpeningAssemblyId, PortalId, ReservationId, ZoneId,
+        ArchetypeIndex, ArchetypeRequestId, BeatId, OpeningAssemblyId, PortalId, ReservationId,
+        ZoneId,
     };
 
     fn make_attr() -> SemanticAttribution {
         SemanticAttribution::from_reservation(
             ReservationId::new(0),
             Some(ArchetypeRequestId::new(0)),
+            Some(ArchetypeIndex::new(0)),
             Some(BeatId::new(0)),
             Some(ZoneId::new(0)),
         )
@@ -666,6 +869,9 @@ mod tests {
             OpeningRecord {
                 id: opening_id,
                 owner_brush_id: dummy_brush_id,
+                wall_segment_ids: vec![dummy_brush_id],
+                owner_partition_bounds: (0, 240, 16, 256, 256, 160),
+                wall_role: BrushAssemblyRole::NorthWall,
                 owner: attr.clone(),
                 bounds: (80, 240, 16, 176, 256, 112),
                 portal_id: Some(PortalId::new(0)),
@@ -680,6 +886,41 @@ mod tests {
         assert_eq!(intent.convention, Some(CompilerConvention::FuncDetail));
         assert!(intent.is_portal_frame);
         assert_eq!(intent.portal_id, Some(PortalId::new(0)));
+        let record = &plan.compiler_records[&post_id];
+        assert_eq!(record.primary, "func_detail");
+        assert_eq!(record.secondary, None);
+        validate_compiler_conventions(&plan).unwrap();
+    }
+
+    #[test]
+    fn compiler_records_use_exact_phase05_miptex_names() {
+        let mut plan = VisibilityPlan::new();
+        let owner = make_attr();
+        let hint_id = BrushAssemblyId::new(10);
+        let skip_id = BrushAssemblyId::new(11);
+        plan.record_occluder(OcclusionIntent {
+            brush_id: hint_id,
+            kind: OccluderKind::BentApproach,
+            convention: Some(CompilerConvention::HintSplit),
+            owner: owner.clone(),
+            is_portal_frame: false,
+            portal_id: None,
+            opening_id: None,
+        });
+        plan.record_occluder(OcclusionIntent {
+            brush_id: skip_id,
+            kind: OccluderKind::PartialWall,
+            convention: Some(CompilerConvention::SkipSolid),
+            owner,
+            is_portal_frame: false,
+            portal_id: None,
+            opening_id: None,
+        });
+        assert_eq!(plan.compiler_records[&hint_id].primary, "hint");
+        assert_eq!(plan.compiler_records[&hint_id].secondary, Some("hintskip"));
+        assert_eq!(plan.compiler_records[&skip_id].primary, "skip");
+        assert_eq!(plan.compiler_records[&skip_id].secondary, None);
+        validate_compiler_conventions(&plan).unwrap();
     }
 
     #[test]

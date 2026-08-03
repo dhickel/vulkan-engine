@@ -10,6 +10,7 @@ mod support {
     pub mod conventions_compiler;
 }
 
+use glam::Vec3;
 use std::path::Path;
 use support::conventions_compiler as cc;
 
@@ -103,27 +104,21 @@ fn ancient_post_lintel_compiles_warning_free() {
     assert!(!world.vis_data.is_empty(), "must retain PVS data");
     assert!(reload.lightdata_bytes > 0, "must have lightmap data");
 
-    // Portal-specific: verify two rooms are reachable via the portal
-    // Check that leaves exist on both sides of the portal (y=240..272 is the shared wall)
-    let leaves_before: Vec<_> = world
-        .leaves
-        .iter()
-        .filter(|l| (l.mins[1] as f32) < 256.0 && (l.maxs[1] as f32) > 0.0)
-        .collect();
-    let leaves_after: Vec<_> = world
-        .leaves
-        .iter()
-        .filter(|l| (l.mins[1] as f32) >= 256.0 || (l.maxs[1] as f32) > 256.0)
-        .collect();
-
-    assert!(
-        !leaves_before.is_empty(),
-        "must have leaves in room A (y < 256)"
-    );
-    assert!(
-        !leaves_after.is_empty(),
-        "must have leaves in room B (y >= 256)"
-    );
+    // Portal-specific: semantic room witnesses on both sides must resolve to
+    // non-solid compiled leaves. Leaf AABBs are not room attribution records.
+    let qte = bsp::coords::QuakeToEngine::default();
+    for (label, point) in [
+        ("room A", (128.0, 128.0, 56.0)),
+        ("room B", (128.0, 384.0, 56.0)),
+    ] {
+        let contents = bsp::point_contents(
+            qte.position(point.0, point.1, point.2),
+            &world.nodes,
+            &world.leaves,
+            &world.planes,
+        );
+        assert!(!contents.is_solid(), "{label} center must be clear");
+    }
 
     eprintln!(
         "ancient_post_lintel: {} leaves total, {} visible faces, {} clipnodes, {} lightmap bytes",
@@ -316,8 +311,8 @@ fn portal_throat_witnesses_are_clear() {
 
     let (_compiled, world, _reload) = result.unwrap();
 
-    // The portal throat is at x=80..176, y=240..272, z=16..96
-    // Witness points in both rooms near the portal
+    // The exact clear throat is x=96..160, y=240..272, z=16..96.
+    // x=80..96 and x=160..176 are the two frame posts.
     let qte = bsp::coords::QuakeToEngine::default();
 
     // Room A: point just south of portal (y < 240)
@@ -338,20 +333,27 @@ fn portal_throat_witnesses_are_clear() {
     );
     assert!(!room_b.is_solid(), "room B witness must be in clear space");
 
-    // Portal center (within the throat opening, between y=240..272)
-    // This should be clear (no solid geometry in the opening)
-    let portal_center = bsp::point_contents(
-        qte.position(128.0, 256.0, 56.0),
-        &world.nodes,
-        &world.leaves,
-        &world.planes,
-    );
-    // The portal center at y=256 is BETWEEN rooms - may be in solid shared wall
-    // or in clear opening depending on how qbsp partitions. We just verify
-    // both rooms have clear witnesses.
+    // Sample the complete throat interior on every axis. Boundary faces are
+    // excluded deliberately; every interior witness must be empty.
+    for x in [104.0, 128.0, 152.0] {
+        for y in [248.0, 256.0, 264.0] {
+            for z in [24.0, 56.0, 88.0] {
+                let contents = bsp::point_contents(
+                    qte.position(x, y, z),
+                    &world.nodes,
+                    &world.leaves,
+                    &world.planes,
+                );
+                assert!(
+                    !contents.is_solid(),
+                    "throat witness ({x},{y},{z}) must be clear"
+                );
+            }
+        }
+    }
 
     eprintln!(
-        "portal throat witnesses: room_a_clear={}, room_b_clear={}",
+        "portal throat witnesses: room_a_clear={}, room_b_clear={}, throat_grid_clear=true",
         !room_a.is_solid(),
         !room_b.is_solid()
     );
@@ -381,11 +383,15 @@ fn pvs_cross_room_visibility() {
     // Use camera_leaf_index to find leaf indices for room centers
     let qte = bsp::coords::QuakeToEngine::default();
 
-    let room_a_pos = qte.position(128.0, 128.0, 56.0);
-    let room_b_pos = qte.position(128.0, 384.0, 56.0);
+    let room_a_engine = qte.position(128.0, 128.0, 56.0);
+    let room_b_engine = qte.position(128.0, 384.0, 56.0);
+    // `camera_leaf_index` is the low-level Quake-space traversal. The PVS
+    // helper below accepts engine-space coordinates and performs the inverse.
+    let room_a_quake = Vec3::new(128.0, 128.0, 56.0);
+    let room_b_quake = Vec3::new(128.0, 384.0, 56.0);
 
-    let leaf_a = bsp::camera_leaf_index(&room_a_pos, &world.nodes, &world.leaves, &world.planes);
-    let leaf_b = bsp::camera_leaf_index(&room_b_pos, &world.nodes, &world.leaves, &world.planes);
+    let leaf_a = bsp::camera_leaf_index(&room_a_quake, &world.nodes, &world.leaves, &world.planes);
+    let leaf_b = bsp::camera_leaf_index(&room_b_quake, &world.nodes, &world.leaves, &world.planes);
 
     assert!(!leaf_a.in_solid, "room A center must not be in solid");
     assert!(!leaf_b.in_solid, "room B center must not be in solid");
@@ -397,9 +403,37 @@ fn pvs_cross_room_visibility() {
     let leaf_b_idx = leaf_b.leaf_index;
     assert!(leaf_a_idx < reload.leaves as u32, "leaf A index in range");
     assert!(leaf_b_idx < reload.leaves as u32, "leaf B index in range");
+    assert_ne!(leaf_a_idx, 0, "room A must not resolve to solid leaf 0");
+    assert_ne!(leaf_b_idx, 0, "room B must not resolve to solid leaf 0");
+
+    let pvs_a = bsp::camera_pvs(
+        &room_a_engine,
+        &world.vis_data,
+        &world.nodes,
+        &world.leaves,
+        &world.planes,
+    )
+    .expect("room A must have a valid PVS");
+    let pvs_b = bsp::camera_pvs(
+        &room_b_engine,
+        &world.vis_data,
+        &world.nodes,
+        &world.leaves,
+        &world.planes,
+    )
+    .expect("room B must have a valid PVS");
+    assert!(pvs_a.valid && pvs_b.valid, "both PVS rows must decompress");
+    assert!(
+        pvs_a.is_visible(leaf_b_idx - 1),
+        "room B leaf must be visible from room A through the portal"
+    );
+    assert!(
+        pvs_b.is_visible(leaf_a_idx - 1),
+        "room A leaf must be visible from room B through the portal"
+    );
 
     eprintln!(
-        "PVS cross-room: room_A_leaf={leaf_a_idx}, room_B_leaf={leaf_b_idx}, total_leaves={}",
+        "PVS cross-room: room_A_leaf={leaf_a_idx}, room_B_leaf={leaf_b_idx}, total_leaves={}, bidirectional=true",
         reload.leaves
     );
 }

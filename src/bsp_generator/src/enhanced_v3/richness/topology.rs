@@ -1843,9 +1843,12 @@ fn ordered_walls(preferred: Dir) -> [Dir; 4] {
 }
 
 /// Enumerate the revision-v1 canonical non-overlapping 64-unit portal sockets
-/// in midpoint-first order, capped by the frozen five-exit room capacity. The
-/// exterior center is two cells beyond the wall, so its 4×4 route witness
-/// begins exactly at the room boundary without overlapping the room.
+/// in midpoint-first order, capped by the frozen five-exit room capacity.
+/// Centers retain five cells of end clearance: two for the exact throat, two
+/// for the widest approved Phase-09 surround, and one for the perpendicular
+/// corner wall. The exterior center is two
+/// cells beyond the wall, so its 4×4 route witness begins exactly at the room
+/// boundary without overlapping the room.
 fn portal_route_candidates(
     room: &ReservationRecord,
     preferred: Dir,
@@ -1856,8 +1859,8 @@ fn portal_route_candidates(
     let mut candidates = Vec::new();
     for wall in ordered_walls(preferred) {
         let (lo, hi) = match wall {
-            Dir::East | Dir::West => (room.footprint.y0 + 2, room.footprint.y1.saturating_sub(2)),
-            Dir::North | Dir::South => (room.footprint.x0 + 2, room.footprint.x1.saturating_sub(2)),
+            Dir::East | Dir::West => (room.footprint.y0 + 5, room.footprint.y1.saturating_sub(5)),
+            Dir::North | Dir::South => (room.footprint.x0 + 5, room.footprint.x1.saturating_sub(5)),
         };
         if lo > hi {
             continue;
@@ -4664,10 +4667,12 @@ mod tests {
     fn syn_placement(reservations: &BTreeMap<ReservationId, ReservationRecord>) -> PlacementResult {
         let journal = syn_journal(reservations);
         let mut request_to_reservation = BTreeMap::new();
+        let mut request_archetypes = BTreeMap::new();
         let mut beat_to_reservations: BTreeMap<BeatId, Vec<ReservationId>> = BTreeMap::new();
         for r in reservations.values() {
             if let Some(req_id) = r.request_id {
                 request_to_reservation.insert(req_id, r.id);
+                request_archetypes.insert(req_id, ArchetypeIndex::new(0));
             }
             if let Some(bid) = r.beat_id {
                 beat_to_reservations.entry(bid).or_default().push(r.id);
@@ -4676,6 +4681,7 @@ mod tests {
         PlacementResult {
             reservations: reservations.clone(),
             request_to_reservation,
+            request_archetypes,
             beat_to_reservations,
             journal,
             remaining_faces: 8000,

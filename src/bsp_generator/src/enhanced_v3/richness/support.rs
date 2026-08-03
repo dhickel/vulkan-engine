@@ -18,8 +18,11 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::assembly::{AssemblyIR, BrushAssembly, BrushAssemblyRole, SupportTarget};
 use super::error::{RichnessError, RichnessErrorCategory, RichnessErrorCode};
+use super::geometry::{exact_face_contact, face_contact_bounds};
 use super::ids::BrushAssemblyId;
-use crate::enhanced_v3::geometry::{CanonicalPlane, ConvexBrush};
+use crate::enhanced_v3::geometry::{
+    half_space_vertices, polygon_area_squared, CanonicalPlane, ConvexBrush, Rational,
+};
 
 // ── Support contact ───────────────────────────────────────────────────────
 
@@ -40,8 +43,8 @@ pub(crate) struct SupportContact {
     pub contact_plane: (i128, i128, i128, i128), // (nx, ny, nz, d)
     /// Whether the contact is orientation-valid (parent's face points upward).
     pub orientation_valid: bool,
-    /// Contact area in square units (quantum-aligned).
-    pub contact_area: i128,
+    /// Exact squared contact area. A positive value is the support proof.
+    pub contact_area_squared: Rational,
 }
 
 // ── Support DAG ───────────────────────────────────────────────────────────
@@ -62,8 +65,10 @@ pub(crate) struct SupportDag {
     pub contacts: Vec<SupportContact>,
     /// Whether the DAG is complete (all brushes reached).
     pub complete: bool,
-    /// Unsupported brush IDs (no path to world).
+    /// Unsupported brush IDs (no geometrically valid path to world).
     pub unsupported: Vec<BrushAssemblyId>,
+    /// Declared brush parents with no positive-area face contact.
+    pub missing_contacts: Vec<(BrushAssemblyId, BrushAssemblyId)>,
 }
 
 impl SupportDag {
@@ -76,23 +81,36 @@ impl SupportDag {
         let mut reverse_edges: BTreeMap<BrushAssemblyId, BTreeSet<BrushAssemblyId>> =
             BTreeMap::new();
         let mut contacts = Vec::new();
+        let mut missing_contacts = Vec::new();
 
         for brush in ir.brushes.values() {
-            let parents: BTreeSet<SupportTarget> = [brush.support.clone()].into_iter().collect();
-            edges.insert(brush.id, parents.clone());
-
-            if let SupportTarget::Brush(parent_id) = brush.support {
-                reverse_edges.entry(parent_id).or_default().insert(brush.id);
-
-                // Compute support contact if both brushes exist
-                if let (Some(child_brush), Some(parent_brush)) =
-                    (ir.brushes.get(&brush.id), ir.brushes.get(&parent_id))
-                {
-                    if let Some(contact) = compute_support_contact(child_brush, parent_brush) {
-                        contacts.push(contact);
+            let mut parents = BTreeSet::new();
+            match brush.support {
+                SupportTarget::World => {
+                    parents.insert(SupportTarget::World);
+                }
+                SupportTarget::Brush(parent_id) => {
+                    let contact = ir
+                        .brushes
+                        .get(&parent_id)
+                        .and_then(|parent| compute_support_contact(brush, parent));
+                    match contact {
+                        Some(contact)
+                            if contact.orientation_valid
+                                && contact.contact_area_squared > Rational::ZERO =>
+                        {
+                            parents.insert(SupportTarget::Brush(parent_id));
+                            reverse_edges.entry(parent_id).or_default().insert(brush.id);
+                            contacts.push(contact);
+                        }
+                        Some(contact) => {
+                            contacts.push(contact);
+                        }
+                        None => missing_contacts.push((brush.id, parent_id)),
                     }
                 }
             }
+            edges.insert(brush.id, parents);
         }
 
         let (complete, unsupported) = Self::validate_transitive_support(&edges);
@@ -103,6 +121,7 @@ impl SupportDag {
             contacts,
             complete,
             unsupported,
+            missing_contacts,
         }
     }
 
@@ -240,178 +259,135 @@ pub(crate) fn compute_support_contact(
     child: &BrushAssembly,
     parent: &BrushAssembly,
 ) -> Option<SupportContact> {
-    // Quick AABB overlap test
-    let child_bb = child.brush.aabb().ok()?;
-    let parent_bb = parent.brush.aabb().ok()?;
-    let ((cmin_x, cmin_y, cmin_z), (cmax_x, cmax_y, cmax_z)) = child_bb;
-    let ((pmin_x, pmin_y, pmin_z), (pmax_x, pmax_y, pmax_z)) = parent_bb;
+    let contact = exact_face_contact(&child.brush, &parent.brush)?;
+    let bounds = face_contact_bounds(&child.brush, &parent.brush)?;
 
-    // Support requires the child sits ON the parent (or is adjacent)
-    // For proper support, the child's bottom should be at/near the parent's top
-    // or the child's face should contact the parent's face.
-
-    // Check for positive-area contact via AABB overlap
-    let ox0 = cmin_x.max(pmin_x);
-    let oy0 = cmin_y.max(pmin_y);
-    let oz0 = cmin_z.max(pmin_z);
-    let ox1 = cmax_x.min(pmax_x);
-    let oy1 = cmax_y.min(pmax_y);
-    let oz1 = cmax_z.min(pmax_z);
-
-    if ox0 >= ox1 || oy0 >= oy1 || oz0 > oz1 {
-        return None; // No contact
-    }
-
-    // Positive area requires at least two non-zero dimensions
-    let dx = ox1 - ox0;
-    let dy = oy1 - oy0;
-    let dz = oz1 - oz0;
-    let area_xy = dx * dy;
-    let area_xz = dx * dz;
-    let area_yz = dy * dz;
-
-    let contact_area = area_xy.max(area_xz).max(area_yz);
-    if contact_area <= 0 {
-        return None;
-    }
-
-    // Determine the contact plane orientation.
-    // For typical floor support: parent's top face (nz=+1) supports child's bottom.
-    // We detect which plane the contact is on by checking AABB boundaries.
-    let contact_plane = if oz0 == oz1 && dz == 0 && area_xy > 0 {
-        // Contact on XY plane (horizontal)
-        if oz0 == pmin_z {
-            // Child's bottom on parent's bottom — unusual
-            (0, 0, -1, oz0)
-        } else if oz1 == pmax_z {
-            // Child on parent's top — standard floor support
-            (0, 0, 1, oz1)
-        } else {
-            // Generic Z-plane contact
-            (0, 0, 1, oz0)
-        }
-    } else if ox0 == ox1 && dx == 0 && area_yz > 0 {
-        // Contact on YZ plane
-        (1, 0, 0, ox0)
-    } else if oy0 == oy1 && dy == 0 && area_xz > 0 {
-        // Contact on XZ plane
-        (0, 1, 0, oy0)
-    } else {
-        // Volumetric overlap — invalid for support contact
-        // Face contact with zero-thickness in one dimension
-        // Pick the axis with smallest non-zero extent as "thickness direction"
-        if dz == 0 {
-            (0, 0, 1, oz0)
-        } else if dx == 0 {
-            (1, 0, 0, ox0)
-        } else if dy == 0 {
-            (0, 1, 0, oy0)
-        } else {
-            // 3D overlap — not a support contact
-            return None;
-        }
-    };
-
-    // For floor support: the parent's top face normal should be upward (+Z).
-    // The child sits ON the parent; orientation is valid if the contact plane
-    // is horizontal (Z-plane) with the parent's top facing up.
-    let (_, _, nz, _) = contact_plane;
-    let orientation_valid = true; // always valid for horizontal contacts
-    let _ = nz;
+    // Half-space normals point into a brush. A child bottom therefore has
+    // +Z, while the coincident parent top has -Z. Split masonry can also
+    // transfer load laterally into a same-wall segment whose base is lower;
+    // the strict base ordering keeps those structural edges acyclic.
+    let gravity = contact.plane.nx == 0 && contact.plane.ny == 0 && contact.plane.nz > 0;
+    let child_min_z = child.brush.aabb().ok()?.0 .2;
+    let parent_min_z = parent.brush.aabb().ok()?.0 .2;
+    let masonry_transfer = contact.plane.nz == 0
+        && child.role.is_wall()
+        && parent.role.is_wall()
+        && parent_min_z < child_min_z;
+    let orientation_valid = gravity || masonry_transfer;
+    let parent_plane = (
+        -contact.plane.nx,
+        -contact.plane.ny,
+        -contact.plane.nz,
+        -contact.plane.d,
+    );
 
     Some(SupportContact {
         child: child.id,
         parent: parent.id,
-        contact_bounds: (ox0, oy0, oz0, ox1, oy1, oz1),
-        contact_plane,
+        contact_bounds: bounds,
+        contact_plane: parent_plane,
         orientation_valid,
-        contact_area,
+        contact_area_squared: contact.area_squared,
     })
 }
 
-/// Compute positive-area polygon intersection for two brushes on a common plane.
-///
-/// For diagonal brushes, exact AABB contacts may undercount the contact area.
-/// This function uses half-space enumeration to find the contact polygon.
+/// Compute the exact squared area of the intersection polygon on `plane`.
+/// Handles cardinal and approved XY-45 diagonal contact planes.
 pub(crate) fn plane_contact_polygon_area(
     a: &ConvexBrush,
     b: &ConvexBrush,
     plane: &CanonicalPlane,
-) -> Option<i128> {
-    use crate::enhanced_v3::geometry::{half_space_vertices, BrushFace};
-
-    // Collect faces from both brushes plus the contact plane
-    let mut all_faces: Vec<BrushFace> = Vec::new();
-    for face in &a.faces {
-        all_faces.push(face.clone());
-    }
-    for face in &b.faces {
-        all_faces.push(face.clone());
-    }
-
-    if all_faces.len() < 4 {
-        return None;
-    }
-
-    let vertices = half_space_vertices(&all_faces).ok()?;
+) -> Option<Rational> {
+    let mut faces = a.faces.clone();
+    faces.extend(b.faces.iter().cloned());
+    let vertices: Vec<_> = half_space_vertices(&faces)
+        .ok()?
+        .into_iter()
+        .filter(|vertex| {
+            plane
+                .signed_distance_rational(vertex)
+                .is_ok_and(|distance| distance == Rational::ZERO)
+        })
+        .collect();
     if vertices.len() < 3 {
         return None;
     }
-
-    // Project vertices onto the contact plane and compute polygon area
-    // For axis-aligned planes, area computation is straightforward
-    let (nx, ny, nz) = (plane.nx, plane.ny, plane.nz);
-
-    if nz.abs() == 1 {
-        // XY plane contact: area = shoelace on XY
-        polygon_area_2d(&vertices, |v| (v.x, v.y))
-    } else if ny.abs() == 1 {
-        // XZ plane contact: area using XZ coordinates
-        polygon_area_2d(&vertices, |v| (v.x, v.z))
-    } else if nx.abs() == 1 {
-        // YZ plane contact: area using YZ
-        polygon_area_2d(&vertices, |v| (v.y, v.z))
-    } else {
-        None
-    }
+    let area_squared = polygon_area_squared(&vertices, plane).ok()?;
+    (area_squared > Rational::ZERO).then_some(area_squared)
 }
 
-/// Shoelace formula for 2D polygon area from vertices via a coordinate projector.
-fn polygon_area_2d<F>(vertices: &[crate::enhanced_v3::geometry::Point3], proj: F) -> Option<i128>
-where
-    F: Fn(
-        &crate::enhanced_v3::geometry::Point3,
-    ) -> (
-        crate::enhanced_v3::geometry::Rational,
-        crate::enhanced_v3::geometry::Rational,
-    ),
-{
-    if vertices.len() < 3 {
-        return None;
+/// Derive one exact gravity-support parent for every emitted brush.
+///
+/// Floor slabs are explicit world anchors. Every other brush selects the
+/// positive-area, orientation-valid contact with the greatest exact area;
+/// brush ID breaks ties canonically. Existing declarative records are rebuilt
+/// from the resulting single source of truth.
+pub(crate) fn derive_support_records(ir: &mut AssemblyIR) -> Result<(), RichnessError> {
+    let brush_ids: Vec<_> = ir.brushes.keys().copied().collect();
+    let mut targets = BTreeMap::new();
+
+    for child_id in &brush_ids {
+        let child = &ir.brushes[child_id];
+        if child.role == BrushAssemblyRole::FloorSlab {
+            targets.insert(*child_id, SupportTarget::World);
+            continue;
+        }
+
+        let parent = brush_ids
+            .iter()
+            .filter(|parent_id| *parent_id != child_id)
+            .filter_map(|parent_id| {
+                let contact = compute_support_contact(child, &ir.brushes[parent_id])?;
+                (contact.orientation_valid && contact.contact_area_squared > Rational::ZERO)
+                    .then_some((
+                        *parent_id,
+                        contact.contact_area_squared,
+                        contact.contact_plane.2 < 0,
+                    ))
+            })
+            .max_by(
+                |(left_id, left_area, left_gravity), (right_id, right_area, right_gravity)| {
+                    left_gravity
+                        .cmp(right_gravity)
+                        .then_with(|| left_area.cmp(right_area))
+                        .then_with(|| right_id.cmp(left_id))
+                },
+            )
+            .map(|(parent_id, _, _)| parent_id)
+            .ok_or_else(|| {
+                support_error(
+                    "support.derive",
+                    format!(
+                        "brush {} ({}) has no positive-area gravity support contact",
+                        child_id.raw(),
+                        child.role.tag()
+                    ),
+                )
+            })?;
+        targets.insert(*child_id, SupportTarget::Brush(parent));
     }
 
-    // Use Rational arithmetic for exact area
-    let mut sum = crate::enhanced_v3::geometry::Rational::ZERO;
-    let n = vertices.len();
-    for i in 0..n {
-        let j = (i + 1) % n;
-        let (xi, yi) = proj(&vertices[i]);
-        let (xj, yj) = proj(&vertices[j]);
-        // sum += xi * yj - xj * yi
-        let term1 = xi.checked_mul(yj).ok()?;
-        let term2 = xj.checked_mul(yi).ok()?;
-        sum = sum.checked_add(term1).ok()?.checked_sub(term2).ok()?;
+    ir.supports.clear();
+    for child_id in brush_ids {
+        let parent = targets[&child_id].clone();
+        let Some(brush) = ir.brushes.get_mut(&child_id) else {
+            return Err(support_error(
+                "support.derive",
+                format!(
+                    "brush {} disappeared while deriving support",
+                    child_id.raw()
+                ),
+            ));
+        };
+        brush.support = parent.clone();
+        let id = ir.alloc_support_id();
+        ir.insert_support(super::assembly::SupportRecord {
+            id,
+            child: child_id,
+            parent,
+        });
     }
-
-    // Area = |sum| / 2
-    let abs_sum = sum.checked_abs().ok()?;
-    let two = crate::enhanced_v3::geometry::Rational::from_int(2);
-    let half_area = abs_sum.checked_div(two).ok()?;
-
-    // Convert to i128 approximation (exact for integer geometry)
-    // Since all coordinates are integer multiples of the quantum,
-    // the rational area should have denominator 1
-    Some(half_area.num / half_area.den.max(1))
+    Ok(())
 }
 
 // ── Support validator ──────────────────────────────────────────────────────
@@ -421,73 +397,77 @@ where
 pub(crate) fn validate_support_dag(ir: &AssemblyIR) -> Result<SupportDag, RichnessError> {
     let dag = SupportDag::build(ir);
 
+    if !dag.missing_contacts.is_empty() {
+        let contacts = dag
+            .missing_contacts
+            .iter()
+            .map(|(child, parent)| format!("child={} parent={}", child.raw(), parent.raw()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(support_error(
+            "support.contact",
+            format!("declared support edges lack positive-area contact: {contacts}"),
+        ));
+    }
+
+    let invalid = dag.invalid_contacts();
+    if !invalid.is_empty() {
+        let contacts = invalid
+            .iter()
+            .map(|contact| {
+                format!(
+                    "child={} parent={} plane={:?}",
+                    contact.child.raw(),
+                    contact.parent.raw(),
+                    contact.contact_plane
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(support_error(
+            "support.orientation",
+            format!("orientation-invalid support contacts: {contacts}"),
+        ));
+    }
+
     if !dag.complete {
-        let unsupported: Vec<String> = dag
+        let unsupported = dag
             .unsupported
             .iter()
-            .map(|id| format!("{:?}", id.raw()))
-            .collect();
-        return Err(RichnessError::new(
-            RichnessErrorCode::ValueOutOfRange,
-            0,
-            "?",
-            "?",
-            "?",
-            "?",
-            "?",
-            "?",
-            "?",
+            .map(|id| id.raw().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(support_error(
             "support.dag",
-            RichnessErrorCategory::PlacementTopologyExhaustion,
-            format!(
-                "unsupported brushes: {} — no transitive path to world",
-                unsupported.join(", ")
-            ),
+            format!("unsupported brushes without a valid path to world: {unsupported}"),
         ));
     }
 
-    // Check for orientation-invalid contacts
-    let invalid: Vec<_> = dag.invalid_contacts();
-    if !invalid.is_empty() {
-        let ids: Vec<String> = invalid
-            .iter()
-            .map(|c| format!("child={:?} parent={:?}", c.child.raw(), c.parent.raw()))
-            .collect();
-        return Err(RichnessError::new(
-            RichnessErrorCode::ValueOutOfRange,
-            0,
-            "?",
-            "?",
-            "?",
-            "?",
-            "?",
-            "?",
-            "?",
-            "support.orientation",
-            RichnessErrorCategory::PlacementTopologyExhaustion,
-            format!("orientation-invalid support contacts: {}", ids.join(", ")),
-        ));
-    }
-
-    // Check acyclicity
     if !dag.is_acyclic() {
-        return Err(RichnessError::new(
-            RichnessErrorCode::ValueOutOfRange,
-            0,
-            "?",
-            "?",
-            "?",
-            "?",
-            "?",
-            "?",
-            "?",
+        return Err(support_error(
             "support.cycle",
-            RichnessErrorCategory::PlacementTopologyExhaustion,
             "support DAG contains a cycle",
         ));
     }
 
     Ok(dag)
+}
+
+fn support_error(path: &str, context: impl Into<String>) -> RichnessError {
+    RichnessError::new(
+        RichnessErrorCode::SemanticInfeasible,
+        0,
+        "?",
+        "?",
+        "?",
+        "?",
+        "?",
+        "?",
+        "?",
+        path,
+        RichnessErrorCategory::SemanticInfeasibility,
+        context,
+    )
 }
 
 /// Quick check: does a brush have a valid support path to world?
@@ -522,12 +502,15 @@ mod tests {
         AssemblyIR, BrushAssembly, BrushAssemblyRole, BudgetDimension, CostSource,
         SemanticAttribution, SupportRecord, SupportTarget,
     };
-    use crate::enhanced_v3::richness::ids::{ArchetypeRequestId, BeatId, ReservationId, ZoneId};
+    use crate::enhanced_v3::richness::ids::{
+        ArchetypeIndex, ArchetypeRequestId, BeatId, ReservationId, ZoneId,
+    };
 
     fn make_attr() -> SemanticAttribution {
         SemanticAttribution::from_reservation(
             ReservationId::new(0),
             Some(ArchetypeRequestId::new(0)),
+            Some(ArchetypeIndex::new(0)),
             Some(BeatId::new(0)),
             Some(ZoneId::new(0)),
         )
@@ -664,7 +647,10 @@ mod tests {
 
         let result = validate_support_dag(&ir);
         assert!(result.is_err());
-        assert!(result.unwrap_err().context.contains("unsupported"));
+        assert!(result
+            .unwrap_err()
+            .context
+            .contains("lack positive-area contact"));
     }
 
     #[test]
@@ -690,8 +676,37 @@ mod tests {
         let contact = compute_support_contact(&wall, &floor);
         assert!(contact.is_some());
         let contact = contact.unwrap();
-        assert!(contact.contact_area > 0);
+        assert!(contact.contact_area_squared > Rational::ZERO);
         assert!(contact.orientation_valid);
+    }
+
+    #[test]
+    fn diagonal_footprint_has_exact_positive_support_polygon() {
+        let floor = ConvexBrush::make_box((0, 128), (0, 128), (0, 16)).unwrap();
+        let diagonal =
+            crate::enhanced_v3::geometry::make_diagonal_wall((0, 128), (0, 128), 16, 160, 1, 1, 64)
+                .unwrap();
+        let floor = BrushAssembly {
+            id: BrushAssemblyId::new(0),
+            brush: floor,
+            role: BrushAssemblyRole::FloorSlab,
+            owner: make_attr(),
+            cost: make_cost(),
+            support: SupportTarget::World,
+        };
+        let wall = BrushAssembly {
+            id: BrushAssemblyId::new(1),
+            brush: diagonal,
+            role: BrushAssemblyRole::DiagNEWall,
+            owner: make_attr(),
+            cost: make_cost(),
+            support: SupportTarget::Brush(floor.id),
+        };
+        let contact = compute_support_contact(&wall, &floor).unwrap();
+        assert!(contact.orientation_valid);
+        assert!(contact.contact_area_squared > Rational::ZERO);
+        let plane = CanonicalPlane::new(0, 0, 1, 16).unwrap();
+        assert!(plane_contact_polygon_area(&wall.brush, &floor.brush, &plane).is_some());
     }
 
     #[test]
@@ -718,33 +733,21 @@ mod tests {
 
     #[test]
     fn support_dag_cycle_detected() {
-        let mut ir = AssemblyIR::new();
-        let attr = make_attr();
-        let cost = make_cost();
-
-        // A supported by B, B supported by A (cycle)
-        let a_id = ir.alloc_brush_id();
-        let b_id = ir.alloc_brush_id();
-
-        ir.insert_brush(BrushAssembly {
-            id: a_id,
-            brush: ConvexBrush::make_box((0, 64), (0, 64), (0, 16)).unwrap(),
-            role: BrushAssemblyRole::FloorSlab,
-            owner: attr.clone(),
-            cost,
-            support: SupportTarget::Brush(b_id),
-        });
-
-        ir.insert_brush(BrushAssembly {
-            id: b_id,
-            brush: ConvexBrush::make_box((64, 128), (0, 64), (0, 16)).unwrap(),
-            role: BrushAssemblyRole::FloorSlab,
-            owner: attr,
-            cost,
-            support: SupportTarget::Brush(a_id),
-        });
-
-        let dag = SupportDag::build(&ir);
+        let a_id = BrushAssemblyId::new(0);
+        let b_id = BrushAssemblyId::new(1);
+        let dag = SupportDag {
+            edges: [
+                (a_id, [SupportTarget::Brush(b_id)].into_iter().collect()),
+                (b_id, [SupportTarget::Brush(a_id)].into_iter().collect()),
+            ]
+            .into_iter()
+            .collect(),
+            reverse_edges: BTreeMap::new(),
+            contacts: Vec::new(),
+            complete: false,
+            unsupported: vec![a_id, b_id],
+            missing_contacts: Vec::new(),
+        };
         assert!(!dag.is_acyclic());
     }
 }

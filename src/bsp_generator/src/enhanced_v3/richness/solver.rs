@@ -136,6 +136,9 @@ pub(crate) struct PlacementResult {
     pub reservations: BTreeMap<ReservationId, ReservationRecord>,
     /// Mapping from archetype request ID to reservation ID.
     pub request_to_reservation: BTreeMap<ArchetypeRequestId, ReservationId>,
+    /// Explicit archetype identity for every authored or solver-materialized
+    /// request. Request IDs are identities, never catalog indices.
+    pub request_archetypes: BTreeMap<ArchetypeRequestId, ArchetypeIndex>,
     /// Mapping from beat ID to reservation IDs.
     pub beat_to_reservations: BTreeMap<BeatId, Vec<ReservationId>>,
     /// The reservation journal (final committed state).
@@ -447,7 +450,10 @@ impl PlacementSolver {
     /// Returns `PlacementResult` on success or a typed error on exhaustion.
     pub fn solve(mut self) -> Result<PlacementResult, RichnessError> {
         if !self.place_from(0) {
-            let request_index = self.placed.len().min(self.placement_requests.len() - 1);
+            let Some(last_index) = self.placement_requests.len().checked_sub(1) else {
+                return Err(self.empty_placement_error());
+            };
+            let request_index = self.placed.len().min(last_index);
             let request = &self.placement_requests[request_index];
             return Err(self.exhaustion_error(request, request_index));
         }
@@ -458,6 +464,11 @@ impl PlacementSolver {
         let beat_to_reservations = self.build_beat_to_reservations();
         let reservations = self.journal.reservations.clone();
         let request_to_reservation = self.request_to_reservation.clone();
+        let request_archetypes = self
+            .placement_requests
+            .iter()
+            .map(|request| (request.request_id, request.archetype))
+            .collect();
         let journal = self.journal.clone();
         let remaining_faces = self
             .journal
@@ -468,6 +479,7 @@ impl PlacementSolver {
         Ok(PlacementResult {
             reservations,
             request_to_reservation,
+            request_archetypes,
             beat_to_reservations,
             journal,
             remaining_faces,
@@ -791,6 +803,23 @@ impl PlacementSolver {
                 "vertical host reservation exhausted: required {required}, reserved {reserved}"
             ),
         ))
+    }
+
+    fn empty_placement_error(&self) -> RichnessError {
+        RichnessError::new(
+            RichnessErrorCode::SemanticInfeasible,
+            self.resolved.seed(),
+            self.resolved.provenance().request_schema_revision.tag(),
+            self.resolved.provenance().algorithm_revision.tag(),
+            self.resolved.provenance().content_revision.tag(),
+            self.resolved.provenance().preset_revision.tag(),
+            self.resolved.provenance().theme_revision.tag(),
+            self.resolved.provenance().asset_revision.tag(),
+            self.resolved.provenance().convention_revision.tag(),
+            "placement.requests",
+            RichnessErrorCategory::SemanticInfeasibility,
+            "placement search failed without an archetype request",
+        )
     }
 
     /// Build an exhaustion error for a placement request.

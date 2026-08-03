@@ -606,7 +606,9 @@ impl RecipeCatalog {
                 lights: 0,
                 vertical_openings: 0,
                 support_contacts: 2, // floor + ceiling support
-                package_assets: 4,
+                // Route shells reuse the selected theme's role-bound assets;
+                // package assets are unique identities, not per-route copies.
+                package_assets: 0,
                 compiler_lumps: 0,
                 renderer_batches: 1,
                 renderer_memory_bytes: 4096,
@@ -631,7 +633,8 @@ impl RecipeCatalog {
                 lights: 0,
                 vertical_openings: 0,
                 support_contacts: 1,
-                package_assets: 2,
+                // Portal geometry reuses the selected theme's portal roles.
+                package_assets: 0,
                 compiler_lumps: 0,
                 renderer_batches: 1,
                 renderer_memory_bytes: 2048,
@@ -657,7 +660,8 @@ impl RecipeCatalog {
                     lights: 0,
                     vertical_openings: 0,
                     support_contacts: 1,
-                    package_assets: 2,
+                    // Portal geometry reuses the selected theme's portal roles.
+                    package_assets: 0,
                     compiler_lumps: 0,
                     renderer_batches: 1,
                     renderer_memory_bytes: 2048,
@@ -700,7 +704,8 @@ impl RecipeCatalog {
             vertical_openings: 0,
             support_contacts: 0,
             package_assets: 0,
-            compiler_lumps: 0,
+            // Every compiled BSP2 map owns the fixed 15-lump package once.
+            compiler_lumps: 15,
             renderer_batches: 0,
             renderer_memory_bytes: 0,
             runtime_requirements: 0,
