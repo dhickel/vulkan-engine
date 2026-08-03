@@ -1,4 +1,5 @@
-//! Typed stable IDs and immutable records for the semantic pacing blueprint.
+//! Typed stable IDs and immutable records for the semantic pacing blueprint
+//! and the 3D reservation / occupancy system.
 //!
 //! Every record in the blueprint carries a typed newtype ID. Records are
 //! immutable and ordered canonically (BTreeMap / sorted vectors). Theme never
@@ -7,7 +8,8 @@
 //! # Contract
 //!
 //! - All IDs are `Copy + Eq + Ord + Hash` so they can serve as map keys.
-//! - Beat IDs, zone IDs, landmark IDs, and branch IDs are distinct namespaces.
+//! - Beat IDs, zone IDs, landmark IDs, reservation IDs, and branch IDs are
+//!   distinct namespaces.
 //! - Records use `BTreeMap` or explicitly sorted vectors for canonical order.
 //! - No floats; only integer, enum, and fixed-point primitives.
 
@@ -156,6 +158,26 @@ typed_id!(LandmarkId, "Typed identifier for a critical-path landmark.");
 typed_id!(
     ShortcutId,
     "Typed identifier for a backward shortcut intent."
+);
+typed_id!(
+    ReservationId,
+    "Typed identifier for an immutable occupancy reservation."
+);
+typed_id!(
+    EdgeId,
+    "Typed identifier for a candidate edge in the multigraph topology."
+);
+typed_id!(
+    RouteId,
+    "Typed identifier for a committed route reservation."
+);
+typed_id!(
+    PortalId,
+    "Typed identifier for a committed portal throat reservation."
+);
+typed_id!(
+    TurnId,
+    "Typed identifier for a committed turn / junction reservation."
 );
 
 // ── Archetype index ────────────────────────────────────────────────────────
