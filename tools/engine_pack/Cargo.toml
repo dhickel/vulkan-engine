@@ -13,6 +13,7 @@ toml = "=0.8.23"
 bsp = { path = "../../src/bsp" }
 bsp_runtime = { path = "../../src/bsp_runtime" }
 bsp_generator = { path = "../../src/bsp_generator" }
+png = "0.17"
 
 [dev-dependencies]
 sha2 = "0.10"

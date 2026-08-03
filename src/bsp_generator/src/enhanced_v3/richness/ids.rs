@@ -183,6 +183,23 @@ typed_id!(
     WallChainId,
     "Typed identifier for a shared structural wall chain."
 );
+typed_id!(
+    BrushAssemblyId,
+    "Typed identifier for a brush in the assembly IR."
+);
+typed_id!(
+    EntityAssemblyId,
+    "Typed identifier for an entity in the assembly IR."
+);
+typed_id!(
+    InterfaceAssemblyId,
+    "Typed identifier for a brush interface record."
+);
+typed_id!(SupportAssemblyId, "Typed identifier for a support record.");
+typed_id!(
+    OpeningAssemblyId,
+    "Typed identifier for an opening omission record."
+);
 
 // ── Semantic ID ────────────────────────────────────────────────────────────
 

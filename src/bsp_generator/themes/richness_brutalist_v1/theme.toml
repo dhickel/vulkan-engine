@@ -1,0 +1,19 @@
+[theme]
+name = "richness_brutalist_v1"
+version = "1.0.0"
+wad = "richness_brutalist_v1.wad"
+
+[roles]
+wall = "wall"
+floor = "floor"
+ceiling = "ceiling"
+accent = "accent"
+portal = "portal"
+vertical = "vertical"
+cave = "cave"
+prop = "prop"
+emissive = "emissive"
+
+[compiler]
+skip = "skip"
+skip_size = 64

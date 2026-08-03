@@ -22,14 +22,17 @@
 //! Rust file is checked in and byte-compared with a fresh code-generation
 //! run. Runtime generation reads only checked-in Rust constants.
 
+pub(crate) mod assembly;
 pub(crate) mod canonical;
 pub(crate) mod complexity;
+pub(crate) mod composition;
 pub(crate) mod content_types;
 pub(crate) mod error;
 pub(crate) mod fields;
 pub(crate) mod fixed;
 pub(crate) mod footprint;
 pub(crate) mod generated_content;
+pub(crate) mod geometry;
 pub(crate) mod ids;
 pub(crate) mod metadata;
 pub(crate) mod pacing;
@@ -37,8 +40,12 @@ pub(crate) mod request;
 pub(crate) mod reservation;
 pub(crate) mod sampling;
 pub(crate) mod solver;
+pub(crate) mod support;
+pub(crate) mod theme;
 pub(crate) mod topology;
+pub(crate) mod validation;
 pub(crate) mod variation;
+pub(crate) mod visibility;
 pub(crate) mod zones;
 
 #[cfg(test)]
