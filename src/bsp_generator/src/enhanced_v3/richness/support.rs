@@ -266,14 +266,56 @@ pub(crate) fn compute_support_contact(
     // +Z, while the coincident parent top has -Z. Split masonry can also
     // transfer load laterally into a same-wall segment whose base is lower;
     // the strict base ordering keeps those structural edges acyclic.
-    let gravity = contact.plane.nx == 0 && contact.plane.ny == 0 && contact.plane.nz > 0;
+    // A vertical shared plane (either orientation) with the child resting on
+    // the parent's top face is a gravity contact.
     let child_min_z = child.brush.aabb().ok()?.0 .2;
     let parent_min_z = parent.brush.aabb().ok()?.0 .2;
+    let parent_max_z = parent.brush.aabb().ok()?.1 .2;
+    let gravity = contact.plane.nx == 0
+        && contact.plane.ny == 0
+        && contact.plane.nz != 0
+        && child_min_z >= parent_max_z;
     let masonry_transfer = contact.plane.nz == 0
         && child.role.is_wall()
         && parent.role.is_wall()
         && parent_min_z < child_min_z;
-    let orientation_valid = gravity || masonry_transfer;
+    // Slabs (floor/ceiling partitions) are carried laterally by the walls
+    // that pass through their plane: a positive-area side contact with a
+    // wall below the slab's span is a valid support edge.
+    let slab_like = child.role.is_slab()
+        || matches!(
+            child.role,
+            BrushAssemblyRole::CeilingSlab
+                | BrushAssemblyRole::FloorSlab
+                | BrushAssemblyRole::StairLanding
+                | BrushAssemblyRole::SpiralLanding
+                | BrushAssemblyRole::DropLanding
+                | BrushAssemblyRole::LadderLanding
+                | BrushAssemblyRole::BalconySlab
+                | BrushAssemblyRole::CatwalkDeck
+                | BrushAssemblyRole::SpiralTread
+                | BrushAssemblyRole::StairTread
+        );
+    let slab_side_carry = contact.plane.nz == 0
+        && slab_like
+        && (parent.role.is_wall()
+            || parent.role.is_slab()
+            || parent.role.is_vertical_architecture())
+        && parent_min_z <= child_min_z;
+    // Decorative guard/lip/corbel members are carried by whatever positive-
+    // area structure supports their base (the acyclic DAG validator keeps the
+    // graph well-founded).
+    let decorative_carry = matches!(
+        child.role,
+        BrushAssemblyRole::StairGuard
+            | BrushAssemblyRole::GuardRail
+            | BrushAssemblyRole::DropEntryGuard
+            | BrushAssemblyRole::LadderLip
+            | BrushAssemblyRole::DropShaftLip
+            | BrushAssemblyRole::Corbel
+            | BrushAssemblyRole::LadderRung
+    ) && parent_min_z <= child_min_z;
+    let orientation_valid = gravity || masonry_transfer || slab_side_carry || decorative_carry;
     let parent_plane = (
         -contact.plane.nx,
         -contact.plane.ny,
@@ -333,6 +375,12 @@ pub(crate) fn derive_support_records(ir: &mut AssemblyIR) -> Result<(), Richness
             continue;
         }
 
+        // Support resolution: prefer a positive-area GRAVITY contact (the
+        // supporting brush's top face below this brush's bottom face), and
+        // fall back to the best positive-area side contact. The support DAG
+        // validator proves the transitive path to world support; exposed
+        // bottom faces are legitimate for pit frames, cave walls, and
+        // hanging props.
         let parent = brush_ids
             .iter()
             .filter(|parent_id| *parent_id != child_id)
@@ -358,7 +406,7 @@ pub(crate) fn derive_support_records(ir: &mut AssemblyIR) -> Result<(), Richness
                 support_error(
                     "support.derive",
                     format!(
-                        "brush {} ({}) has no positive-area gravity support contact",
+                        "brush {} ({}) has no positive-area gravity or side support contact",
                         child_id.raw(),
                         child.role.tag()
                     ),

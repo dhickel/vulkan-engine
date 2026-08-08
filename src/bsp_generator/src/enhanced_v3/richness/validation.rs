@@ -485,6 +485,14 @@ pub(crate) fn validate_protected_routes(ir: &AssemblyIR) -> Result<(), RichnessE
                 })?;
             for brush in ir.brushes.values() {
                 if richness_geom::brushes_overlap(&brush.brush, &throat)? {
+                    eprintln!(
+                        "DBG-THROAT: opening {} bounds {:?} intruder {} ({}) aabb={:?}",
+                        opening.id.raw(),
+                        opening.bounds,
+                        brush.id.raw(),
+                        brush.role.tag(),
+                        brush.brush.aabb().ok()
+                    );
                     return Err(validation_error(
                         RichnessErrorCode::SemanticInfeasible,
                         RichnessErrorCategory::SemanticInfeasibility,

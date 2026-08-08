@@ -396,3 +396,186 @@ mod tests {
         assert!(descriptors.is_empty(), "ordinary entities are ignored");
     }
 }
+
+// ── Canonical map emission ─────────────────────────────────────────────────
+
+/// Emit the canonical Quake .map text for a sealed Richness composition.
+///
+/// Grammar (frozen): the worldspawn entity owns every structural brush in
+/// deterministic brush-ID order; descriptor entities carry their brush-model
+/// geometry inline; lights and the player spawn follow in stable entity
+/// order. Face textures come from the theme WAD identity of each brush's
+/// semantic role; tool surfaces (`skip`) are used for descriptor models.
+/// Entity key order is sorted, and every value comes from validated plans.
+pub(crate) fn emit_richness_map(
+    composition: &crate::enhanced_v3::richness::composition::StructuralComposition,
+    theme: crate::enhanced_v3::richness::request::RichnessTheme,
+    spawn: (i32, i32, i32),
+) -> Result<String, RichnessError> {
+    use crate::enhanced_v3::richness::theme::SemanticRole;
+    use std::fmt::Write as _;
+
+    let wad_name = match theme {
+        crate::enhanced_v3::richness::request::RichnessTheme::Ancient => "richness_ancient_v1.wad",
+        crate::enhanced_v3::richness::request::RichnessTheme::Egyptian => {
+            "richness_egyptian_v1.wad"
+        }
+        crate::enhanced_v3::richness::request::RichnessTheme::Brutalist => {
+            "richness_brutalist_v1.wad"
+        }
+    };
+    let role_texture = |role: SemanticRole| -> &'static str {
+        match role {
+            SemanticRole::Floor => "floor",
+            SemanticRole::Ceiling => "ceiling",
+            SemanticRole::Wall => "wall",
+            SemanticRole::Portal => "portal",
+            SemanticRole::Vertical => "vertical",
+            SemanticRole::Cave => "cave",
+            SemanticRole::Prop => "prop",
+            SemanticRole::Emissive => "emissive",
+            SemanticRole::Accent => "accent",
+        }
+    };
+
+    let mut out = String::with_capacity(composition.assembly.brushes.len() * 512 + 4096);
+    // Worldspawn opens and owns all structural brushes (the qbsp grammar used
+    // by every sealed Richness fixture).
+    out.push_str("{\n");
+    out.push_str("\"classname\" \"worldspawn\"\n");
+    let _ = writeln!(out, "\"wad\" \"{wad_name}\"");
+    out.push_str("\"_minlight\" \"16\"\n");
+    let _ = writeln!(out, "\"richness_theme\" \"{}\"", theme.tag());
+
+    for brush in composition.assembly.brushes.values() {
+        emit_richness_brush(&mut out, &composition.assembly, brush)?;
+        out.push('\n');
+    }
+    out.push_str("}\n");
+
+    // Player spawn entity.
+    let _ = writeln!(
+        out,
+        "{{\n\"classname\" \"info_player_start\"\n\"origin\" \"{} {} {}\"\n}}",
+        spawn.0, spawn.1, spawn.2
+    );
+
+    // Entities in deterministic ID order: descriptor brush-model entities
+    // first (stable order), then lights.
+    let mut entities: Vec<_> = composition.assembly.entities.values().collect();
+    entities.sort_by_key(|entity| entity.id);
+    for entity in entities {
+        out.push_str("{\n");
+        let _ = writeln!(out, "\"classname\" \"{}\"", entity.classname);
+        let _ = writeln!(
+            out,
+            "\"origin\" \"{} {} {}\"",
+            entity.origin.0, entity.origin.1, entity.origin.2
+        );
+        for (key, value) in &entity.keys {
+            let _ = writeln!(out, "\"{key}\" \"{value}\"");
+        }
+        if let Some(model) = &entity.brush_model {
+            // Inline brush model: emit the descriptor volume as a skip
+            // tool-surface brush inside the entity block.
+            out.push_str("{\n");
+            for face in &model.faces {
+                let points =
+                    crate::enhanced_v3::emission::brush_face_plane_points(model, &face.plane)
+                        .map_err(|error| {
+                            RichnessError::new(
+                                RichnessErrorCode::PostcompileFailure,
+                                0,
+                                SCHEMA_VERSION,
+                                "?",
+                                "?",
+                                "?",
+                                "?",
+                                "?",
+                                "?",
+                                "emission.brush_face",
+                                RichnessErrorCategory::PostcompileFailure,
+                                format!("{error}"),
+                            )
+                        })?;
+                let (p0, p1, p2) = (points[0], points[1], points[2]);
+                let _ = writeln!(
+                    out,
+                    "( {} {} {} ) ( {} {} {} ) ( {} {} {} ) \"skip\" 0 0 0 0.25 0.25",
+                    p0.0, p0.1, p0.2, p1.0, p1.1, p1.2, p2.0, p2.1, p2.2
+                );
+            }
+            out.push_str("}\n");
+        }
+        out.push_str("}\n");
+    }
+
+    // Structural brush models for every assembly brush (roles not yet
+    // textured) are already emitted; descriptor-only volumes carry skip.
+    let _ = role_texture;
+    Ok(out)
+}
+
+fn emit_richness_brush(
+    out: &mut String,
+    ir: &crate::enhanced_v3::richness::assembly::AssemblyIR,
+    brush: &crate::enhanced_v3::richness::assembly::BrushAssembly,
+) -> Result<(), RichnessError> {
+    use std::fmt::Write as _;
+    let role = ir.material_roles.get(&brush.id).copied().ok_or_else(|| {
+        RichnessError::new(
+            RichnessErrorCode::PostcompileFailure,
+            0,
+            SCHEMA_VERSION,
+            "?",
+            "?",
+            "?",
+            "?",
+            "?",
+            "?",
+            "emission.material_role",
+            RichnessErrorCategory::PostcompileFailure,
+            format!("brush {} has no material role", brush.id.raw()),
+        )
+    })?;
+    let texture = match role {
+        crate::enhanced_v3::richness::theme::SemanticRole::Floor => "floor",
+        crate::enhanced_v3::richness::theme::SemanticRole::Ceiling => "ceiling",
+        crate::enhanced_v3::richness::theme::SemanticRole::Wall => "wall",
+        crate::enhanced_v3::richness::theme::SemanticRole::Portal => "portal",
+        crate::enhanced_v3::richness::theme::SemanticRole::Vertical => "vertical",
+        crate::enhanced_v3::richness::theme::SemanticRole::Cave => "cave",
+        crate::enhanced_v3::richness::theme::SemanticRole::Prop => "prop",
+        crate::enhanced_v3::richness::theme::SemanticRole::Emissive => "emissive",
+        crate::enhanced_v3::richness::theme::SemanticRole::Accent => "accent",
+    };
+    out.push_str("{\n");
+    for face in &brush.brush.faces {
+        let points =
+            crate::enhanced_v3::emission::brush_face_plane_points(&brush.brush, &face.plane)
+                .map_err(|error| {
+                    RichnessError::new(
+                        RichnessErrorCode::PostcompileFailure,
+                        0,
+                        SCHEMA_VERSION,
+                        "?",
+                        "?",
+                        "?",
+                        "?",
+                        "?",
+                        "?",
+                        "emission.brush_face",
+                        RichnessErrorCategory::PostcompileFailure,
+                        format!("{error}"),
+                    )
+                })?;
+        let (p0, p1, p2) = (points[0], points[1], points[2]);
+        let _ = writeln!(
+            out,
+            "( {} {} {} ) ( {} {} {} ) ( {} {} {} ) \"{texture}\" 0 0 0 0.25 0.25",
+            p0.0, p0.1, p0.2, p1.0, p1.1, p1.2, p2.0, p2.1, p2.2
+        );
+    }
+    out.push_str("}\n");
+    Ok(())
+}

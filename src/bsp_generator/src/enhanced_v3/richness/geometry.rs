@@ -967,6 +967,11 @@ pub(crate) fn derive_interface_kind(
         ) => Some(InterfaceKind::WallToWallCorner),
         // Split runs on one cardinal wall retain an explicit structural joint.
         (r1, r2) if r1 == r2 && is_cardinal_wall(r1) => Some(InterfaceKind::WallSegmentJoint),
+        // Parallel opposite walls meet face-to-face at corridor junctions and
+        // shared-wall chains (e.g. a corridor side wall abutting a room wall).
+        (r1, r2) if is_cardinal_wall(r1) && is_cardinal_wall(r2) => {
+            Some(InterfaceKind::WallToWallCorner)
+        }
         // Adjacent room slab partitions meet without overlap.
         (r1, r2) if r1 == r2 && r1.is_slab() => Some(InterfaceKind::SlabRunJoint),
         // A diagonal joint is valid only between one diagonal wall and one

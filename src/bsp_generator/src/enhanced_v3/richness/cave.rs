@@ -460,12 +460,11 @@ pub(crate) fn synthesize_cave(
             if component.is_empty() {
                 continue;
             }
-            return Ok(Some(finish_cave(
-                host_id,
-                lattice,
-                component,
-                candidate_key,
-            )));
+            let candidate = finish_cave(host_id, lattice, component, candidate_key);
+            if cave_support_ok(&candidate) {
+                return Ok(Some(candidate));
+            }
+            continue;
         }
         // Witness component must contain ALL witnesses.
         let first_witness = lattice.witnesses[0];
@@ -476,12 +475,10 @@ pub(crate) fn synthesize_cave(
             .iter()
             .all(|&cell| visited[lattice.index(cell.0, cell.1, cell.2)]);
         if all_witnesses {
-            return Ok(Some(finish_cave(
-                host_id,
-                lattice,
-                component,
-                candidate_key,
-            )));
+            let candidate = finish_cave(host_id, lattice, component, candidate_key);
+            if cave_support_ok(&candidate) {
+                return Ok(Some(candidate));
+            }
         }
     }
     let error = cave_error(
@@ -654,28 +651,43 @@ pub(crate) fn materialize_cave(
         let support = if solid.min.2 == 0 {
             SupportTarget::World
         } else {
-            // Find the box directly below the center cell with positive-area
-            // contact.
-            let center_x = (solid.min.0 + solid.max.0) / 2;
-            let center_y = (solid.min.1 + solid.max.1) / 2;
+            // Support resolution (frozen): prefer a box whose top face
+            // touches this box's bottom face with positive-area xy overlap;
+            // otherwise accept same-layer side contact (a wall box
+            // overhanging the cave void is carried by its neighbors). The
+            // assembly support DAG validates the transitive path to world
+            // support afterwards.
             let below = emitted
                 .iter()
-                .filter(|(other, _)| other.max.2 == solid.min.2)
                 .filter(|(other, _)| {
-                    other.min.0 <= center_x
-                        && center_x < other.max.0
-                        && other.min.1 <= center_y
-                        && center_y < other.max.1
+                    other.max.2 == solid.min.2
+                        && other.min.0 < solid.max.0
+                        && other.max.0 > solid.min.0
+                        && other.min.1 < solid.max.1
+                        && other.max.1 > solid.min.1
                 })
                 .map(|(_, id)| *id)
                 .min();
-            match below {
+            let side = emitted
+                .iter()
+                .filter(|(other, _)| {
+                    other.min.2 == solid.min.2
+                        && ((other.max.0 == solid.min.0 || other.min.0 == solid.max.0)
+                            && other.min.1 < solid.max.1
+                            && other.max.1 > solid.min.1
+                            || (other.max.1 == solid.min.1 || other.min.1 == solid.max.1)
+                                && other.min.0 < solid.max.0
+                                && other.max.0 > solid.min.0)
+                })
+                .map(|(_, id)| *id)
+                .min();
+            match below.or(side) {
                 Some(id) => SupportTarget::Brush(id),
                 None => {
                     return Err(cave_error(
                         "support.missing",
                         format!(
-                            "cave solid box {:?} has no supporting box below its center",
+                            "cave solid box {:?} has no supporting or side-carrying box",
                             solid
                         ),
                     ));
@@ -696,6 +708,36 @@ pub(crate) fn materialize_cave(
         emitted.push((solid.clone(), id));
     }
     Ok(())
+}
+
+/// Support-validity gate: every solid box must rest on the interior floor
+/// plane or have a bottom-face (positive-area) or same-layer side-carrying
+/// neighbor. Unsupported cantilevers invalidate a candidate instance.
+pub(crate) fn cave_support_ok(result: &CaveResult) -> bool {
+    for solid in &result.solid_boxes {
+        if solid.min.2 == 0 {
+            continue;
+        }
+        let supported = result.solid_boxes.iter().any(|other| {
+            other != solid
+                && ((other.max.2 == solid.min.2
+                    && other.min.0 < solid.max.0
+                    && other.max.0 > solid.min.0
+                    && other.min.1 < solid.max.1
+                    && other.max.1 > solid.min.1)
+                    || (other.min.2 == solid.min.2
+                        && ((other.max.0 == solid.min.0 || other.min.0 == solid.max.0)
+                            && other.min.1 < solid.max.1
+                            && other.max.1 > solid.min.1
+                            || (other.max.1 == solid.min.1 || other.min.1 == solid.max.1)
+                                && other.min.0 < solid.max.0
+                                && other.max.0 > solid.min.0)))
+        });
+        if !supported {
+            return false;
+        }
+    }
+    true
 }
 
 /// Validate cave invariants over an emitted result:

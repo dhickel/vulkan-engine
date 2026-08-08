@@ -291,6 +291,35 @@ pub(crate) fn materialize_vertical_features(
                 }
                 _ => {}
             }
+            // Multi-storey rooms whose catalog contract carries a traversal
+            // recipe (grand stair hall, spiral tower, ladder hub, observatory)
+            // consume the COMPLETE recipe with the room as its own host.
+            let recipe = attr
+                .archetype
+                .map(|archetype| {
+                    generated_content::ARCHETYPE_VERTICAL_RECIPE
+                        .get(archetype.raw() as usize)
+                        .copied()
+                        .unwrap_or(VerticalRecipe::None)
+                })
+                .unwrap_or(VerticalRecipe::None);
+            let feature = match recipe {
+                VerticalRecipe::Stairwell => {
+                    build_stairwell(composite, room, &attr, false, ir, &mut next_feature)?
+                }
+                VerticalRecipe::OpenStairwell => {
+                    build_stairwell(composite, room, &attr, true, ir, &mut next_feature)?
+                }
+                VerticalRecipe::LadderShaft => {
+                    build_ladder_shaft(composite, &attr, ir, &mut next_feature)?
+                }
+                VerticalRecipe::SpiralStair => {
+                    build_spiral_stair(composite, &attr, ir, &mut next_feature)?
+                }
+                _ => continue,
+            };
+            result.push(feature);
+            continue;
         }
 
         for pit in composite
@@ -1058,15 +1087,18 @@ fn stair_frame(
     let (x0, y0, x1, y1) = room_bounds(composite);
     let available_x = x1 - x0 - 32;
     let available_y = y1 - y0 - 32;
-    let (swap, width, height) = if available_x >= 192 && available_y >= 224 {
-        (false, 192, 224)
-    } else if available_x >= 224 && available_y >= 192 {
-        (true, 224, 192)
+    // The complete stairwell needs 11 steps of 16 rise x 32 run (176 units
+    // of rise) plus a lower landing and turn: 448 units of run in the
+    // unswapped orientation (192 wide) or 416 in the swapped one (224 wide).
+    let (swap, width, height) = if available_x >= 192 && available_y >= 448 {
+        (false, 192, 448)
+    } else if available_x >= 224 && available_y >= 416 {
+        (true, 224, 416)
     } else {
         return Err(vertical_error(
             "stairwell.envelope",
             format!(
-                "{}x{} interior cannot contain the complete 192x224 stairwell",
+                "{}x{} interior cannot contain the complete 192x448 stairwell",
                 available_x, available_y
             ),
         ));
@@ -1090,10 +1122,24 @@ fn build_stairwell(
     next_feature: &mut u32,
 ) -> Result<VerticalFeature, RichnessError> {
     let frame = stair_frame(composite, host)?;
-    let partition_upper = frame.bounds(0, 0, UPPER_FLOOR.0, 192, 224, UPPER_FLOOR.1);
-    let hole_upper = frame.bounds(16, 0, UPPER_FLOOR.0, 176, 224, UPPER_FLOOR.1);
-    let partition_lower = with_z(partition_upper, LOWER_CEILING);
-    let hole_lower = with_z(hole_upper, LOWER_CEILING);
+    let partition_upper = frame.bounds(16, 0, UPPER_FLOOR.0, 176, 464, UPPER_FLOOR.1);
+    // The upper-floor carve clears only the flight's run, leaving a live
+    // partition owner rim around the landing and shaft.
+    let hole_upper = frame.bounds(112, 224, UPPER_FLOOR.0, 176, 464, UPPER_FLOOR.1);
+    // The lower-ceiling partition and carve span the FULL stairwell run so
+    // the upper flight's lower treads keep 80 units of headroom before they
+    // rise through the opening.
+    let partition_lower = with_z(
+        frame.bounds(16, 0, LOWER_FLOOR_TOP, 176, 464, LOWER_FLOOR_TOP),
+        LOWER_CEILING,
+    );
+    // The carve covers only the upper flight's run (the lower flight keeps
+    // 80+ units of headroom under the intact lower ceiling), leaving a live
+    // partition owner segment.
+    let hole_lower = with_z(
+        frame.bounds(16, 192, LOWER_FLOOR_TOP, 176, 464, LOWER_FLOOR_TOP),
+        LOWER_CEILING,
+    );
     let upper_opening_id = carve_slab_opening(
         ir,
         partition_upper,
@@ -1116,8 +1162,10 @@ fn build_stairwell(
         attr,
     )?;
 
+    // Lower flight: 4 steps rising 16 -> 80 (80 units of headroom below the
+    // lower ceiling at 160, per the frozen controller contract).
     let mut tread_ids = Vec::new();
-    for step in 0..6 {
+    for step in 0..4 {
         let y0 = 64 + step as i128 * STAIR_RUN;
         let top = LOWER_FLOOR_TOP + (step as i128 + 1) * STAIR_RISE;
         tread_ids.push(insert_box(
@@ -1127,12 +1175,14 @@ fn build_stairwell(
             attr,
         )?);
     }
-    for step in 0..6 {
-        let y1 = 160 - step as i128 * STAIR_RUN;
-        let top = LOWER_FLOOR_TOP + (step as i128 + 7) * STAIR_RISE;
+    // Upper flight: 8 steps rising 80 -> 208 (the 12-step frozen contract)
+    // through the carved ceiling opening (headroom above the upper floor).
+    for step in 0..8 {
+        let y0 = 224 + step as i128 * STAIR_RUN;
+        let top = LOWER_FLOOR_TOP + (step as i128 + 5) * STAIR_RISE;
         tread_ids.push(insert_box(
             ir,
-            frame.bounds(112, y1 - STAIR_RUN, LOWER_FLOOR_TOP, 176, y1, top),
+            frame.bounds(112, y0, LOWER_FLOOR_TOP, 176, y0 + STAIR_RUN, top),
             BrushAssemblyRole::StairTread,
             attr,
         )?);
@@ -1140,22 +1190,24 @@ fn build_stairwell(
 
     let turn_id = insert_box(
         ir,
-        frame.bounds(16, 160, LOWER_FLOOR_TOP, 176, 224, 112),
+        frame.bounds(16, 192, LOWER_FLOOR_TOP, 176, 224, 80),
         BrushAssemblyRole::StairLanding,
         attr,
     )?;
-    let upper_id = insert_box(
+    let upper_id = replace_floor_patch(
         ir,
-        frame.bounds(112, 0, LOWER_FLOOR_TOP, 176, 64, UPPER_FLOOR.1),
+        frame.bounds(112, 0, UPPER_FLOOR.0, 176, 64, UPPER_FLOOR.1),
         BrushAssemblyRole::StairLanding,
         attr,
     )?;
 
     let mut guard_ids = Vec::new();
+    // Fixed guards anchor on the intact floor outside the carved stairwell
+    // opening (the opening spans x 16..176, y 0..224), so their bases always
+    // have a positive-area gravity contact.
     for bounds in [
-        frame.bounds(0, 64, LOWER_FLOOR_TOP, 16, 160, 160),
-        frame.bounds(176, 64, LOWER_FLOOR_TOP, 192, 160, 256),
-        frame.bounds(16, 224, 112, 176, 240, 160),
+        frame.bounds(0, 64, LOWER_FLOOR_TOP, 16, 160, LOWER_CEILING.1),
+        frame.bounds(176, 64, LOWER_FLOOR_TOP, 192, 160, LOWER_CEILING.1),
     ] {
         for piece in split_around_interlayer(bounds) {
             guard_ids.push(insert_box(ir, piece, BrushAssemblyRole::StairGuard, attr)?);
@@ -1163,19 +1215,24 @@ fn build_stairwell(
     }
     if open {
         for step in 0..6 {
+            // Guard rails rise FROM each tread surface AND overlap the
+            // flight's tread footprint in the run axis, so their base has a
+            // positive-area gravity contact with the tread below.
             let y0 = 64 + step as i128 * STAIR_RUN;
-            let top = LOWER_FLOOR_TOP + (step as i128 + 1) * STAIR_RISE + GUARD_HEIGHT;
+            let base = LOWER_FLOOR_TOP + (step as i128 + 1) * STAIR_RISE;
+            let top = (base + GUARD_HEIGHT).min(UPPER_FLOOR.0);
             guard_ids.push(insert_box(
                 ir,
-                frame.bounds(80, y0, LOWER_FLOOR_TOP, 96, y0 + STAIR_RUN, top),
+                frame.bounds(64, y0, base, 96, y0 + STAIR_RUN, top),
                 BrushAssemblyRole::StairGuard,
                 attr,
             )?);
-            let y1 = 160 - step as i128 * STAIR_RUN;
-            let top = LOWER_FLOOR_TOP + (step as i128 + 7) * STAIR_RISE + GUARD_HEIGHT;
+            let y1 = 224 + step as i128 * STAIR_RUN;
+            let base = LOWER_FLOOR_TOP + (step as i128 + 5) * STAIR_RISE;
+            let top = (base + GUARD_HEIGHT).min(UPPER_FLOOR.0);
             guard_ids.push(insert_box(
                 ir,
-                frame.bounds(96, y1 - STAIR_RUN, LOWER_FLOOR_TOP, 112, y1, top),
+                frame.bounds(96, y1, base, 128, y1 + STAIR_RUN, top),
                 BrushAssemblyRole::StairGuard,
                 attr,
             )?);
@@ -2937,6 +2994,14 @@ pub(crate) fn validate_slab_opening_ownership(ir: &AssemblyIR) -> Result<(), Ric
                 let omitted = openings
                     .iter()
                     .any(|opening| bounds_contains(opening.bounds, cell));
+                // A cell is owned by the live slab segment OR by a stair
+                // landing surface that replaced the floor patch there.
+                let covers = |brush: &super::assembly::BrushAssembly| {
+                    brush.owner == owner
+                        && brush.brush.aabb().is_ok_and(|(min, max)| {
+                            bounds_contains((min.0, min.1, min.2, max.0, max.1, max.2), cell)
+                        })
+                };
                 let owners = ids
                     .iter()
                     .filter(|id| {
@@ -2951,7 +3016,19 @@ pub(crate) fn validate_slab_opening_ownership(ir: &AssemblyIR) -> Result<(), Ric
                                 })
                         })
                     })
-                    .count();
+                    .count()
+                    + ir.brushes
+                        .values()
+                        .filter(|brush| {
+                            matches!(
+                                brush.role,
+                                BrushAssemblyRole::StairLanding
+                                    | BrushAssemblyRole::SpiralLanding
+                                    | BrushAssemblyRole::DropLanding
+                                    | BrushAssemblyRole::LadderLanding
+                            ) && covers(brush)
+                        })
+                        .count();
                 if (omitted && owners != 0) || (!omitted && owners != 1) {
                     return Err(opening_error(
                         openings[0],

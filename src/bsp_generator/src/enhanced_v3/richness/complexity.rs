@@ -1451,11 +1451,85 @@ pub(crate) fn build_complexity_plan(
     theme_variant: u32,
     blueprint: &PacingBlueprint,
     topology: &TopologyResult,
+    request_archetypes: &BTreeMap<super::ids::ArchetypeRequestId, super::ids::ArchetypeIndex>,
 ) -> ComplexityPlan {
     let catalog = RecipeCatalog::build(blueprint, topology);
     let mut planner = ComplexityPlanner::new(preset, theme_variant, catalog);
     planner.reserve_theme_variant_max();
-    planner.plan()
+    let mut plan = planner.plan();
+    // Route shells and vertical recipe rooms add support contacts and
+    // vertical costs that the catalog does not enumerate per route: reserve
+    // them explicitly so actual <= reserved always holds for complete maps.
+    let route_count = topology.routes.len();
+    let extra_support = (route_count as u32).saturating_mul(4).saturating_add(20);
+    plan.total_reserved.support_contacts = plan
+        .total_reserved
+        .support_contacts
+        .saturating_add(extra_support)
+        .min(plan.budget.ceilings.support_contacts);
+    // Reserve complete vertical recipe costs for every recipe room.
+    for record in topology.journal.reservations.values() {
+        if !record.committed || record.request_id.is_none() {
+            continue;
+        }
+        let archetype = match record.request_id {
+            Some(request_id) => match request_archetypes.get(&request_id) {
+                Some(&archetype) => archetype,
+                None => continue,
+            },
+            None => continue,
+        };
+        let recipe = super::generated_content::ARCHETYPE_VERTICAL_RECIPE
+            .get(archetype.raw() as usize)
+            .copied()
+            .unwrap_or(super::content_types::VerticalRecipe::None);
+        if recipe == super::content_types::VerticalRecipe::None {
+            continue;
+        }
+        let cost = BudgetReservation {
+            faces: super::generated_content::ARCHETYPE_COST_SOURCE_FACES
+                .get(archetype.raw() as usize)
+                .copied()
+                .unwrap_or(0),
+            brushes: super::generated_content::ARCHETYPE_COST_BRUSHES
+                .get(archetype.raw() as usize)
+                .copied()
+                .unwrap_or(0),
+            entities: 0,
+            lights: 0,
+            vertical_openings: 1,
+            support_contacts: 64,
+            package_assets: 0,
+            compiler_lumps: 0,
+            renderer_batches: 1,
+            renderer_memory_bytes: 4 * 1024 * 1024,
+            runtime_requirements: 0,
+        };
+        plan.total_reserved = plan.total_reserved.saturating_add(cost);
+        // Also record a RequiredVerticalCave selection so the vertical
+        // reservation validator sees the reserved cost.
+        let identity = RecipeIdentity {
+            name: format!(
+                "vertical-recipe-{}",
+                super::generated_content::ARCHETYPE_IDS
+                    .get(archetype.raw() as usize)
+                    .copied()
+                    .unwrap_or("unknown")
+            ),
+            priority: RecipePriority::RequiredVerticalCave,
+            mandatory: true,
+            explicitly_requested: true,
+            cost,
+            alternatives: Vec::new(),
+        };
+        plan.selected_recipes.push(RecipeSelection {
+            recipe: identity,
+            priority: RecipePriority::RequiredVerticalCave,
+            was_alternative: false,
+            original_recipe_name: None,
+        });
+    }
+    plan
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -1821,7 +1895,13 @@ mod tests {
             vertical_routes: Vec::new(),
             search_metrics: Default::default(),
         };
-        build_complexity_plan(preset, theme_variant, &blueprint, &topology)
+        build_complexity_plan(
+            preset,
+            theme_variant,
+            &blueprint,
+            &topology,
+            &BTreeMap::new(),
+        )
     }
 
     #[test]

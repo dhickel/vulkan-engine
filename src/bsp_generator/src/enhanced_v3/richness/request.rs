@@ -1025,6 +1025,7 @@ impl ResolvedRichnessRequestV1 {
     }
 
     /// Resolved cave-mode control and its source marker.
+    /// Resolved cave mode control (value + provenance source).
     pub(crate) fn cave_mode(&self) -> ResolvedField<RichnessCaveMode> {
         self.cave_mode
     }

@@ -39,6 +39,7 @@ pub(crate) mod ids;
 pub(crate) mod lighting;
 pub(crate) mod metadata;
 pub(crate) mod pacing;
+pub(crate) mod pipeline;
 pub(crate) mod presentation;
 pub(crate) mod props;
 pub(crate) mod request;
