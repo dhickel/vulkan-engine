@@ -1,0 +1,125 @@
+---- qbsp / ericw-tools 2.0.0-alpha3 ----
+Input file: /home/dhickel/Code/Rust/vulkan-engine/src/bsp_generator/tests/fixtures/enhanced_v3_richness_portals/ancient_post_lintel.map
+Output file: /home/dhickel/Code/Rust/vulkan-engine/src/bsp_generator/tests/fixtures/enhanced_v3_richness_portals/ancient_post_lintel.bsp
+
+INFO: using built-in palette.
+---- LoadMapFile ----
+addArchive: WARNING: archive '/home/dhickel/Code/Rust/vulkan-engine/src/bsp_generator/tests/fixtures/enhanced_v3_richness_portals/cc0_dungeon_v2.wad' not found
+addArchive: WARNING: archive 'cc0_dungeon_v2.wad' not found
+WARNING: No valid WAD filenames in worldmodel
+     4 entities
+     5 unique textures
+    13 texinfos
+    40 unique planes
+
+---- ProcessMapBrushes ----
+INFO: world extents calculated to 1224 units
+     20 brushes
+    120 sides
+
+            0 texture frames added
+WARNING: unable to find texture skip
+WARNING: unable to find texture bs_floor
+WARNING: unable to find texture bs_ceil
+WARNING: unable to find texture bs_wall
+WARNING: unable to find texture bs_accent
+Processing hull 0...
+---- Brush_LoadEntity ----
+---- CountBrushes ----
+    20 SOLID brushes
+    20 brushes total
+    120 visible sides
+INFO: calculating BSP for 20 brushes with 120 sides
+---- BrushBSP ----
+     20 brushes
+    120 visible faces
+    53 nodes
+    53 expensive split nodes
+    54 leaves
+---- CountLeafs ----
+    24 SOLID leafs
+    30 EMPTY leafs
+    54 leafs total
+    11 max tree height
+     7 avg tree height
+---- MakeTreePortals ----
+---- CalcTreeBounds ----
+    244 tree portals
+---- FillOutside ----
+    26 outside leaves
+---- FillDetail ----
+    0 detail filled leafs
+---- BrushBSP ----
+    20 brushes
+    26 visible faces
+    94 non-visible faces
+    68 nodes
+    51 non-visible nodes
+    68 expensive split nodes
+    69 leaves
+---- CountLeafs ----
+    28 SOLID leafs
+    41 EMPTY leafs
+    69 leafs total
+    11 max tree height
+     8 avg tree height
+---- MakeTreePortals ----
+---- CalcTreeBounds ----
+    299 tree portals
+---- FillOutside ----
+    38 outside leaves
+---- FillDetail ----
+    0 detail filled leafs
+---- MakeTreePortals ----
+---- CalcTreeBounds ----
+    299 tree portals
+---- MarkVisibleSides ----
+    32 sides visible
+---- MakeFaces ----
+     32 makefaces
+      8 merged
+    160 subdivided
+---- PruneNodes ----
+    55 nodes pruned
+---- WritePortalFile ----
+    3 player-occupiable leaves
+    3 clusters of leaves
+    2 vis portals
+---- CountLeafs ----
+     3 EMPTY leafs
+    11 SOLID leafs
+    14 leafs total
+    8 max tree height
+    6 avg tree height
+---- TJunc ----
+     48 edges added by tjunctions
+    184 faces optimized through MWT
+    416 triangles computed from MWT
+     10 faces created via optimization of MWT triangles
+---- EmitFaces ----
+    402 edges
+    194 faces
+Processing hull 1...
+Processing hull 2...
+---- FinishBSPFile ----
+Writing /home/dhickel/Code/Rust/vulkan-engine/src/bsp_generator/tests/fixtures/enhanced_v3_richness_portals/ancient_post_lintel.bsp as Quake BSP2 bsp2
+Wrote /home/dhickel/Code/Rust/vulkan-engine/src/bsp_generator/tests/fixtures/enhanced_v3_richness_portals/ancient_post_lintel.bsp
+
+count   lump name    byte size 
+      1 models               64
+     26 planes              520
+    210 vertexes           2520
+     13 nodes               572
+      7 texinfos            280
+    194 faces              5432
+     22 clipnodes           264
+      4 leafs               176
+    194 marksurfaces        776
+    403 edges              3224
+    804 surfedges          3216
+      5 textures             24
+        lightdata             0
+        visdata               0
+        entdata             266
+
+0.022s seconds elapsed

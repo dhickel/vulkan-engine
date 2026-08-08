@@ -57,6 +57,8 @@ pub enum FieldTag {
     WorleyF1,
     /// Worley F2 (distance to second-nearest feature point).
     WorleyF2,
+    /// Three-dimensional density field for CarvedGrotto synthesis.
+    Caves,
 }
 
 impl FieldTag {
@@ -69,6 +71,7 @@ impl FieldTag {
             FieldTag::FbmDomainWarpY => b"fbm_domain_warp_y",
             FieldTag::WorleyF1 => b"worley_f1",
             FieldTag::WorleyF2 => b"worley_f2",
+            FieldTag::Caves => b"caves",
         }
     }
 }
@@ -465,11 +468,186 @@ pub fn worley_f2(seed: u64, px: i32, py: i32) -> u64 {
     worley_f1_f2(seed, px, py).1
 }
 
+// ── 3D density field (CarvedGrotto) ────────────────────────────────────────
+
+/// Hash frame for a 3D lattice cell corner (frozen).
+///
+/// Same framing rules as [`hash_corner`], with a third signed coordinate:
+/// - u32 LE: length of domain
+/// - domain bytes
+/// - u32 LE: length of tag
+/// - tag bytes
+/// - u64 LE: seed
+/// - i64 LE: cell_x (two's complement)
+/// - i64 LE: cell_y (two's complement)
+/// - i64 LE: cell_z (two's complement)
+/// - u32 LE: octave
+/// - u32 LE: candidate_key
+pub(crate) fn hash_corner3(
+    seed: u64,
+    tag: FieldTag,
+    cell_x: i64,
+    cell_y: i64,
+    cell_z: i64,
+    octave: u32,
+    candidate_key: u32,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(&(RICHNESS_DOMAIN.len() as u32).to_le_bytes());
+    hasher.update(RICHNESS_DOMAIN);
+    let tag_bytes = tag.as_bytes();
+    hasher.update(&(tag_bytes.len() as u32).to_le_bytes());
+    hasher.update(tag_bytes);
+    hasher.update(&seed.to_le_bytes());
+    hasher.update(&cell_x.to_le_bytes());
+    hasher.update(&cell_y.to_le_bytes());
+    hasher.update(&cell_z.to_le_bytes());
+    hasher.update(&octave.to_le_bytes());
+    hasher.update(&candidate_key.to_le_bytes());
+    hasher.finalize().into()
+}
+
+/// Trilinear lattice value noise in 3D.
+///
+/// Eight corner hashes are interpolated with fixed smoothstep in frozen
+/// corner order: (0,0,0), (1,0,0), (0,1,0), (1,1,0), (0,0,1), (1,0,1),
+/// (0,1,1), (1,1,1). All arithmetic is integer fixed-point.
+pub fn value_noise3(
+    seed: u64,
+    tag: FieldTag,
+    x: FixedQ32,
+    y: FixedQ32,
+    z: FixedQ32,
+    cell_size: i32,
+    octave: u32,
+    candidate_key: u32,
+) -> i64 {
+    let cs_raw = FixedQ32::from_i32(cell_size).raw();
+    if cs_raw == 0 {
+        return 0;
+    }
+    let cell_x = x.floor_div_i64(cs_raw).unwrap_or(0);
+    let cell_y = y.floor_div_i64(cs_raw).unwrap_or(0);
+    let cell_z = z.floor_div_i64(cs_raw).unwrap_or(0);
+    let origin_x_raw = cell_x.wrapping_mul(cs_raw);
+    let origin_y_raw = cell_y.wrapping_mul(cs_raw);
+    let origin_z_raw = cell_z.wrapping_mul(cs_raw);
+    let fx_raw = x.raw().wrapping_sub(origin_x_raw);
+    let fy_raw = y.raw().wrapping_sub(origin_y_raw);
+    let fz_raw = z.raw().wrapping_sub(origin_z_raw);
+    let fx = FixedQ32::from_raw(fx_raw);
+    let fy = FixedQ32::from_raw(fy_raw);
+    let fz = FixedQ32::from_raw(fz_raw);
+    let cs = FixedQ32::from_raw(cs_raw);
+    let tx = fx.div(cs).unwrap_or(FixedQ32::ZERO);
+    let ty = fy.div(cs).unwrap_or(FixedQ32::ZERO);
+    let tz = fz.div(cs).unwrap_or(FixedQ32::ZERO);
+    let sx = smoothstep(tx);
+    let sy = smoothstep(ty);
+    let sz = smoothstep(tz);
+
+    // Frozen corner order (corner indices 0..=7). The effective hash key
+    // packs the candidate key and corner index: `candidate_key * 8 + corner`.
+    // Candidate search therefore perturbs every corner without touching any
+    // other candidate's framing.
+    let corners: [(i64, i64, i64); 8] = [
+        (cell_x, cell_y, cell_z),
+        (cell_x + 1, cell_y, cell_z),
+        (cell_x, cell_y + 1, cell_z),
+        (cell_x + 1, cell_y + 1, cell_z),
+        (cell_x, cell_y, cell_z + 1),
+        (cell_x + 1, cell_y, cell_z + 1),
+        (cell_x, cell_y + 1, cell_z + 1),
+        (cell_x + 1, cell_y + 1, cell_z + 1),
+    ];
+    let mut values = [0i64; 8];
+    for (index, &(cx, cy, cz)) in corners.iter().enumerate() {
+        let key = candidate_key.wrapping_mul(8).wrapping_add(index as u32);
+        let hash = hash_corner3(seed, tag, cx, cy, cz, octave, key);
+        values[index] = corner_value_from_hash(&hash);
+    }
+
+    // Trilinear interpolation: x first, then y, then z (frozen).
+    let x0 = lerp_i64(values[0], values[1], sx);
+    let x1 = lerp_i64(values[2], values[3], sx);
+    let x2 = lerp_i64(values[4], values[5], sx);
+    let x3 = lerp_i64(values[6], values[7], sx);
+    let y0 = lerp_i64(x0, x1, sy);
+    let y1 = lerp_i64(x2, x3, sy);
+    lerp_i64(y0, y1, sz)
+}
+
+/// Four-octave 3D fBm with weights 8:4:2:1 and exact integer normalization.
+///
+/// Octave cell sizes: 128, 64, 32, 16 (units). The candidate key is threaded
+/// through every octave so candidate search never perturbs another candidate.
+pub fn fbm3(
+    seed: u64,
+    tag: FieldTag,
+    x: FixedQ32,
+    y: FixedQ32,
+    z: FixedQ32,
+    candidate_key: u32,
+) -> i64 {
+    let cell_sizes: [i32; 4] = [128, 64, 32, 16];
+    let weights: [i64; 4] = [8, 4, 2, 1];
+    let weight_sum: i64 = 15;
+    let oct0 = value_noise3(seed, tag, x, y, z, cell_sizes[0], 0, candidate_key);
+    let oct1 = value_noise3(seed, tag, x, y, z, cell_sizes[1], 1, candidate_key);
+    let oct2 = value_noise3(seed, tag, x, y, z, cell_sizes[2], 2, candidate_key);
+    let oct3 = value_noise3(seed, tag, x, y, z, cell_sizes[3], 3, candidate_key);
+    let sum = oct0 as i128 * weights[0] as i128
+        + oct1 as i128 * weights[1] as i128
+        + oct2 as i128 * weights[2] as i128
+        + oct3 as i128 * weights[3] as i128;
+    (sum / weight_sum as i128) as i64
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hash_corner3_framing_is_stable() {
+        let a = hash_corner3(7, FieldTag::Caves, 3, -2, 5, 2, 4);
+        let b = hash_corner3(7, FieldTag::Caves, 3, -2, 5, 2, 4);
+        assert_eq!(a, b);
+        assert_ne!(hash_corner3(8, FieldTag::Caves, 3, -2, 5, 2, 4), a);
+        assert_ne!(hash_corner3(7, FieldTag::Caves, 3, -2, 6, 2, 4), a);
+        assert_ne!(hash_corner3(7, FieldTag::Caves, 3, -2, 5, 2, 5), a);
+    }
+
+    #[test]
+    fn value_noise3_negative_coordinates_deterministic() {
+        let x = FixedQ32::from_i32(-64);
+        let y = FixedQ32::from_i32(-32);
+        let z = FixedQ32::from_i32(0);
+        let a = value_noise3(11, FieldTag::Caves, x, y, z, 32, 0, 0);
+        let b = value_noise3(11, FieldTag::Caves, x, y, z, 32, 0, 0);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn fbm3_candidate_keys_differ() {
+        let x = FixedQ32::from_i32(48);
+        let y = FixedQ32::from_i32(80);
+        let z = FixedQ32::from_i32(112);
+        let a = fbm3(5, FieldTag::Caves, x, y, z, 0);
+        let b = fbm3(5, FieldTag::Caves, x, y, z, 1);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn fbm3_is_deterministic_across_runs() {
+        let x = FixedQ32::from_i32(16);
+        let y = FixedQ32::from_i32(32);
+        let z = FixedQ32::from_i32(48);
+        let a = fbm3(3, FieldTag::Caves, x, y, z, 2);
+        let b = fbm3(3, FieldTag::Caves, x, y, z, 2);
+        assert_eq!(a, b);
+    }
 
     // ── Field tag tests ────────────────────────────────────────────────
 

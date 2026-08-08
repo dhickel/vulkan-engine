@@ -24,6 +24,7 @@
 
 pub(crate) mod assembly;
 pub(crate) mod canonical;
+pub(crate) mod cave;
 pub(crate) mod complexity;
 pub(crate) mod composition;
 pub(crate) mod content_types;

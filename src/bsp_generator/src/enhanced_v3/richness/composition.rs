@@ -154,6 +154,8 @@ fn compose_single_room(
 pub(crate) struct StructuralComposition {
     pub assembly: AssemblyIR,
     pub visibility: VisibilityPlan,
+    /// CarvedGrotto result (None when omitted or infeasible in preferred mode).
+    pub cave: Option<super::cave::CaveResult>,
 }
 
 /// Reachable structural composition path for an already solved Richness map.
@@ -168,6 +170,8 @@ pub(crate) fn compose_solved_generation(
     generation: &FullGenerationResult,
     theme: RichnessTheme,
     complexity: &ComplexityPlan,
+    seed: u64,
+    cave_mode: super::request::RichnessCaveMode,
 ) -> Result<StructuralComposition, RichnessError> {
     let reservations = &generation.topology.journal.reservations;
     let mut assembly = compose_all_rooms(reservations, &generation.placement.request_archetypes)?;
@@ -197,6 +201,18 @@ pub(crate) fn compose_solved_generation(
         reservations,
         &generation.placement.request_archetypes,
     )?;
+
+    // Phase 11: CarvedGrotto synthesis (exactly one cave for eligible maps).
+    let cave_result = super::cave::synthesize_cave(seed, cave_mode, &generation.topology.journal)?;
+    if let Some(cave_result) = &cave_result {
+        super::cave::validate_cave_result(cave_result)?;
+        super::cave::materialize_cave(
+            &mut assembly,
+            cave_result,
+            &generation.placement.request_archetypes,
+            reservations,
+        )?;
+    }
 
     derive_all_interfaces(&mut assembly)?;
     derive_support_records(&mut assembly)?;
@@ -228,6 +244,7 @@ pub(crate) fn compose_solved_generation(
     Ok(StructuralComposition {
         assembly,
         visibility,
+        cave: cave_result,
     })
 }
 
@@ -3299,7 +3316,14 @@ mod tests {
                 &generation.topology,
             );
             assert!(complexity.is_within_budget(), "{:?}", complexity.errors);
-            let composition = compose_solved_generation(&generation, theme, &complexity).unwrap();
+            let composition = compose_solved_generation(
+                &generation,
+                theme,
+                &complexity,
+                42,
+                crate::enhanced_v3::richness::request::RichnessCaveMode::Omitted,
+            )
+            .unwrap();
             assert_eq!(
                 composition.assembly.portal_assemblies.len(),
                 expected_portals

@@ -215,6 +215,12 @@ pub(crate) enum BrushAssemblyRole {
     DropEntryGuard,
     /// Internal arena gate wall carrying controlled lower/upper entries.
     ArenaGateWall,
+    /// Carved cave floor solid (bottom of the cave void).
+    CaveFloor,
+    /// Carved cave wall solid (side of the cave void).
+    CaveWall,
+    /// Carved cave ceiling solid (top of the cave void).
+    CaveCeiling,
 }
 
 impl BrushAssemblyRole {
@@ -268,6 +274,9 @@ impl BrushAssemblyRole {
             Self::DropLanding => "drop_landing",
             Self::DropEntryGuard => "drop_entry_guard",
             Self::ArenaGateWall => "arena_gate_wall",
+            Self::CaveFloor => "cave_floor",
+            Self::CaveWall => "cave_wall",
+            Self::CaveCeiling => "cave_ceiling",
         }
     }
 
@@ -288,6 +297,7 @@ impl BrushAssemblyRole {
                 | Self::DropShaftWall
                 | Self::SpiralShellWall
                 | Self::ArenaGateWall
+                | Self::CaveWall
         )
     }
 
@@ -323,6 +333,7 @@ impl BrushAssemblyRole {
                 | Self::DropLanding
                 | Self::DropEntryGuard
                 | Self::ArenaGateWall
+                | Self::CaveWall
         )
     }
 
@@ -375,6 +386,9 @@ impl BrushAssemblyRole {
             | Self::StairGuard
             | Self::VerticalSupport
             | Self::DropEntryGuard => SemanticRole::Accent,
+            Self::CaveFloor => SemanticRole::Floor,
+            Self::CaveWall => SemanticRole::Wall,
+            Self::CaveCeiling => SemanticRole::Ceiling,
         }
     }
 }
