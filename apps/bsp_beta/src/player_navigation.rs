@@ -683,6 +683,14 @@ impl BspPlayerMovementController {
         self.velocity = Vec3::Y * input.forward_axis * LADDER_SPEED_ENGINE;
         let trace = self.move_fraction(self.velocity * dt);
         if !trace.no_hit {
+            if input.forward_axis > 0.0 && trace.plane_normal.y < -0.5 {
+                // The ladder shaft is capped by solid structure: the climb is
+                // complete at the physical top. Release to airborne so the
+                // player exits deterministically instead of stalling.
+                self.velocity = retained_horizontal;
+                self.state = BspMovementState::Airborne;
+                return;
+            }
             self.velocity = Vec3::ZERO;
             self.diagnostics.push(BspMovementDiagnostic::blocked(
                 Some(volume.id.clone()),

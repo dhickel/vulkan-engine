@@ -28,6 +28,7 @@ pub(crate) mod cave;
 pub(crate) mod complexity;
 pub(crate) mod composition;
 pub(crate) mod content_types;
+pub(crate) mod emission;
 pub(crate) mod error;
 pub(crate) mod fields;
 pub(crate) mod fixed;
