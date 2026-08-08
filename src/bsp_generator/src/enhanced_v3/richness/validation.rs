@@ -522,12 +522,32 @@ pub(crate) fn validate_protected_routes(ir: &AssemblyIR) -> Result<(), RichnessE
 pub(crate) fn validate_overlap(ir: &AssemblyIR) -> Result<(), RichnessError> {
     // First: check all brush pairs for positive-volume overlap.
     let brush_ids: Vec<_> = ir.brushes.keys().copied().collect();
+    let bounds = brush_ids
+        .iter()
+        .map(|id| {
+            ir.brushes[id]
+                .brush
+                .aabb()
+                .map(|(min, max)| (min.0, min.1, min.2, max.0, max.1, max.2))
+                .map_err(|error| {
+                    validation_error(
+                        RichnessErrorCode::SemanticInfeasible,
+                        RichnessErrorCategory::SemanticInfeasibility,
+                        "validation.overlap",
+                        format!("brush {} AABB: {error}", id.raw()),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     for i in 0..brush_ids.len() {
         for j in (i + 1)..brush_ids.len() {
             let a_id = brush_ids[i];
             let b_id = brush_ids[j];
             let a = &ir.brushes[&a_id];
             let b = &ir.brushes[&b_id];
+            if !aabbs_may_touch(bounds[i], bounds[j]) {
+                continue;
+            }
 
             if richness_geom::brushes_overlap(&a.brush, &b.brush)? {
                 return Err(RichnessError::new(
@@ -602,6 +622,13 @@ pub(crate) fn validate_overlap(ir: &AssemblyIR) -> Result<(), RichnessError> {
     Ok(())
 }
 
+fn aabbs_may_touch(
+    (ax0, ay0, az0, ax1, ay1, az1): (i128, i128, i128, i128, i128, i128),
+    (bx0, by0, bz0, bx1, by1, bz1): (i128, i128, i128, i128, i128, i128),
+) -> bool {
+    ax0 <= bx1 && bx0 <= ax1 && ay0 <= by1 && by0 <= ay1 && az0 <= bz1 && bz0 <= az1
+}
+
 // ── 8. Support DAG ───────────────────────────────────────────────────────
 
 // validate_support_dag is in support.rs; re-exported via use.
@@ -662,6 +689,7 @@ pub(crate) fn validate_actual_vs_reserved_cost(
 fn actual_support_budget_units(ir: &AssemblyIR) -> u32 {
     let mut floor_owners = BTreeSet::new();
     let mut ceiling_owners = BTreeSet::new();
+    let mut cave_owners = BTreeSet::new();
     let mut independent = 0u32;
 
     for brush in ir.brushes.values() {
@@ -671,6 +699,15 @@ fn actual_support_budget_units(ir: &AssemblyIR) -> u32 {
             }
             BrushAssemblyRole::CeilingSlab => {
                 ceiling_owners.insert(brush.owner.clone());
+            }
+            // Cave boxes are a deterministic convex decomposition of one
+            // cave shell, not independently authored support assemblies.
+            // Their individual positive-area DAG edges remain mandatory;
+            // this budget meter charges the one owning cave assembly.
+            BrushAssemblyRole::CaveFloor
+            | BrushAssemblyRole::CaveWall
+            | BrushAssemblyRole::CaveCeiling => {
+                cave_owners.insert(brush.owner.clone());
             }
             BrushAssemblyRole::NorthWall
             | BrushAssemblyRole::SouthWall
@@ -689,6 +726,7 @@ fn actual_support_budget_units(ir: &AssemblyIR) -> u32 {
 
     (floor_owners.len() as u32)
         .saturating_add(ceiling_owners.len() as u32)
+        .saturating_add(cave_owners.len() as u32)
         .saturating_add(ir.portal_assemblies.len() as u32)
         .saturating_add(independent)
 }
@@ -1283,7 +1321,7 @@ pub(crate) fn validate_archetype_vertical_recipes(
                 RichnessErrorCategory::SemanticInfeasibility,
                 "validation.archetype_vertical",
                 format!(
-                    "archetype {} request {} ({:?}) is missing role tags [{}]",
+                    "archetype {} request {} ({:?}) is missing role tags [{}]; present roles={roles:?}; opening roles={opening_roles:?}",
                     contract.archetype_id,
                     request.raw(),
                     contract.recipe,

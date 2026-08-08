@@ -314,7 +314,11 @@ impl VisibilityPlan {
                 );
                 let aligned = (north_south && a.bounds.0 < b.bounds.3 && b.bounds.0 < a.bounds.3)
                     || (east_west && a.bounds.1 < b.bounds.4 && b.bounds.1 < a.bounds.4);
-                if aligned {
+                // Route portals are explicit planned sightlines. Only
+                // unplanned openings on opposite walls are an unintended
+                // alignment; route-owned portal pairs are retained in the
+                // semantic PVS graph rather than rejected as decoration.
+                if aligned && (a.portal_id.is_none() || b.portal_id.is_none()) {
                     self.rejections.push(format!(
                         "opposite-wall openings {} and {} align in reservation {}",
                         a.id.raw(),
@@ -411,11 +415,35 @@ impl VisibilityPlan {
                 .first()
                 .and_then(|brush| brush.owner.zone_id)
                 .map_or(0, |zone| zone.raw());
-            let _ = plan.try_merge(
-                (route.source, route.target),
-                cluster_id,
-                format!("vertical route {}", route.id.raw()),
-            );
+            let source_count = plan
+                .merge_count_per_room
+                .get(&route.source)
+                .copied()
+                .unwrap_or(0);
+            let target_count = plan
+                .merge_count_per_room
+                .get(&route.target)
+                .copied()
+                .unwrap_or(0);
+            let cluster_count = plan
+                .merge_count_per_cluster
+                .get(&cluster_id)
+                .copied()
+                .unwrap_or(0);
+            // Retain every vertical route in semantic PVS, but merge only
+            // the canonical prefix that fits the leaf-cap budget. Later
+            // routes remain explicit PVS edges instead of invalidating the
+            // complete composition through an over-cap merge attempt.
+            if source_count < plan.max_merges_per_room
+                && target_count < plan.max_merges_per_room
+                && cluster_count < plan.max_merges_per_cluster
+            {
+                let _ = plan.try_merge(
+                    (route.source, route.target),
+                    cluster_id,
+                    format!("vertical route {}", route.id.raw()),
+                );
+            }
         }
         plan
     }

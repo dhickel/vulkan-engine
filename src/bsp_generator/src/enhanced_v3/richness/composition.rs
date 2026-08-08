@@ -16,7 +16,7 @@
 //! - Crate-private; no baseline changes.
 //! - No portal constructions (session B), no visibility (session C), no vertical/cave/props.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::enhanced_v3::geometry::{self, BrushFace, CanonicalPlane, ConvexBrush};
 use crate::enhanced_v3::richness::error::{
@@ -203,14 +203,17 @@ pub(crate) fn compose_solved_generation(
             &mut assembly,
         )?;
     }
-    materialize_route_shells(
+    let route_shell_ids = materialize_route_shells(
         &generation.topology.routes,
         reservations,
         &generation.placement.request_archetypes,
         &mut assembly,
     )?;
+    enforce_room_shell_ownership(&route_shell_ids, reservations, &mut assembly)?;
 
     coalesce_overlapping_portal_frames(&mut assembly)?;
+    prune_portal_frame_wall_conflicts(&mut assembly)?;
+    ensure_portal_frame_floor_supports(&mut assembly)?;
     enforce_opening_omission(&assembly)?;
 
     // Phase 10-A: materialize vertical architecture features
@@ -285,8 +288,9 @@ fn materialize_route_shells(
     reservations: &BTreeMap<ReservationId, ReservationRecord>,
     request_archetypes: &BTreeMap<ArchetypeRequestId, ArchetypeIndex>,
     ir: &mut AssemblyIR,
-) -> Result<(), RichnessError> {
+) -> Result<Vec<BrushAssemblyId>, RichnessError> {
     let q = richness_geom::QUANTUM;
+    let mut shell_ids = Vec::new();
     // Corridor floors are emitted as the GAP between rooms; overlapping gaps
     // (junctions and crossing corridors) must not double-emit floors. Track
     // every emitted floor rect and subtract it from later ones.
@@ -361,7 +365,7 @@ fn materialize_route_shells(
             rects = next;
         }
         for (rx0, ry0, rx1, ry1) in rects {
-            build_and_insert_box(
+            shell_ids.push(build_and_insert_box(
                 (rx0, rx1),
                 (ry0, ry1),
                 (floor_min, wall_min),
@@ -369,7 +373,7 @@ fn materialize_route_shells(
                 &owner,
                 route_cost(),
                 ir,
-            )?;
+            )?);
         }
         emitted_floors.push((
             floor_extent.0 .0,
@@ -386,7 +390,7 @@ fn materialize_route_shells(
             ceiling_rects = next;
         }
         for (cx0, cy0, cx1, cy1) in ceiling_rects {
-            build_and_insert_box(
+            shell_ids.push(build_and_insert_box(
                 (cx0, cx1),
                 (cy0, cy1),
                 (wall_max, ceiling_max),
@@ -394,12 +398,108 @@ fn materialize_route_shells(
                 &owner,
                 route_cost(),
                 ir,
-            )?;
+            )?);
         }
         emitted_ceilings.push((x0, y0, x1, y1));
-        // The corridor's long sides are bounded by the surrounding rooms'
-        // structural walls; only the floor and ceiling slabs are emitted
-        // here. The ceiling is carried laterally by the slab run joints.
+        // Each corridor shell owns its two long boundary walls. They stay
+        // outside the exact clear envelope, rest on the extended floor slab,
+        // and provide positive-area side support for the ceiling instead of
+        // relying on a non-existent room wall along the route run.
+        let side_walls = if horizontal {
+            [((x0, x1), (y0 - q, y0)), ((x0, x1), (y1, y1 + q))]
+        } else {
+            [((x0 - q, x0), (y0, y1)), ((x1, x1 + q), (y0, y1))]
+        };
+        for (x, y) in side_walls {
+            shell_ids.push(build_and_insert_box(
+                x,
+                y,
+                (wall_min, wall_max),
+                BrushAssemblyRole::NorthWall,
+                &owner,
+                route_cost(),
+                ir,
+            )?);
+        }
+    }
+    Ok(shell_ids)
+}
+
+/// Route envelopes are conservative bounding boxes; their shell pieces may
+/// cross a room whose actual routed path goes around it. Rooms and dual-band
+/// Composites are projection-exclusive owners, so clip every route-authored
+/// floor, ceiling, and boundary wall at room footprints before vertical work.
+fn enforce_room_shell_ownership(
+    route_shell_ids: &[BrushAssemblyId],
+    reservations: &BTreeMap<ReservationId, ReservationRecord>,
+    ir: &mut AssemblyIR,
+) -> Result<(), RichnessError> {
+    use super::reservation::ReservationKind;
+
+    let room_footprints = reservations
+        .values()
+        .filter(|record| {
+            matches!(
+                record.kind,
+                ReservationKind::StandardRoom
+                    | ReservationKind::MultiStoreyRoom
+                    | ReservationKind::CaveHost
+                    | ReservationKind::NegativeSpace
+            )
+        })
+        .map(|record| record.footprint)
+        .collect::<Vec<_>>();
+
+    for id in route_shell_ids {
+        let Some(route_brush) = ir.brushes.get(id) else {
+            continue;
+        };
+        let ((x0, y0, z0), (x1, y1, z1)) = route_brush.brush.aabb().map_err(|error| {
+            composition_error(
+                "pipeline.route.shell_owner",
+                format!("route shell {} has no finite AABB: {error}", id.raw()),
+            )
+        })?;
+        let layer = if z0 >= super::footprint::UPPER_FLOOR_Z as i128 {
+            1
+        } else {
+            0
+        };
+        let mut rects = vec![(x0, y0, x1, y1)];
+        for footprint in room_footprints.iter().filter(|footprint| {
+            (layer == 0 && footprint.occupies_lower) || (layer == 1 && footprint.occupies_upper)
+        }) {
+            let room = richness_geom::footprint_quake_bounds(footprint);
+            let mut next = Vec::new();
+            for rect in rects {
+                subtract_rect(rect, room, &mut next);
+            }
+            rects = next;
+        }
+        if rects.len() == 1 && rects[0] == (x0, y0, x1, y1) {
+            continue;
+        }
+
+        let old = ir.remove_brush(*id).ok_or_else(|| {
+            composition_error(
+                "pipeline.route.shell_owner",
+                format!(
+                    "route shell {} disappeared during ownership clipping",
+                    id.raw()
+                ),
+            )
+        })?;
+        for (rx0, ry0, rx1, ry1) in rects {
+            build_and_insert_box(
+                (rx0, rx1),
+                (ry0, ry1),
+                (z0, z1),
+                old.role,
+                &old.owner,
+                old.cost,
+                ir,
+            )?;
+        }
     }
     Ok(())
 }
@@ -474,7 +574,23 @@ fn materialize_route_portals(
             endpoint.zone_id,
         );
         let (wall_id, wall_role) = find_portal_wall(ir, portal)?;
-        let throat = committed_throat_anchor(portal)?;
+        // Earlier portals split a wall into several live fragments. Fit the
+        // next canonical throat against the complete owner partition, not
+        // whichever fragment happens to be first in canonical brush order.
+        let wall_owner = ir.brushes[&wall_id].owner.clone();
+        let wall_ids = ir
+            .brushes
+            .values()
+            .filter(|brush| brush.owner == wall_owner && brush.role == wall_role)
+            .map(|brush| brush.id)
+            .collect::<Vec<_>>();
+        let throat = fit_throat_to_wall_partition(
+            committed_throat_anchor(portal)?,
+            wall_role,
+            union_brush_bounds(ir, &wall_ids)?,
+            &wall_ids,
+            ir,
+        )?;
         build_portal(
             portal.id,
             style,
@@ -490,6 +606,96 @@ fn materialize_route_portals(
         )?;
     }
     Ok(())
+}
+
+fn fit_throat_to_wall_partition(
+    (span_min, z_min, span_max, z_max): (i128, i128, i128, i128),
+    wall_role: BrushAssemblyRole,
+    bounds: (i128, i128, i128, i128, i128, i128),
+    owning_wall_ids: &[BrushAssemblyId],
+    ir: &AssemblyIR,
+) -> Result<(i128, i128, i128, i128), RichnessError> {
+    let (partition_min, partition_max) = match wall_role {
+        BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => (bounds.0, bounds.3),
+        BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => (bounds.1, bounds.4),
+        _ => {
+            return Err(composition_error(
+                "pipeline.portal.wall",
+                "non-cardinal portal wall",
+            ))
+        }
+    };
+    let width = span_max - span_min;
+    if width != 64 || partition_max - partition_min < width {
+        return Err(composition_error(
+            "pipeline.portal.throat",
+            format!(
+                "committed portal throat width {width} cannot fit in {} partition {partition_min}..{partition_max}",
+                wall_role.tag()
+            ),
+        ));
+    }
+
+    let preferred = span_min.clamp(partition_min, partition_max - width);
+    let steps = ((partition_max - partition_min - width) / richness_geom::QUANTUM) as usize;
+    let mut candidates = Vec::with_capacity(steps.saturating_mul(2).saturating_add(1));
+    candidates.push(preferred);
+    for step in 1..=steps {
+        let delta = step as i128 * richness_geom::QUANTUM;
+        if preferred >= partition_min + delta {
+            candidates.push(preferred - delta);
+        }
+        if preferred + delta + width <= partition_max {
+            candidates.push(preferred + delta);
+        }
+    }
+    candidates.sort_by_key(|candidate| ((candidate - preferred).abs(), *candidate));
+    candidates.dedup();
+
+    for fitted_min in candidates {
+        let throat_bounds = match wall_role {
+            BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => (
+                fitted_min,
+                bounds.1,
+                z_min,
+                fitted_min + width,
+                bounds.4,
+                z_max,
+            ),
+            _ => (
+                bounds.0,
+                fitted_min,
+                z_min,
+                bounds.3,
+                fitted_min + width,
+                z_max,
+            ),
+        };
+        let throat = ConvexBrush::make_box(
+            (throat_bounds.0, throat_bounds.3),
+            (throat_bounds.1, throat_bounds.4),
+            (throat_bounds.2, throat_bounds.5),
+        )
+        .map_err(|error| {
+            composition_error("pipeline.portal.throat", format!("throat AABB: {error}"))
+        })?;
+        let blocked = ir.brushes.values().any(|brush| {
+            brush.role.is_wall()
+                && !owning_wall_ids.contains(&brush.id)
+                && richness_geom::brushes_overlap(&throat, &brush.brush).unwrap_or(true)
+        });
+        if !blocked {
+            return Ok((fitted_min, z_min, fitted_min + width, z_max));
+        }
+    }
+
+    Err(composition_error(
+        "pipeline.portal.throat",
+        format!(
+            "no exact 64x80 throat in {} partition {partition_min}..{partition_max} avoids adjacent structural walls",
+            wall_role.tag()
+        ),
+    ))
 }
 
 fn committed_throat_anchor(
@@ -702,14 +908,11 @@ pub(crate) fn materialize_canonical_shared_walls(
                 }
             }
             let Some((owner_id, sharing_id, exact)) = contact else {
-                return Err(composition_error(
-                    "shared_wall.contact",
-                    format!(
-                        "touching reservations {} and {} have no identical positive-area wall plane",
-                        owner.id.raw(),
-                        sharing.id.raw()
-                    ),
-                ));
+                // Chamfered footprints can touch in their conservative XY
+                // rectangles while their actual diagonal shells remain
+                // disjoint. There is no shared wall to deduplicate in that
+                // case; each room keeps its independently sealed boundary.
+                continue;
             };
 
             let span = contact_span(&exact.vertices, owner_role)?;
@@ -981,30 +1184,56 @@ pub(crate) fn build_portal(
     }?;
     let mut portal = portal;
 
-    // Split the wall at the FRAME bounds (not just the raw throat): the
-    // posts/lintel occupy the wall region adjacent to the throat, so the
-    // remaining wall segments must end at the frame's outer edges.
+    // Split the wall at the complete emitted frame envelope, not an assumed
+    // one-quantum margin around the throat. Brutalist surrounds extend two
+    // quanta beyond the throat and their outer lintel reaches two quanta
+    // above it; leaving the structural wall there creates positive-volume
+    // overlap. The partition depth remains the wall's full depth.
     let (tx0, ty0, tz0, tx1, ty1, tz1) = portal.throat_bounds;
-    let frame_w = richness_geom::WALL_THICKNESS;
-    // The throat's SPAN axis depends on the wall role: N/S walls span X,
-    // E/W walls span Y. The frame bounds extend the span by one wall
-    // thickness on each side so the split leaves room for the posts.
+    let mut frame_x0 = tx0;
+    let mut frame_y0 = ty0;
+    let mut frame_z0 = tz0;
+    let mut frame_x1 = tx1;
+    let mut frame_y1 = ty1;
+    let mut frame_z1 = tz1;
+    for frame_id in portal
+        .post_ids
+        .iter()
+        .chain(portal.lintel_ids.iter())
+        .chain(portal.surround_ids.iter())
+    {
+        let frame = ir.brushes.get(frame_id).ok_or_else(|| {
+            composition_error(
+                "portal.wall_split",
+                format!("portal {} lost frame {}", portal_id.raw(), frame_id.raw()),
+            )
+        })?;
+        let ((x0, y0, z0), (x1, y1, z1)) = frame.brush.aabb().map_err(|error| {
+            composition_error("portal.wall_split", format!("frame AABB: {error}"))
+        })?;
+        frame_x0 = frame_x0.min(x0);
+        frame_y0 = frame_y0.min(y0);
+        frame_z0 = frame_z0.min(z0);
+        frame_x1 = frame_x1.max(x1);
+        frame_y1 = frame_y1.max(y1);
+        frame_z1 = frame_z1.max(z1);
+    }
     let frame_bounds = match wall_role {
         BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => (
-            tx0 - frame_w,
+            frame_x0,
             partition_bounds.1,
-            tz0,
-            tx1 + frame_w,
+            frame_z0,
+            frame_x1,
             partition_bounds.4,
-            tz1 + frame_w,
+            frame_z1,
         ),
         _ => (
             partition_bounds.0,
-            ty0 - frame_w,
-            tz0,
+            frame_y0,
+            frame_z0,
             partition_bounds.3,
-            ty1 + frame_w,
-            tz1 + frame_w,
+            frame_y1,
+            frame_z1,
         ),
     };
     let mut replacement_ids = Vec::new();
@@ -1118,6 +1347,105 @@ fn coalesce_overlapping_portal_frames(ir: &mut AssemblyIR) -> Result<(), Richnes
                 support: first.support.clone(),
             });
             replace_frame_ids(ir, &merged, new_id);
+        }
+    }
+    Ok(())
+}
+
+/// Drop decorative portal courses that would intrude into an unrelated room
+/// or route shell. The structural wall omission remains the portal; a frame
+/// cannot claim a third-party wall volume merely to preserve ornamentation.
+fn prune_portal_frame_wall_conflicts(ir: &mut AssemblyIR) -> Result<(), RichnessError> {
+    let frames = ir
+        .brushes
+        .values()
+        .filter(|brush| {
+            matches!(
+                brush.role,
+                BrushAssemblyRole::PortalPost
+                    | BrushAssemblyRole::PortalLintel
+                    | BrushAssemblyRole::PortalSurround
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let walls = ir
+        .brushes
+        .values()
+        .filter(|brush| brush.role.is_wall())
+        .cloned()
+        .collect::<Vec<_>>();
+    let conflicting = frames
+        .iter()
+        .filter(|frame| {
+            walls.iter().any(|wall| {
+                wall.owner != frame.owner
+                    && richness_geom::brushes_overlap(&frame.brush, &wall.brush).unwrap_or(true)
+            })
+        })
+        .map(|frame| frame.id)
+        .collect::<BTreeSet<_>>();
+    if conflicting.is_empty() {
+        return Ok(());
+    }
+    for id in &conflicting {
+        ir.remove_brush(*id);
+    }
+    for opening in ir.openings.values_mut() {
+        opening
+            .frame_brush_ids
+            .retain(|id| !conflicting.contains(id));
+    }
+    for portal in &mut ir.portal_assemblies {
+        portal.post_ids.retain(|id| !conflicting.contains(id));
+        portal.lintel_ids.retain(|id| !conflicting.contains(id));
+        portal.surround_ids.retain(|id| !conflicting.contains(id));
+    }
+    Ok(())
+}
+
+/// Portal posts and surround courses at the floor line require an actual
+/// floor-slab bearing. Route-shell ownership clipping can legitimately remove
+/// a corridor slab beneath a frame that sits just inside its host's wall, so
+/// restore a discrete 16-unit footing only when no room or route slab already
+/// provides a positive-area contact.
+fn ensure_portal_frame_floor_supports(ir: &mut AssemblyIR) -> Result<(), RichnessError> {
+    let frames = ir
+        .brushes
+        .values()
+        .filter(|brush| {
+            matches!(
+                brush.role,
+                BrushAssemblyRole::PortalPost | BrushAssemblyRole::PortalSurround
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    for frame in frames {
+        let ((x0, y0, z0), (x1, y1, _)) = frame
+            .brush
+            .aabb()
+            .map_err(|error| composition_error("portal.frame_support", format!("AABB: {error}")))?;
+        if z0 != richness_geom::WALL_THICKNESS {
+            continue;
+        }
+        let has_bearing = ir.brushes.values().any(|brush| {
+            brush.role == BrushAssemblyRole::FloorSlab
+                && brush.brush.aabb().is_ok_and(|(min, max)| {
+                    max.2 == z0 && min.0 < x1 && max.0 > x0 && min.1 < y1 && max.1 > y0
+                })
+        });
+        if !has_bearing {
+            build_and_insert_box(
+                (x0, x1),
+                (y0, y1),
+                (z0 - richness_geom::WALL_THICKNESS, z0),
+                BrushAssemblyRole::FloorSlab,
+                &frame.owner,
+                frame.cost,
+                ir,
+            )?;
         }
     }
     Ok(())
@@ -1247,7 +1575,10 @@ fn validate_throat_within_partition(
     if !span_contains || z0 < wall_z0 || z1 > wall_z1 {
         return Err(composition_error(
             "portal.throat",
-            "exact portal throat escapes the owning wall partition",
+            format!(
+                "exact portal throat ({s0},{z0})..({s1},{z1}) escapes {} partition ({x0},{y0},{wall_z0})..({x1},{y1},{wall_z1})",
+                wall_role.tag()
+            ),
         ));
     }
     Ok(())
@@ -2109,6 +2440,18 @@ fn compute_recess_bounds(
 pub(crate) fn derive_all_interfaces(ir: &mut AssemblyIR) -> Result<(), RichnessError> {
     ir.interfaces.clear();
     let brush_ids: Vec<BrushAssemblyId> = ir.brushes.keys().copied().collect();
+    let bounds = brush_ids
+        .iter()
+        .map(|id| {
+            ir.brushes[id]
+                .brush
+                .aabb()
+                .map(|(min, max)| (*id, (min.0, min.1, min.2, max.0, max.1, max.2)))
+                .map_err(|error| {
+                    composition_error("interfaces", format!("brush {} AABB: {error}", id.raw()))
+                })
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
 
     for i in 0..brush_ids.len() {
         for j in (i + 1)..brush_ids.len() {
@@ -2116,6 +2459,9 @@ pub(crate) fn derive_all_interfaces(ir: &mut AssemblyIR) -> Result<(), RichnessE
             let id_b = brush_ids[j];
             let brush_a = &ir.brushes[&id_a];
             let brush_b = &ir.brushes[&id_b];
+            if !aabbs_may_touch(bounds[&id_a], bounds[&id_b]) {
+                continue;
+            }
 
             // Check for positive-volume overlap — this is always an error
             if richness_geom::brushes_overlap(&brush_a.brush, &brush_b.brush)? {
@@ -2172,6 +2518,13 @@ pub(crate) fn derive_all_interfaces(ir: &mut AssemblyIR) -> Result<(), RichnessE
     }
 
     Ok(())
+}
+
+fn aabbs_may_touch(
+    (ax0, ay0, az0, ax1, ay1, az1): (i128, i128, i128, i128, i128, i128),
+    (bx0, by0, bz0, bx1, by1, bz1): (i128, i128, i128, i128, i128, i128),
+) -> bool {
+    ax0 <= bx1 && bx0 <= ax1 && ay0 <= by1 && by0 <= ay1 && az0 <= bz1 && bz0 <= az1
 }
 
 fn declared_portal_frame_contact(ir: &AssemblyIR, a: BrushAssemblyId, b: BrushAssemblyId) -> bool {

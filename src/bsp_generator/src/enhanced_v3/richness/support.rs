@@ -366,6 +366,21 @@ pub(crate) fn plane_contact_polygon_area(
 /// from the resulting single source of truth.
 pub(crate) fn derive_support_records(ir: &mut AssemblyIR) -> Result<(), RichnessError> {
     let brush_ids: Vec<_> = ir.brushes.keys().copied().collect();
+    let bounds = brush_ids
+        .iter()
+        .map(|id| {
+            ir.brushes[id]
+                .brush
+                .aabb()
+                .map(|(min, max)| (*id, (min.0, min.1, min.2, max.0, max.1, max.2)))
+                .map_err(|error| {
+                    support_error(
+                        "support.derive",
+                        format!("brush {} AABB: {error}", id.raw()),
+                    )
+                })
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
     let mut targets = BTreeMap::new();
 
     for child_id in &brush_ids {
@@ -384,6 +399,7 @@ pub(crate) fn derive_support_records(ir: &mut AssemblyIR) -> Result<(), Richness
         let parent = brush_ids
             .iter()
             .filter(|parent_id| *parent_id != child_id)
+            .filter(|parent_id| aabbs_may_touch(bounds[child_id], bounds[parent_id]))
             .filter_map(|parent_id| {
                 let contact = compute_support_contact(child, &ir.brushes[parent_id])?;
                 (contact.orientation_valid && contact.contact_area_squared > Rational::ZERO)
@@ -438,6 +454,13 @@ pub(crate) fn derive_support_records(ir: &mut AssemblyIR) -> Result<(), Richness
     Ok(())
 }
 
+fn aabbs_may_touch(
+    (ax0, ay0, az0, ax1, ay1, az1): (i128, i128, i128, i128, i128, i128),
+    (bx0, by0, bz0, bx1, by1, bz1): (i128, i128, i128, i128, i128, i128),
+) -> bool {
+    ax0 <= bx1 && bx0 <= ax1 && ay0 <= by1 && by0 <= ay1 && az0 <= bz1 && bz0 <= az1
+}
+
 // ── Support validator ──────────────────────────────────────────────────────
 
 /// Validate that every brush in the assembly has a complete transitive
@@ -482,7 +505,19 @@ pub(crate) fn validate_support_dag(ir: &AssemblyIR) -> Result<SupportDag, Richne
         let unsupported = dag
             .unsupported
             .iter()
-            .map(|id| id.raw().to_string())
+            .map(|id| {
+                ir.brushes.get(id).map_or_else(
+                    || id.raw().to_string(),
+                    |brush| {
+                        format!(
+                            "{} ({}, {:?})",
+                            id.raw(),
+                            brush.role.tag(),
+                            brush.brush.aabb().ok()
+                        )
+                    },
+                )
+            })
             .collect::<Vec<_>>()
             .join(", ");
         return Err(support_error(

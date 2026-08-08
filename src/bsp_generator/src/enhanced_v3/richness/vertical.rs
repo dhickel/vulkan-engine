@@ -437,6 +437,45 @@ pub(crate) fn materialize_vertical_features(
         }
     }
 
+    // Quiet negative-space rooms may legitimately occupy both layers without
+    // becoming a composite reservation. Their authored vertical recipe is
+    // still mandatory, so materialize it against the room's own footprint.
+    for room in reservations
+        .values()
+        .filter(|record| record.committed && record.kind == ReservationKind::NegativeSpace)
+    {
+        let attr = attribution_for(room, request_archetypes)?;
+        let recipe = attr
+            .archetype
+            .and_then(|archetype| {
+                generated_content::ARCHETYPE_VERTICAL_RECIPE
+                    .get(archetype.raw() as usize)
+                    .copied()
+            })
+            .unwrap_or(VerticalRecipe::None);
+        let feature = match recipe {
+            VerticalRecipe::None => continue,
+            VerticalRecipe::Stairwell => {
+                build_stairwell(room, room, &attr, false, ir, &mut next_feature)?
+            }
+            VerticalRecipe::OpenStairwell => {
+                build_stairwell(room, room, &attr, true, ir, &mut next_feature)?
+            }
+            VerticalRecipe::LadderShaft => build_ladder_shaft(room, &attr, ir, &mut next_feature)?,
+            VerticalRecipe::SpiralStair => build_spiral_stair(room, &attr, ir, &mut next_feature)?,
+            VerticalRecipe::DropHole => {
+                return Err(vertical_error(
+                    "dispatch.drop_hole",
+                    format!(
+                        "negative-space room {} cannot materialize a drop-hole recipe without a paired pit omission",
+                        room.id.raw()
+                    ),
+                ));
+            }
+        };
+        result.push(feature);
+    }
+
     Ok(result)
 }
 
@@ -1053,12 +1092,18 @@ fn build_pit_chasm_pair(
 struct Frame2D {
     ox: i128,
     oy: i128,
-    swap: bool,
+    rotate: bool,
+    inset_x: i128,
+    inset_y: i128,
 }
 
 impl Frame2D {
     fn bounds(self, x0: i128, y0: i128, z0: i128, x1: i128, y1: i128, z1: i128) -> Bounds {
-        if self.swap {
+        let x0 = x0 + self.inset_x;
+        let x1 = x1 + self.inset_x;
+        let y0 = y0 + self.inset_y;
+        let y1 = y1 + self.inset_y;
+        if self.rotate {
             (
                 self.ox + y0,
                 self.oy + x0,
@@ -1083,34 +1128,95 @@ impl Frame2D {
 fn stair_frame(
     composite: &ReservationRecord,
     host: &ReservationRecord,
+    ir: &AssemblyIR,
 ) -> Result<Frame2D, RichnessError> {
-    let (x0, y0, x1, y1) = room_bounds(composite);
-    let available_x = x1 - x0 - 32;
-    let available_y = y1 - y0 - 32;
-    // The complete stairwell needs 11 steps of 16 rise x 32 run (176 units
-    // of rise) plus a lower landing and turn: 448 units of run in the
-    // unswapped orientation (192 wide) or 416 in the swapped one (224 wide).
-    let (swap, width, height) = if available_x >= 192 && available_y >= 448 {
-        (false, 192, 448)
-    } else if available_x >= 224 && available_y >= 416 {
-        (true, 224, 416)
-    } else {
-        return Err(vertical_error(
-            "stairwell.envelope",
-            format!(
-                "{}x{} interior cannot contain the complete 192x448 stairwell",
-                available_x, available_y
-            ),
-        ));
-    };
-    let (hx0, hy0, hx1, hy1) = room_bounds(host);
-    let desired_x = snap_down((hx0 + hx1 - width) / 2);
-    let desired_y = snap_down((hy0 + hy1 - height) / 2);
-    Ok(Frame2D {
-        ox: desired_x.clamp(x0 + 16, x1 - 16 - width),
-        oy: desired_y.clamp(y0 + 16, y1 - 16 - height),
-        swap,
-    })
+    // The authored construction occupies a 192x416 canonical frame. Its
+    // frozen placement envelope contributes one additional 32-unit sealing
+    // band along one axis: 192x448 for the long form or 224x416 for the
+    // compact form. Either form may be rotated as a whole in map XY.
+    const CANDIDATES: [(bool, i128, i128, i128, i128); 4] = [
+        (false, 192, 448, 0, Q),
+        (false, 224, 416, Q, 0),
+        (true, 448, 192, 0, Q),
+        (true, 416, 224, Q, 0),
+    ];
+
+    // Multi-storey and negative-space recipes belong to their room and must
+    // never escape into the wider composite projection. A 96x96 VerticalHost
+    // is only a route witness; generic hosted stairs may instead use the
+    // composite room that structurally owns that witness.
+    let mut containers = vec![room_bounds(host)];
+    if host.kind == ReservationKind::VerticalHost && host.id != composite.id {
+        containers.push(room_bounds(composite));
+    }
+    containers.dedup();
+
+    for (x0, y0, x1, y1) in containers.iter().copied() {
+        let interior = (x0 + Q, y0 + Q, x1 - Q, y1 - Q);
+        for (rotate, envelope_width, envelope_height, inset_x, inset_y) in CANDIDATES {
+            if interior.2 - interior.0 < envelope_width || interior.3 - interior.1 < envelope_height
+            {
+                continue;
+            }
+            let mut origins = Vec::new();
+            for ox in (interior.0..=interior.2 - envelope_width).step_by(Q as usize) {
+                for oy in (interior.1..=interior.3 - envelope_height).step_by(Q as usize) {
+                    let dx = (2 * ox + envelope_width - interior.0 - interior.2).abs();
+                    let dy = (2 * oy + envelope_height - interior.1 - interior.3).abs();
+                    origins.push((dx + dy, dy, dx, oy, ox));
+                }
+            }
+            origins.sort_unstable();
+
+            for (_, _, _, envelope_y, envelope_x) in origins {
+                let envelope = (
+                    envelope_x,
+                    envelope_y,
+                    SHELL_Z.0,
+                    envelope_x + envelope_width,
+                    envelope_y + envelope_height,
+                    SHELL_Z.1,
+                );
+                let envelope_brush = ConvexBrush::make_box(
+                    (envelope.0, envelope.3),
+                    (envelope.1, envelope.4),
+                    (envelope.2, envelope.5),
+                )
+                .map_err(|error| vertical_error("stairwell.frame", format!("{error}")))?;
+                let wall_conflict = ir
+                    .brushes
+                    .values()
+                    .filter(|brush| brush.role.is_wall())
+                    .any(|wall| {
+                        richness_geom::brushes_overlap(&envelope_brush, &wall.brush).unwrap_or(true)
+                    });
+                if wall_conflict {
+                    continue;
+                }
+
+                // Center the 192x416 physical construction inside the chosen
+                // sealing envelope before applying its optional map rotation.
+                return Ok(Frame2D {
+                    ox: envelope_x,
+                    oy: envelope_y,
+                    rotate,
+                    inset_x,
+                    inset_y,
+                });
+            }
+        }
+    }
+
+    let host_bounds = room_bounds(host);
+    let available_x = host_bounds.2 - host_bounds.0 - 2 * Q;
+    let available_y = host_bounds.3 - host_bounds.1 - 2 * Q;
+    Err(vertical_error(
+        "stairwell.envelope",
+        format!(
+            "{}x{} interior cannot contain a wall-clear 192x448, 224x416, or rotated equivalent stairwell",
+            available_x, available_y
+        ),
+    ))
 }
 
 fn build_stairwell(
@@ -1121,23 +1227,24 @@ fn build_stairwell(
     ir: &mut AssemblyIR,
     next_feature: &mut u32,
 ) -> Result<VerticalFeature, RichnessError> {
-    let frame = stair_frame(composite, host)?;
-    let partition_upper = frame.bounds(16, 0, UPPER_FLOOR.0, 176, 464, UPPER_FLOOR.1);
-    // The upper-floor carve clears only the flight's run, leaving a live
-    // partition owner rim around the landing and shaft.
-    let hole_upper = frame.bounds(112, 224, UPPER_FLOOR.0, 176, 464, UPPER_FLOOR.1);
-    // The lower-ceiling partition and carve span the FULL stairwell run so
-    // the upper flight's lower treads keep 80 units of headroom before they
-    // rise through the opening.
+    let frame = stair_frame(composite, host, ir)?;
+    // The complete route occupies y=0..416 inside the 448-unit frame:
+    // lower landing (0..64), lower flight (64..128), turn (128..224), upper
+    // flight (224..352), and upper landing (352..416). Keeping the slab
+    // partitions to that exact envelope avoids the former unowned 16-unit
+    // tail while retaining a live owner rim around every omission.
+    let partition_upper = frame.bounds(16, 0, UPPER_FLOOR.0, 176, 416, UPPER_FLOOR.1);
+    // The upper-floor opening clears the full upper flight and its landing.
+    let hole_upper = frame.bounds(96, 224, UPPER_FLOOR.0, 176, 416, UPPER_FLOOR.1);
+    // The lower ceiling is opened only where the upper flight rises through
+    // it. The lower flight and turn remain beneath the intact slab with the
+    // required 80 units of headroom.
     let partition_lower = with_z(
-        frame.bounds(16, 0, LOWER_FLOOR_TOP, 176, 464, LOWER_FLOOR_TOP),
+        frame.bounds(16, 0, LOWER_FLOOR_TOP, 176, 416, LOWER_FLOOR_TOP),
         LOWER_CEILING,
     );
-    // The carve covers only the upper flight's run (the lower flight keeps
-    // 80+ units of headroom under the intact lower ceiling), leaving a live
-    // partition owner segment.
     let hole_lower = with_z(
-        frame.bounds(16, 192, LOWER_FLOOR_TOP, 176, 464, LOWER_FLOOR_TOP),
+        frame.bounds(16, 192, LOWER_FLOOR_TOP, 176, 416, LOWER_FLOOR_TOP),
         LOWER_CEILING,
     );
     let upper_opening_id = carve_slab_opening(
@@ -1154,6 +1261,26 @@ fn build_stairwell(
         BrushAssemblyRole::CeilingSlab,
         attr,
     )?;
+
+    // `carve_slab_opening` may add a temporary bearing column for a split
+    // ceiling segment. A column inside the committed stair witnesses would
+    // turn the route into a decorative-only construction, so retain support
+    // only outside every lower, turn, upper-flight, and upper-landing volume.
+    let stair_witnesses = [
+        frame.bounds(16, 0, LOWER_FLOOR_TOP, 80, 64, LOWER_FLOOR_TOP + HEADROOM),
+        frame.bounds(16, 64, LOWER_FLOOR_TOP, 80, 128, LOWER_CEILING.0),
+        frame.bounds(16, 128, 80, 176, 224, LOWER_CEILING.0),
+        frame.bounds(
+            112,
+            224,
+            LOWER_FLOOR_TOP,
+            176,
+            352,
+            UPPER_FLOOR.1 + HEADROOM,
+        ),
+        frame.bounds(112, 352, UPPER_FLOOR.1, 176, 416, UPPER_FLOOR.1 + HEADROOM),
+    ];
+    remove_stair_witness_supports(ir, &stair_witnesses)?;
 
     let lower_id = replace_floor_patch(
         ir,
@@ -1188,15 +1315,20 @@ fn build_stairwell(
         )?);
     }
 
+    // Composite-host frames may extend past a child room's original floor
+    // partition. Materialize a lower slab patch beneath any such tread so
+    // each integral riser has a real positive-area world support.
+    ensure_tread_floor_supports(ir, &tread_ids, attr)?;
+
     let turn_id = insert_box(
         ir,
-        frame.bounds(16, 192, LOWER_FLOOR_TOP, 176, 224, 80),
+        frame.bounds(16, 128, LOWER_FLOOR_TOP, 176, 224, 80),
         BrushAssemblyRole::StairLanding,
         attr,
     )?;
     let upper_id = replace_floor_patch(
         ir,
-        frame.bounds(112, 0, UPPER_FLOOR.0, 176, 64, UPPER_FLOOR.1),
+        frame.bounds(112, 352, UPPER_FLOOR.0, 176, 416, UPPER_FLOOR.1),
         BrushAssemblyRole::StairLanding,
         attr,
     )?;
@@ -1214,37 +1346,56 @@ fn build_stairwell(
         }
     }
     if open {
-        for step in 0..6 {
-            // Guard rails rise FROM each tread surface AND overlap the
-            // flight's tread footprint in the run axis, so their base has a
-            // positive-area gravity contact with the tread below.
+        // One guard per actual tread: four on the lower flight and eight on
+        // the upper flight. Do not synthesize rails beyond the four lower
+        // treads into the turn landing.
+        for step in 0..4 {
             let y0 = 64 + step as i128 * STAIR_RUN;
             let base = LOWER_FLOOR_TOP + (step as i128 + 1) * STAIR_RISE;
             let top = (base + GUARD_HEIGHT).min(UPPER_FLOOR.0);
-            guard_ids.push(insert_box(
+            let guard = frame.bounds(80, y0, base, 96, y0 + STAIR_RUN, top);
+            insert_box(
                 ir,
-                frame.bounds(64, y0, base, 96, y0 + STAIR_RUN, top),
-                BrushAssemblyRole::StairGuard,
+                (guard.0, guard.1, LOWER_FLOOR_TOP, guard.3, guard.4, base),
+                BrushAssemblyRole::VerticalSupport,
                 attr,
-            )?);
+            )?;
+            guard_ids.push(insert_box(ir, guard, BrushAssemblyRole::StairGuard, attr)?);
+        }
+        for step in 0..8 {
             let y1 = 224 + step as i128 * STAIR_RUN;
             let base = LOWER_FLOOR_TOP + (step as i128 + 5) * STAIR_RISE;
-            let top = (base + GUARD_HEIGHT).min(UPPER_FLOOR.0);
-            guard_ids.push(insert_box(
+            let top = base + GUARD_HEIGHT;
+            let guard = frame.bounds(96, y1, base, 112, y1 + STAIR_RUN, top);
+            insert_box(
                 ir,
-                frame.bounds(96, y1, base, 128, y1 + STAIR_RUN, top),
-                BrushAssemblyRole::StairGuard,
+                (guard.0, guard.1, LOWER_FLOOR_TOP, guard.3, guard.4, base),
+                BrushAssemblyRole::VerticalSupport,
                 attr,
-            )?);
+            )?;
+            guard_ids.push(insert_box(ir, guard, BrushAssemblyRole::StairGuard, attr)?);
         }
     } else {
-        guard_ids.push(insert_box(
-            ir,
-            frame.bounds(80, 64, LOWER_FLOOR_TOP, 112, 160, UPPER_CEILING_BOTTOM),
-            BrushAssemblyRole::StairGuard,
-            attr,
-        )?);
+        // The closed stair's central guard stops below the inter-layer slab.
+        // It is a lower-flight guard, not a solid shaft through the retained
+        // upper floor, so extending it to the upper ceiling would overlap the
+        // live slab in swapped frames.
+        let guard = frame.bounds(80, 64, LOWER_FLOOR_TOP, 112, 128, LOWER_CEILING.0);
+        let guard_id = insert_box(ir, guard, BrushAssemblyRole::StairGuard, attr)?;
+        ensure_tread_floor_supports(ir, &[guard_id], attr)?;
+        guard_ids.push(guard_id);
     }
+
+    // Re-establish a legal bearing for every remaining lower-ceiling segment
+    // after route/landing construction has excluded support columns from the
+    // protected stair witnesses.
+    let ceiling_ids = ir
+        .brushes
+        .values()
+        .filter(|brush| brush.role == BrushAssemblyRole::CeilingSlab && brush.owner == *attr)
+        .map(|brush| brush.id)
+        .collect::<Vec<_>>();
+    ensure_ceiling_supports(ir, &ceiling_ids, attr, &stair_witnesses)?;
 
     let data = StairwellData {
         tread_ids,
@@ -1262,6 +1413,60 @@ fn build_stairwell(
             VerticalFeatureKind::Stairwell(data)
         },
     })
+}
+
+fn remove_stair_witness_supports(
+    ir: &mut AssemblyIR,
+    witnesses: &[Bounds],
+) -> Result<(), RichnessError> {
+    let mut remove = Vec::new();
+    for brush in ir.brushes.values() {
+        if brush.role != BrushAssemblyRole::VerticalSupport {
+            continue;
+        }
+        if witnesses.iter().any(|bounds| {
+            ConvexBrush::make_box(
+                (bounds.0, bounds.3),
+                (bounds.1, bounds.4),
+                (bounds.2, bounds.5),
+            )
+            .is_ok_and(|witness| {
+                richness_geom::brushes_overlap(&witness, &brush.brush).unwrap_or(false)
+            })
+        }) {
+            remove.push(brush.id);
+        }
+    }
+    for id in remove {
+        ir.remove_brush(id);
+        remove_brush_references(ir, id);
+    }
+    Ok(())
+}
+
+fn ensure_tread_floor_supports(
+    ir: &mut AssemblyIR,
+    tread_ids: &[BrushAssemblyId],
+    owner: &SemanticAttribution,
+) -> Result<(), RichnessError> {
+    for tread_id in tread_ids {
+        let (bounds, supported) = {
+            let tread = ir
+                .brushes
+                .get(tread_id)
+                .ok_or_else(|| vertical_error("stairwell.support", "tread disappeared"))?;
+            (brush_bounds(tread)?, touches_floor(ir, tread)?)
+        };
+        if !supported {
+            insert_box(
+                ir,
+                (bounds.0, bounds.1, 0, bounds.3, bounds.4, LOWER_FLOOR_TOP),
+                BrushAssemblyRole::FloorSlab,
+                owner,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn split_around_interlayer(bounds: Bounds) -> Vec<Bounds> {
@@ -2041,6 +2246,9 @@ pub(crate) fn validate_multi_storey_shells(ir: &AssemblyIR) -> Result<(), Richne
             generated_content::ARCHETYPE_LAYER_OCCUPANCY
                 .get(key.archetype.raw() as usize)
                 .is_some_and(|occupancy| *occupancy == super::content_types::LayerOccupancy::Both)
+                // A drop pair spans layers through paired omissions, not a
+                // full-height multi-storey room shell.
+                && owner_recipe(*key, ir) != VerticalRecipe::DropHole
         })
         .collect::<BTreeSet<_>>();
     for key in owners {
@@ -2490,7 +2698,7 @@ pub(crate) fn validate_stairwells(ir: &AssemblyIR) -> Result<(), RichnessError> 
             landing
                 .brush
                 .aabb()
-                .is_ok_and(|(min, max)| max.2 == 112 && max.0 - min.0 >= 64 && max.1 - min.1 >= 64)
+                .is_ok_and(|(min, max)| max.2 == 80 && max.0 - min.0 >= 64 && max.1 - min.1 >= 64)
         });
         let upper_ok = landings.iter().any(|landing| {
             landing.brush.aabb().is_ok_and(|(min, max)| {
@@ -2498,7 +2706,7 @@ pub(crate) fn validate_stairwells(ir: &AssemblyIR) -> Result<(), RichnessError> 
             })
         });
         if !lower_ok || !turn_ok || !upper_ok {
-            return Err(missing_owner_role(
+            let mut error = missing_owner_role(
                 key,
                 owner_recipe(key, ir),
                 &[
@@ -2506,7 +2714,15 @@ pub(crate) fn validate_stairwells(ir: &AssemblyIR) -> Result<(), RichnessError> 
                     "64x64 turn_landing",
                     "64x64 upper_landing",
                 ],
+            );
+            error.context.push_str(&format!(
+                "; landing checks lower={lower_ok} turn={turn_ok} upper={upper_ok}; bounds={:?}",
+                landings
+                    .iter()
+                    .map(|landing| brush_bounds(landing))
+                    .collect::<Vec<_>>()
             ));
+            return Err(error);
         }
         for landing in &landings {
             let bounds = brush_bounds(landing)?;
@@ -2521,7 +2737,30 @@ pub(crate) fn validate_stairwells(ir: &AssemblyIR) -> Result<(), RichnessError> 
                 return Err(owner_error(
                     landing,
                     "stair_landing_headroom",
-                    "stair landing has no 64x80 standing witness",
+                    format!(
+                        "stair landing {:?} has no 64x80 standing witness; treads={:?}; blockers={:?}",
+                        bounds,
+                        treads
+                            .iter()
+                            .map(|tread| brush_bounds(tread))
+                            .collect::<Vec<_>>(),
+                        ir.brushes
+                            .values()
+                            .filter(|candidate| candidate.id != landing.id)
+                            .filter(|candidate| {
+                                ConvexBrush::make_box(
+                                    (bounds.0, bounds.3),
+                                    (bounds.1, bounds.4),
+                                    (bounds.5, bounds.5 + HEADROOM),
+                                )
+                                .is_ok_and(|witness| {
+                                    richness_geom::brushes_overlap(&witness, &candidate.brush)
+                                        .unwrap_or(false)
+                                })
+                            })
+                            .map(|candidate| (candidate.id.raw(), candidate.role.tag()))
+                            .collect::<Vec<_>>()
+                    ),
                 ));
             }
         }
@@ -2994,14 +3233,28 @@ pub(crate) fn validate_slab_opening_ownership(ir: &AssemblyIR) -> Result<(), Ric
                 let omitted = openings
                     .iter()
                     .any(|opening| bounds_contains(opening.bounds, cell));
-                // A cell is owned by the live slab segment OR by a stair
-                // landing surface that replaced the floor patch there.
+                // A landing may deliberately replace a portion of a slab
+                // opening. It is then the sole final partition owner, rather
+                // than an intruder into an otherwise empty omission.
                 let covers = |brush: &super::assembly::BrushAssembly| {
                     brush.owner == owner
                         && brush.brush.aabb().is_ok_and(|(min, max)| {
                             bounds_contains((min.0, min.1, min.2, max.0, max.1, max.2), cell)
                         })
                 };
+                let replacement_owners = ir
+                    .brushes
+                    .values()
+                    .filter(|brush| {
+                        matches!(
+                            brush.role,
+                            BrushAssemblyRole::StairLanding
+                                | BrushAssemblyRole::SpiralLanding
+                                | BrushAssemblyRole::DropLanding
+                                | BrushAssemblyRole::LadderLanding
+                        ) && covers(brush)
+                    })
+                    .count();
                 let owners = ids
                     .iter()
                     .filter(|id| {
@@ -3017,19 +3270,9 @@ pub(crate) fn validate_slab_opening_ownership(ir: &AssemblyIR) -> Result<(), Ric
                         })
                     })
                     .count()
-                    + ir.brushes
-                        .values()
-                        .filter(|brush| {
-                            matches!(
-                                brush.role,
-                                BrushAssemblyRole::StairLanding
-                                    | BrushAssemblyRole::SpiralLanding
-                                    | BrushAssemblyRole::DropLanding
-                                    | BrushAssemblyRole::LadderLanding
-                            ) && covers(brush)
-                        })
-                        .count();
-                if (omitted && owners != 0) || (!omitted && owners != 1) {
+                    + replacement_owners;
+                let final_omission = omitted && replacement_owners == 0;
+                if (final_omission && owners != 0) || (!final_omission && owners != 1) {
                     return Err(opening_error(
                         openings[0],
                         "slab_omission",
@@ -3167,6 +3410,23 @@ fn carve_slab_opening(
     };
     validate_partition_hole(effective_partition, hole)?;
 
+    // A prior opening may have split the same semantic slab into fragments
+    // whose bounds extend beyond this feature's local partition. Include
+    // every overlapping live fragment before re-partitioning; otherwise a
+    // later vertical feature can insert a new ceiling/floor piece through an
+    // earlier live segment.
+    source_ids.extend(
+        ir.brushes
+            .values()
+            .filter(|brush| {
+                brush.role == role && brush.owner.request_id == preferred_owner.request_id
+            })
+            .filter(|brush| {
+                brush_bounds(brush)
+                    .is_ok_and(|bounds| bounds_intersection(bounds, effective_partition).is_some())
+            })
+            .map(|brush| brush.id),
+    );
     source_ids.sort_unstable();
     source_ids.dedup();
 
@@ -3233,7 +3493,7 @@ fn carve_slab_opening(
         portal_style: None,
     });
     if role == BrushAssemblyRole::CeilingSlab {
-        ensure_ceiling_supports(ir, &replacements, &owner)?;
+        ensure_ceiling_supports(ir, &replacements, &owner, &[])?;
     }
     Ok(id)
 }
@@ -3288,23 +3548,26 @@ fn ensure_ceiling_supports(
     ir: &mut AssemblyIR,
     segment_ids: &[BrushAssemblyId],
     owner: &SemanticAttribution,
+    excluded: &[Bounds],
 ) -> Result<(), RichnessError> {
     for id in segment_ids {
-        let segment = ir
-            .brushes
-            .get(id)
-            .ok_or_else(|| vertical_error("ceiling.support", "missing ceiling segment"))?;
-        let bounds = brush_bounds(segment)?;
-        let supported = ir.brushes.values().any(|candidate| {
-            candidate.id != *id
-                && candidate.brush.aabb().is_ok_and(|(min, max)| {
-                    max.2 == bounds.2
-                        && min.0 < bounds.3
-                        && max.0 > bounds.0
-                        && min.1 < bounds.4
-                        && max.1 > bounds.1
-                })
-        });
+        let (bounds, supported) = {
+            let segment = ir
+                .brushes
+                .get(id)
+                .ok_or_else(|| vertical_error("ceiling.support", "missing ceiling segment"))?;
+            let supported = ir.brushes.values().any(|candidate| {
+                candidate.id != *id
+                    && super::support::compute_support_contact(segment, candidate).is_some_and(
+                        |contact| {
+                            contact.orientation_valid
+                                && contact.contact_area_squared
+                                    > crate::enhanced_v3::geometry::Rational::ZERO
+                        },
+                    )
+            });
+            (brush_bounds(segment)?, supported)
+        };
         if supported {
             continue;
         }
@@ -3324,7 +3587,13 @@ fn ensure_ceiling_supports(
                     .max()
                     .unwrap_or(LOWER_FLOOR_TOP);
                 let column = (x, y, base_z, x1, y1, bounds.2);
-                if base_z < bounds.2 && !bounds_overlap_any(ir, column, &[*id])? {
+                let intersects_witness = excluded
+                    .iter()
+                    .any(|witness| bounds_intersection(column, *witness).is_some());
+                if base_z < bounds.2
+                    && !intersects_witness
+                    && !bounds_overlap_any(ir, column, &[*id])?
+                {
                     insert_box(ir, column, BrushAssemblyRole::VerticalSupport, owner)?;
                     placed = true;
                     break 'cells;
@@ -3442,10 +3711,13 @@ fn insert_box_with_cost(
             return Err(vertical_error(
                 "box.overlap",
                 format!(
-                    "new {} brush {bounds:?} overlaps brush {} ({})",
+                    "new {} brush {bounds:?} owner {:?} overlaps brush {} ({}, {:?}, owner {:?})",
                     role.tag(),
+                    owner.reservation_id.raw(),
                     existing.id.raw(),
-                    existing.role.tag()
+                    existing.role.tag(),
+                    existing.brush.aabb().ok(),
+                    existing.owner.reservation_id.raw(),
                 ),
             ));
         }
@@ -3750,11 +4022,19 @@ fn validate_paired_owner_openings(ir: &AssemblyIR, key: OwnerKey) -> Result<(), 
             &["floor_slab_opening", "ceiling_slab_opening"],
         ));
     };
-    if xy_bounds(upper.bounds) != xy_bounds(lower.bounds) {
+    // The lower-ceiling opening may be wider than the upper-floor opening
+    // where a turn or approach needs clearance below the retained upper slab.
+    // It must still fully contain the upper-floor projection; pit/drop pairs
+    // retain their stricter exact-match validation separately.
+    let lower_contains_upper = lower.bounds.0 <= upper.bounds.0
+        && lower.bounds.1 <= upper.bounds.1
+        && lower.bounds.3 >= upper.bounds.3
+        && lower.bounds.4 >= upper.bounds.4;
+    if !lower_contains_upper {
         return Err(opening_error(
             upper,
             "paired_openings",
-            "lower-ceiling and upper-floor omissions differ",
+            "lower-ceiling omission does not contain the upper-floor omission",
         ));
     }
     Ok(())
@@ -3774,13 +4054,25 @@ fn validate_headroom_over(
         bounds.4,
         bounds.5 + height,
     );
-    if bounds_overlap_any(ir, witness, &[brush.id])? {
+    if let Some(blocker) = ir.brushes.values().find(|candidate| {
+        candidate.id != brush.id
+            && ConvexBrush::make_box(
+                (witness.0, witness.3),
+                (witness.1, witness.4),
+                (witness.2, witness.5),
+            )
+            .is_ok_and(|volume| {
+                richness_geom::brushes_overlap(&volume, &candidate.brush).unwrap_or(true)
+            })
+    }) {
         return Err(owner_error(
             brush,
             "headroom",
             format!(
-                "{} has less than {height} units of headroom",
-                brush.role.tag()
+                "{} has less than {height} units of headroom due to {} {}",
+                brush.role.tag(),
+                blocker.id.raw(),
+                blocker.role.tag(),
             ),
         ));
     }
@@ -3981,6 +4273,87 @@ mod tests {
         insert_box(ir, bounds, BrushAssemblyRole::FloorSlab, owner).unwrap();
     }
 
+    fn octagonal_shell(
+        ir: &mut AssemblyIR,
+        owner: &SemanticAttribution,
+        width: i128,
+        depth: i128,
+    ) -> Vec<BrushAssemblyId> {
+        floor(ir, owner, (0, 0, 0, width, depth, LOWER_FLOOR_TOP));
+        insert_box(
+            ir,
+            (0, 0, UPPER_CEILING_BOTTOM, width, depth, 368),
+            BrushAssemblyRole::CeilingSlab,
+            owner,
+        )
+        .unwrap();
+
+        let chamfer = ((width.min(depth) / 4) & !(Q - 1)).clamp(48, 96);
+        let mut walls = Vec::new();
+        for (bounds, role) in [
+            (
+                (chamfer, 0, SHELL_Z.0, width - chamfer, Q, SHELL_Z.1),
+                BrushAssemblyRole::SouthWall,
+            ),
+            (
+                (
+                    chamfer,
+                    depth - Q,
+                    SHELL_Z.0,
+                    width - chamfer,
+                    depth,
+                    SHELL_Z.1,
+                ),
+                BrushAssemblyRole::NorthWall,
+            ),
+            (
+                (0, chamfer, SHELL_Z.0, Q, depth - chamfer, SHELL_Z.1),
+                BrushAssemblyRole::WestWall,
+            ),
+            (
+                (
+                    width - Q,
+                    chamfer,
+                    SHELL_Z.0,
+                    width,
+                    depth - chamfer,
+                    SHELL_Z.1,
+                ),
+                BrushAssemblyRole::EastWall,
+            ),
+        ] {
+            walls.push(insert_box(ir, bounds, role, owner).unwrap());
+        }
+        for (sx, sy, role) in [
+            (-1, -1, BrushAssemblyRole::DiagSWWall),
+            (1, -1, BrushAssemblyRole::DiagSEWall),
+            (-1, 1, BrushAssemblyRole::DiagNWWall),
+            (1, 1, BrushAssemblyRole::DiagNEWall),
+        ] {
+            let brush = v3_geometry::make_diagonal_wall(
+                (0, width),
+                (0, depth),
+                SHELL_Z.0,
+                SHELL_Z.1,
+                sx,
+                sy,
+                chamfer,
+            )
+            .unwrap();
+            let id = ir.alloc_brush_id();
+            ir.insert_brush(BrushAssembly {
+                id,
+                brush,
+                role,
+                owner: owner.clone(),
+                cost: brush_cost(),
+                support: SupportTarget::World,
+            });
+            walls.push(id);
+        }
+        walls
+    }
+
     fn record(id: u32, kind: ReservationKind, fp: Footprint3D) -> ReservationRecord {
         ReservationRecord {
             id: ReservationId::new(id),
@@ -4151,8 +4524,54 @@ mod tests {
         assert_eq!(data.tread_ids.len(), STAIR_TREADS);
         assert_eq!(data.landing_ids.len(), 3);
         assert!(data.guard_ids.len() >= STAIR_TREADS);
+        for id in data
+            .tread_ids
+            .iter()
+            .chain(&data.landing_ids)
+            .chain(&data.guard_ids)
+        {
+            assert!(bounds_contains(
+                (0, 0, 0, 320, 448, 368),
+                brush_bounds(&ir.brushes[id]).unwrap()
+            ));
+        }
         validate_slab_opening_ownership(&ir).unwrap();
         validate_stairwells(&ir).unwrap();
+    }
+
+    #[test]
+    fn open_stairwell_is_wall_clear_in_both_octagonal_host_orientations() {
+        for (width, depth) in [(352, 512), (512, 352)] {
+            let room = record(
+                0,
+                ReservationKind::MultiStoreyRoom,
+                Footprint3D::dual_layer(0, 0, width, depth),
+            );
+            let owner = attr(18);
+            let mut ir = AssemblyIR::new();
+            let wall_ids = octagonal_shell(&mut ir, &owner, i128::from(width), i128::from(depth));
+            let mut next = 0;
+            let feature = build_stairwell(&room, &room, &owner, true, &mut ir, &mut next).unwrap();
+            let VerticalFeatureKind::OpenStairwell(data) = feature.kind else {
+                panic!("wrong kind")
+            };
+            let room_bounds = (0, 0, 0, i128::from(width), i128::from(depth), 368);
+            for id in data
+                .tread_ids
+                .iter()
+                .chain(&data.landing_ids)
+                .chain(&data.guard_ids)
+            {
+                let brush = &ir.brushes[id];
+                assert!(bounds_contains(room_bounds, brush_bounds(brush).unwrap()));
+                assert!(wall_ids.iter().all(|wall_id| {
+                    !richness_geom::brushes_overlap(&brush.brush, &ir.brushes[wall_id].brush)
+                        .unwrap()
+                }));
+            }
+            validate_slab_opening_ownership(&ir).unwrap();
+            validate_stairwells(&ir).unwrap();
+        }
     }
 
     #[test]

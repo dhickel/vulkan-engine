@@ -934,6 +934,25 @@ pub(crate) fn derive_interface_kind(
 ) -> Option<super::assembly::InterfaceKind> {
     use super::assembly::{BrushAssemblyRole, InterfaceKind};
     match (a_role, b_role) {
+        // Cave complement members form a real, explicitly declared shell
+        // interface with one another and with their containing host shell.
+        // This preserves every positive-area contact while keeping cave
+        // material roles distinct from ordinary room partitions.
+        (r1, r2)
+            if matches!(
+                r1,
+                BrushAssemblyRole::CaveFloor
+                    | BrushAssemblyRole::CaveWall
+                    | BrushAssemblyRole::CaveCeiling
+            ) || matches!(
+                r2,
+                BrushAssemblyRole::CaveFloor
+                    | BrushAssemblyRole::CaveWall
+                    | BrushAssemblyRole::CaveCeiling
+            ) =>
+        {
+            Some(InterfaceKind::CaveShellContact)
+        }
         // Floor/wall
         (BrushAssemblyRole::FloorSlab, r) if r.is_wall() => Some(InterfaceKind::WallToFloor),
         (r, BrushAssemblyRole::FloorSlab) if r.is_wall() => Some(InterfaceKind::WallToFloor),

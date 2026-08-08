@@ -20,6 +20,7 @@
 use std::collections::BTreeMap;
 
 use crate::enhanced_v3::geometry::ConvexBrush;
+use crate::enhanced_v3::geometry::Rational;
 use crate::enhanced_v3::richness::{
     assembly::{
         AssemblyIR, BrushAssembly, BrushAssemblyRole, BudgetDimension, CostSource,
@@ -35,6 +36,7 @@ use crate::enhanced_v3::richness::{
     },
     request::RichnessCaveMode,
     reservation::{ReservationJournal, ReservationKind, ReservationRecord},
+    support::compute_support_contact,
 };
 
 /// Frozen lattice cell size in units.
@@ -509,7 +511,7 @@ pub(crate) fn synthesize_cave(
 fn finish_cave(
     host_id: ReservationId,
     mut lattice: CaveLattice,
-    component: Vec<(i32, i32, i32)>,
+    mut component: Vec<(i32, i32, i32)>,
     candidate_key: u32,
 ) -> CaveResult {
     let nx = lattice.nx;
@@ -519,13 +521,59 @@ fn finish_cave(
     for &(i, j, k) in &component {
         solid[lattice.index(i, j, k)] = false;
     }
+    // A density-field island entirely enclosed by the cave void would become
+    // a floating column after box partitioning. Carve every such disconnected
+    // island into the already-connected empty component. The remaining solid
+    // lattice is therefore retained only where it has a gravity path to the
+    // interior floor before it becomes brush geometry.
+    let mut grounded = vec![false; solid.len()];
+    let mut stack = Vec::new();
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let index = lattice.index(i, j, k);
+                if solid[index] && k == 0 {
+                    grounded[index] = true;
+                    stack.push((i, j, k));
+                }
+            }
+        }
+    }
+    while let Some((i, j, k)) = stack.pop() {
+        for (di, dj, dk) in [(0, 0, 1)] {
+            let (ni, nj, nk) = (i + di, j + dj, k + dk);
+            if lattice.in_bounds(ni, nj, nk) {
+                let neighbor = lattice.index(ni, nj, nk);
+                if solid[neighbor] && !grounded[neighbor] {
+                    grounded[neighbor] = true;
+                    stack.push((ni, nj, nk));
+                }
+            }
+        }
+    }
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let index = lattice.index(i, j, k);
+                if solid[index] && !grounded[index] {
+                    solid[index] = false;
+                    component.push((i, j, k));
+                }
+            }
+        }
+    }
+    component.sort_unstable();
     // Unreachable pockets (empty cells outside the witness component) are
     // re-solidified: their lattice state flips to solid so the emitted
     // complement owns every cell exactly once.
     for (idx, cell) in solid.iter().enumerate() {
-        if *cell {
-            lattice.cells[idx] = 0;
-        }
+        lattice.cells[idx] = if *cell {
+            0
+        } else if lattice.cells[idx] == 2 {
+            2
+        } else {
+            1
+        };
     }
     let mut claimed = vec![false; (nx * ny * nz) as usize];
     let mut solid_boxes: Vec<SolidBox> = Vec::new();
@@ -605,9 +653,10 @@ fn finish_cave(
 }
 
 /// Emit the cave solids into the assembly with roles, attribution, and
-/// support. Floor boxes rest on the world; every other box is supported by
-/// the box whose top face touches its bottom face with positive area.
-/// A box with no such support is a typed failure (never fake support).
+/// exact positive-area support. Cave geometry is derived against both the
+/// complete host shell and every emitted cave member, so the protected host
+/// envelope participates in support resolution rather than making boundary
+/// cave walls appear unsupported.
 pub(crate) fn materialize_cave(
     ir: &mut AssemblyIR,
     result: &CaveResult,
@@ -629,9 +678,9 @@ pub(crate) fn materialize_cave(
         zone_id,
     };
 
-    let mut emitted: Vec<(SolidBox, BrushAssemblyId)> = Vec::new();
+    let mut cave_ids = Vec::with_capacity(result.solid_boxes.len());
     for solid in &result.solid_boxes {
-        let (x0, y0, z0, x1, y1, z1) =
+        let (x0, y0, z0, _, _, _) =
             result
                 .lattice
                 .cell_bounds(solid.min.0, solid.min.1, solid.min.2);
@@ -648,52 +697,6 @@ pub(crate) fn materialize_cave(
         .map_err(|error| cave_error("box", format!("{error}")))?;
         validate_brush(&brush)?;
         let id = ir.alloc_brush_id();
-        let support = if solid.min.2 == 0 {
-            SupportTarget::World
-        } else {
-            // Support resolution (frozen): prefer a box whose top face
-            // touches this box's bottom face with positive-area xy overlap;
-            // otherwise accept same-layer side contact (a wall box
-            // overhanging the cave void is carried by its neighbors). The
-            // assembly support DAG validates the transitive path to world
-            // support afterwards.
-            let below = emitted
-                .iter()
-                .filter(|(other, _)| {
-                    other.max.2 == solid.min.2
-                        && other.min.0 < solid.max.0
-                        && other.max.0 > solid.min.0
-                        && other.min.1 < solid.max.1
-                        && other.max.1 > solid.min.1
-                })
-                .map(|(_, id)| *id)
-                .min();
-            let side = emitted
-                .iter()
-                .filter(|(other, _)| {
-                    other.min.2 == solid.min.2
-                        && ((other.max.0 == solid.min.0 || other.min.0 == solid.max.0)
-                            && other.min.1 < solid.max.1
-                            && other.max.1 > solid.min.1
-                            || (other.max.1 == solid.min.1 || other.min.1 == solid.max.1)
-                                && other.min.0 < solid.max.0
-                                && other.max.0 > solid.min.0)
-                })
-                .map(|(_, id)| *id)
-                .min();
-            match below.or(side) {
-                Some(id) => SupportTarget::Brush(id),
-                None => {
-                    return Err(cave_error(
-                        "support.missing",
-                        format!(
-                            "cave solid box {:?} has no supporting or side-carrying box",
-                            solid
-                        ),
-                    ));
-                }
-            }
-        };
         ir.insert_brush(BrushAssembly {
             id,
             brush,
@@ -703,41 +706,126 @@ pub(crate) fn materialize_cave(
                 dimension: BudgetDimension::SourceFaces,
                 face_count: 6,
             },
-            support,
+            // The exact target is selected after all cave boxes exist, so a
+            // positive-area side carrier can be emitted later in canonical
+            // box order. This provisional value is never validated or
+            // emitted: `derive_cave_support_targets` replaces it below.
+            support: SupportTarget::World,
         });
-        emitted.push((solid.clone(), id));
+        cave_ids.push(id);
+    }
+    derive_cave_support_targets(ir, &cave_ids)
+}
+
+/// Select exact support targets for cave brushes after the full cave complement
+/// has been inserted. This includes the host room shell, preserving the
+/// positive-area gravity/side-contact rules for carved boundary members.
+fn derive_cave_support_targets(
+    ir: &mut AssemblyIR,
+    cave_ids: &[BrushAssemblyId],
+) -> Result<(), RichnessError> {
+    let brush_ids: Vec<_> = ir.brushes.keys().copied().collect();
+    let mut targets = BTreeMap::new();
+
+    for child_id in cave_ids {
+        let child = &ir.brushes[child_id];
+        let parent = brush_ids
+            .iter()
+            .filter(|parent_id| *parent_id != child_id)
+            .filter_map(|parent_id| {
+                let contact = compute_support_contact(child, &ir.brushes[parent_id])?;
+                (contact.orientation_valid && contact.contact_area_squared > Rational::ZERO)
+                    .then_some((
+                        *parent_id,
+                        contact.contact_area_squared,
+                        contact.contact_plane.2 < 0,
+                    ))
+            })
+            .max_by(
+                |(left_id, left_area, left_gravity), (right_id, right_area, right_gravity)| {
+                    left_gravity
+                        .cmp(right_gravity)
+                        .then_with(|| left_area.cmp(right_area))
+                        .then_with(|| right_id.cmp(left_id))
+                },
+            )
+            .map(|(parent_id, _, _)| parent_id)
+            .ok_or_else(|| {
+                cave_error(
+                    "support.missing",
+                    format!(
+                        "cave brush {} ({}, {:?}) has no positive-area gravity or side support",
+                        child_id.raw(),
+                        child.role.tag(),
+                        child.brush.aabb().ok(),
+                    ),
+                )
+            })?;
+        targets.insert(*child_id, SupportTarget::Brush(parent));
+    }
+
+    for (child_id, target) in targets {
+        let child = ir.brushes.get_mut(&child_id).ok_or_else(|| {
+            cave_error(
+                "support.missing",
+                format!(
+                    "cave brush {} disappeared during support derivation",
+                    child_id.raw()
+                ),
+            )
+        })?;
+        child.support = target;
     }
     Ok(())
 }
 
-/// Support-validity gate: every solid box must rest on the interior floor
-/// plane or have a bottom-face (positive-area) or same-layer side-carrying
-/// neighbor. Unsupported cantilevers invalidate a candidate instance.
+/// Support-validity gate for a cave's solid complement.
+///
+/// Starting from interior-floor contacts, require every cave box to be
+/// reachable through positive-area gravity or side contacts. Density-field
+/// islands without that path are carved into the connected void before box
+/// partitioning, and exact brush support is re-derived after materialization.
 pub(crate) fn cave_support_ok(result: &CaveResult) -> bool {
-    for solid in &result.solid_boxes {
+    let boxes = &result.solid_boxes;
+    let mut supported = vec![false; boxes.len()];
+    let mut stack = Vec::new();
+
+    for (index, solid) in boxes.iter().enumerate() {
         if solid.min.2 == 0 {
-            continue;
-        }
-        let supported = result.solid_boxes.iter().any(|other| {
-            other != solid
-                && ((other.max.2 == solid.min.2
-                    && other.min.0 < solid.max.0
-                    && other.max.0 > solid.min.0
-                    && other.min.1 < solid.max.1
-                    && other.max.1 > solid.min.1)
-                    || (other.min.2 == solid.min.2
-                        && ((other.max.0 == solid.min.0 || other.min.0 == solid.max.0)
-                            && other.min.1 < solid.max.1
-                            && other.max.1 > solid.min.1
-                            || (other.max.1 == solid.min.1 || other.min.1 == solid.max.1)
-                                && other.min.0 < solid.max.0
-                                && other.max.0 > solid.min.0)))
-        });
-        if !supported {
-            return false;
+            supported[index] = true;
+            stack.push(index);
         }
     }
-    true
+
+    while let Some(index) = stack.pop() {
+        for candidate in 0..boxes.len() {
+            if !supported[candidate] && cave_boxes_support_contact(&boxes[index], &boxes[candidate])
+            {
+                supported[candidate] = true;
+                stack.push(candidate);
+            }
+        }
+    }
+
+    supported.into_iter().all(|is_supported| is_supported)
+}
+
+/// Whether two cave-complement boxes share a positive-area contact that can
+/// transmit gravity or side support. The face tests are strict in the two
+/// in-plane dimensions so edge and point touches never count.
+fn cave_boxes_support_contact(a: &SolidBox, b: &SolidBox) -> bool {
+    let gravity_contact = (a.max.2 == b.min.2 || b.max.2 == a.min.2)
+        && a.min.0 < b.max.0
+        && a.max.0 > b.min.0
+        && a.min.1 < b.max.1
+        && a.max.1 > b.min.1;
+    let side_contact = a.min.2 < b.max.2
+        && a.max.2 > b.min.2
+        && ((a.max.0 == b.min.0 || b.max.0 == a.min.0) && a.min.1 < b.max.1 && a.max.1 > b.min.1
+            || (a.max.1 == b.min.1 || b.max.1 == a.min.1)
+                && a.min.0 < b.max.0
+                && a.max.0 > b.min.0);
+    gravity_contact || side_contact
 }
 
 /// Validate cave invariants over an emitted result:

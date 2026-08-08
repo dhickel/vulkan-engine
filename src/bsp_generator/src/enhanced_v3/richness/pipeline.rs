@@ -119,7 +119,10 @@ pub(crate) fn run_richness_pipeline(
     if !complexity.assert_dominates(&actual_budget) {
         return Err(pipeline_error(
             "costs.actual_exceed_reserved",
-            format!("actual counts {actual:?} exceed the complexity reservation"),
+            format!(
+                "actual counts {actual:?} exceed the complexity reservation {:?}",
+                complexity.total_reserved
+            ),
         ));
     }
 
@@ -167,8 +170,31 @@ pub(crate) fn recompute_actual_counts(composition: &StructuralComposition) -> Ac
         .values()
         .filter(|entity| entity.classname == "light")
         .count();
-    let support_contacts = composition.assembly.supports.len();
-    let openings = composition.assembly.openings.len();
+    // World anchors are not inter-brush support contacts. Count only the
+    // derived brush-to-brush contacts that consume the bounded support graph
+    // reservation; floor slabs remain explicit world roots.
+    let support_contacts = composition
+        .assembly
+        .supports
+        .values()
+        .filter(|support| matches!(support.parent, super::assembly::SupportTarget::Brush(_)))
+        .filter(|support| {
+            composition
+                .assembly
+                .brushes
+                .get(&support.child)
+                .is_some_and(|brush| brush.role.is_vertical_architecture())
+        })
+        .count();
+    // Complexity reserves logical vertical openings. Portal throats are
+    // accounted by their dedicated sealing recipes and must not consume the
+    // bounded vertical-opening dimension a second time.
+    let openings = composition
+        .assembly
+        .openings
+        .values()
+        .filter(|opening| opening.portal_id.is_none() && opening.wall_role.is_slab())
+        .count();
     ActualCounts {
         brushes,
         faces,
@@ -353,9 +379,11 @@ mod tests {
     fn failure_is_atomic_no_partial_output() {
         // An impossible request (tiny extent) must fail with a typed error
         // and never return a bundle.
-        let request = resolved(1, 128, RichnessPreset::Rich, RichnessTheme::Ancient);
-        let outcome = run_richness_pipeline(&request);
-        assert!(outcome.is_err(), "tiny-extent Rich must fail atomically");
+        let outcome = RichnessDocumentV1::new(1, 128, RichnessPreset::Rich, RichnessTheme::Ancient);
+        assert!(
+            outcome.is_err(),
+            "tiny-extent Rich must fail atomically at request validation"
+        );
     }
 
     #[test]

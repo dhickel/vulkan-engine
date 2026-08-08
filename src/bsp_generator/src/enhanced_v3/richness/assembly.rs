@@ -303,7 +303,10 @@ impl BrushAssemblyRole {
 
     /// Whether this role is a floor or ceiling slab.
     pub fn is_slab(self) -> bool {
-        matches!(self, Self::FloorSlab | Self::CeilingSlab)
+        matches!(
+            self,
+            Self::FloorSlab | Self::CeilingSlab | Self::CaveFloor | Self::CaveCeiling
+        )
     }
 
     /// Whether this role belongs to the Richness vertical architecture layer.
@@ -544,6 +547,8 @@ pub(crate) enum InterfaceKind {
     SlabToWall,
     /// Positive-area contact involving a vertical architecture member.
     VerticalMemberContact,
+    /// Positive-area contact involving a carved cave-complement member.
+    CaveShellContact,
 }
 
 // ── Support record ────────────────────────────────────────────────────────

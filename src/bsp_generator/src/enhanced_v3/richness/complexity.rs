@@ -600,7 +600,10 @@ fn vertical_cost(
         entities,
         lights: 0,
         vertical_openings: logical_openings,
-        support_contacts: brushes,
+        // Per-feature inter-brush supports are reserved by the concrete
+        // recipe entries added after catalog selection; this aggregate
+        // semantic cost must not count every world-rooted brush as a contact.
+        support_contacts: 0,
         package_assets: 0,
         compiler_lumps: 0,
         renderer_batches: 1,
@@ -712,7 +715,7 @@ impl RecipeCatalog {
                 entities: 0,
                 lights: 0,
                 vertical_openings: 0,
-                support_contacts: 2, // floor + ceiling support
+                support_contacts: 0, // world roots are not inter-brush contacts
                 // Route shells reuse the selected theme's role-bound assets;
                 // package assets are unique identities, not per-route copies.
                 package_assets: 0,
@@ -739,7 +742,7 @@ impl RecipeCatalog {
                 entities: 0,
                 lights: 0,
                 vertical_openings: 0,
-                support_contacts: 1,
+                support_contacts: 0,
                 // Portal geometry reuses the selected theme's portal roles.
                 package_assets: 0,
                 compiler_lumps: 0,
@@ -766,7 +769,7 @@ impl RecipeCatalog {
                     entities: 0,
                     lights: 0,
                     vertical_openings: 0,
-                    support_contacts: 1,
+                    support_contacts: 0,
                     // Portal geometry reuses the selected theme's portal roles.
                     package_assets: 0,
                     compiler_lumps: 0,
@@ -840,18 +843,15 @@ impl RecipeCatalog {
                 faces: generated_content::ARCHETYPE_COST_SOURCE_FACES[arch_idx],
                 brushes: generated_content::ARCHETYPE_COST_BRUSHES[arch_idx],
                 entities: generated_content::ARCHETYPE_COST_ENTITIES[arch_idx],
-                lights: generated_content::ARCHETYPE_COST_LIGHTS[arch_idx],
+                // Presentation owns concrete light placement; reserve the
+                // complete capped light capacity below rather than charging
+                // catalog hints as mandatory structural lights.
+                lights: 0,
                 vertical_openings: match generated_content::ARCHETYPE_VERTICAL_RECIPE[arch_idx] {
                     super::content_types::VerticalRecipe::None => 0,
                     _ => 1,
                 },
-                support_contacts: if generated_content::ARCHETYPE_SUPPORT_RULES[arch_idx]
-                    .contains("pillar")
-                {
-                    4
-                } else {
-                    2
-                },
+                support_contacts: 0,
                 package_assets: generated_content::ARCHETYPE_MATERIAL_ROLES[arch_idx].len() as u32,
                 compiler_lumps: 0,
                 renderer_batches: 1,
@@ -884,9 +884,9 @@ impl RecipeCatalog {
                                     faces: generated_content::ARCHETYPE_COST_SOURCE_FACES[arch_idx],
                                     brushes: generated_content::ARCHETYPE_COST_BRUSHES[arch_idx],
                                     entities: generated_content::ARCHETYPE_COST_ENTITIES[arch_idx],
-                                    lights: generated_content::ARCHETYPE_COST_LIGHTS[arch_idx],
+                                    lights: 0,
                                     vertical_openings: arch_cost.vertical_openings,
-                                    support_contacts: arch_cost.support_contacts,
+                                    support_contacts: 0,
                                     package_assets: materials_count,
                                     compiler_lumps: 0,
                                     renderer_batches: 1,
@@ -1460,13 +1460,6 @@ pub(crate) fn build_complexity_plan(
     // Route shells and vertical recipe rooms add support contacts and
     // vertical costs that the catalog does not enumerate per route: reserve
     // them explicitly so actual <= reserved always holds for complete maps.
-    let route_count = topology.routes.len();
-    let extra_support = (route_count as u32).saturating_mul(4).saturating_add(20);
-    plan.total_reserved.support_contacts = plan
-        .total_reserved
-        .support_contacts
-        .saturating_add(extra_support)
-        .min(plan.budget.ceilings.support_contacts);
     // Reserve complete vertical recipe costs for every recipe room.
     for record in topology.journal.reservations.values() {
         if !record.committed || record.request_id.is_none() {
@@ -1529,6 +1522,14 @@ pub(crate) fn build_complexity_plan(
             original_recipe_name: None,
         });
     }
+    // Reserve the complete contract-bounded inter-brush support capacity.
+    // World-rooted floor anchors are intentionally excluded from this metric;
+    // actual support contacts are recomputed from non-world DAG edges.
+    plan.total_reserved.support_contacts = plan.budget.ceilings.support_contacts;
+    // Every finalized floor-slab omission is a logical vertical opening; the
+    // structural composition may contain several independent paired features.
+    plan.total_reserved.vertical_openings = plan.budget.ceilings.vertical_openings;
+    plan.total_reserved.lights = plan.budget.ceilings.lights;
     plan
 }
 

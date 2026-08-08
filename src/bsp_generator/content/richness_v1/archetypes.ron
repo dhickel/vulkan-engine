@@ -732,7 +732,7 @@ archetypes: [
   (
     id: "grand_stair_hall",
     span_min: (192, 256),
-    span_max: (320, 512),
+    span_max: (320, 448),
     shape: Rectangle,
     exit_degree_min: 2,
     exit_degree_max: 4,
@@ -1029,7 +1029,7 @@ archetypes: [
   (
     id: "ladder_hub",
     span_min: (160, 160),
-    span_max: (256, 512),
+    span_max: (256, 256),
     shape: Rectangle,
     exit_degree_min: 2,
     exit_degree_max: 4,
@@ -1444,7 +1444,7 @@ archetypes: [
   (
     id: "spiral_tower",
     span_min: (192, 192),
-    span_max: (288, 512),
+    span_max: (288, 288),
     shape: Octagon,
     exit_degree_min: 2,
     exit_degree_max: 2,
