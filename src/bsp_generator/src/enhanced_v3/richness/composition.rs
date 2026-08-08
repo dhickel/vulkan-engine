@@ -156,6 +156,8 @@ pub(crate) struct StructuralComposition {
     pub visibility: VisibilityPlan,
     /// CarvedGrotto result (None when omitted or infeasible in preferred mode).
     pub cave: Option<super::cave::CaveResult>,
+    /// Presentation layer (props, lights, negative space, imperfection).
+    pub presentation: super::presentation::Presentation,
 }
 
 /// Reachable structural composition path for an already solved Richness map.
@@ -214,6 +216,15 @@ pub(crate) fn compose_solved_generation(
         )?;
     }
 
+    // Phase 13: props, lighting, negative space, authored imperfection.
+    let presentation = super::presentation::apply_presentation(
+        &mut assembly,
+        &generation.topology.journal,
+        &generation.placement.request_archetypes,
+        theme,
+        seed,
+    )?;
+
     derive_all_interfaces(&mut assembly)?;
     derive_support_records(&mut assembly)?;
     let visibility = VisibilityPlan::build_from_assembly_and_routes(
@@ -245,6 +256,7 @@ pub(crate) fn compose_solved_generation(
         assembly,
         visibility,
         cave: cave_result,
+        presentation,
     })
 }
 

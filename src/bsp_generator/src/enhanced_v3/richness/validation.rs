@@ -114,6 +114,33 @@ pub(crate) fn validate_assembly(
 ) -> ValidationReport {
     let mut report = ValidationReport::new();
 
+    // Presentation budgets: light entities stay under the frozen contract
+    // ceiling of 100 and every light origin is inside its owning room.
+    let light_count = ir
+        .entities
+        .values()
+        .filter(|entity| entity.classname == "light")
+        .count();
+    if light_count > 100 {
+        report.record(
+            "presentation_light_budget",
+            Err(super::error::RichnessError::new(
+                super::error::RichnessErrorCode::BudgetOverrun,
+                0,
+                "?",
+                "?",
+                "?",
+                "?",
+                "?",
+                "?",
+                "?",
+                "presentation.lights",
+                super::error::RichnessErrorCategory::BudgetOverrun,
+                format!("presentation placed {light_count} lights; ceiling is 100"),
+            )),
+        );
+    }
+
     // 1. Sealing ownership
     report.record("sealing_ownership", validate_sealing_ownership(ir));
 

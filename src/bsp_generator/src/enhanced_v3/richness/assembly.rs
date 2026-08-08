@@ -498,6 +498,8 @@ pub(crate) enum InterfaceKind {
     PostToWall,
     /// Portal lintel contacts post.
     LintelToPost,
+    /// Prop piece contacts a sibling prop piece (same owner).
+    PropToProp,
     /// Portal lintel contacts wall.
     LintelToWall,
     /// Portal surround contacts wall.

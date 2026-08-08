@@ -984,6 +984,30 @@ pub(crate) fn derive_interface_kind(
         (BrushAssemblyRole::InteriorMass, r) if r.is_wall() => Some(InterfaceKind::MassToWall),
         (r, BrushAssemblyRole::InteriorMass) if r.is_wall() => Some(InterfaceKind::MassToWall),
         // Mass/floor
+        (BrushAssemblyRole::InteriorMass, r)
+            if matches!(
+                r,
+                BrushAssemblyRole::InteriorMass | BrushAssemblyRole::InteriorColumn
+            ) =>
+        {
+            Some(InterfaceKind::PropToProp)
+        }
+        (BrushAssemblyRole::InteriorColumn, r)
+            if matches!(
+                r,
+                BrushAssemblyRole::InteriorMass | BrushAssemblyRole::InteriorColumn
+            ) =>
+        {
+            Some(InterfaceKind::PropToProp)
+        }
+        // Props attach to any structural role: a declared detail-to-structure
+        // interface (shelf on wall, altar on floor, etc.).
+        (BrushAssemblyRole::InteriorColumn | BrushAssemblyRole::InteriorMass, r) => {
+            Some(InterfaceKind::MassToWall)
+        }
+        (r, BrushAssemblyRole::InteriorColumn | BrushAssemblyRole::InteriorMass) => {
+            Some(InterfaceKind::MassToWall)
+        }
         (BrushAssemblyRole::InteriorMass, BrushAssemblyRole::FloorSlab) => {
             Some(InterfaceKind::MassToFloor)
         }
