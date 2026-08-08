@@ -13,10 +13,13 @@
 //!   that wires structural behaviors (doors, buttons, platforms, triggers,
 //!   targets, light styles).
 
+pub mod cli;
 pub mod generation;
 pub mod m3_gui;
 pub mod physics_bridge;
 pub mod player_navigation;
+pub mod richness_generation;
+pub mod richness_gui;
 pub mod runtime_bridge;
 pub mod scene_sync;
 pub mod snapshot;

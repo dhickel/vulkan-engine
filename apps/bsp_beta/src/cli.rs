@@ -570,6 +570,239 @@ fn print_usage() {
     eprintln!();
 }
 
+// ── Richness V1 unregistered CLI parser ───────────────────────────────────
+//
+// The `parse_richness_launch_token` function mirrors every RichnessDraft
+// control. It is intentionally NOT registered in the ordinary `parse_from`
+// dispatch or `print_usage` help text. It exists for standalone testing and
+// will be wired into the public CLI at release (Phase 18).
+
+/// Parsed Richness V1 launch token with all draft controls.
+///
+/// Every InheritedOr field uses `Option<T>` with `None` meaning inherited.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RichnessLaunchToken {
+    pub richness_preset: Option<String>,
+    pub richness_theme: Option<String>,
+    pub richness_extent: Option<u32>,
+    pub richness_seed: Option<u64>,
+    pub richness_pacing: Option<String>,
+    pub richness_landmarks: Option<u32>,
+    pub richness_zones: Option<u32>,
+    pub richness_cave_mode: Option<String>,
+    pub richness_vertical_openings: Option<u32>,
+    pub richness_variation: Option<String>,
+    pub richness_prop_density: Option<u32>,
+    pub richness_light_density: Option<u32>,
+    pub richness_budget_ceiling: Option<u32>,
+    /// Inherited-marker fields: `--richness-<name>-inherited` sets the
+    /// corresponding control to inherited (clearing any explicit value).
+    pub richness_landmarks_inherited: bool,
+    pub richness_zones_inherited: bool,
+    pub richness_cave_mode_inherited: bool,
+    pub richness_vertical_openings_inherited: bool,
+    pub richness_budget_ceiling_inherited: bool,
+    pub richness_pacing_inherited: bool,
+    pub richness_variation_inherited: bool,
+    pub richness_prop_density_inherited: bool,
+    pub richness_light_density_inherited: bool,
+}
+
+impl Default for RichnessLaunchToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RichnessLaunchToken {
+    /// Create an empty launch token (all fields `None`, all inherited flags `false`).
+    pub fn new() -> Self {
+        Self {
+            richness_preset: None,
+            richness_theme: None,
+            richness_extent: None,
+            richness_seed: None,
+            richness_pacing: None,
+            richness_landmarks: None,
+            richness_zones: None,
+            richness_cave_mode: None,
+            richness_vertical_openings: None,
+            richness_variation: None,
+            richness_prop_density: None,
+            richness_light_density: None,
+            richness_budget_ceiling: None,
+            richness_landmarks_inherited: false,
+            richness_zones_inherited: false,
+            richness_cave_mode_inherited: false,
+            richness_vertical_openings_inherited: false,
+            richness_budget_ceiling_inherited: false,
+            richness_pacing_inherited: false,
+            richness_variation_inherited: false,
+            richness_prop_density_inherited: false,
+            richness_light_density_inherited: false,
+        }
+    }
+
+    /// Returns `true` if every field is `None` and every inherited flag is `false`.
+    pub fn is_empty(&self) -> bool {
+        self == &Self::new()
+    }
+}
+
+/// Parse a Richness V1 launch token from CLI arguments.
+///
+/// This function is intentionally UNREGISTERED — it is not called by
+/// `parse_from` and its options are not listed in `print_usage`. It
+/// exists for standalone testing and will be wired into the public CLI
+/// at release (Phase 18).
+///
+/// All Richness options use the `--richness-` prefix to avoid collision
+/// with existing M3 and BSP flags.
+pub(crate) fn parse_richness_launch_token(
+    args: impl IntoIterator<Item = impl Into<String>>,
+) -> Result<RichnessLaunchToken, CliError> {
+    let args: Vec<String> = args.into_iter().map(Into::into).collect();
+    let mut token = RichnessLaunchToken::new();
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--richness-preset" => {
+                let value = next_value(&args, i, "--richness-preset")?;
+                token.richness_preset = Some(value.to_string());
+                i += 2;
+            }
+            "--richness-theme" => {
+                let value = next_value(&args, i, "--richness-theme")?;
+                token.richness_theme = Some(value.to_string());
+                i += 2;
+            }
+            "--richness-extent" => {
+                let value = next_value(&args, i, "--richness-extent")?;
+                token.richness_extent = Some(
+                    value
+                        .parse::<u32>()
+                        .map_err(|_| invalid_m3_value("--richness-extent", value, "a u32"))?,
+                );
+                i += 2;
+            }
+            "--richness-seed" => {
+                let value = next_value(&args, i, "--richness-seed")?;
+                token.richness_seed = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| invalid_m3_value("--richness-seed", value, "a u64"))?,
+                );
+                i += 2;
+            }
+            "--richness-pacing" => {
+                let value = next_value(&args, i, "--richness-pacing")?;
+                token.richness_pacing = Some(value.to_string());
+                i += 2;
+            }
+            "--richness-landmarks" => {
+                let value = next_value(&args, i, "--richness-landmarks")?;
+                token.richness_landmarks = Some(
+                    value
+                        .parse::<u32>()
+                        .map_err(|_| invalid_m3_value("--richness-landmarks", value, "a u32"))?,
+                );
+                i += 2;
+            }
+            "--richness-zones" => {
+                let value = next_value(&args, i, "--richness-zones")?;
+                token.richness_zones = Some(
+                    value
+                        .parse::<u32>()
+                        .map_err(|_| invalid_m3_value("--richness-zones", value, "a u32"))?,
+                );
+                i += 2;
+            }
+            "--richness-cave-mode" => {
+                let value = next_value(&args, i, "--richness-cave-mode")?;
+                token.richness_cave_mode = Some(value.to_string());
+                i += 2;
+            }
+            "--richness-vertical-openings" => {
+                let value = next_value(&args, i, "--richness-vertical-openings")?;
+                token.richness_vertical_openings = Some(value.parse::<u32>().map_err(|_| {
+                    invalid_m3_value("--richness-vertical-openings", value, "a u32")
+                })?);
+                i += 2;
+            }
+            "--richness-variation" => {
+                let value = next_value(&args, i, "--richness-variation")?;
+                token.richness_variation = Some(value.to_string());
+                i += 2;
+            }
+            "--richness-prop-density" => {
+                let value = next_value(&args, i, "--richness-prop-density")?;
+                token.richness_prop_density =
+                    Some(value.parse::<u32>().map_err(|_| {
+                        invalid_m3_value("--richness-prop-density", value, "a u32")
+                    })?);
+                i += 2;
+            }
+            "--richness-light-density" => {
+                let value = next_value(&args, i, "--richness-light-density")?;
+                token.richness_light_density =
+                    Some(value.parse::<u32>().map_err(|_| {
+                        invalid_m3_value("--richness-light-density", value, "a u32")
+                    })?);
+                i += 2;
+            }
+            "--richness-budget-ceiling" => {
+                let value = next_value(&args, i, "--richness-budget-ceiling")?;
+                token.richness_budget_ceiling =
+                    Some(value.parse::<u32>().map_err(|_| {
+                        invalid_m3_value("--richness-budget-ceiling", value, "a u32")
+                    })?);
+                i += 2;
+            }
+            // Inherited flags (no value — just the flag)
+            "--richness-landmarks-inherited" => {
+                token.richness_landmarks_inherited = true;
+                i += 1;
+            }
+            "--richness-zones-inherited" => {
+                token.richness_zones_inherited = true;
+                i += 1;
+            }
+            "--richness-cave-mode-inherited" => {
+                token.richness_cave_mode_inherited = true;
+                i += 1;
+            }
+            "--richness-vertical-openings-inherited" => {
+                token.richness_vertical_openings_inherited = true;
+                i += 1;
+            }
+            "--richness-budget-ceiling-inherited" => {
+                token.richness_budget_ceiling_inherited = true;
+                i += 1;
+            }
+            "--richness-pacing-inherited" => {
+                token.richness_pacing_inherited = true;
+                i += 1;
+            }
+            "--richness-variation-inherited" => {
+                token.richness_variation_inherited = true;
+                i += 1;
+            }
+            "--richness-prop-density-inherited" => {
+                token.richness_prop_density_inherited = true;
+                i += 1;
+            }
+            "--richness-light-density-inherited" => {
+                token.richness_light_density_inherited = true;
+                i += 1;
+            }
+            other => return Err(CliError::UnknownArgument(other.to_string())),
+        }
+    }
+
+    Ok(token)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
