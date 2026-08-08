@@ -45,6 +45,7 @@ use super::theme::{THEME_ANCIENT, THEME_BRUTALIST, THEME_EGYPTIAN};
 use super::topology::{CommittedPortal, CommittedRoute, Dir};
 use super::validation::validate_assembly;
 use super::variation::{WallChainRecord, WallMass, WallMassTreatment, WallShaping};
+use super::vertical;
 use super::visibility::VisibilityPlan;
 
 // ── Macro composition entry point ─────────────────────────────────────────
@@ -189,6 +190,14 @@ pub(crate) fn compose_solved_generation(
 
     coalesce_overlapping_portal_frames(&mut assembly)?;
     enforce_opening_omission(&assembly)?;
+
+    // Phase 10-A: materialize vertical architecture features
+    let _vertical_features = vertical::materialize_vertical_features(
+        &mut assembly,
+        reservations,
+        &generation.placement.request_archetypes,
+    )?;
+
     derive_all_interfaces(&mut assembly)?;
     derive_support_records(&mut assembly)?;
     let visibility = VisibilityPlan::build_from_assembly_and_routes(
@@ -1001,6 +1010,73 @@ fn frame_depth_range(
     }
 }
 
+/// Clip decorative portal framing to the cardinal wall run that can legally
+/// carry it. The committed topology owns only the exact two-cell throat
+/// socket; near a corner, a wider surround must shed or shorten its outer
+/// course instead of penetrating the perpendicular structural wall.
+fn clip_portal_frame_spans(
+    ir: &mut AssemblyIR,
+    frame_ids: &mut Vec<BrushAssemblyId>,
+    wall_role: BrushAssemblyRole,
+    wall_bounds: (i128, i128, i128, i128, i128, i128),
+) -> Result<(), RichnessError> {
+    let (span_min, span_max) = match wall_role {
+        // North/south walls include both corner blocks in their AABB.
+        BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => (
+            wall_bounds.0 + richness_geom::WALL_THICKNESS,
+            wall_bounds.3 - richness_geom::WALL_THICKNESS,
+        ),
+        // East/west walls are already inset between the corner blocks.
+        BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => (wall_bounds.1, wall_bounds.4),
+        _ => {
+            return Err(composition_error(
+                "portal.frame_clip",
+                "portal frame clipping requires a cardinal wall",
+            ));
+        }
+    };
+
+    let original_ids = std::mem::take(frame_ids);
+    for id in original_ids {
+        let Some(original) = ir.brushes.get(&id).cloned() else {
+            return Err(composition_error(
+                "portal.frame_clip",
+                format!("portal frame brush {} disappeared", id.raw()),
+            ));
+        };
+        let ((x0, y0, z0), (x1, y1, z1)) = original
+            .brush
+            .aabb()
+            .map_err(|error| composition_error("portal.frame_clip", format!("AABB: {error}")))?;
+        let (x, y) = match wall_role {
+            BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => {
+                ((x0.max(span_min), x1.min(span_max)), (y0, y1))
+            }
+            BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => {
+                ((x0, x1), (y0.max(span_min), y1.min(span_max)))
+            }
+            _ => unreachable!("cardinal role checked above"),
+        };
+        if x.0 >= x.1 || y.0 >= y.1 {
+            ir.remove_brush(id);
+            continue;
+        }
+        if (x0, x1) != x || (y0, y1) != y {
+            let clipped = ConvexBrush::make_box(x, y, (z0, z1)).map_err(|error| {
+                composition_error("portal.frame_clip", format!("clipped frame: {error}"))
+            })?;
+            richness_geom::validate_brush(&clipped)?;
+            let brush = ir.brushes.get_mut(&id).ok_or_else(|| {
+                composition_error("portal.frame_clip", "portal frame brush disappeared")
+            })?;
+            brush.brush = clipped;
+            brush.cost.face_count = brush.brush.faces.len() as u32;
+        }
+        frame_ids.push(id);
+    }
+    Ok(())
+}
+
 /// Ancient post-and-lintel portal: two 16u posts + 16u lintel framing a 64×80 throat.
 ///
 /// The throat_anchor is (span_min, z_min, span_max, z_max) where:
@@ -1121,6 +1197,9 @@ fn build_ancient_post_lintel(
             ));
         }
     }
+
+    clip_portal_frame_spans(ir, &mut post_ids, wall_role, wall_bounds)?;
+    clip_portal_frame_spans(ir, &mut lintel_ids, wall_role, wall_bounds)?;
 
     let opening_id = ir.alloc_opening_id();
     let opening = OpeningRecord {
@@ -1245,6 +1324,8 @@ fn build_egyptian_stepped_surround(
             ));
         }
     };
+
+    clip_portal_frame_spans(ir, &mut surround_ids, wall_role, wall_bounds)?;
 
     let opening_id = ir.alloc_opening_id();
     let opening = OpeningRecord {
@@ -1424,6 +1505,8 @@ fn build_brutalist_reveal_surround(
             ));
         }
     };
+
+    clip_portal_frame_spans(ir, &mut surround_ids, wall_role, wall_bounds)?;
 
     let opening_id = ir.alloc_opening_id();
     let opening = OpeningRecord {
@@ -3775,6 +3858,55 @@ mod tests {
         assert!(portal.post_ids.is_empty());
         assert!(portal.lintel_ids.is_empty());
         assert_eq!(ir.openings.len(), 1);
+    }
+
+    #[test]
+    fn near_corner_brutalist_surround_clips_to_two_cell_socket() {
+        let mut ir = AssemblyIR::new();
+        let attr = make_test_attr();
+        let cost = CostSource {
+            dimension: BudgetDimension::SourceFaces,
+            face_count: 6,
+        };
+
+        let east_id = ir.alloc_brush_id();
+        ir.insert_brush(BrushAssembly {
+            id: east_id,
+            brush: ConvexBrush::make_box((736, 752), (16, 240), (16, 352)).unwrap(),
+            role: BrushAssemblyRole::EastWall,
+            owner: attr.clone(),
+            cost,
+            support: SupportTarget::World,
+        });
+        let south_id = ir.alloc_brush_id();
+        ir.insert_brush(BrushAssembly {
+            id: south_id,
+            brush: ConvexBrush::make_box((512, 768), (240, 256), (16, 352)).unwrap(),
+            role: BrushAssemblyRole::SouthWall,
+            owner: attr.clone(),
+            cost,
+            support: SupportTarget::World,
+        });
+
+        let portal = build_portal(
+            PortalId::new(3),
+            PortalStyle::BrutalistRevealSurround,
+            east_id,
+            (160, 16, 224, 96),
+            BrushAssemblyRole::EastWall,
+            &attr,
+            cost,
+            &mut ir,
+        )
+        .unwrap();
+
+        assert_eq!(portal.throat_bounds, (736, 160, 16, 752, 224, 96));
+        assert!(portal.surround_ids.iter().all(|id| {
+            let ((_, y0, _), (_, y1, _)) = ir.brushes[id].brush.aabb().unwrap();
+            y0 >= 16 && y1 <= 240
+        }));
+        validate_no_overlaps(&ir).unwrap();
+        enforce_opening_omission(&ir).unwrap();
     }
 
     #[test]

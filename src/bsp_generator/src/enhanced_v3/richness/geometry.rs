@@ -940,22 +940,30 @@ pub(crate) fn derive_interface_kind(
         // Ceiling/wall
         (BrushAssemblyRole::CeilingSlab, r) if r.is_wall() => Some(InterfaceKind::WallToCeiling),
         (r, BrushAssemblyRole::CeilingSlab) if r.is_wall() => Some(InterfaceKind::WallToCeiling),
-        // Wall/wall corner (cardinal meets cardinal)
+        // Wall/wall corner (cardinal meets cardinal) — includes UpperShellWall
         (
-            BrushAssemblyRole::NorthWall,
-            BrushAssemblyRole::WestWall | BrushAssemblyRole::EastWall,
+            BrushAssemblyRole::NorthWall | BrushAssemblyRole::UpperShellWall,
+            BrushAssemblyRole::WestWall
+            | BrushAssemblyRole::EastWall
+            | BrushAssemblyRole::UpperShellWall,
         ) => Some(InterfaceKind::WallToWallCorner),
         (
             BrushAssemblyRole::SouthWall,
-            BrushAssemblyRole::WestWall | BrushAssemblyRole::EastWall,
+            BrushAssemblyRole::WestWall
+            | BrushAssemblyRole::EastWall
+            | BrushAssemblyRole::UpperShellWall,
         ) => Some(InterfaceKind::WallToWallCorner),
         (
-            BrushAssemblyRole::WestWall,
-            BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall,
+            BrushAssemblyRole::WestWall | BrushAssemblyRole::UpperShellWall,
+            BrushAssemblyRole::NorthWall
+            | BrushAssemblyRole::SouthWall
+            | BrushAssemblyRole::UpperShellWall,
         ) => Some(InterfaceKind::WallToWallCorner),
         (
             BrushAssemblyRole::EastWall,
-            BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall,
+            BrushAssemblyRole::NorthWall
+            | BrushAssemblyRole::SouthWall
+            | BrushAssemblyRole::UpperShellWall,
         ) => Some(InterfaceKind::WallToWallCorner),
         // Split runs on one cardinal wall retain an explicit structural joint.
         (r1, r2) if r1 == r2 && is_cardinal_wall(r1) => Some(InterfaceKind::WallSegmentJoint),
@@ -1060,6 +1068,48 @@ pub(crate) fn derive_interface_kind(
         // Offset shaft/wall
         (BrushAssemblyRole::OffsetShaft, r) if r.is_wall() => Some(InterfaceKind::ShaftToWall),
         (r, BrushAssemblyRole::OffsetShaft) if r.is_wall() => Some(InterfaceKind::ShaftToWall),
+        // Balcony/wall
+        (BrushAssemblyRole::BalconySlab, r) if r.is_wall() => Some(InterfaceKind::BalconyToWall),
+        (r, BrushAssemblyRole::BalconySlab) if r.is_wall() => Some(InterfaceKind::BalconyToWall),
+        // Guard rail/balcony
+        (BrushAssemblyRole::GuardRail, BrushAssemblyRole::BalconySlab)
+        | (BrushAssemblyRole::BalconySlab, BrushAssemblyRole::GuardRail) => {
+            Some(InterfaceKind::RailToSlab)
+        }
+        // Guard rail/catwalk
+        (BrushAssemblyRole::GuardRail, BrushAssemblyRole::CatwalkDeck)
+        | (BrushAssemblyRole::CatwalkDeck, BrushAssemblyRole::GuardRail) => {
+            Some(InterfaceKind::RailToSlab)
+        }
+        // Corbel/wall
+        (BrushAssemblyRole::Corbel, r) if r.is_wall() => Some(InterfaceKind::CorbelToWall),
+        (r, BrushAssemblyRole::Corbel) if r.is_wall() => Some(InterfaceKind::CorbelToWall),
+        // Corbel/balcony
+        (BrushAssemblyRole::Corbel, BrushAssemblyRole::BalconySlab)
+        | (BrushAssemblyRole::BalconySlab, BrushAssemblyRole::Corbel) => {
+            Some(InterfaceKind::CorbelToSlab)
+        }
+        // Pit perimeter/upper shell wall
+        (BrushAssemblyRole::PitPerimeterSlab, BrushAssemblyRole::UpperShellWall)
+        | (BrushAssemblyRole::UpperShellWall, BrushAssemblyRole::PitPerimeterSlab) => {
+            Some(InterfaceKind::SlabToWall)
+        }
+        // Upper shell wall/floor
+        (BrushAssemblyRole::UpperShellWall, BrushAssemblyRole::FloorSlab)
+        | (BrushAssemblyRole::FloorSlab, BrushAssemblyRole::UpperShellWall) => {
+            Some(InterfaceKind::WallToFloor)
+        }
+        // Upper shell wall/ceiling
+        (BrushAssemblyRole::UpperShellWall, BrushAssemblyRole::CeilingSlab)
+        | (BrushAssemblyRole::CeilingSlab, BrushAssemblyRole::UpperShellWall) => {
+            Some(InterfaceKind::WallToCeiling)
+        }
+        // Vertical architecture is assembled from exact, non-overlapping
+        // gravity contacts. Keep those contacts explicit without pretending
+        // every tread/landing/support combination is a baseline room joint.
+        (r1, r2) if r1.is_vertical_architecture() || r2.is_vertical_architecture() => {
+            Some(InterfaceKind::VerticalMemberContact)
+        }
         _ => None,
     }
 }

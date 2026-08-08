@@ -200,6 +200,10 @@ typed_id!(
     OpeningAssemblyId,
     "Typed identifier for an opening omission record."
 );
+typed_id!(
+    VerticalFeatureId,
+    "Typed identifier for a vertical architecture feature."
+);
 
 // ── Semantic ID ────────────────────────────────────────────────────────────
 

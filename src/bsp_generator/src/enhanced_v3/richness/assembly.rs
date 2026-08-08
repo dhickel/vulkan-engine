@@ -169,6 +169,52 @@ pub(crate) enum BrushAssemblyRole {
     PartialWall,
     /// Offset shaft (vertical conduit).
     OffsetShaft,
+    /// Balcony/mezzanine slab (16-thick, projecting from wall).
+    BalconySlab,
+    /// Catwalk bridge deck (16-thick, spanning void).
+    CatwalkDeck,
+    /// Guard rail (48-high clip, player collision hull).
+    GuardRail,
+    /// Corbel/pilaster support member with a 16×16 bearing footprint.
+    Corbel,
+    /// Pit perimeter slab (railing-collision structure).
+    PitPerimeterSlab,
+    /// Upper-floor extension wall for multi-storey shells.
+    UpperShellWall,
+    /// Ladder shaft outer wall (16-thick, 96x96 shell).
+    LadderShaftWall,
+    /// Ladder rung (horizontal bar, 16u grid spacing).
+    LadderRung,
+    /// Ladder landing (flat slab at top/bottom of shaft).
+    LadderLanding,
+    /// Ladder lip (guard ledge around shaft opening).
+    LadderLip,
+    /// One-way drop shaft outer wall.
+    DropShaftWall,
+    /// Drop shaft upper lip (guard ledge preventing accidental fall-back).
+    DropShaftLip,
+    /// Spiral stair tread (single step, 64 radial depth).
+    SpiralTread,
+    /// Spiral stair center column (32x32 structural).
+    SpiralColumn,
+    /// Spiral stair outer shell wall (cardinal or exact 45-degree chamfer segment).
+    SpiralShellWall,
+    /// Straight/U-stair tread and integral riser/support block.
+    StairTread,
+    /// Lower, turn, or upper stair landing.
+    StairLanding,
+    /// Stair guard outside the protected 64-unit route.
+    StairGuard,
+    /// Upper spiral landing joined to the shell exit.
+    SpiralLanding,
+    /// Gravity support for a floating slab, landing, deck, or guard.
+    VerticalSupport,
+    /// Offset landing at the base of a one-way drop.
+    DropLanding,
+    /// Protected one-way-drop entry guard/lip.
+    DropEntryGuard,
+    /// Internal arena gate wall carrying controlled lower/upper entries.
+    ArenaGateWall,
 }
 
 impl BrushAssemblyRole {
@@ -199,6 +245,29 @@ impl BrushAssemblyRole {
             Self::BentApproach => "bent_approach",
             Self::PartialWall => "partial_wall",
             Self::OffsetShaft => "offset_shaft",
+            Self::BalconySlab => "balcony_slab",
+            Self::CatwalkDeck => "catwalk_deck",
+            Self::GuardRail => "guard_rail",
+            Self::Corbel => "corbel",
+            Self::PitPerimeterSlab => "pit_perimeter_slab",
+            Self::UpperShellWall => "upper_shell_wall",
+            Self::LadderShaftWall => "ladder_shaft_wall",
+            Self::LadderRung => "ladder_rung",
+            Self::LadderLanding => "ladder_landing",
+            Self::LadderLip => "ladder_lip",
+            Self::DropShaftWall => "drop_shaft_wall",
+            Self::DropShaftLip => "drop_shaft_lip",
+            Self::SpiralTread => "spiral_tread",
+            Self::SpiralColumn => "spiral_column",
+            Self::SpiralShellWall => "spiral_shell_wall",
+            Self::StairTread => "stair_tread",
+            Self::StairLanding => "stair_landing",
+            Self::StairGuard => "stair_guard",
+            Self::SpiralLanding => "spiral_landing",
+            Self::VerticalSupport => "vertical_support",
+            Self::DropLanding => "drop_landing",
+            Self::DropEntryGuard => "drop_entry_guard",
+            Self::ArenaGateWall => "arena_gate_wall",
         }
     }
 
@@ -214,12 +283,47 @@ impl BrushAssemblyRole {
                 | Self::DiagNWWall
                 | Self::DiagSEWall
                 | Self::DiagSWWall
+                | Self::UpperShellWall
+                | Self::LadderShaftWall
+                | Self::DropShaftWall
+                | Self::SpiralShellWall
+                | Self::ArenaGateWall
         )
     }
 
     /// Whether this role is a floor or ceiling slab.
     pub fn is_slab(self) -> bool {
         matches!(self, Self::FloorSlab | Self::CeilingSlab)
+    }
+
+    /// Whether this role belongs to the Richness vertical architecture layer.
+    pub fn is_vertical_architecture(self) -> bool {
+        matches!(
+            self,
+            Self::BalconySlab
+                | Self::CatwalkDeck
+                | Self::GuardRail
+                | Self::Corbel
+                | Self::PitPerimeterSlab
+                | Self::UpperShellWall
+                | Self::LadderShaftWall
+                | Self::LadderRung
+                | Self::LadderLanding
+                | Self::LadderLip
+                | Self::DropShaftWall
+                | Self::DropShaftLip
+                | Self::SpiralTread
+                | Self::SpiralColumn
+                | Self::SpiralShellWall
+                | Self::StairTread
+                | Self::StairLanding
+                | Self::StairGuard
+                | Self::SpiralLanding
+                | Self::VerticalSupport
+                | Self::DropLanding
+                | Self::DropEntryGuard
+                | Self::ArenaGateWall
+        )
     }
 
     /// Whether this role owns the full footprint partition beneath/above walls.
@@ -253,6 +357,24 @@ impl BrushAssemblyRole {
             | Self::Buttress
             | Self::Sill
             | Self::BentApproach => SemanticRole::Accent,
+            Self::BalconySlab | Self::CatwalkDeck | Self::PitPerimeterSlab => SemanticRole::Floor,
+            Self::GuardRail | Self::Corbel => SemanticRole::Accent,
+            Self::UpperShellWall => SemanticRole::Wall,
+            Self::LadderShaftWall | Self::SpiralShellWall | Self::DropShaftWall => {
+                SemanticRole::Wall
+            }
+            Self::LadderRung | Self::LadderLip | Self::DropShaftLip => SemanticRole::Accent,
+            Self::LadderLanding
+            | Self::SpiralTread
+            | Self::StairTread
+            | Self::StairLanding
+            | Self::SpiralLanding
+            | Self::DropLanding => SemanticRole::Floor,
+            Self::ArenaGateWall => SemanticRole::Wall,
+            Self::SpiralColumn
+            | Self::StairGuard
+            | Self::VerticalSupport
+            | Self::DropEntryGuard => SemanticRole::Accent,
         }
     }
 }
@@ -309,6 +431,15 @@ pub(crate) struct EntityAssembly {
     pub owner: SemanticAttribution,
     /// Cost source.
     pub cost: CostSource,
+    /// Custom key-value pairs.
+    pub keys: std::collections::BTreeMap<String, String>,
+    /// Compiler-preserved brush-model AABB for Richness movement descriptors.
+    /// Point entities leave this as `None`.
+    pub brush_model_bounds: Option<(i128, i128, i128, i128, i128, i128)>,
+    /// Exact convex source brush emitted as this entity's inline model.
+    /// This is kept beside the AABB so descriptor validation proves that the
+    /// runtime bounds came from real compiler geometry rather than metadata.
+    pub brush_model: Option<ConvexBrush>,
 }
 
 // ── Interface record ──────────────────────────────────────────────────────
@@ -385,6 +516,18 @@ pub(crate) enum InterfaceKind {
     SurroundToFloor,
     /// Shared wall contacts shared wall (same chain, adjacent rooms).
     SharedWallContact,
+    /// Balcony slab contacts wall.
+    BalconyToWall,
+    /// Guard rail contacts balcony/catwalk slab.
+    RailToSlab,
+    /// Corbel contacts wall.
+    CorbelToWall,
+    /// Corbel contacts balcony slab.
+    CorbelToSlab,
+    /// Slab contacts wall (generic).
+    SlabToWall,
+    /// Positive-area contact involving a vertical architecture member.
+    VerticalMemberContact,
 }
 
 // ── Support record ────────────────────────────────────────────────────────
@@ -752,6 +895,29 @@ mod tests {
             BrushAssemblyRole::BentApproach,
             BrushAssemblyRole::PartialWall,
             BrushAssemblyRole::OffsetShaft,
+            BrushAssemblyRole::BalconySlab,
+            BrushAssemblyRole::CatwalkDeck,
+            BrushAssemblyRole::GuardRail,
+            BrushAssemblyRole::Corbel,
+            BrushAssemblyRole::PitPerimeterSlab,
+            BrushAssemblyRole::UpperShellWall,
+            BrushAssemblyRole::LadderShaftWall,
+            BrushAssemblyRole::LadderRung,
+            BrushAssemblyRole::LadderLanding,
+            BrushAssemblyRole::LadderLip,
+            BrushAssemblyRole::DropShaftWall,
+            BrushAssemblyRole::DropShaftLip,
+            BrushAssemblyRole::SpiralTread,
+            BrushAssemblyRole::SpiralColumn,
+            BrushAssemblyRole::SpiralShellWall,
+            BrushAssemblyRole::StairTread,
+            BrushAssemblyRole::StairLanding,
+            BrushAssemblyRole::StairGuard,
+            BrushAssemblyRole::SpiralLanding,
+            BrushAssemblyRole::VerticalSupport,
+            BrushAssemblyRole::DropLanding,
+            BrushAssemblyRole::DropEntryGuard,
+            BrushAssemblyRole::ArenaGateWall,
         ];
         let tags: Vec<_> = roles.iter().map(|r| r.tag()).collect();
         let set: std::collections::BTreeSet<_> = tags.iter().collect();

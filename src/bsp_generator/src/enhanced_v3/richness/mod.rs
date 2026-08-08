@@ -45,6 +45,7 @@ pub(crate) mod theme;
 pub(crate) mod topology;
 pub(crate) mod validation;
 pub(crate) mod variation;
+pub(crate) mod vertical;
 pub(crate) mod visibility;
 pub(crate) mod zones;
 

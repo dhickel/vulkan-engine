@@ -19,15 +19,16 @@
 //! - Validators may call each other internally.
 //! - Crate-private; canonical ordering; no baseline changes.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use super::assembly::{AssemblyIR, BrushAssembly, BrushAssemblyRole, OpeningRecord};
+use super::assembly::{AssemblyIR, BrushAssemblyRole};
 use super::complexity::{BudgetReservation, ComplexityPlan};
 use super::error::{RichnessError, RichnessErrorCategory, RichnessErrorCode};
 use super::geometry as richness_geom;
-use super::ids::{BrushAssemblyId, OpeningAssemblyId, ReservationId};
-use super::support::{validate_support_dag, SupportDag};
+use super::ids::BrushAssemblyId;
+use super::support::validate_support_dag;
 use super::theme::ThemeDefinition;
+use super::vertical;
 use super::visibility::{
     validate_compiler_conventions, validate_no_aligned_openings, validate_visibility_caps,
     VisibilityPlan,
@@ -157,6 +158,57 @@ pub(crate) fn validate_assembly(
         validate_compiler_conventions(visibility),
     );
 
+    // 13. Vertical architecture features (Phase 10)
+    report.record(
+        "vertical_multi_storey_shells",
+        vertical::validate_multi_storey_shells(ir),
+    );
+    report.record(
+        "vertical_slab_ownership",
+        vertical::validate_slab_opening_ownership(ir),
+    );
+    report.record(
+        "vertical_balcony_clearance",
+        vertical::validate_balcony_clearance(ir),
+    );
+    report.record(
+        "vertical_catwalk_void",
+        vertical::validate_catwalk_over_void_only(ir),
+    );
+    report.record(
+        "vertical_overlook_sealed",
+        vertical::validate_overlook_sealed(ir),
+    );
+    report.record(
+        "vertical_pit_chasm_pairs",
+        vertical::validate_pit_chasm_pairs(ir),
+    );
+    report.record(
+        "vertical_ladder_shafts",
+        vertical::validate_ladder_shafts(ir),
+    );
+    report.record("vertical_stairwells", vertical::validate_stairwells(ir));
+    report.record(
+        "vertical_spiral_stairs",
+        vertical::validate_spiral_stairs(ir),
+    );
+    report.record("vertical_drop_shafts", vertical::validate_drop_shafts(ir));
+    report.record("vertical_arena", vertical::validate_vertical_arena(ir));
+
+    // 14. Vertical cost reservation (Phase 10-C)
+    if let Some(cp) = complexity {
+        report.record(
+            "vertical_cost_reservation",
+            validate_vertical_cost_reservation(ir, cp),
+        );
+    }
+
+    // 15. Archetype vertical recipe confirmation (Phase 10-C)
+    report.record(
+        "archetype_vertical_recipes",
+        validate_archetype_vertical_recipes(ir, visibility),
+    );
+
     report
 }
 
@@ -241,6 +293,13 @@ pub(crate) fn validate_convexity(ir: &AssemblyIR) -> Result<(), RichnessError> {
     for brush in ir.brushes.values() {
         richness_geom::validate_positive_volume(&brush.brush)?;
     }
+    for model in ir
+        .entities
+        .values()
+        .filter_map(|entity| entity.brush_model.as_ref())
+    {
+        richness_geom::validate_positive_volume(model)?;
+    }
     Ok(())
 }
 
@@ -251,6 +310,13 @@ pub(crate) fn validate_normal_class(ir: &AssemblyIR) -> Result<(), RichnessError
     for brush in ir.brushes.values() {
         richness_geom::validate_approved_normals(&brush.brush)?;
     }
+    for model in ir
+        .entities
+        .values()
+        .filter_map(|entity| entity.brush_model.as_ref())
+    {
+        richness_geom::validate_approved_normals(model)?;
+    }
     Ok(())
 }
 
@@ -260,6 +326,13 @@ pub(crate) fn validate_normal_class(ir: &AssemblyIR) -> Result<(), RichnessError
 pub(crate) fn validate_grid_alignment(ir: &AssemblyIR) -> Result<(), RichnessError> {
     for brush in ir.brushes.values() {
         richness_geom::validate_grid_alignment(&brush.brush)?;
+    }
+    for model in ir
+        .entities
+        .values()
+        .filter_map(|entity| entity.brush_model.as_ref())
+    {
+        richness_geom::validate_grid_alignment(model)?;
     }
     Ok(())
 }
@@ -696,6 +769,497 @@ pub(crate) enum RouteWitnessDir {
     West,
 }
 
+// ── 10. Vertical cost reservation ─────────────────────────────────────────
+
+/// Validate that actual vertical feature costs are within the complexity plan
+/// reservation. Per the plan: complete source/PVS/support cost reservation for
+/// every vertical recipe. Actual vertical brush counts and face counts must
+/// not exceed reserved vertical budget.
+pub(crate) fn validate_vertical_cost_reservation(
+    ir: &AssemblyIR,
+    plan: &ComplexityPlan,
+) -> Result<(), RichnessError> {
+    let is_vertical = |brush: &&super::assembly::BrushAssembly| {
+        brush.role.is_vertical_architecture()
+            || (brush.role == BrushAssemblyRole::MonolithSolid
+                && brush.owner.archetype_id_str() == Some("grand_arena"))
+    };
+    let vertical_brushes = ir.brushes.values().filter(is_vertical).collect::<Vec<_>>();
+    let descriptor_entities = ir
+        .entities
+        .values()
+        .filter(|entity| entity.keys.contains_key("richness_volume"))
+        .collect::<Vec<_>>();
+    let descriptor_models = descriptor_entities
+        .iter()
+        .filter_map(|entity| entity.brush_model.as_ref())
+        .collect::<Vec<_>>();
+    let actual = BudgetReservation {
+        faces: vertical_brushes
+            .iter()
+            .map(|brush| brush.brush.faces.len() as u32)
+            .chain(
+                descriptor_models
+                    .iter()
+                    .map(|model| model.faces.len() as u32),
+            )
+            .sum(),
+        brushes: (vertical_brushes.len() + descriptor_models.len()) as u32,
+        entities: descriptor_entities.len() as u32,
+        lights: 0,
+        // A paired lower-ceiling/upper-floor omission is one logical opening.
+        vertical_openings: ir
+            .openings
+            .values()
+            .filter(|opening| opening.wall_role == BrushAssemblyRole::FloorSlab)
+            .count() as u32,
+        support_contacts: ir
+            .supports
+            .values()
+            .filter(|support| {
+                vertical_brushes
+                    .iter()
+                    .any(|brush| brush.id == support.child)
+            })
+            .count() as u32,
+        package_assets: 0,
+        compiler_lumps: 0,
+        renderer_batches: u32::from(!vertical_brushes.is_empty()),
+        renderer_memory_bytes: ((vertical_brushes.len() + descriptor_models.len()) as u64)
+            .saturating_mul(4_096),
+        runtime_requirements: descriptor_entities.len() as u32,
+    };
+    let reserved = plan.vertical_reservation();
+    if actual.within(&reserved) {
+        return Ok(());
+    }
+    Err(validation_error(
+        RichnessErrorCode::BudgetOverrun,
+        RichnessErrorCategory::BudgetOverrun,
+        "validation.vertical_cost",
+        format!("actual vertical cost {actual:?} exceeds complete reserved cost {reserved:?}"),
+    ))
+}
+
+// ── 11. Archetype vertical recipe confirmation ────────────────────────────
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ExpectedVerticalRoleContract {
+    pub archetype_id: &'static str,
+    pub recipe: super::content_types::VerticalRecipe,
+    pub brush_roles: &'static [BrushAssemblyRole],
+    pub opening_roles: &'static [BrushAssemblyRole],
+    pub descriptor_kind: Option<&'static str>,
+}
+
+const EMPTY_ROLES: &[BrushAssemblyRole] = &[];
+const PAIRED_SLAB_OPENINGS: &[BrushAssemblyRole] =
+    &[BrushAssemblyRole::FloorSlab, BrushAssemblyRole::CeilingSlab];
+const DROP_ROLES: &[BrushAssemblyRole] = &[
+    BrushAssemblyRole::PitPerimeterSlab,
+    BrushAssemblyRole::DropEntryGuard,
+    BrushAssemblyRole::DropLanding,
+];
+const STAIR_ROLES: &[BrushAssemblyRole] = &[
+    BrushAssemblyRole::StairTread,
+    BrushAssemblyRole::StairLanding,
+    BrushAssemblyRole::StairGuard,
+];
+const LADDER_ROLES: &[BrushAssemblyRole] = &[
+    BrushAssemblyRole::LadderShaftWall,
+    BrushAssemblyRole::LadderRung,
+    BrushAssemblyRole::LadderLanding,
+    BrushAssemblyRole::LadderLip,
+];
+const SPIRAL_ROLES: &[BrushAssemblyRole] = &[
+    BrushAssemblyRole::SpiralShellWall,
+    BrushAssemblyRole::SpiralColumn,
+    BrushAssemblyRole::SpiralTread,
+    BrushAssemblyRole::SpiralLanding,
+];
+const BALCONY_ROLES: &[BrushAssemblyRole] = &[
+    BrushAssemblyRole::BalconySlab,
+    BrushAssemblyRole::GuardRail,
+    BrushAssemblyRole::Corbel,
+];
+const CATWALK_ROLES: &[BrushAssemblyRole] = &[
+    BrushAssemblyRole::CatwalkDeck,
+    BrushAssemblyRole::GuardRail,
+    BrushAssemblyRole::VerticalSupport,
+];
+const OVERLOOK_ROLES: &[BrushAssemblyRole] = &[BrushAssemblyRole::PartialWall];
+const OVERLOOK_OPENINGS: &[BrushAssemblyRole] = &[BrushAssemblyRole::PartialWall];
+const ARENA_ROLES: &[BrushAssemblyRole] = &[
+    BrushAssemblyRole::BalconySlab,
+    BrushAssemblyRole::GuardRail,
+    BrushAssemblyRole::Corbel,
+    BrushAssemblyRole::CatwalkDeck,
+    BrushAssemblyRole::MonolithSolid,
+    BrushAssemblyRole::StairTread,
+    BrushAssemblyRole::StairGuard,
+    BrushAssemblyRole::ArenaGateWall,
+];
+const ARENA_OPENINGS: &[BrushAssemblyRole] = &[
+    BrushAssemblyRole::FloorSlab,
+    BrushAssemblyRole::CeilingSlab,
+    BrushAssemblyRole::ArenaGateWall,
+];
+
+const fn role_contract(
+    archetype_id: &'static str,
+    recipe: super::content_types::VerticalRecipe,
+    brush_roles: &'static [BrushAssemblyRole],
+    opening_roles: &'static [BrushAssemblyRole],
+    descriptor_kind: Option<&'static str>,
+) -> ExpectedVerticalRoleContract {
+    ExpectedVerticalRoleContract {
+        archetype_id,
+        recipe,
+        brush_roles,
+        opening_roles,
+        descriptor_kind,
+    }
+}
+
+/// Total generated-catalog role contract.  Every one of the canonical 30
+/// entries appears exactly once. Catalog recipe `None` does not erase an
+/// archetype-specific vertical set-piece contract: arena, bridge, overlook,
+/// and grand-arena roles remain mandatory without inventing a catalog enum.
+/// `grand_arena` therefore stays `None` while its independently materialized
+/// arena has a complete role/opening contract.
+pub(crate) const EXPECTED_VERTICAL_ROLE_CONTRACTS: [ExpectedVerticalRoleContract; 30] = [
+    role_contract(
+        "ambush_cross",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "antechamber",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "arena",
+        super::content_types::VerticalRecipe::None,
+        BALCONY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "barracks",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "bridge_crossing",
+        super::content_types::VerticalRecipe::None,
+        CATWALK_ROLES,
+        PAIRED_SLAB_OPENINGS,
+        None,
+    ),
+    role_contract(
+        "cistern",
+        super::content_types::VerticalRecipe::DropHole,
+        DROP_ROLES,
+        PAIRED_SLAB_OPENINGS,
+        Some("one_way_drop"),
+    ),
+    role_contract(
+        "crossroads",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "entrance_hall",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "flooded_crypt",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "foundry",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "gallery",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "grand_arena",
+        super::content_types::VerticalRecipe::None,
+        ARENA_ROLES,
+        ARENA_OPENINGS,
+        None,
+    ),
+    role_contract(
+        "grand_stair_hall",
+        super::content_types::VerticalRecipe::Stairwell,
+        STAIR_ROLES,
+        PAIRED_SLAB_OPENINGS,
+        None,
+    ),
+    role_contract(
+        "grotto",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "guard_hall",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "hypostyle_hall",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "kill_court",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "ladder_hub",
+        super::content_types::VerticalRecipe::LadderShaft,
+        LADDER_ROLES,
+        PAIRED_SLAB_OPENINGS,
+        Some("climb"),
+    ),
+    role_contract(
+        "observatory",
+        super::content_types::VerticalRecipe::OpenStairwell,
+        STAIR_ROLES,
+        PAIRED_SLAB_OPENINGS,
+        None,
+    ),
+    role_contract(
+        "ossuary",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "overlook_hall",
+        super::content_types::VerticalRecipe::None,
+        OVERLOOK_ROLES,
+        OVERLOOK_OPENINGS,
+        None,
+    ),
+    role_contract(
+        "pit_room",
+        super::content_types::VerticalRecipe::DropHole,
+        DROP_ROLES,
+        PAIRED_SLAB_OPENINGS,
+        Some("one_way_drop"),
+    ),
+    role_contract(
+        "reliquary",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "shrine",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "spiral_tower",
+        super::content_types::VerticalRecipe::SpiralStair,
+        SPIRAL_ROLES,
+        PAIRED_SLAB_OPENINGS,
+        None,
+    ),
+    role_contract(
+        "throne_hall",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "trapped_gallery",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "treasury",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "vault",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+    role_contract(
+        "vestibule",
+        super::content_types::VerticalRecipe::None,
+        EMPTY_ROLES,
+        EMPTY_ROLES,
+        None,
+    ),
+];
+
+pub(crate) fn validate_archetype_vertical_recipes(
+    ir: &AssemblyIR,
+    visibility: &VisibilityPlan,
+) -> Result<(), RichnessError> {
+    use super::generated_content;
+
+    let _ = visibility;
+    let mut represented = BTreeSet::new();
+    for owner in ir
+        .brushes
+        .values()
+        .map(|brush| &brush.owner)
+        .chain(ir.openings.values().map(|opening| &opening.owner))
+        .chain(ir.entities.values().map(|entity| &entity.owner))
+    {
+        if let (Some(request), Some(archetype)) = (owner.request_id, owner.archetype) {
+            represented.insert((request, archetype));
+        }
+    }
+
+    for (request, archetype) in represented {
+        let index = archetype.raw() as usize;
+        let contract = EXPECTED_VERTICAL_ROLE_CONTRACTS.get(index).ok_or_else(|| {
+            validation_error(
+                RichnessErrorCode::SemanticInfeasible,
+                RichnessErrorCategory::SemanticInfeasibility,
+                "validation.archetype_vertical",
+                format!("represented archetype index {index} has no total role contract"),
+            )
+        })?;
+        if generated_content::ARCHETYPE_IDS.get(index).copied() != Some(contract.archetype_id)
+            || generated_content::ARCHETYPE_VERTICAL_RECIPE
+                .get(index)
+                .copied()
+                != Some(contract.recipe)
+        {
+            return Err(validation_error(
+                RichnessErrorCode::SemanticInfeasible,
+                RichnessErrorCategory::SemanticInfeasibility,
+                "validation.archetype_vertical",
+                format!("catalog/role-contract mismatch at index {index}"),
+            ));
+        }
+        if contract.brush_roles.is_empty()
+            && contract.opening_roles.is_empty()
+            && contract.descriptor_kind.is_none()
+        {
+            continue;
+        }
+
+        let roles = ir
+            .brushes
+            .values()
+            .filter(|brush| {
+                brush.owner.request_id == Some(request) && brush.owner.archetype == Some(archetype)
+            })
+            .map(|brush| brush.role)
+            .collect::<BTreeSet<_>>();
+        let opening_roles = ir
+            .openings
+            .values()
+            .filter(|opening| {
+                opening.owner.request_id == Some(request)
+                    && opening.owner.archetype == Some(archetype)
+            })
+            .map(|opening| opening.wall_role)
+            .collect::<BTreeSet<_>>();
+        let mut missing = contract
+            .brush_roles
+            .iter()
+            .filter(|role| !roles.contains(role))
+            .map(|role| role.tag().to_string())
+            .chain(
+                contract
+                    .opening_roles
+                    .iter()
+                    .filter(|role| !opening_roles.contains(role))
+                    .map(|role| format!("{}_opening", role.tag())),
+            )
+            .collect::<Vec<_>>();
+        if let Some(kind) = contract.descriptor_kind {
+            let present = ir.entities.values().any(|entity| {
+                entity.owner.request_id == Some(request)
+                    && entity.owner.archetype == Some(archetype)
+                    && entity.classname == "trigger_multiple"
+                    && entity
+                        .brush_model
+                        .as_ref()
+                        .and_then(|model| model.aabb().ok())
+                        .zip(entity.brush_model_bounds)
+                        .is_some_and(|((min, max), bounds)| {
+                            bounds == (min.0, min.1, min.2, max.0, max.1, max.2)
+                        })
+                    && entity
+                        .keys
+                        .get("richness_volume")
+                        .is_some_and(|value| value == kind)
+            });
+            if !present {
+                missing.push(format!("{kind}_descriptor"));
+            }
+        }
+        if !missing.is_empty() {
+            return Err(validation_error(
+                RichnessErrorCode::SemanticInfeasible,
+                RichnessErrorCategory::SemanticInfeasibility,
+                "validation.archetype_vertical",
+                format!(
+                    "archetype {} request {} ({:?}) is missing role tags [{}]",
+                    contract.archetype_id,
+                    request.raw(),
+                    contract.recipe,
+                    missing.join(",")
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -706,6 +1270,7 @@ mod tests {
         AssemblyIR, BrushAssembly, BrushAssemblyRole, BudgetDimension, CostSource, OpeningRecord,
         SemanticAttribution, SupportRecord, SupportTarget,
     };
+    use crate::enhanced_v3::richness::generated_content;
     use crate::enhanced_v3::richness::ids::{
         ArchetypeIndex, ArchetypeRequestId, BeatId, OpeningAssemblyId, ReservationId, ZoneId,
     };
@@ -715,7 +1280,7 @@ mod tests {
         SemanticAttribution::from_reservation(
             ReservationId::new(0),
             Some(ArchetypeRequestId::new(0)),
-            Some(ArchetypeIndex::new(0)),
+            Some(ArchetypeIndex::new(1)),
             Some(BeatId::new(0)),
             Some(ZoneId::new(0)),
         )
@@ -903,6 +1468,105 @@ mod tests {
         // touch but not intrude (AABB test with > not >= means z0=16 is floor top,
         // not inside). Let's check: wz0=16, floor_zmax=16 → bmax_z(16) > wz0(16) is false
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn vertical_role_contract_is_total_and_matches_all_thirty_generated_entries() {
+        assert_eq!(
+            EXPECTED_VERTICAL_ROLE_CONTRACTS.len(),
+            generated_content::ARCHETYPE_COUNT
+        );
+        let mut ids = BTreeSet::new();
+        for (index, contract) in EXPECTED_VERTICAL_ROLE_CONTRACTS.iter().enumerate() {
+            assert!(
+                ids.insert(contract.archetype_id),
+                "duplicate contract for {}",
+                contract.archetype_id
+            );
+            assert_eq!(
+                generated_content::ARCHETYPE_IDS[index],
+                contract.archetype_id
+            );
+            assert_eq!(
+                generated_content::ARCHETYPE_VERTICAL_RECIPE[index],
+                contract.recipe
+            );
+        }
+        assert_eq!(ids.len(), 30);
+
+        let vestibule = EXPECTED_VERTICAL_ROLE_CONTRACTS
+            .iter()
+            .find(|contract| contract.archetype_id == "vestibule")
+            .unwrap();
+        assert_eq!(
+            vestibule.recipe,
+            super::super::content_types::VerticalRecipe::None
+        );
+        assert!(vestibule.brush_roles.is_empty());
+        assert!(vestibule.opening_roles.is_empty());
+
+        let grand_arena = EXPECTED_VERTICAL_ROLE_CONTRACTS
+            .iter()
+            .find(|contract| contract.archetype_id == "grand_arena")
+            .unwrap();
+        assert_eq!(
+            grand_arena.recipe,
+            super::super::content_types::VerticalRecipe::None
+        );
+        assert!(!grand_arena.brush_roles.is_empty());
+        assert!(grand_arena
+            .opening_roles
+            .contains(&BrushAssemblyRole::ArenaGateWall));
+    }
+
+    #[test]
+    fn every_vertical_contract_reports_a_typed_missing_role_error() {
+        let visibility = VisibilityPlan::new();
+        let required = EXPECTED_VERTICAL_ROLE_CONTRACTS
+            .iter()
+            .enumerate()
+            .filter(|(_, contract)| {
+                !contract.brush_roles.is_empty()
+                    || !contract.opening_roles.is_empty()
+                    || contract.descriptor_kind.is_some()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(required.len(), 10);
+
+        for (index, contract) in required {
+            let mut ir = AssemblyIR::new();
+            let owner = SemanticAttribution::from_reservation(
+                ReservationId::new(index as u32),
+                Some(ArchetypeRequestId::new(index as u32)),
+                Some(ArchetypeIndex::new(index as u32)),
+                Some(BeatId::new(0)),
+                Some(ZoneId::new(0)),
+            );
+            let id = ir.alloc_brush_id();
+            ir.insert_brush(BrushAssembly {
+                id,
+                brush: ConvexBrush::make_box((0, 64), (0, 64), (0, 16)).unwrap(),
+                role: BrushAssemblyRole::FloorSlab,
+                owner,
+                cost: make_cost(),
+                support: SupportTarget::World,
+            });
+
+            let error = validate_archetype_vertical_recipes(&ir, &visibility).unwrap_err();
+            assert_eq!(
+                error.code,
+                RichnessErrorCode::SemanticInfeasible,
+                "{}",
+                contract.archetype_id
+            );
+            assert_eq!(
+                error.path, "validation.archetype_vertical",
+                "{}",
+                contract.archetype_id
+            );
+            assert!(error.context.contains(contract.archetype_id));
+            assert!(error.context.contains("missing role tags"));
+        }
     }
 
     #[test]

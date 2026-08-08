@@ -544,6 +544,18 @@ impl ComplexityPlan {
             && self.total_reserved.runtime_requirements >= actual.runtime_requirements
     }
 
+    /// Return the reserved budget for vertical features (priority RequiredVerticalCave).
+    /// Sums the declared cost of every selected recipe at that priority tier.
+    pub fn vertical_reservation(&self) -> BudgetReservation {
+        let mut reservation = BudgetReservation::ZERO;
+        for selection in &self.selected_recipes {
+            if selection.priority == RecipePriority::RequiredVerticalCave {
+                reservation = reservation.saturating_add(selection.recipe.cost);
+            }
+        }
+        reservation
+    }
+
     /// Validate that every mandatory recipe at each priority tier is included.
     pub fn validate_mandatory_completeness(&self) -> Vec<String> {
         let mut errors = Vec::new();
@@ -574,6 +586,101 @@ impl ComplexityPlan {
 
         errors
     }
+}
+
+fn vertical_cost(
+    brushes: u32,
+    entities: u32,
+    logical_openings: u32,
+    runtime_requirements: u32,
+) -> BudgetReservation {
+    BudgetReservation {
+        faces: brushes.saturating_mul(6),
+        brushes,
+        entities,
+        lights: 0,
+        vertical_openings: logical_openings,
+        support_contacts: brushes,
+        package_assets: 0,
+        compiler_lumps: 0,
+        renderer_batches: 1,
+        renderer_memory_bytes: u64::from(brushes).saturating_mul(4_096),
+        runtime_requirements,
+    }
+}
+
+fn cost_for_vertical_recipe(recipe: super::content_types::VerticalRecipe) -> BudgetReservation {
+    use super::content_types::VerticalRecipe;
+    match recipe {
+        VerticalRecipe::None => vertical_cost(52, 0, 1, 0), // requested generic open stairwell
+        VerticalRecipe::Stairwell => vertical_cost(40, 0, 1, 0),
+        VerticalRecipe::OpenStairwell => vertical_cost(56, 0, 1, 0),
+        VerticalRecipe::LadderShaft => vertical_cost(48, 1, 1, 1),
+        VerticalRecipe::SpiralStair => vertical_cost(52, 0, 1, 0),
+        VerticalRecipe::DropHole => vertical_cost(32, 1, 1, 1),
+    }
+}
+
+/// Conservative complete cost for the vertical architecture that the current
+/// committed topology will materialize.  Catalog `None` remains intentionally
+/// empty; a committed request-level host with `None` receives the generic open
+/// stairwell contract and is therefore costed independently of the catalog.
+fn planned_vertical_cost(
+    blueprint: &PacingBlueprint,
+    topology: &TopologyResult,
+) -> BudgetReservation {
+    use super::reservation::ReservationKind;
+
+    let mut total = BudgetReservation::ZERO;
+    for record in topology
+        .journal
+        .reservations
+        .values()
+        .filter(|record| record.committed)
+    {
+        match record.kind {
+            ReservationKind::VerticalHost => {
+                let recipe = record
+                    .request_id
+                    .and_then(|request_id| blueprint.archetype_requests.get(&request_id))
+                    .and_then(|request| {
+                        generated_content::ARCHETYPE_VERTICAL_RECIPE
+                            .get(request.archetype.raw() as usize)
+                            .copied()
+                    })
+                    .unwrap_or(super::content_types::VerticalRecipe::None);
+                total = total.saturating_add(cost_for_vertical_recipe(recipe));
+            }
+            ReservationKind::PitOmission => {
+                total = total.saturating_add(cost_for_vertical_recipe(
+                    super::content_types::VerticalRecipe::DropHole,
+                ));
+            }
+            ReservationKind::MultiStoreyRoom => {
+                let archetype_id = record
+                    .request_id
+                    .and_then(|request_id| blueprint.archetype_requests.get(&request_id))
+                    .and_then(|request| {
+                        generated_content::ARCHETYPE_IDS
+                            .get(request.archetype.raw() as usize)
+                            .copied()
+                    });
+                let setpiece = match archetype_id {
+                    Some("arena") => vertical_cost(10, 0, 0, 0),
+                    Some("bridge_crossing") => vertical_cost(24, 0, 1, 0),
+                    Some("overlook_hall") => vertical_cost(12, 0, 0, 0),
+                    // `grand_arena` is deliberately a separately materialized
+                    // set-piece.  Adding a catalog enum value would change the
+                    // authored/code-generated content contract.
+                    Some("grand_arena") => vertical_cost(64, 0, 1, 0),
+                    _ => BudgetReservation::ZERO,
+                };
+                total = total.saturating_add(setpiece);
+            }
+            _ => {}
+        }
+    }
+    total
 }
 
 // ── Recipe catalog ─────────────────────────────────────────────────────────
@@ -859,19 +966,10 @@ impl RecipeCatalog {
         );
 
         // ── Priority 4: Required Vertical / Cave ───────────────────────
-        let vertical_cost = BudgetReservation {
-            faces: 180,
-            brushes: 12,
-            entities: 2,
-            lights: 4,
-            vertical_openings: 1,
-            support_contacts: 6,
-            package_assets: 8,
-            compiler_lumps: 0,
-            renderer_batches: 2,
-            renderer_memory_bytes: 32768,
-            runtime_requirements: 0,
-        };
+        // Reserve the complete materialized recipe set.  This is derived from
+        // committed hosts/pit pairs plus separately authored set-pieces; no
+        // synthetic minimum is injected later as a proof substitute.
+        let vertical_cost = planned_vertical_cost(blueprint, topology);
         recipes.insert(
             RecipePriority::RequiredVerticalCave,
             vec![RecipeIdentity {
