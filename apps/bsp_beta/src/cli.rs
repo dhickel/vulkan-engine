@@ -117,8 +117,6 @@ pub enum CliError {
     M3GenerateRichnessConflict,
     /// --m3-generate conflicts with --bsp.
     M3GenerateBspConflict,
-    /// --m3-richness-v1 conflicts with --bsp.
-    M3RichnessBspConflict,
     /// --m3-generate conflicts with explicit --palette.
     M3GeneratePaletteConflict,
     /// --m3-generate conflicts with explicit --lit.
@@ -129,6 +127,8 @@ pub enum CliError {
     M3GenerateTexturesConflict,
     /// Generation-only option used without --m3-generate.
     M3OptionRequiresGenerate(&'static str),
+    /// Richness-only option used without --m3-richness-v1.
+    RichnessOptionRequiresRichness(&'static str),
     /// Invalid EnhancedV3 generation option.
     InvalidM3Value {
         flag: &'static str,
@@ -176,9 +176,6 @@ impl fmt::Display for CliError {
             CliError::M3GenerateBspConflict => {
                 write!(f, "--m3-generate and --bsp are mutually exclusive")
             }
-            CliError::M3RichnessBspConflict => {
-                write!(f, "--m3-richness-v1 and --bsp are mutually exclusive")
-            }
             CliError::M3GeneratePaletteConflict => {
                 write!(f, "--m3-generate and --palette are mutually exclusive")
             }
@@ -193,6 +190,9 @@ impl fmt::Display for CliError {
             }
             CliError::M3OptionRequiresGenerate(flag) => {
                 write!(f, "{flag} is only valid with --m3-generate")
+            }
+            CliError::RichnessOptionRequiresRichness(flag) => {
+                write!(f, "{flag} is only valid with --m3-richness-v1")
             }
             CliError::InvalidM3Value {
                 flag,
@@ -283,6 +283,7 @@ pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<C
     let args: Vec<String> = args.into_iter().map(Into::into).collect();
     let mut opts = CliArgs::default();
     let mut m3_option_used = None;
+    let mut richness_option_used = None;
     let mut i = 0;
 
     while i < args.len() {
@@ -403,24 +404,18 @@ pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<C
                 opts.m3_richness = true;
                 i += 1;
             }
-            // Richness overrides are consumed by parse_richness_launch_token
-            // from the raw process args; parse_from skips them so ordinary
-            // dispatch does not reject a richness launch.
-            "--richness-preset"
-            | "--richness-theme"
-            | "--richness-extent"
-            | "--richness-seed"
-            | "--richness-pacing"
-            | "--richness-landmarks"
-            | "--richness-zones"
-            | "--richness-cave-mode"
-            | "--richness-vertical-openings"
-            | "--richness-budget"
-            | "--richness-budget-ceiling"
-            | "--richness-prop-density"
-            | "--richness-light-density"
-            | "--richness-variation" => {
+            // Richness overrides are parsed into the launch token after the
+            // primary mode gate. Validate their arity here so malformed
+            // options cannot be silently skipped.
+            flag if richness_value_flag(flag).is_some() => {
+                let flag = richness_value_flag(flag).expect("matched Richness value flag");
+                let _ = next_value(&args, i, flag)?;
+                richness_option_used = Some(flag);
                 i += 2;
+            }
+            flag if richness_inherited_flag(flag).is_some() => {
+                richness_option_used = richness_inherited_flag(flag);
+                i += 1;
             }
             "--seed" => {
                 opts.m3_seed = parse_u64_value(&args, i, "--seed")?;
@@ -488,20 +483,26 @@ pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<C
         return Err(CliError::M3GenerateRichnessConflict);
     }
     if opts.m3_richness {
-        if opts.bsp_path.is_some() {
-            return Err(CliError::M3RichnessBspConflict);
+        if let Some(flag) = m3_option_used {
+            return Err(CliError::M3OptionRequiresGenerate(flag));
         }
-        if opts.palette_path.is_some() {
-            return Err(CliError::M3GeneratePaletteConflict);
-        }
-        if opts.lit_path.is_some() {
-            return Err(CliError::M3GenerateLitConflict);
-        }
-        if opts.wad_path.is_some() {
-            return Err(CliError::M3GenerateWadConflict);
-        }
-        if opts.textures_dir.is_some() {
-            return Err(CliError::M3GenerateTexturesConflict);
+        // A Richness launch without --bsp owns and builds its startup closure.
+        // With --bsp, the complete prebuilt closure is authorized by the
+        // Richness runtime path; this is how the cache-backed script avoids a
+        // redundant startup build while still launching the Richness GUI.
+        if opts.bsp_path.is_none() {
+            if opts.palette_path.is_some() {
+                return Err(CliError::M3GeneratePaletteConflict);
+            }
+            if opts.lit_path.is_some() {
+                return Err(CliError::M3GenerateLitConflict);
+            }
+            if opts.wad_path.is_some() {
+                return Err(CliError::M3GenerateWadConflict);
+            }
+            if opts.textures_dir.is_some() {
+                return Err(CliError::M3GenerateTexturesConflict);
+            }
         }
         if opts.import_mode.is_none() {
             opts.import_mode = Some(ImportMode::Strict);
@@ -510,7 +511,13 @@ pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<C
         if let Some(flag) = m3_option_used {
             return Err(CliError::M3OptionRequiresGenerate(flag));
         }
+        if let Some(flag) = richness_option_used {
+            return Err(CliError::RichnessOptionRequiresRichness(flag));
+        }
     } else {
+        if let Some(flag) = richness_option_used {
+            return Err(CliError::RichnessOptionRequiresRichness(flag));
+        }
         if opts.bsp_path.is_some() {
             return Err(CliError::M3GenerateBspConflict);
         }
@@ -553,6 +560,40 @@ fn invalid_m3_value(flag: &'static str, value: &str, expected: &'static str) -> 
         flag,
         value: value.to_string(),
         expected,
+    }
+}
+
+fn richness_value_flag(flag: &str) -> Option<&'static str> {
+    match flag {
+        "--richness-preset" => Some("--richness-preset"),
+        "--richness-theme" => Some("--richness-theme"),
+        "--richness-extent" => Some("--richness-extent"),
+        "--richness-seed" => Some("--richness-seed"),
+        "--richness-pacing" => Some("--richness-pacing"),
+        "--richness-landmarks" => Some("--richness-landmarks"),
+        "--richness-zones" => Some("--richness-zones"),
+        "--richness-cave-mode" => Some("--richness-cave-mode"),
+        "--richness-vertical-openings" => Some("--richness-vertical-openings"),
+        "--richness-budget-ceiling" => Some("--richness-budget-ceiling"),
+        "--richness-prop-density" => Some("--richness-prop-density"),
+        "--richness-light-density" => Some("--richness-light-density"),
+        "--richness-variation" => Some("--richness-variation"),
+        _ => None,
+    }
+}
+
+fn richness_inherited_flag(flag: &str) -> Option<&'static str> {
+    match flag {
+        "--richness-landmarks-inherited" => Some("--richness-landmarks-inherited"),
+        "--richness-zones-inherited" => Some("--richness-zones-inherited"),
+        "--richness-cave-mode-inherited" => Some("--richness-cave-mode-inherited"),
+        "--richness-vertical-openings-inherited" => Some("--richness-vertical-openings-inherited"),
+        "--richness-budget-ceiling-inherited" => Some("--richness-budget-ceiling-inherited"),
+        "--richness-pacing-inherited" => Some("--richness-pacing-inherited"),
+        "--richness-variation-inherited" => Some("--richness-variation-inherited"),
+        "--richness-prop-density-inherited" => Some("--richness-prop-density-inherited"),
+        "--richness-light-density-inherited" => Some("--richness-light-density-inherited"),
+        _ => None,
     }
 }
 
@@ -664,6 +705,31 @@ pub(crate) fn usage_text() -> String {
         "  --m3-generate          Generate EnhancedV3 dungeon from scratch"
     );
     let _ = writeln!(out, "  --m3-richness-v1       Launch Richness V1 explorer");
+    let _ = writeln!(out, "  --richness-preset <name>  sparse|moderate|rich");
+    let _ = writeln!(
+        out,
+        "  --richness-theme <name>   ancient|egyptian|brutalist"
+    );
+    let _ = writeln!(out, "  --richness-seed <u64>     Richness generation seed");
+    let _ = writeln!(out, "  --richness-extent <u32>   Richness XY extent");
+    let _ = writeln!(out, "  --richness-pacing <name>  relaxed|normal|intense");
+    let _ = writeln!(
+        out,
+        "  --richness-variation <name>  restrained|moderate|wild"
+    );
+    let _ = writeln!(out, "  --richness-landmarks|zones|vertical-openings <u32>");
+    let _ = writeln!(
+        out,
+        "  --richness-cave-mode <name>  disabled|allowed|required"
+    );
+    let _ = writeln!(
+        out,
+        "  --richness-prop-density|light-density|budget-ceiling <u32>"
+    );
+    let _ = writeln!(
+        out,
+        "  --richness-<field>-inherited  Clear an inherited-or-explicit override"
+    );
     let _ = writeln!(
         out,
         "  --seed <u64>           Generation seed (default: current system time)"
@@ -780,12 +846,10 @@ pub(crate) fn usage_text() -> String {
 fn print_usage() {
     eprint!("{}", usage_text());
 }
-// ── Richness V1 unregistered CLI parser ───────────────────────────────────
+// ── Richness V1 CLI override parser ───────────────────────────────────────
 //
-// The `parse_richness_launch_token` function mirrors every RichnessDraft
-// control. It is intentionally NOT registered in the ordinary `parse_from`
-// dispatch or `print_usage` help text. It exists for standalone testing and
-// will be wired into the public CLI at release (Phase 18).
+// The primary parser enforces the mode gate and option arity. This parser
+// converts the Richness-prefixed controls into the explorer launch token.
 
 /// Parsed Richness V1 launch token with all draft controls.
 ///
@@ -861,10 +925,8 @@ impl RichnessLaunchToken {
 
 /// Parse a Richness V1 launch token from CLI arguments.
 ///
-/// This function is intentionally UNREGISTERED — it is not called by
-/// `parse_from` and its options are not listed in `print_usage`. It
-/// exists for standalone testing and will be wired into the public CLI
-/// at release (Phase 18).
+/// Non-Richness arguments are ignored because production passes the original
+/// process argument vector. Unknown `--richness-*` flags still fail closed.
 ///
 /// All Richness options use the `--richness-` prefix to avoid collision
 /// with existing M3 and BSP flags.
@@ -1006,7 +1068,10 @@ pub(crate) fn parse_richness_launch_token(
                 token.richness_light_density_inherited = true;
                 i += 1;
             }
-            other => return Err(CliError::UnknownArgument(other.to_string())),
+            other if other.starts_with("--richness-") => {
+                return Err(CliError::UnknownArgument(other.to_string()));
+            }
+            _ => i += 1,
         }
     }
 

@@ -314,6 +314,7 @@ if [[ "$MODE" == "richness" ]]; then
     brutalist) RICHNESS_WAD="$RICHNESS_WAD_BRUTALIST"; RICHNESS_PALETTE="$RICHNESS_PALETTE_BRUTALIST" ;;
     *) die "unknown richness theme: $THEME (ancient|egyptian|brutalist)" ;;
   esac
+  RICHNESS_TEXTURES="$(dirname "$RICHNESS_WAD")/textures"
 
   # Cache identity covers generator + authored content + theme assets +
   # compiler profile + pinned tools + this script: any change rebuilds.
@@ -332,7 +333,10 @@ if [[ "$MODE" == "richness" ]]; then
   MANIFEST="$CACHE_ROOT/${RICHNESS_LABEL}.manifest.toml"
   FINGERPRINT="$(richness_fingerprint)"
 
-  [[ -n "$BUST" ]] && bust_cache "$SEED" "$RICHNESS_LABEL"
+  if [[ -n "$BUST" ]]; then
+    rm -f "$BSP" "$LIT" "$MANIFEST"
+    echo "$(green "✓") Cache busted for $(bold "$RICHNESS_LABEL")"
+  fi
 
   if ! verify_richness_cache "$BSP" "$LIT" "$MANIFEST" "$RICHNESS_WAD" "$RICHNESS_PALETTE" "$FINGERPRINT"; then
     echo ""
@@ -365,11 +369,22 @@ if [[ "$MODE" == "richness" ]]; then
 
   IMPORT_MODE="--strict"
   [[ -n "$DEVELOPMENT" ]] && IMPORT_MODE="$DEVELOPMENT"
-  RICHNESS_ARGS=("$IMPORT_MODE" "--bsp" "$BSP" "--palette" "$RICHNESS_PALETTE" "--wad" "$RICHNESS_WAD")
-  [[ -f "$LIT" ]] && RICHNESS_ARGS+=(--lit "$LIT")
+  RICHNESS_ARGS=(
+    "$IMPORT_MODE"
+    "--m3-richness-v1"
+    "--bsp" "$BSP"
+    "--palette" "$RICHNESS_PALETTE"
+    "--lit" "$LIT"
+    "--wad" "$RICHNESS_WAD"
+    "--textures" "$RICHNESS_TEXTURES"
+    "--richness-seed" "$SEED"
+    "--richness-preset" "$PRESET"
+    "--richness-theme" "$THEME"
+  )
+  [[ -x "$DEFAULT_TOOL_PATH/qbsp" && -x "$DEFAULT_TOOL_PATH/vis" && -x "$DEFAULT_TOOL_PATH/light" ]] && RICHNESS_ARGS+=(--ericw-tools "$DEFAULT_TOOL_PATH")
 
   echo ""
-  echo "  $(bold "Launching") $(green "richness") ${PRESET}/${THEME} seed $(bold "$SEED")..."
+  echo "  $(bold "Launching") $(green "richness explorer") ${PRESET}/${THEME} seed $(bold "$SEED")..."
   exec cargo run -p bsp_beta -- "${RICHNESS_ARGS[@]}"
 fi
 

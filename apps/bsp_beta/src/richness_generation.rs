@@ -422,7 +422,7 @@ fn validate_executor_outcome(
 // ── Package directory helpers ──────────────────────────────────────────────
 
 /// Create a process-unique root for Richness packages.
-fn create_unique_richness_package_root() -> std::io::Result<PathBuf> {
+pub fn create_unique_richness_package_root() -> std::io::Result<PathBuf> {
     static ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     for _ in 0..64 {

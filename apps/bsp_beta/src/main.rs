@@ -30,7 +30,8 @@ use bsp_beta::richness_generation::{
 };
 use bsp_beta::richness_gui::{
     InheritedOr, RichnessCaveMode, RichnessDraft, RichnessFieldId, RichnessGui, RichnessGuiAction,
-    RichnessGuiMode, RichnessInputAction, RichnessPreset, RichnessTheme,
+    RichnessGuiMode, RichnessInputAction, RichnessPacing, RichnessPreset, RichnessTheme,
+    RichnessVariation,
 };
 use bsp_beta::runtime_bridge::RuntimeBridge;
 use bsp_beta::scene_sync::{sync_snapshot_to_scene, EntityNodeMap};
@@ -86,6 +87,8 @@ enum AppError {
     Window(#[from] winit::error::OsError),
     #[error("MCP stdio error: {0}")]
     McpIo(#[from] std::io::Error),
+    #[error("invalid Richness CLI: {0}")]
+    RichnessCli(#[source] cli::CliError),
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────
@@ -276,10 +279,10 @@ fn build_initial_generated_import(
 
 fn run() -> Result<(), AppError> {
     let args = cli::CliArgs::parse();
-    // Richness V1 launches build their own package through the real
-    // pipeline; they bypass the direct-BSP import machinery entirely.
+    // Richness V1 either builds its startup package or authorizes the
+    // complete prebuilt closure supplied by the cache-backed launcher.
     if args.m3_richness {
-        let richness_args = parse_richness_cli_overrides();
+        let richness_args = parse_richness_cli_overrides()?;
         return run_richness_launch(&args, &richness_args, &tools_dir_for_richness(&args)?);
     }
     let import_mode = if args.m3_generate {
@@ -391,9 +394,8 @@ fn run() -> Result<(), AppError> {
 
 /// Parse Richness CLI overrides from the original process args.
 /// Only `--richness-*` flags are recognized; unknown args are ignored.
-fn parse_richness_cli_overrides() -> cli::RichnessLaunchToken {
-    let args: Vec<String> = std::env::args().collect();
-    cli::parse_richness_launch_token(&args).unwrap_or_default()
+fn parse_richness_cli_overrides() -> Result<cli::RichnessLaunchToken, AppError> {
+    cli::parse_richness_launch_token(std::env::args().skip(1)).map_err(AppError::RichnessCli)
 }
 
 /// Resolve ericw-tools directory for Richness generation.
@@ -430,6 +432,20 @@ fn apply_richness_overrides(
         draft.set_seed(v);
     }
     // Apply inherited-or-explicit fields (inherited flags win over explicit values)
+    if token.richness_pacing_inherited {
+        draft.try_set_pacing(InheritedOr::Inherited)?;
+    } else if let Some(ref tag) = token.richness_pacing {
+        let pacing = RichnessPacing::from_tag(tag)
+            .ok_or_else(|| format!("unknown richness pacing '{tag}'"))?;
+        draft.try_set_pacing(InheritedOr::Explicit(pacing))?;
+    }
+    if token.richness_variation_inherited {
+        draft.try_set_variation(InheritedOr::Inherited)?;
+    } else if let Some(ref tag) = token.richness_variation {
+        let variation = RichnessVariation::from_tag(tag)
+            .ok_or_else(|| format!("unknown richness variation '{tag}'"))?;
+        draft.try_set_variation(InheritedOr::Explicit(variation))?;
+    }
     if token.richness_landmarks_inherited {
         draft.try_set_inherited_u32(RichnessFieldId::Landmarks, InheritedOr::Inherited)?;
     } else if let Some(v) = token.richness_landmarks {
@@ -451,6 +467,16 @@ fn apply_richness_overrides(
         draft.try_set_inherited_u32(RichnessFieldId::VerticalOpenings, InheritedOr::Inherited)?;
     } else if let Some(v) = token.richness_vertical_openings {
         draft.try_set_explicit_u32(RichnessFieldId::VerticalOpenings, v)?;
+    }
+    if token.richness_prop_density_inherited {
+        draft.try_set_inherited_u32(RichnessFieldId::PropDensity, InheritedOr::Inherited)?;
+    } else if let Some(v) = token.richness_prop_density {
+        draft.try_set_explicit_u32(RichnessFieldId::PropDensity, v)?;
+    }
+    if token.richness_light_density_inherited {
+        draft.try_set_inherited_u32(RichnessFieldId::LightDensity, InheritedOr::Inherited)?;
+    } else if let Some(v) = token.richness_light_density {
+        draft.try_set_explicit_u32(RichnessFieldId::LightDensity, v)?;
     }
     if token.richness_budget_ceiling_inherited {
         draft.try_set_inherited_u32(RichnessFieldId::BudgetCeiling, InheritedOr::Inherited)?;
@@ -476,6 +502,34 @@ fn build_richness_startup_package(
     )
     .map_err(|e| format!("richness package build failed: {e}"))?;
     Ok(())
+}
+
+/// Authorize a complete prebuilt Richness closure supplied on the CLI.
+fn authorize_prebuilt_richness_closure(
+    args: &cli::CliArgs,
+) -> Result<package::AuthorizedBspImport, AppError> {
+    let required = |path: Option<&std::path::Path>, flag: &str| {
+        path.ok_or_else(|| {
+            AppError::BridgeProof(format!("prebuilt Richness closure requires {flag} <path>"))
+        })
+    };
+    let bsp = required(args.bsp_path.as_deref(), "--bsp")?;
+    let palette = required(args.palette_path.as_deref(), "--palette")?;
+    let lit = required(args.lit_path.as_deref(), "--lit")?;
+    let wad = required(args.wad_path.as_deref(), "--wad")?;
+    let textures = required(args.textures_dir.as_deref(), "--textures")?;
+    let wad_paths = vec![wad.to_path_buf()];
+
+    package::authorize_direct_import(
+        bsp,
+        palette,
+        Some(lit),
+        &wad_paths,
+        Some(textures),
+        app_import_mode(args)?,
+        args.scale,
+    )
+    .map_err(AppError::PackageLoad)
 }
 
 /// Authorize a richness package closure.
@@ -556,25 +610,29 @@ fn run_richness_launch(
         )));
     }
 
-    // Create package root
+    // Create the process-confined root used by subsequent GUI generations.
     sweep_stale_richness_package_roots(std::time::Duration::from_secs(300));
-    let package_root = generation::create_unique_package_root().map_err(|error| {
-        AppError::BridgeProof(format!("reserve richness package root: {error}"))
-    })?;
-    let startup_dir = package_root.join("startup");
+    let package_root =
+        richness_generation::create_unique_richness_package_root().map_err(|error| {
+            AppError::BridgeProof(format!("reserve richness package root: {error}"))
+        })?;
 
-    // Build the startup package
-    if let Err(e) = build_richness_startup_package(&startup_draft, tools_dir, &startup_dir) {
-        let _ = std::fs::remove_dir_all(&package_root);
-        return Err(AppError::BridgeProof(e));
-    }
-
-    // Authorize and load
-    let import = match authorize_richness_package(&startup_dir, args.scale) {
+    // A cache-backed launch supplies a complete, already compiled closure.
+    // Otherwise build the startup package through the production pipeline.
+    let (import, built_startup) = if args.bsp_path.is_some() {
+        (authorize_prebuilt_richness_closure(args), false)
+    } else {
+        let startup_dir = package_root.join("startup");
+        let import = build_richness_startup_package(&startup_draft, tools_dir, &startup_dir)
+            .map_err(AppError::BridgeProof)
+            .and_then(|()| authorize_richness_package(&startup_dir, args.scale));
+        (import, true)
+    };
+    let import = match import {
         Ok(import) => import,
-        Err(e) => {
+        Err(error) => {
             let _ = std::fs::remove_dir_all(&package_root);
-            return Err(e);
+            return Err(error);
         }
     };
 
@@ -590,7 +648,11 @@ fn run_richness_launch(
         return Err(AppError::BspRuntime(error));
     }
 
-    log::info!("Richness package built and authorized");
+    if built_startup {
+        log::info!("Richness startup package built and authorized");
+    } else {
+        log::info!("Prebuilt Richness startup closure authorized");
+    }
 
     if args.headless {
         run_richness_headless(args, &mut coordinator, movement_world, &package_root)

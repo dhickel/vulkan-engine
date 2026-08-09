@@ -291,6 +291,76 @@ fn all_three_richness_theme_assets_are_present() {
     }
 }
 
+#[test]
+fn frozen_manifest_has_complete_real_hashes_and_canonical_order() {
+    fn valid_sha256(value: &str) -> bool {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+
+    let manifest: CorpusManifest = serde_json::from_str(include_str!(
+        "fixtures/enhanced_v3_richness_corpus/manifest.json"
+    ))
+    .expect("frozen manifest must deserialize");
+    let expected_entries = corpus_entries();
+    assert_eq!(manifest.entry_count, 36);
+    assert_eq!(manifest.entries.len(), 36);
+    assert_eq!(expected_entries.len(), 36);
+
+    let empty_sha256 = sha256_hex(b"");
+    let constants_sha256 = sha256_hex(include_bytes!(
+        "../src/enhanced_v3/richness/generated_content.rs"
+    ));
+    let mut ordered_identities = Vec::new();
+
+    for ((preset, theme, seed), entry) in expected_entries.into_iter().zip(&manifest.entries) {
+        let identity = format!("{}/{}/seed:{seed}", preset.tag(), theme.tag());
+        assert_eq!(entry.identity, identity, "manifest order drifted");
+        assert_eq!(entry.seed, seed, "{identity}: seed drifted");
+        assert_eq!(entry.preset, preset.tag(), "{identity}: preset drifted");
+        assert_eq!(entry.theme, theme.tag(), "{identity}: theme drifted");
+        assert_eq!(
+            entry.extent,
+            preset_extent(preset),
+            "{identity}: extent drifted"
+        );
+
+        for (label, hash) in [
+            ("request", &entry.request_sha256),
+            ("request identity", &entry.request_identity_sha256),
+            ("metadata", &entry.metadata_sha256),
+            ("constants", &entry.constants_sha256),
+            ("map", &entry.map_sha256),
+            ("bsp", &entry.bsp_sha256),
+            ("lit", &entry.lit_sha256),
+            ("wad", &entry.wad_sha256),
+            ("palette", &entry.palette_sha256),
+            ("package", &entry.package_sha256),
+            ("qbsp tool", &entry.qbsp_sha256),
+            ("vis tool", &entry.vis_sha256),
+            ("light tool", &entry.light_sha256),
+        ] {
+            assert!(valid_sha256(hash), "{identity}: invalid {label} SHA-256");
+            assert_ne!(hash, &empty_sha256, "{identity}: empty {label} placeholder");
+        }
+        assert_eq!(
+            entry.constants_sha256, constants_sha256,
+            "{identity}: generated constants hash drifted"
+        );
+
+        ordered_identities.extend_from_slice(identity.as_bytes());
+        ordered_identities.push(0);
+    }
+
+    assert_eq!(
+        manifest.ordered_sha256,
+        sha256_hex(&ordered_identities),
+        "ordered corpus identity drifted"
+    );
+}
+
 // ── 36-entry generation ───────────────────────────────────────────────────
 
 #[test]
@@ -817,7 +887,9 @@ fn freeze_canonical_manifest() {
         let request_identity_sha256 = sha256_hex(&output.request_metadata.request_identity());
         let metadata_sha256 = sha256_hex(&output.generation_metadata.to_canonical_bytes());
         let map_sha256 = sha256_hex(output.map_text.as_bytes());
-        let constants_sha256 = sha256_hex(b""); // empty constants for now
+        let constants_sha256 = sha256_hex(include_bytes!(
+            "../src/enhanced_v3/richness/generated_content.rs"
+        ));
 
         // Compile
         let (wad_path, palette_path) = theme_asset_paths(theme.tag());

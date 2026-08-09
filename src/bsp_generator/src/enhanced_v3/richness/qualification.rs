@@ -146,7 +146,7 @@ pub struct CorpusManifestEntry {
     pub request_identity_sha256: String,
     /// SHA-256 of the generation metadata canonical bytes.
     pub metadata_sha256: String,
-    /// SHA-256 of the generation constants (a frozen empty-hash for now).
+    /// SHA-256 of the authored generated Rust constants source.
     pub constants_sha256: String,
     /// SHA-256 of the generated .map text bytes.
     pub map_sha256: String,

@@ -14,7 +14,9 @@
 
 use super::fields::{self, FieldTag};
 use super::fixed::FixedQ32;
-use super::qualification::{pipeline_map_text, resolve_from_bytes};
+use super::qualification::{
+    corpus_entries, pipeline_output, preset_extent, resolve_from_bytes, sha256_hex, CorpusManifest,
+};
 use super::sampling::{self, PoissonConfig};
 use sha2::{Digest, Sha256};
 
@@ -57,14 +59,11 @@ fn finish_digest(buf: &[u8]) -> [u8; 32] {
 const FROZEN_GOLDEN_DIGEST_HEX: &str =
     "ad031221721274c126c7db5694e0107b369db88ad704f0f598eff170081ba9b8";
 
-/// Frozen cross-architecture identity digest for all 36 corpus request/map/metadata bytes.
+/// Frozen cross-architecture identity digest for all 36 corpus entries.
 ///
-/// This digest covers every request identity, map text, metadata, and constants byte
-/// for all 36 EnhancedV3 Richness corpus entries. It must be identical on x86-64 and
-/// AArch64 — any divergence indicates a platform-dependent computation path and is a
-/// release blocker.
-const FROZEN_CROSS_ARCH_IDENTITY_DIGEST_HEX: &str =
-    "4fd09bc529e1a496af4c7f18c551ab6fe85ee048d39c542a98e6b9b33e0369fb";
+/// This covers each identity, canonical request, request identity, map,
+/// metadata record, and the authored generated constants.
+const FROZEN_CROSS_ARCH_IDENTITY_DIGEST_HEX: &str = "REPLACE_WITH_FULL_36_ENTRY_DIGEST";
 
 // ── Golden vectors ─────────────────────────────────────────────────────────
 
@@ -776,89 +775,82 @@ fn build_cross_arch_request(seed: u64, extent: u32, preset: &str, theme: &str) -
 }
 
 #[test]
+#[ignore = "full 36-entry release-only cross-architecture gate"]
 fn cross_arch_36_entry_identity_digest() {
-    let mut buf = Vec::with_capacity(1_048_576);
+    fn hash_frame(hasher: &mut Sha256, bytes: &[u8]) {
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
 
-    push_str(&mut buf, "richness-cross-arch-identity-v1");
+    let manifest: CorpusManifest = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/enhanced_v3_richness_corpus/manifest.json"
+    ))
+    .expect("frozen Richness corpus manifest must deserialize");
+    let entries = corpus_entries();
+    assert_eq!(manifest.entry_count, 36);
+    assert_eq!(manifest.entries.len(), 36);
+    assert_eq!(entries.len(), 36);
 
-    // Representative cross-section: all 3 themes × Sparse preset × seed 42.
-    // Sparse (12 rooms) is the fastest preset and still exercises the full
-    // request→resolve→pipeline→map_text→metadata chain. Combined with the
-    // existing golden-vectors test, this proves the cross-arch contract.
-    //
-    // The full 36-entry corpus is exercised by the integration test
-    // enhanced_v3_richness_corpus (Subphase B, already green).
-    let entries: Vec<(&str, &str, u64)> = vec![
-        ("sparse", "ancient", 42),
-        ("sparse", "egyptian", 42),
-        ("sparse", "brutalist", 42),
-    ];
+    let constants = include_bytes!("generated_content.rs");
+    let constants_sha256 = sha256_hex(constants);
+    let mut hasher = Sha256::new();
+    hash_frame(&mut hasher, b"richness-cross-arch-identity-v2");
 
-    push_u64(&mut buf, entries.len() as u64);
+    for ((preset, theme, seed), frozen) in entries.into_iter().zip(&manifest.entries) {
+        let identity = format!("{}/{}/seed:{seed}", preset.tag(), theme.tag());
+        assert_eq!(frozen.identity, identity, "non-canonical manifest order");
+        assert_eq!(frozen.seed, seed, "{identity}: seed drifted");
+        assert_eq!(frozen.preset, preset.tag(), "{identity}: preset drifted");
+        assert_eq!(frozen.theme, theme.tag(), "{identity}: theme drifted");
 
-    for (preset_tag, theme_tag, seed) in &entries {
-        let extent: u32 = 2048; // Sparse preset
-        let identity = format!("{preset_tag}/{theme_tag}/seed:{seed}");
-
-        push_str(&mut buf, &identity);
-
-        // ── Request bytes ───────────────────────────────────────────
-        let request_bytes = build_cross_arch_request(*seed, extent, preset_tag, theme_tag);
-        push_u64(&mut buf, request_bytes.len() as u64);
-        buf.extend_from_slice(&request_bytes);
-
-        // ── Resolve + generate map + metadata ───────────────────────
+        let extent = preset_extent(preset);
+        assert_eq!(frozen.extent, extent, "{identity}: extent drifted");
+        let request_bytes = build_cross_arch_request(seed, extent, preset.tag(), theme.tag());
         let resolved = resolve_from_bytes(&request_bytes)
             .unwrap_or_else(|e| panic!("{identity}: resolve failed: {e:?}"));
-
-        let map_text = pipeline_map_text(&resolved)
+        let output = pipeline_output(&resolved)
             .unwrap_or_else(|e| panic!("{identity}: pipeline failed: {e:?}"));
+        let canonical_request = output.request_metadata.canonical_request();
+        let request_identity = output.request_metadata.request_identity();
+        let metadata = output.generation_metadata.to_canonical_bytes();
 
-        assert!(!map_text.is_empty(), "{identity}: empty map");
-        assert!(
-            map_text.contains("worldspawn"),
-            "{identity}: map missing worldspawn"
+        assert_eq!(
+            frozen.request_sha256,
+            sha256_hex(canonical_request),
+            "{identity}: canonical request hash drifted"
+        );
+        assert_eq!(
+            frozen.request_identity_sha256,
+            sha256_hex(&request_identity),
+            "{identity}: request identity hash drifted"
+        );
+        assert_eq!(
+            frozen.map_sha256,
+            sha256_hex(output.map_text.as_bytes()),
+            "{identity}: map hash drifted"
+        );
+        assert_eq!(
+            frozen.metadata_sha256,
+            sha256_hex(&metadata),
+            "{identity}: metadata hash drifted"
+        );
+        assert_eq!(
+            frozen.constants_sha256, constants_sha256,
+            "{identity}: generated constants hash drifted"
         );
 
-        // Accumulate map bytes (framed)
-        push_u64(&mut buf, map_text.len() as u64);
-        buf.extend_from_slice(map_text.as_bytes());
-
-        // ── Full pipeline output for metadata ───────────────────────
-        let output = super::qualification::pipeline_output(&resolved)
-            .unwrap_or_else(|e| panic!("{identity}: pipeline_output failed: {e:?}"));
-
-        let metadata_bytes = output.generation_metadata.to_canonical_bytes();
-        push_u64(&mut buf, metadata_bytes.len() as u64);
-        buf.extend_from_slice(&metadata_bytes);
-
-        // Constants bytes (empty for now — tracked by manifest)
-        let constants_bytes: &[u8] = &[];
-        push_u64(&mut buf, constants_bytes.len() as u64);
-        buf.extend_from_slice(constants_bytes);
+        hash_frame(&mut hasher, identity.as_bytes());
+        hash_frame(&mut hasher, canonical_request);
+        hash_frame(&mut hasher, &request_identity);
+        hash_frame(&mut hasher, output.map_text.as_bytes());
+        hash_frame(&mut hasher, &metadata);
+        hash_frame(&mut hasher, constants);
     }
 
-    // ── Compute canonical digest ─────────────────────────────────────
-    let digest = finish_digest(&buf);
-    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-
-    println!("\n>>> CROSS-ARCH IDENTITY DIGEST: {hex} <<<\n");
-
-    if FROZEN_CROSS_ARCH_IDENTITY_DIGEST_HEX
-        == "0000000000000000000000000000000000000000000000000000000000000000"
-    {
-        println!(
-            ">>> PLACEHOLDER DIGEST — update FROZEN_CROSS_ARCH_IDENTITY_DIGEST_HEX to: {hex} <<<"
-        );
-    }
-
+    let digest = format!("{:x}", hasher.finalize());
+    println!("\n>>> CROSS-ARCH 36-ENTRY IDENTITY DIGEST: {digest} <<<\n");
     assert_eq!(
-        hex, FROZEN_CROSS_ARCH_IDENTITY_DIGEST_HEX,
-        "Cross-architecture identity digest mismatch!\n\
-         Expected: {FROZEN_CROSS_ARCH_IDENTITY_DIGEST_HEX}\n\
-         Got:      {hex}\n\
-         This test ensures x86-64 and AArch64 produce byte-identical results.\n\
-         If this is the first run or the digest changed intentionally, update\n\
-         FROZEN_CROSS_ARCH_IDENTITY_DIGEST_HEX to the printed value."
+        digest, FROZEN_CROSS_ARCH_IDENTITY_DIGEST_HEX,
+        "canonical 36-entry Richness identity drifted"
     );
 }

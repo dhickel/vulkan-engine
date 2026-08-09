@@ -203,6 +203,9 @@ jobs:
         run: cargo test -p bsp_generator --lib richness::vectors
       - name: cargo test richness golden vectors (release)
         run: cargo test --release -p bsp_generator --lib richness::vectors
+      - name: cargo test full 36-entry cross-architecture identity (release)
+        timeout-minutes: 15
+        run: cargo test --release -p bsp_generator --lib cross_arch_36_entry_identity_digest -- --ignored --nocapture
 
   # ── Richness golden vectors AArch64 ───────────────────────────────────
   richness-vectors-aarch64:
@@ -215,3 +218,6 @@ jobs:
         run: cargo test -p bsp_generator --lib richness::vectors
       - name: cargo test richness golden vectors (release)
         run: cargo test --release -p bsp_generator --lib richness::vectors
+      - name: cargo test full 36-entry cross-architecture identity (release)
+        timeout-minutes: 15
+        run: cargo test --release -p bsp_generator --lib cross_arch_36_entry_identity_digest -- --ignored --nocapture

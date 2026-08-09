@@ -1443,9 +1443,6 @@ pub fn validate_theme_closure(
     let expected = expected_closure_filenames(theme_def);
 
     for path_str in &on_disk {
-        if path_str == "__pycache__" || path_str.starts_with("__pycache__/") {
-            continue; // build artifacts are allowed
-        }
         if !expected.contains(path_str) {
             return Err(RichnessAssetError::ExtraFile {
                 dir: theme_dir.to_path_buf(),
@@ -1543,14 +1540,7 @@ fn collect_files(
             return Err(RichnessAssetError::SymlinkRejected { path });
         }
         if meta.is_dir() {
-            if rel != "textures" && !rel.starts_with("textures/") {
-                // Allow textures/ and __pycache__ only
-                if rel != "__pycache__" && !rel.starts_with("__pycache__/") {
-                    relative_set.insert(rel.clone());
-                }
-            } else {
-                relative_set.insert(rel.clone());
-            }
+            relative_set.insert(rel.clone());
             collect_files(root, &path, relative_set, file_paths)?;
         } else if meta.is_file() {
             relative_set.insert(rel.clone());
@@ -1973,6 +1963,23 @@ mod tests {
     fn ancient_closure_passes_validation() {
         let dir = ancient_dir();
         validate_theme_closure(&dir, &THEME_ANCIENT).expect("ancient closure must validate");
+    }
+
+    #[test]
+    fn python_bytecode_is_not_part_of_the_exact_closure() {
+        let dir = create_temp_dir().expect("temp dir");
+        let _cleanup = TempDirGuard(dir.clone());
+        let pycache = dir.join("__pycache__");
+        std::fs::create_dir_all(&pycache).expect("create pycache");
+        std::fs::write(pycache.join("build.cpython-314.pyc"), b"not allowed").expect("write pyc");
+
+        let error = validate_theme_closure(&dir, &THEME_ANCIENT)
+            .expect_err("python bytecode must fail the exact closure");
+        assert!(matches!(
+            error,
+            RichnessAssetError::ExtraFile { ref filename, .. }
+                if filename == "__pycache__"
+        ));
     }
 
     #[test]
