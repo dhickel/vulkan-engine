@@ -18,7 +18,7 @@ use crate::enhanced_v3::richness::{
     lighting::{place_room_lights, readability_floor_satisfied},
     props::{place_room_props, RoomPresentation},
     request::RichnessTheme,
-    reservation::ReservationJournal,
+    reservation::{ReservationJournal, ReservationKind},
 };
 
 /// The complete presentation layer result.
@@ -26,8 +26,12 @@ use crate::enhanced_v3::richness::{
 pub(crate) struct Presentation {
     /// Per-room prop placements.
     pub rooms: BTreeMap<ReservationId, RoomPresentation>,
+    /// Deterministic evidence for prop candidates skipped as unsafe or unenclosed.
+    pub skipped_room_props: BTreeMap<ReservationId, Vec<super::props::SkippedProp>>,
     /// Per-room light placements.
     pub room_lights: BTreeMap<ReservationId, Vec<super::lighting::PlacedLight>>,
+    /// Deterministic evidence for light candidates skipped as unenclosed.
+    pub skipped_room_lights: BTreeMap<ReservationId, Vec<super::lighting::SkippedLight>>,
     /// Rooms treated as quiet negative space.
     pub quiet_rooms: Vec<ReservationId>,
     /// Rooms treated as dense set pieces.
@@ -42,6 +46,19 @@ struct RoomInput {
     archetype: ArchetypeIndex,
 }
 
+/// Match the reservation kinds materialized by `compose_all_rooms`.
+/// Witnesses, omissions, and vertical child reservations do not own an
+/// enclosing room shell and must never receive point entities or props.
+fn emits_room_geometry(kind: ReservationKind) -> bool {
+    matches!(
+        kind,
+        ReservationKind::StandardRoom
+            | ReservationKind::MultiStoreyRoom
+            | ReservationKind::CaveHost
+            | ReservationKind::NegativeSpace
+    )
+}
+
 fn room_inputs(
     journal: &ReservationJournal,
     request_archetypes: &BTreeMap<
@@ -51,7 +68,7 @@ fn room_inputs(
 ) -> BTreeMap<ReservationId, RoomInput> {
     let mut inputs = BTreeMap::new();
     for (id, record) in &journal.reservations {
-        if !record.committed {
+        if !record.committed || !emits_room_geometry(record.kind) {
             continue;
         }
         let request_id = match record.request_id {
@@ -149,7 +166,12 @@ pub(crate) fn apply_presentation(
             max_props,
             quiet,
         )?;
-        presentation.rooms.insert(*room, room_props.clone());
+        if !room_props.skipped.is_empty() {
+            presentation
+                .skipped_room_props
+                .insert(*room, room_props.skipped.clone());
+        }
+        presentation.rooms.insert(*room, room_props);
 
         // Lights (bounded by the global presentation light budget; excess
         // is truncated deterministically rather than erroring).
@@ -164,6 +186,11 @@ pub(crate) fn apply_presentation(
         presentation
             .room_lights
             .insert(*room, lights.lights.clone());
+        if !lights.skipped.is_empty() {
+            presentation
+                .skipped_room_lights
+                .insert(*room, lights.skipped.clone());
+        }
 
         if quiet {
             presentation.quiet_rooms.push(*room);
@@ -178,7 +205,7 @@ pub(crate) fn apply_presentation(
         if large && presentation.broken_rooms.len() % 3 != 0 {
             // Deterministic authored damage: add a rubble cluster at a
             // wall-adjacent cell (the authored non-structural variant).
-            let _ = place_room_props(
+            let broken = place_room_props(
                 ir,
                 *room,
                 input.bounds,
@@ -189,6 +216,20 @@ pub(crate) fn apply_presentation(
                 1,
                 true,
             )?;
+            if let Some(room_presentation) = presentation.rooms.get_mut(room) {
+                room_presentation.detail_count = room_presentation
+                    .detail_count
+                    .saturating_add(broken.detail_count);
+                room_presentation.props.extend(broken.props);
+                room_presentation.skipped.extend(broken.skipped);
+                if room_presentation.skipped.is_empty() {
+                    presentation.skipped_room_props.remove(room);
+                } else {
+                    presentation
+                        .skipped_room_props
+                        .insert(*room, room_presentation.skipped.clone());
+                }
+            }
             presentation.broken_rooms.push(*room);
         }
     }
@@ -221,8 +262,38 @@ mod tests {
     fn presentation_default_is_empty() {
         let presentation = Presentation::default();
         assert!(presentation.rooms.is_empty());
+        assert!(presentation.skipped_room_props.is_empty());
+        assert!(presentation.skipped_room_lights.is_empty());
         assert!(presentation.quiet_rooms.is_empty());
         assert!(presentation.dense_rooms.is_empty());
+    }
+
+    #[test]
+    fn presentation_inputs_match_geometry_emitting_room_kinds() {
+        for kind in [
+            ReservationKind::StandardRoom,
+            ReservationKind::MultiStoreyRoom,
+            ReservationKind::CaveHost,
+            ReservationKind::NegativeSpace,
+        ] {
+            assert!(emits_room_geometry(kind), "{kind:?} emits a room shell");
+        }
+        for kind in [
+            ReservationKind::VerticalHost,
+            ReservationKind::PitOmission,
+            ReservationKind::Route,
+            ReservationKind::PortalThroat,
+            ReservationKind::Turn,
+            ReservationKind::Spawn,
+            ReservationKind::Light,
+            ReservationKind::Support,
+            ReservationKind::Composite,
+        ] {
+            assert!(
+                !emits_room_geometry(kind),
+                "{kind:?} is a witness, omission, or non-room owner"
+            );
+        }
     }
 
     #[test]

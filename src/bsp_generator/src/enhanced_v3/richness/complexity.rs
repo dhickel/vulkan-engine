@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 
 use super::generated_content;
 use super::ids::PacingBlueprint;
-use super::request::RichnessPreset;
+use super::request::{RichnessCaveMode, RichnessPreset};
 use super::topology::TopologyResult;
 
 // ── Budget dimensions ──────────────────────────────────────────────────────
@@ -600,10 +600,11 @@ fn vertical_cost(
         entities,
         lights: 0,
         vertical_openings: logical_openings,
-        // Per-feature inter-brush supports are reserved by the concrete
-        // recipe entries added after catalog selection; this aggregate
-        // semantic cost must not count every world-rooted brush as a contact.
-        support_contacts: 0,
+        // Every validator-counted vertical member may require its own support
+        // edge. Charging the complete brush bound before optional recipes are
+        // selected leaves deterministic room for that proof under the frozen
+        // 128-contact ceiling.
+        support_contacts: brushes,
         package_assets: 0,
         compiler_lumps: 0,
         renderer_batches: 1,
@@ -631,10 +632,37 @@ fn cost_for_vertical_recipe(recipe: super::content_types::VerticalRecipe) -> Bud
 fn planned_vertical_cost(
     blueprint: &PacingBlueprint,
     topology: &TopologyResult,
+    cave_mode: RichnessCaveMode,
 ) -> BudgetReservation {
+    use super::content_types::VerticalRecipe;
     use super::reservation::ReservationKind;
 
+    let recipe_for = |record: &super::reservation::ReservationRecord| {
+        record
+            .request_id
+            .and_then(|request_id| blueprint.archetype_requests.get(&request_id))
+            .and_then(|request| {
+                generated_content::ARCHETYPE_VERTICAL_RECIPE
+                    .get(request.archetype.raw() as usize)
+                    .copied()
+            })
+            .unwrap_or(VerticalRecipe::None)
+    };
+
+    let cave_vertical = super::cave::synthesize_cave(blueprint.seed, cave_mode, &topology.journal)
+        .ok()
+        .flatten()
+        .map(|cave| {
+            let brushes = cave
+                .solid_boxes
+                .iter()
+                .filter(|solid| solid.role == super::cave::CaveRole::Wall)
+                .count() as u32;
+            vertical_cost(brushes, 0, 0, 0)
+        })
+        .unwrap_or(BudgetReservation::ZERO);
     let mut total = BudgetReservation::ZERO;
+    let mut cave_reserved = false;
     for record in topology
         .journal
         .reservations
@@ -642,18 +670,10 @@ fn planned_vertical_cost(
         .filter(|record| record.committed)
     {
         match record.kind {
-            ReservationKind::VerticalHost => {
-                let recipe = record
-                    .request_id
-                    .and_then(|request_id| blueprint.archetype_requests.get(&request_id))
-                    .and_then(|request| {
-                        generated_content::ARCHETYPE_VERTICAL_RECIPE
-                            .get(request.archetype.raw() as usize)
-                            .copied()
-                    })
-                    .unwrap_or(super::content_types::VerticalRecipe::None);
-                total = total.saturating_add(cost_for_vertical_recipe(recipe));
-            }
+            // VerticalHost cells reserve placement space for the paired
+            // feature owned by their multi-storey room; they do not emit an
+            // additional architecture assembly of their own.
+            ReservationKind::VerticalHost => {}
             ReservationKind::PitOmission => {
                 total = total.saturating_add(cost_for_vertical_recipe(
                     super::content_types::VerticalRecipe::DropHole,
@@ -675,11 +695,29 @@ fn planned_vertical_cost(
                     // `grand_arena` is deliberately a separately materialized
                     // set-piece.  Adding a catalog enum value would change the
                     // authored/code-generated content contract.
-                    Some("grand_arena") => vertical_cost(64, 0, 1, 0),
-                    _ => BudgetReservation::ZERO,
+                    // Complete maximum: 4 balconies + 4 balcony rails + 4
+                    // corbels + 2 decks + 4 deck rails + 4 deck supports +
+                    // monolith + 12 treads + 11 stair guards + 2 gates.
+                    Some("grand_arena") => vertical_cost(48, 0, 1, 0),
+                    _ => match recipe_for(record) {
+                        VerticalRecipe::None => BudgetReservation::ZERO,
+                        recipe => cost_for_vertical_recipe(recipe),
+                    },
                 };
                 total = total.saturating_add(setpiece);
             }
+            ReservationKind::NegativeSpace => match recipe_for(record) {
+                VerticalRecipe::None => {}
+                recipe => total = total.saturating_add(cost_for_vertical_recipe(recipe)),
+            },
+            // Cave synthesis is deterministic from the finalized topology,
+            // so reserve the exact materialized CaveWall set once even when
+            // placement retained several eligible host reservations.
+            ReservationKind::CaveHost if !cave_reserved => {
+                total = total.saturating_add(cave_vertical);
+                cave_reserved = true;
+            }
+            ReservationKind::CaveHost => {}
             _ => {}
         }
     }
@@ -700,7 +738,11 @@ pub(crate) struct RecipeCatalog {
 
 impl RecipeCatalog {
     /// Build the catalog from a pacing blueprint and topology result.
-    pub fn build(blueprint: &PacingBlueprint, topology: &TopologyResult) -> Self {
+    pub fn build(
+        blueprint: &PacingBlueprint,
+        topology: &TopologyResult,
+        cave_mode: RichnessCaveMode,
+    ) -> Self {
         let mut recipes: BTreeMap<RecipePriority, Vec<RecipeIdentity>> = BTreeMap::new();
 
         // ── Priority 0: Sealing / Routes ───────────────────────────────
@@ -969,7 +1011,7 @@ impl RecipeCatalog {
         // Reserve the complete materialized recipe set.  This is derived from
         // committed hosts/pit pairs plus separately authored set-pieces; no
         // synthetic minimum is injected later as a proof substitute.
-        let vertical_cost = planned_vertical_cost(blueprint, topology);
+        let vertical_cost = planned_vertical_cost(blueprint, topology, cave_mode);
         recipes.insert(
             RecipePriority::RequiredVerticalCave,
             vec![RecipeIdentity {
@@ -1451,77 +1493,13 @@ pub(crate) fn build_complexity_plan(
     theme_variant: u32,
     blueprint: &PacingBlueprint,
     topology: &TopologyResult,
-    request_archetypes: &BTreeMap<super::ids::ArchetypeRequestId, super::ids::ArchetypeIndex>,
+    _request_archetypes: &BTreeMap<super::ids::ArchetypeRequestId, super::ids::ArchetypeIndex>,
+    cave_mode: RichnessCaveMode,
 ) -> ComplexityPlan {
-    let catalog = RecipeCatalog::build(blueprint, topology);
+    let catalog = RecipeCatalog::build(blueprint, topology, cave_mode);
     let mut planner = ComplexityPlanner::new(preset, theme_variant, catalog);
     planner.reserve_theme_variant_max();
     let mut plan = planner.plan();
-    // Route shells and vertical recipe rooms add support contacts and
-    // vertical costs that the catalog does not enumerate per route: reserve
-    // them explicitly so actual <= reserved always holds for complete maps.
-    // Reserve complete vertical recipe costs for every recipe room.
-    for record in topology.journal.reservations.values() {
-        if !record.committed || record.request_id.is_none() {
-            continue;
-        }
-        let archetype = match record.request_id {
-            Some(request_id) => match request_archetypes.get(&request_id) {
-                Some(&archetype) => archetype,
-                None => continue,
-            },
-            None => continue,
-        };
-        let recipe = super::generated_content::ARCHETYPE_VERTICAL_RECIPE
-            .get(archetype.raw() as usize)
-            .copied()
-            .unwrap_or(super::content_types::VerticalRecipe::None);
-        if recipe == super::content_types::VerticalRecipe::None {
-            continue;
-        }
-        let cost = BudgetReservation {
-            faces: super::generated_content::ARCHETYPE_COST_SOURCE_FACES
-                .get(archetype.raw() as usize)
-                .copied()
-                .unwrap_or(0),
-            brushes: super::generated_content::ARCHETYPE_COST_BRUSHES
-                .get(archetype.raw() as usize)
-                .copied()
-                .unwrap_or(0),
-            entities: 0,
-            lights: 0,
-            vertical_openings: 1,
-            support_contacts: 64,
-            package_assets: 0,
-            compiler_lumps: 0,
-            renderer_batches: 1,
-            renderer_memory_bytes: 4 * 1024 * 1024,
-            runtime_requirements: 0,
-        };
-        plan.total_reserved = plan.total_reserved.saturating_add(cost);
-        // Also record a RequiredVerticalCave selection so the vertical
-        // reservation validator sees the reserved cost.
-        let identity = RecipeIdentity {
-            name: format!(
-                "vertical-recipe-{}",
-                super::generated_content::ARCHETYPE_IDS
-                    .get(archetype.raw() as usize)
-                    .copied()
-                    .unwrap_or("unknown")
-            ),
-            priority: RecipePriority::RequiredVerticalCave,
-            mandatory: true,
-            explicitly_requested: true,
-            cost,
-            alternatives: Vec::new(),
-        };
-        plan.selected_recipes.push(RecipeSelection {
-            recipe: identity,
-            priority: RecipePriority::RequiredVerticalCave,
-            was_alternative: false,
-            original_recipe_name: None,
-        });
-    }
     // Reserve the complete contract-bounded inter-brush support capacity.
     // World-rooted floor anchors are intentionally excluded from this metric;
     // actual support contacts are recomputed from non-world DAG edges.
@@ -1825,7 +1803,7 @@ mod tests {
             vertical_routes: Vec::new(),
             search_metrics: Default::default(),
         };
-        RecipeCatalog::build(&blueprint, &topology)
+        RecipeCatalog::build(&blueprint, &topology, RichnessCaveMode::Omitted)
     }
 
     #[test]
@@ -1867,7 +1845,7 @@ mod tests {
             vertical_routes: Vec::new(),
             search_metrics: Default::default(),
         };
-        let catalog = RecipeCatalog::build(&blueprint, &topology);
+        let catalog = RecipeCatalog::build(&blueprint, &topology, RichnessCaveMode::Omitted);
         let landmarks = catalog.at_priority(RecipePriority::LandmarksTraversal);
 
         let request_count = blueprint.archetype_requests.len();
@@ -1902,6 +1880,7 @@ mod tests {
             &blueprint,
             &topology,
             &BTreeMap::new(),
+            RichnessCaveMode::Omitted,
         )
     }
 

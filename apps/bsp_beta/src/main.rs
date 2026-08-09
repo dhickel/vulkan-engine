@@ -368,7 +368,7 @@ fn run() -> Result<(), AppError> {
     } else if let Some(ref generated) = generated {
         run_m3_generate_windowed(&mut coordinator, generated, args.scale, movement_world)
     } else {
-        run_windowed(&mut coordinator, movement_world)
+        run_windowed(&mut coordinator, movement_world, &args)
     };
     cleanup_generated_launch(generated.as_ref());
     result
@@ -556,6 +556,45 @@ fn bsp_player_start(extracted: &bsp::extract::ExtractedBsp, fallback: Vec3) -> V
 }
 
 /// Start headless and MCP views at the authored player spawn.
+fn bsp_explicit_camera(
+    origin: (f32, f32, f32),
+    look_at: (f32, f32, f32),
+    extracted: &bsp::extract::ExtractedBsp,
+) -> Result<Camera, AppError> {
+    // CLI coordinates are Quake map units; the camera and the acceptance
+    // contents check live in engine space (extracted entity origins are
+    // already engine-space, so convert explicitly here).
+    let eye = extracted.transform.position(origin.0, origin.1, origin.2);
+    let target = extracted
+        .transform
+        .position(look_at.0, look_at.1, look_at.2);
+    if !eye.is_finite() || !target.is_finite() {
+        return Err(AppError::BridgeProof(format!(
+            "explicit camera has non-finite data: origin={origin:?} look_at={look_at:?}"
+        )));
+    }
+    let contents = acceptance_point_contents(eye, extracted);
+    if contents.is_solid() {
+        return Err(AppError::BridgeProof(format!(
+            "explicit camera eye lies in solid space: {origin:?}"
+        )));
+    }
+    let direction = target - eye;
+    let distance = direction.length();
+    if distance <= f32::EPSILON {
+        return Err(AppError::BridgeProof(format!(
+            "explicit camera origin equals look-at: {origin:?}"
+        )));
+    }
+    let (yaw, pitch) = camera_angles_for_direction(direction / distance);
+    let mut camera = Camera::new(eye);
+    camera.update_rotation(yaw, pitch);
+    log::info!(
+        "Explicit acceptance camera: origin={origin:?} look_at={look_at:?}, eye={eye:?}, contents={contents:?}, yaw={yaw:.3}, pitch={pitch:.3}",
+    );
+    Ok(camera)
+}
+
 fn bsp_headless_camera(start_pos: Vec3, _extracted: &bsp::extract::ExtractedBsp) -> Camera {
     let camera = Camera::new(start_pos);
     log::info!("BSP headless camera: pos={start_pos:?} (info_player_start)");
@@ -703,7 +742,9 @@ fn bsp_acceptance_camera(
 fn run_windowed(
     coordinator: &mut BspCoordinator,
     movement_world: BspMovementWorld,
+    args: &cli::CliArgs,
 ) -> Result<(), AppError> {
+    let lifecycle_test = args.wsi_lifecycle_test;
     let event_loop = match EventLoop::new() {
         Ok(event_loop) => event_loop,
         Err(error) => {
@@ -819,6 +860,14 @@ fn run_windowed(
     log::info!("BSP beta windowed mode initialized, starting event loop");
     window.request_redraw();
 
+    // ── Phase 17 WSI lifecycle test ────────────────────────────────────
+    // Resize -> minimize -> restore, driven from inside the app because
+    // scriptable WM control (xdotool/wmctrl) is absent in the validation
+    // environment. Exercises WindowEvent::Resized handling, swapchain
+    // recreation, and minimize/restore without panic or ERROR logs.
+    let mut lifecycle_renders: u32 = 0;
+    let mut lifecycle_phase: u8 = 0;
+
     event_loop
         .run(move |event, elwt| {
             elwt.set_control_flow(ControlFlow::Poll);
@@ -855,6 +904,22 @@ fn run_windowed(
                             elwt.exit();
                         }
                         WindowEvent::Resized(size) => {
+                            if lifecycle_test {
+                                log::info!(
+                                    "WSI lifecycle: Resized event {}x{}",
+                                    size.width,
+                                    size.height
+                                );
+                                if lifecycle_phase == 1 {
+                                    log::info!(
+                                        "WSI lifecycle: resize applied {}x{}",
+                                        size.width,
+                                        size.height
+                                    );
+                                    window.set_minimized(true);
+                                    lifecycle_phase = 2;
+                                }
+                            }
                             if let Err(e) = renderer.resize(size.width, size.height) {
                                 log::error!("Resize failed: {e}");
                                 if let Err(error) =
@@ -896,6 +961,54 @@ fn run_windowed(
                             }
 
                             window.request_redraw();
+
+                            // Phase 17 WSI lifecycle sequencing (only in
+                            // --wsi-lifecycle-test mode).
+                            if lifecycle_test {
+                                lifecycle_renders += 1;
+                                let current = window.inner_size();
+                                match lifecycle_phase {
+                                    0 if lifecycle_renders >= 3 => {
+                                        log::info!(
+                                            "WSI lifecycle: requesting resize to 800x600 (current {}x{})",
+                                            current.width,
+                                            current.height
+                                        );
+                                        window.request_inner_size(winit::dpi::LogicalSize::new(
+                                            800.0, 600.0,
+                                        ));
+                                        lifecycle_phase = 1;
+                                    }
+                                    1 if (current.width, current.height) != (1280, 720) => {
+                                        log::info!(
+                                            "WSI lifecycle: resize observed {}x{}",
+                                            current.width,
+                                            current.height
+                                        );
+                                        window.set_minimized(true);
+                                        lifecycle_phase = 2;
+                                    }
+                                    2 if lifecycle_renders >= 6 => {
+                                        log::info!("WSI lifecycle: restoring window");
+                                        window.set_minimized(false);
+                                        lifecycle_phase = 3;
+                                    }
+                                    3 if lifecycle_renders >= 9 => {
+                                        log::info!(
+                                            "WSI lifecycle test PASS: resize + minimize + restore rendered"
+                                        );
+                                        if let Err(error) = teardown_retire_and_reap(
+                                            coordinator,
+                                            &mut renderer,
+                                            &mut scene,
+                                        ) {
+                                            log::error!("BSP teardown handoff failed: {error}");
+                                        }
+                                        elwt.exit();
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -2188,6 +2301,11 @@ fn prepare_headless_runtime(
         .collect();
     let headless_camera = if let Some(ref cam_label) = args.acceptance_camera {
         bsp_acceptance_camera(cam_label, extracted)?
+    } else if let (Some(origin), Some(look_at)) = (
+        args.acceptance_camera_origin,
+        args.acceptance_camera_look_at,
+    ) {
+        bsp_explicit_camera(origin, look_at, extracted)?
     } else {
         bsp_headless_camera(player_start, extracted)
     };

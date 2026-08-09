@@ -35,6 +35,20 @@ pub(crate) mod richness;
 pub mod rng;
 pub mod topology;
 
+// ── Test-only re-exports for integration tests ──────────────────────────
+// These are always compiled so integration tests (separate crate) can access
+// the crate-private Richness types. They are not part of the public release
+// API surface and will be gated or removed at release time.
+#[doc(hidden)]
+pub use richness::pipeline::{ActualCounts, RichnessPipelineOutput};
+#[doc(hidden)]
+pub use richness::qualification::{
+    archetype_ids, corpus_entries, light_recipe_ids, pipeline_map_text, pipeline_output,
+    pipeline_semantic_identity, preset_extent, prop_ids, qualify_request, resolve_document,
+    resolve_from_bytes, sha256_hex, theme_asset_paths, theme_ids, vertical_recipe_variants,
+    CorpusManifest, CorpusManifestEntry,
+};
+
 // ── Re-exports ────────────────────────────────────────────────────────────
 
 pub use assembly::{Assembly, AssemblyBrush, BrushRole, Interface, ProtectedVolume, Support};

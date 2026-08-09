@@ -244,6 +244,12 @@ pub(crate) fn compose_solved_generation(
         seed,
     )?;
 
+    materialize_map_boundary_shell(
+        reservations,
+        &generation.placement.request_archetypes,
+        &mut assembly,
+    )?;
+
     derive_all_interfaces(&mut assembly)?;
     derive_support_records(&mut assembly)?;
     let visibility = VisibilityPlan::build_from_assembly_and_routes(
@@ -289,140 +295,344 @@ fn materialize_route_shells(
     request_archetypes: &BTreeMap<ArchetypeRequestId, ArchetypeIndex>,
     ir: &mut AssemblyIR,
 ) -> Result<Vec<BrushAssemblyId>, RichnessError> {
-    let q = richness_geom::QUANTUM;
-    let mut shell_ids = Vec::new();
-    // Corridor floors are emitted as the GAP between rooms; overlapping gaps
-    // (junctions and crossing corridors) must not double-emit floors. Track
-    // every emitted floor rect and subtract it from later ones.
-    let mut emitted_floors: Vec<(i128, i128, i128, i128)> = Vec::new();
-    let mut emitted_ceilings: Vec<(i128, i128, i128, i128)> = Vec::new();
+    use super::reservation::ReservationKind;
+
+    type RouteCell = (u8, i32, i32);
+    let room_cells = reservations
+        .values()
+        .filter(|record| {
+            record.committed
+                && matches!(
+                    record.kind,
+                    ReservationKind::StandardRoom
+                        | ReservationKind::MultiStoreyRoom
+                        | ReservationKind::CaveHost
+                        | ReservationKind::NegativeSpace
+                )
+        })
+        .flat_map(|record| record.footprint.cells())
+        .map(|cell| (cell.layer, cell.x as i32, cell.y as i32))
+        .collect::<BTreeSet<_>>();
+    let mut clear_cells: BTreeMap<RouteCell, SemanticAttribution> = BTreeMap::new();
     for route in routes {
         let Some(source) = reservations.get(&route.source) else {
             continue;
         };
-        let Some(target) = reservations.get(&route.target) else {
-            continue;
-        };
-        let source_b = richness_geom::footprint_quake_bounds(&source.footprint);
-        let target_b = richness_geom::footprint_quake_bounds(&target.footprint);
-        let vertical = match richness_geom::footprint_vertical_bounds(&route.envelope) {
-            Ok(vertical) => vertical,
-            Err(_) => continue,
-        };
-        let envelope_b = richness_geom::footprint_quake_bounds(&route.envelope);
-        let floor_min = vertical.floor_min;
-        let ceiling_max = vertical.ceiling_max;
-        let wall_min = vertical.wall_min;
-        let wall_max = vertical.wall_max;
-        let horizontal = source_b.2 <= target_b.0 || target_b.2 <= source_b.0;
-        // Corridor gap = the run between the two rooms' facing walls; the
-        // cross-axis extent comes from the envelope.
-        let (x0, y0, x1, y1) = if horizontal {
-            let (gx0, gx1) = if source_b.2 <= target_b.0 {
-                (source_b.2, target_b.0)
-            } else {
-                (target_b.2, source_b.0)
-            };
-            (gx0, envelope_b.1, gx1, envelope_b.3)
-        } else {
-            let (gy0, gy1) = if source_b.3 <= target_b.1 {
-                (source_b.3, target_b.1)
-            } else {
-                (target_b.3, source_b.1)
-            };
-            (envelope_b.0, gy0, envelope_b.2, gy1)
-        };
-        if x1 <= x0 || y1 <= y0 {
-            continue;
-        }
-        let request_id = source.request_id.unwrap_or(ArchetypeRequestId::new(0));
         let owner = SemanticAttribution::from_reservation(
             route.source,
             source.request_id,
-            request_archetypes.get(&request_id).copied(),
+            source
+                .request_id
+                .and_then(|request_id| request_archetypes.get(&request_id))
+                .copied(),
             source.beat_id,
             source.zone_id,
         );
-        // Floor slab extends under the side walls so every shell brush has
-        // a positive-area gravity support contact. Overlapping portions of
-        // earlier corridor floors are subtracted (junctions emit once).
-        let floor_extent = if horizontal {
-            ((x0, x1), (y0 - q, y1 + q))
-        } else {
-            ((x0 - q, x1 + q), (y0, y1))
-        };
-        let mut rects = vec![(
-            floor_extent.0 .0,
-            floor_extent.1 .0,
-            floor_extent.0 .1,
-            floor_extent.1 .1,
-        )];
-        for existing in &emitted_floors {
-            let mut next = Vec::new();
-            for rect in rects {
-                subtract_rect(rect, *existing, &mut next);
+        for reservation_id in &route.reservation_ids {
+            let Some(record) = reservations.get(reservation_id) else {
+                continue;
+            };
+            if !record.committed
+                || !matches!(
+                    record.kind,
+                    ReservationKind::Route | ReservationKind::PortalThroat | ReservationKind::Turn
+                )
+            {
+                continue;
             }
-            rects = next;
-        }
-        for (rx0, ry0, rx1, ry1) in rects {
-            shell_ids.push(build_and_insert_box(
-                (rx0, rx1),
-                (ry0, ry1),
-                (floor_min, wall_min),
-                BrushAssemblyRole::FloorSlab,
-                &owner,
-                route_cost(),
-                ir,
-            )?);
-        }
-        emitted_floors.push((
-            floor_extent.0 .0,
-            floor_extent.1 .0,
-            floor_extent.0 .1,
-            floor_extent.1 .1,
-        ));
-        let mut ceiling_rects = vec![(x0, y0, x1, y1)];
-        for existing in &emitted_ceilings {
-            let mut next = Vec::new();
-            for rect in ceiling_rects {
-                subtract_rect(rect, *existing, &mut next);
+            for cell in record.footprint.cells() {
+                let key = (cell.layer, cell.x as i32, cell.y as i32);
+                if room_cells.contains(&key) {
+                    continue;
+                }
+                clear_cells
+                    .entry(key)
+                    .and_modify(|current| {
+                        if owner < *current {
+                            *current = owner.clone();
+                        }
+                    })
+                    .or_insert_with(|| owner.clone());
             }
-            ceiling_rects = next;
-        }
-        for (cx0, cy0, cx1, cy1) in ceiling_rects {
-            shell_ids.push(build_and_insert_box(
-                (cx0, cx1),
-                (cy0, cy1),
-                (wall_max, ceiling_max),
-                BrushAssemblyRole::CeilingSlab,
-                &owner,
-                route_cost(),
-                ir,
-            )?);
-        }
-        emitted_ceilings.push((x0, y0, x1, y1));
-        // Each corridor shell owns its two long boundary walls. They stay
-        // outside the exact clear envelope, rest on the extended floor slab,
-        // and provide positive-area side support for the ceiling instead of
-        // relying on a non-existent room wall along the route run.
-        let side_walls = if horizontal {
-            [((x0, x1), (y0 - q, y0)), ((x0, x1), (y1, y1 + q))]
-        } else {
-            [((x0 - q, x0), (y0, y1)), ((x1, x1 + q), (y0, y1))]
-        };
-        for (x, y) in side_walls {
-            shell_ids.push(build_and_insert_box(
-                x,
-                y,
-                (wall_min, wall_max),
-                BrushAssemblyRole::NorthWall,
-                &owner,
-                route_cost(),
-                ir,
-            )?);
         }
     }
+
+    // Build one global route-cell union. Floors extend beneath every boundary
+    // wall cell; walls occupy only cells adjacent to the clear union. This
+    // preserves bends/turns exactly and prevents broad route envelopes from
+    // overlapping one another or leaving the actual reserved path unsealed.
+    let mut floor_cells = clear_cells.clone();
+    let mut wall_cells = BTreeMap::new();
+    for (&(layer, x, y), owner) in &clear_cells {
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let adjacent = (layer, x + dx, y + dy);
+            if clear_cells.contains_key(&adjacent) || room_cells.contains(&adjacent) {
+                continue;
+            }
+            wall_cells
+                .entry(adjacent)
+                .and_modify(|current: &mut SemanticAttribution| {
+                    if owner < current {
+                        *current = owner.clone();
+                    }
+                })
+                .or_insert_with(|| owner.clone());
+            floor_cells
+                .entry(adjacent)
+                .and_modify(|current| {
+                    if owner < current {
+                        *current = owner.clone();
+                    }
+                })
+                .or_insert_with(|| owner.clone());
+        }
+    }
+
+    let mut shell_ids = Vec::new();
+    emit_route_cell_groups(
+        &floor_cells,
+        BrushAssemblyRole::FloorSlab,
+        &mut shell_ids,
+        ir,
+    )?;
+    emit_route_cell_groups(
+        &clear_cells,
+        BrushAssemblyRole::CeilingSlab,
+        &mut shell_ids,
+        ir,
+    )?;
+    emit_route_cell_groups(
+        &wall_cells,
+        BrushAssemblyRole::NorthWall,
+        &mut shell_ids,
+        ir,
+    )?;
     Ok(shell_ids)
+}
+
+fn emit_route_cell_groups(
+    cells: &BTreeMap<(u8, i32, i32), SemanticAttribution>,
+    role: BrushAssemblyRole,
+    shell_ids: &mut Vec<BrushAssemblyId>,
+    ir: &mut AssemblyIR,
+) -> Result<(), RichnessError> {
+    if role == BrushAssemblyRole::CeilingSlab {
+        return emit_route_ceiling_components(cells, shell_ids, ir);
+    }
+    let mut groups: BTreeMap<(u8, SemanticAttribution), BTreeSet<(i32, i32)>> = BTreeMap::new();
+    for (&(layer, x, y), owner) in cells {
+        groups
+            .entry((layer, owner.clone()))
+            .or_default()
+            .insert((x, y));
+    }
+    let quantum = richness_geom::QUANTUM;
+    let portal_frame_bounds = if role == BrushAssemblyRole::NorthWall {
+        ir.brushes
+            .values()
+            .filter(|brush| {
+                matches!(
+                    brush.role,
+                    BrushAssemblyRole::PortalPost
+                        | BrushAssemblyRole::PortalLintel
+                        | BrushAssemblyRole::PortalSurround
+                )
+            })
+            .filter_map(|brush| brush.brush.aabb().ok())
+            .map(|(min, max)| (min.0, min.1, min.2, max.0, max.1, max.2))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    for ((layer, owner), group) in groups {
+        let floor = if layer == 0 {
+            0
+        } else {
+            super::footprint::UPPER_FLOOR_Z as i128
+        };
+        let ceiling = floor + super::footprint::ROOM_HEIGHT as i128;
+        let z = match role {
+            BrushAssemblyRole::FloorSlab => (floor, floor + quantum),
+            BrushAssemblyRole::CeilingSlab => (ceiling - quantum, ceiling),
+            _ => (floor + quantum, ceiling - quantum),
+        };
+        for (x0, y0, x1, y1) in route_cell_rectangles(group) {
+            let mut pieces = vec![(
+                i128::from(x0) * quantum,
+                i128::from(y0) * quantum,
+                z.0,
+                i128::from(x1) * quantum,
+                i128::from(y1) * quantum,
+                z.1,
+            )];
+            for frame in &portal_frame_bounds {
+                pieces = pieces
+                    .into_iter()
+                    .flat_map(|piece| subtract_route_bounds(piece, *frame))
+                    .collect();
+            }
+            for piece in pieces {
+                shell_ids.push(build_and_insert_box(
+                    (piece.0, piece.3),
+                    (piece.1, piece.4),
+                    (piece.2, piece.5),
+                    role,
+                    &owner,
+                    route_cost(),
+                    ir,
+                )?);
+            }
+        }
+    }
+    Ok(())
+}
+
+type RouteBounds = (i128, i128, i128, i128, i128, i128);
+
+fn subtract_route_bounds(piece: RouteBounds, hole: RouteBounds) -> Vec<RouteBounds> {
+    let intersection = (
+        piece.0.max(hole.0),
+        piece.1.max(hole.1),
+        piece.2.max(hole.2),
+        piece.3.min(hole.3),
+        piece.4.min(hole.4),
+        piece.5.min(hole.5),
+    );
+    if intersection.0 >= intersection.3
+        || intersection.1 >= intersection.4
+        || intersection.2 >= intersection.5
+    {
+        return vec![piece];
+    }
+    let i = intersection;
+    [
+        (piece.0, piece.1, piece.2, i.0, piece.4, piece.5),
+        (i.3, piece.1, piece.2, piece.3, piece.4, piece.5),
+        (i.0, piece.1, piece.2, i.3, i.1, piece.5),
+        (i.0, i.4, piece.2, i.3, piece.4, piece.5),
+        (i.0, i.1, piece.2, i.3, i.4, i.2),
+        (i.0, i.1, i.5, i.3, i.4, piece.5),
+    ]
+    .into_iter()
+    .filter(|bounds| bounds.0 < bounds.3 && bounds.1 < bounds.4 && bounds.2 < bounds.5)
+    .collect()
+}
+
+fn emit_route_ceiling_components(
+    cells: &BTreeMap<(u8, i32, i32), SemanticAttribution>,
+    shell_ids: &mut Vec<BrushAssemblyId>,
+    ir: &mut AssemblyIR,
+) -> Result<(), RichnessError> {
+    let quantum = richness_geom::QUANTUM;
+    for layer in 0..super::footprint::LAYER_COUNT {
+        let mut remaining = cells
+            .keys()
+            .filter(|(cell_layer, _, _)| *cell_layer == layer)
+            .map(|(_, x, y)| (*x, *y))
+            .collect::<BTreeSet<_>>();
+        while let Some(&seed) = remaining.iter().next() {
+            remaining.remove(&seed);
+            let mut component = BTreeSet::from([seed]);
+            let mut pending = vec![seed];
+            while let Some((x, y)) = pending.pop() {
+                for adjacent in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+                    if remaining.remove(&adjacent) {
+                        component.insert(adjacent);
+                        pending.push(adjacent);
+                    }
+                }
+            }
+            let owner = component
+                .iter()
+                .filter_map(|&(x, y)| cells.get(&(layer, x, y)))
+                .min()
+                .cloned()
+                .ok_or_else(|| {
+                    composition_error("pipeline.route.shell", "route component lost its owner")
+                })?;
+            let horizontal = route_cell_runs(&component, false);
+            let vertical = route_cell_runs(&component, true);
+            let rectangles = if horizontal.len() <= vertical.len() {
+                horizontal
+            } else {
+                vertical
+            };
+            let floor = if layer == 0 {
+                0
+            } else {
+                super::footprint::UPPER_FLOOR_Z as i128
+            };
+            let ceiling = floor + super::footprint::ROOM_HEIGHT as i128;
+            for (x0, y0, x1, y1) in rectangles {
+                shell_ids.push(build_and_insert_box(
+                    (i128::from(x0) * quantum, i128::from(x1) * quantum),
+                    (i128::from(y0) * quantum, i128::from(y1) * quantum),
+                    (ceiling - 16, ceiling),
+                    BrushAssemblyRole::CeilingSlab,
+                    &owner,
+                    route_cost(),
+                    ir,
+                )?);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn route_cell_runs(cells: &BTreeSet<(i32, i32)>, vertical: bool) -> Vec<(i32, i32, i32, i32)> {
+    let mut groups: BTreeMap<i32, BTreeSet<i32>> = BTreeMap::new();
+    for &(x, y) in cells {
+        let (fixed, variable) = if vertical { (x, y) } else { (y, x) };
+        groups.entry(fixed).or_default().insert(variable);
+    }
+    let mut rectangles = Vec::new();
+    for (fixed, variables) in groups {
+        let mut iter = variables.into_iter();
+        let Some(mut start) = iter.next() else {
+            continue;
+        };
+        let mut end = start;
+        for variable in iter {
+            if variable == end + 1 {
+                end = variable;
+                continue;
+            }
+            rectangles.push(if vertical {
+                (fixed, start, fixed + 1, end + 1)
+            } else {
+                (start, fixed, end + 1, fixed + 1)
+            });
+            start = variable;
+            end = variable;
+        }
+        rectangles.push(if vertical {
+            (fixed, start, fixed + 1, end + 1)
+        } else {
+            (start, fixed, end + 1, fixed + 1)
+        });
+    }
+    rectangles
+}
+
+fn route_cell_rectangles(mut cells: BTreeSet<(i32, i32)>) -> Vec<(i32, i32, i32, i32)> {
+    let mut rectangles = Vec::new();
+    while let Some(&(x0, y0)) = cells.iter().next() {
+        let mut x1 = x0 + 1;
+        while cells.contains(&(x1, y0)) {
+            x1 += 1;
+        }
+        let mut y1 = y0 + 1;
+        while (x0..x1).all(|x| cells.contains(&(x, y1))) {
+            y1 += 1;
+        }
+        for x in x0..x1 {
+            for y in y0..y1 {
+                cells.remove(&(x, y));
+            }
+        }
+        rectangles.push((x0, y0, x1, y1));
+    }
+    rectangles
 }
 
 /// Route envelopes are conservative bounding boxes; their shell pieces may
@@ -530,6 +740,117 @@ fn subtract_rect(
     }
 }
 
+/// Seal the declared map extent with an explicit outer shell.  Route and
+/// vertical compositions legitimately meet edge-touching rooms, so local room
+/// walls alone cannot be treated as the exterior boundary: an omitted portal
+/// or inter-layer opening at that boundary otherwise connects compiler fill to
+/// the infinite void.  The shell sits immediately outside the occupied grid,
+/// contacts edge geometry only on faces, and spans the complete frozen Z
+/// envelope.
+fn materialize_map_boundary_shell(
+    reservations: &BTreeMap<ReservationId, ReservationRecord>,
+    request_archetypes: &BTreeMap<ArchetypeRequestId, ArchetypeIndex>,
+    ir: &mut AssemblyIR,
+) -> Result<(), RichnessError> {
+    use super::reservation::ReservationKind;
+
+    let owner = reservations
+        .values()
+        .find(|record| {
+            record.committed
+                && matches!(
+                    record.kind,
+                    ReservationKind::StandardRoom
+                        | ReservationKind::MultiStoreyRoom
+                        | ReservationKind::CaveHost
+                        | ReservationKind::NegativeSpace
+                )
+        })
+        .ok_or_else(|| composition_error("pipeline.boundary_shell", "no room owns map shell"))?;
+    let attr = SemanticAttribution::from_reservation(
+        owner.id,
+        owner.request_id,
+        owner
+            .request_id
+            .and_then(|request_id| request_archetypes.get(&request_id))
+            .copied(),
+        owner.beat_id,
+        owner.zone_id,
+    );
+    let quantum = richness_geom::QUANTUM;
+    // Portal surrounds, route shells, and cave geometry can legally extend
+    // beyond their occupancy cells. Derive the enclosure from the completed
+    // structural envelope so it touches every edge feature without overlap.
+    let (min, max) = assembly_bounds(ir)?;
+    let z = (min.2, max.2);
+    let full_extent = (
+        (min.0 - quantum, max.0 + quantum),
+        (min.1 - quantum, max.1 + quantum),
+    );
+    // A perimeter wall alone leaves a path under room/route floor slabs and
+    // above their ceilings.  Cap both planes so compiler filling sees one
+    // closed exterior volume even where a Rich-only vertical or cave opening
+    // reaches an edge-touching room.
+    build_and_insert_box(
+        full_extent.0,
+        full_extent.1,
+        (-quantum, 0),
+        BrushAssemblyRole::FloorSlab,
+        &attr,
+        route_cost(),
+        ir,
+    )?;
+    build_and_insert_box(
+        full_extent.0,
+        full_extent.1,
+        (z.1, z.1 + quantum),
+        BrushAssemblyRole::CeilingSlab,
+        &attr,
+        route_cost(),
+        ir,
+    )?;
+    for (x, y) in [
+        (full_extent.0, (min.1 - quantum, min.1)),
+        (full_extent.0, (max.1, max.1 + quantum)),
+        ((min.0 - quantum, min.0), (min.1, max.1)),
+        ((max.0, max.0 + quantum), (min.1, max.1)),
+    ] {
+        build_and_insert_box(
+            x,
+            y,
+            z,
+            BrushAssemblyRole::NorthWall,
+            &attr,
+            route_cost(),
+            ir,
+        )?;
+    }
+    Ok(())
+}
+
+fn assembly_bounds(
+    ir: &AssemblyIR,
+) -> Result<((i128, i128, i128), (i128, i128, i128)), RichnessError> {
+    ir.brushes
+        .values()
+        .try_fold(
+            None::<((i128, i128, i128), (i128, i128, i128))>,
+            |bounds, brush| {
+                let (min, max) = brush.brush.aabb().map_err(|error| {
+                    composition_error("pipeline.boundary_shell", error.to_string())
+                })?;
+                Ok::<_, RichnessError>(Some(match bounds {
+                    None => (min, max),
+                    Some((lo, hi)) => (
+                        (lo.0.min(min.0), lo.1.min(min.1), lo.2.min(min.2)),
+                        (hi.0.max(max.0), hi.1.max(max.1), hi.2.max(max.2)),
+                    ),
+                }))
+            },
+        )?
+        .ok_or_else(|| composition_error("pipeline.boundary_shell", "empty structural assembly"))
+}
+
 fn route_cost() -> CostSource {
     CostSource {
         dimension: super::assembly::BudgetDimension::SourceFaces,
@@ -584,10 +905,34 @@ fn materialize_route_portals(
             .filter(|brush| brush.owner == wall_owner && brush.role == wall_role)
             .map(|brush| brush.id)
             .collect::<Vec<_>>();
+        let partition_bounds = union_brush_bounds(ir, &wall_ids)?;
+        let anchor = committed_throat_anchor(portal)?;
+        let (partition_min, partition_max) = match wall_role {
+            BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => {
+                (partition_bounds.0, partition_bounds.3)
+            }
+            _ => (partition_bounds.1, partition_bounds.4),
+        };
+        let width = anchor.2 - anchor.0;
+        let preferred_min = anchor.0.clamp(partition_min, partition_max - width);
+        let preferred = (preferred_min, anchor.1, preferred_min + width, anchor.3);
+        let preferred_bounds = portal_throat_aabb(preferred, wall_role, partition_bounds);
+        if ir.openings.values().any(|opening| {
+            opening.portal_id.is_some()
+                && preferred_bounds.0 < opening.bounds.3
+                && preferred_bounds.3 > opening.bounds.0
+                && preferred_bounds.1 < opening.bounds.4
+                && preferred_bounds.4 > opening.bounds.1
+                && preferred_bounds.2 < opening.bounds.5
+                && preferred_bounds.5 > opening.bounds.2
+        }) {
+            continue;
+        }
         let throat = fit_throat_to_wall_partition(
-            committed_throat_anchor(portal)?,
+            anchor,
             wall_role,
-            union_brush_bounds(ir, &wall_ids)?,
+            partition_bounds,
+            richness_geom::QUANTUM,
             &wall_ids,
             ir,
         )?;
@@ -612,6 +957,7 @@ fn fit_throat_to_wall_partition(
     (span_min, z_min, span_max, z_max): (i128, i128, i128, i128),
     wall_role: BrushAssemblyRole,
     bounds: (i128, i128, i128, i128, i128, i128),
+    frame_margin: i128,
     owning_wall_ids: &[BrushAssemblyId],
     ir: &AssemblyIR,
 ) -> Result<(i128, i128, i128, i128), RichnessError> {
@@ -653,6 +999,28 @@ fn fit_throat_to_wall_partition(
     candidates.dedup();
 
     for fitted_min in candidates {
+        // Every portal reserves an exact 64×80 throat plus the one-quantum
+        // surround that its cardinal partition can support. This keeps the
+        // aperture and its retained frame clear of adjacent diagonal walls.
+        let frame_min = fitted_min - frame_margin;
+        let frame_max = fitted_min + width + frame_margin;
+        if frame_min < partition_min || frame_max > partition_max {
+            continue;
+        }
+        let frame_bounds = match wall_role {
+            BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => {
+                (frame_min, bounds.1, z_min, frame_max, bounds.4, z_max)
+            }
+            _ => (bounds.0, frame_min, z_min, bounds.3, frame_max, z_max),
+        };
+        let frame = ConvexBrush::make_box(
+            (frame_bounds.0, frame_bounds.3),
+            (frame_bounds.1, frame_bounds.4),
+            (frame_bounds.2, frame_bounds.5),
+        )
+        .map_err(|error| {
+            composition_error("pipeline.portal.throat", format!("frame AABB: {error}"))
+        })?;
         let throat_bounds = match wall_role {
             BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => (
                 fitted_min,
@@ -679,12 +1047,32 @@ fn fit_throat_to_wall_partition(
         .map_err(|error| {
             composition_error("pipeline.portal.throat", format!("throat AABB: {error}"))
         })?;
-        let blocked = ir.brushes.values().any(|brush| {
-            brush.role.is_wall()
-                && !owning_wall_ids.contains(&brush.id)
-                && richness_geom::brushes_overlap(&throat, &brush.brush).unwrap_or(true)
+        let blocked_by_brush = ir.brushes.values().any(|brush| {
+            if owning_wall_ids.contains(&brush.id) {
+                return false;
+            }
+            if brush.role.is_wall() {
+                return richness_geom::brushes_overlap(&frame, &brush.brush).unwrap_or(true);
+            }
+            matches!(
+                brush.role,
+                BrushAssemblyRole::PortalPost
+                    | BrushAssemblyRole::PortalLintel
+                    | BrushAssemblyRole::PortalSurround
+            ) && richness_geom::brushes_overlap(&throat, &brush.brush).unwrap_or(true)
         });
-        if !blocked {
+        let blocked_by_existing_throat = ir.openings.values().any(|opening| {
+            let bounds = opening.bounds;
+            ConvexBrush::make_box(
+                (bounds.0, bounds.3),
+                (bounds.1, bounds.4),
+                (bounds.2, bounds.5),
+            )
+            .map_or(true, |existing_throat| {
+                richness_geom::brushes_overlap(&frame, &existing_throat).unwrap_or(true)
+            })
+        });
+        if !blocked_by_brush && !blocked_by_existing_throat {
             return Ok((fitted_min, z_min, fitted_min + width, z_max));
         }
     }
@@ -2000,37 +2388,20 @@ fn build_brutalist_reveal_surround(
                 cost,
                 ir,
             )?);
-            // Surround mass
-            surround_ids.push(build_and_insert_box(
-                (s0 - reveal_depth - surround_thickness, s0 - reveal_depth),
-                frame_y,
-                (z0, z1),
-                BrushAssemblyRole::PortalSurround,
-                attr,
-                cost,
-                ir,
-            )?);
-            surround_ids.push(build_and_insert_box(
-                (s1 + reveal_depth, s1 + reveal_depth + surround_thickness),
-                frame_y,
-                (z0, z1),
-                BrushAssemblyRole::PortalSurround,
-                attr,
-                cost,
-                ir,
-            )?);
-            surround_ids.push(build_and_insert_box(
-                (
-                    s0 - reveal_depth - surround_thickness,
-                    s1 + reveal_depth + surround_thickness,
-                ),
-                frame_y,
-                (lintel_z1, lintel_z1 + surround_thickness),
-                BrushAssemblyRole::PortalSurround,
-                attr,
-                cost,
-                ir,
-            )?);
+            // A chamfered cardinal partition leaves one quantum either side
+            // of the throat. Stack the outer course above the lintel rather
+            // than widening it into the diagonal corner walls.
+            for span in [(s0 - reveal_depth, s0), (s0, s1), (s1, s1 + reveal_depth)] {
+                surround_ids.push(build_and_insert_box(
+                    span,
+                    frame_y,
+                    (lintel_z1, lintel_z1 + surround_thickness),
+                    BrushAssemblyRole::PortalSurround,
+                    attr,
+                    cost,
+                    ir,
+                )?);
+            }
             (s0, wall_y0, z0, s1, wall_y1, z1)
         }
         BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => {
@@ -2061,36 +2432,17 @@ fn build_brutalist_reveal_surround(
                 cost,
                 ir,
             )?);
-            surround_ids.push(build_and_insert_box(
-                frame_x,
-                (s0 - reveal_depth - surround_thickness, s0 - reveal_depth),
-                (z0, z1),
-                BrushAssemblyRole::PortalSurround,
-                attr,
-                cost,
-                ir,
-            )?);
-            surround_ids.push(build_and_insert_box(
-                frame_x,
-                (s1 + reveal_depth, s1 + reveal_depth + surround_thickness),
-                (z0, z1),
-                BrushAssemblyRole::PortalSurround,
-                attr,
-                cost,
-                ir,
-            )?);
-            surround_ids.push(build_and_insert_box(
-                frame_x,
-                (
-                    s0 - reveal_depth - surround_thickness,
-                    s1 + reveal_depth + surround_thickness,
-                ),
-                (lintel_z1, lintel_z1 + surround_thickness),
-                BrushAssemblyRole::PortalSurround,
-                attr,
-                cost,
-                ir,
-            )?);
+            for span in [(s0 - reveal_depth, s0), (s0, s1), (s1, s1 + reveal_depth)] {
+                surround_ids.push(build_and_insert_box(
+                    frame_x,
+                    span,
+                    (lintel_z1, lintel_z1 + surround_thickness),
+                    BrushAssemblyRole::PortalSurround,
+                    attr,
+                    cost,
+                    ir,
+                )?);
+            }
             (wall_x0, s0, z0, wall_x1, s1, z1)
         }
         _ => {
@@ -3912,6 +4264,7 @@ mod tests {
                 &blueprint,
                 &generation.topology,
                 &generation.placement.request_archetypes,
+                crate::enhanced_v3::richness::request::RichnessCaveMode::Omitted,
             );
             assert!(complexity.is_within_budget(), "{:?}", complexity.errors);
             let composition = compose_solved_generation(

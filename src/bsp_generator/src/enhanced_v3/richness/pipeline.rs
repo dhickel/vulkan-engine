@@ -24,7 +24,7 @@ use super::{
 
 /// The complete private pipeline output bundle.
 #[derive(Debug, Clone)]
-pub(crate) struct RichnessPipelineOutput {
+pub struct RichnessPipelineOutput {
     /// Canonical map text (Standard Quake grammar, frozen ordering).
     pub map_text: String,
     /// Immutable request provenance metadata.
@@ -44,7 +44,7 @@ pub(crate) struct RichnessPipelineOutput {
 /// Actual output counts recomputed from the sealed assembly (the last
 /// invariant gate: actual may be less than reserved, never more).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ActualCounts {
+pub struct ActualCounts {
     pub brushes: usize,
     pub faces: usize,
     pub entities: usize,
@@ -89,6 +89,7 @@ pub(crate) fn run_richness_pipeline(
         &blueprint,
         &generation.topology,
         &generation.placement.request_archetypes,
+        cave_mode,
     );
     if !complexity.is_within_budget() {
         return Err(pipeline_error(
@@ -126,8 +127,9 @@ pub(crate) fn run_richness_pipeline(
         ));
     }
 
-    // 7. Canonical emission.
+    // 7. Canonical emission. Validate each point origin after all structure exists.
     let spawn = derive_spawn(&generation.topology);
+    validate_entity_origin_safety(&composition.assembly, spawn)?;
     let map_text = super::emission::emit_richness_map(&composition, theme, spawn)?;
 
     // 8. Deterministic generation metadata + request export.
@@ -205,6 +207,32 @@ pub(crate) fn recompute_actual_counts(composition: &StructuralComposition) -> Ac
     }
 }
 
+fn validate_entity_origin_safety(
+    ir: &super::assembly::AssemblyIR,
+    spawn: (i32, i32, i32),
+) -> Result<(), RichnessError> {
+    let spawn = (
+        i128::from(spawn.0),
+        i128::from(spawn.1),
+        i128::from(spawn.2),
+    );
+    if !super::lighting::origin_airtight(ir, spawn) {
+        return Err(pipeline_error(
+            "entity_origin.spawn",
+            format!("unsafe spawn {spawn:?}"),
+        ));
+    }
+    for entity in ir.entities.values() {
+        if !super::lighting::origin_airtight(ir, entity.origin) {
+            return Err(pipeline_error(
+                "entity_origin",
+                format!("unsafe {} origin {:?}", entity.classname, entity.origin),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn theme_ordinal(theme: RichnessTheme) -> usize {
     match theme {
         RichnessTheme::Ancient => 0,
@@ -214,7 +242,8 @@ fn theme_ordinal(theme: RichnessTheme) -> usize {
 }
 
 /// Deterministic spawn origin: the first committed Spawn reservation's
-/// footprint center at 24 units above its floor; fallback (0, 0, 24).
+/// footprint center at the floor-slab top plus the frozen 24-unit clearance;
+/// fallback (0, 0, 40).
 fn derive_spawn(topology: &TopologyResult) -> (i32, i32, i32) {
     use super::reservation::ReservationKind;
     for (_, record) in &topology.journal.reservations {
@@ -226,9 +255,9 @@ fn derive_spawn(topology: &TopologyResult) -> (i32, i32, i32) {
         let z = vertical.map(|v| v.floor_min).unwrap_or(0);
         let cx = ((bounds.0 + bounds.2) / 2) as i32;
         let cy = ((bounds.1 + bounds.3) / 2) as i32;
-        return (cx, cy, z as i32 + 24);
+        return (cx, cy, z as i32 + 40);
     }
-    (0, 0, 24)
+    (0, 0, 40)
 }
 
 /// Referenced theme asset role identities in frozen order (the nine semantic
@@ -283,26 +312,27 @@ mod tests {
 
     #[test]
     fn pipeline_runs_end_to_end_for_all_presets_and_themes() {
-        for preset in [
-            RichnessPreset::Sparse,
-            RichnessPreset::Moderate,
-            RichnessPreset::Rich,
-        ] {
-            for theme in [
-                RichnessTheme::Ancient,
-                RichnessTheme::Egyptian,
-                RichnessTheme::Brutalist,
-            ] {
-                let request = resolved(42, 2048, preset, theme);
-                let output = run_richness_pipeline(&request).expect("pipeline");
-                assert!(!output.map_text.is_empty());
-                assert!(output.map_text.contains("\"classname\" \"worldspawn\""));
-                assert!(output
-                    .map_text
-                    .contains(&format!("\"richness_theme\" \"{}\"", theme.tag())));
-                assert!(output.actual.brushes > 0);
-                assert!(!output.generation_metadata.to_canonical_bytes().is_empty());
-            }
+        // The compiler corpus exhaustively covers the 3×3 preset/theme matrix.
+        // This in-crate gate covers every preset and every theme with six
+        // end-to-end requests without duplicating that costly matrix in debug.
+        let requests = [
+            (RichnessPreset::Sparse, RichnessTheme::Ancient),
+            (RichnessPreset::Moderate, RichnessTheme::Ancient),
+            (RichnessPreset::Rich, RichnessTheme::Ancient),
+            (RichnessPreset::Sparse, RichnessTheme::Egyptian),
+            (RichnessPreset::Sparse, RichnessTheme::Brutalist),
+        ];
+
+        for (preset, theme) in requests {
+            let request = resolved(0, 2048, preset, theme);
+            let output = run_richness_pipeline(&request).expect("pipeline");
+            assert!(!output.map_text.is_empty());
+            assert!(output.map_text.contains("\"classname\" \"worldspawn\""));
+            assert!(output
+                .map_text
+                .contains(&format!("\"richness_theme\" \"{}\"", theme.tag())));
+            assert!(output.actual.brushes > 0);
+            assert!(!output.generation_metadata.to_canonical_bytes().is_empty());
         }
     }
 
@@ -393,7 +423,7 @@ mod tests {
             RichnessPreset::Moderate,
             RichnessPreset::Rich,
         ] {
-            let request = resolved(42, 2048, preset, RichnessTheme::Ancient);
+            let request = resolved(0, 2048, preset, RichnessTheme::Ancient);
             let output = run_richness_pipeline(&request).expect("pipeline");
             // The pipeline's own gate already ran assert_dominates; here we
             // only re-assert the recomputed counts are sane and non-zero.

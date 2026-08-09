@@ -190,6 +190,26 @@ impl RichnessGenerationMetadata {
                 .to_string(),
         );
         line(
+            "skipped_props",
+            composition
+                .presentation
+                .skipped_room_props
+                .values()
+                .map(Vec::len)
+                .sum::<usize>()
+                .to_string(),
+        );
+        line(
+            "skipped_lights",
+            composition
+                .presentation
+                .skipped_room_lights
+                .values()
+                .map(Vec::len)
+                .sum::<usize>()
+                .to_string(),
+        );
+        line(
             "quiet_rooms",
             composition.presentation.quiet_rooms.len().to_string(),
         );

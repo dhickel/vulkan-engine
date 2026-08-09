@@ -1199,7 +1199,7 @@ impl DirectImportStaging {
             })?
             .as_nanos();
         let pid = std::process::id();
-        rng[..8].copy_from_slice(&nanos.to_le_bytes());
+        rng[..8].copy_from_slice(&(nanos as u64).to_le_bytes());
         rng[8..12].copy_from_slice(&pid.to_le_bytes());
         rng[12..16].copy_from_slice(b"\xDE\xAD\xBE\xEF");
         let hex = rng.iter().map(|b| format!("{:02x}", b)).collect::<String>();

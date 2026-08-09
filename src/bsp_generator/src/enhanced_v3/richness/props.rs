@@ -43,10 +43,20 @@ pub(crate) struct PlacedProp {
     pub room: ReservationId,
 }
 
+/// One prop candidate skipped because no safe enclosed swept volume exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SkippedProp {
+    pub prop: u32,
+    pub attempted_origin: (i128, i128, i128),
+    pub room: ReservationId,
+    pub reason: &'static str,
+}
+
 /// Full presentation result for one room.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RoomPresentation {
     pub props: Vec<PlacedProp>,
+    pub skipped: Vec<SkippedProp>,
     pub detail_count: usize,
 }
 
@@ -61,6 +71,118 @@ pub(crate) enum FloorCellClass {
     Corner,
     /// Open floor.
     Open,
+}
+
+fn overlaps_vertical_clearance(
+    ir: &AssemblyIR,
+    candidate: &crate::enhanced_v3::geometry::ConvexBrush,
+) -> Result<bool, RichnessError> {
+    for walkable in ir.brushes.values().filter(|brush| {
+        matches!(
+            brush.role,
+            BrushAssemblyRole::StairTread
+                | BrushAssemblyRole::StairLanding
+                | BrushAssemblyRole::SpiralTread
+                | BrushAssemblyRole::SpiralLanding
+                | BrushAssemblyRole::LadderLanding
+                | BrushAssemblyRole::DropLanding
+                | BrushAssemblyRole::BalconySlab
+                | BrushAssemblyRole::CatwalkDeck
+                | BrushAssemblyRole::PitPerimeterSlab
+        )
+    }) {
+        let (min, max) = walkable
+            .brush
+            .aabb()
+            .map_err(|error| prop_error("vertical_clearance", format!("{error}")))?;
+        let clearance = crate::enhanced_v3::geometry::ConvexBrush::make_box(
+            (min.0, max.0),
+            (min.1, max.1),
+            (max.2, max.2 + 80),
+        )
+        .map_err(|error| prop_error("vertical_clearance", format!("{error}")))?;
+        if crate::enhanced_v3::richness::geometry::brushes_overlap(candidate, &clearance)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn prop_enclosure_reason(
+    ir: &AssemblyIR,
+    room: ReservationId,
+    room_bounds: (i128, i128, i128, i128, i128, i128),
+    prop: u32,
+    theme: RichnessTheme,
+    origin: (i128, i128, i128),
+) -> Result<Option<&'static str>, RichnessError> {
+    if ir.openings.values().any(|opening| {
+        opening.owner.reservation_id == room
+            && opening.portal_id.is_none()
+            && opening.wall_role.is_slab()
+    }) {
+        return Ok(Some("intentionally_open_slab_volume"));
+    }
+
+    let theme_idx = theme_ordinal(theme);
+    let dimensions = PROP_THEME_DIMENSIONS[prop as usize][theme_idx];
+    let swept = PROP_SWEPT_OCCUPANCY[prop as usize];
+    let floor16 = |value: i128| value.div_euclid(16) * 16;
+    let ceil16 = |value: i128| value.div_euclid(16) * 16 + if value % 16 == 0 { 0 } else { 16 };
+    let x0 = floor16(origin.0);
+    let y0 = floor16(origin.1);
+    let z0 = floor16(origin.2);
+    let actual = (
+        x0,
+        y0,
+        z0,
+        ceil16(origin.0 + i128::from(dimensions[0])),
+        ceil16(origin.1 + i128::from(dimensions[1])),
+        ceil16(origin.2 + i128::from(dimensions[2])),
+    );
+    let swept = (
+        x0,
+        y0,
+        z0,
+        ceil16(origin.0 + i128::from(swept[0].max(dimensions[0]))),
+        ceil16(origin.1 + i128::from(swept[1].max(dimensions[1]))),
+        ceil16(origin.2 + i128::from(swept[2].max(dimensions[2]))),
+    );
+    if swept.0 < room_bounds.0 + 16
+        || swept.1 < room_bounds.1 + 16
+        || swept.2 < room_bounds.2 + 16
+        || swept.3 > room_bounds.3 - 16
+        || swept.4 > room_bounds.4 - 16
+        || swept.5 > room_bounds.5 - 16
+    {
+        return Ok(Some("swept_volume_outside_room_band"));
+    }
+    let center = (
+        (swept.0 + swept.3) / 2,
+        (swept.1 + swept.4) / 2,
+        (swept.2 + swept.5) / 2,
+    );
+    if !super::lighting::origin_enclosed(ir, room, center, room_bounds) {
+        return Ok(Some("no_solid_enclosure_within_room_band"));
+    }
+
+    let actual_brush = crate::enhanced_v3::geometry::ConvexBrush::make_box(
+        (actual.0, actual.3),
+        (actual.1, actual.4),
+        (actual.2, actual.5),
+    )
+    .map_err(|error| prop_error("enclosure", format!("{error}")))?;
+    let floor_supported = ir.brushes.values().any(|support| {
+        matches!(
+            support.role,
+            BrushAssemblyRole::FloorSlab | BrushAssemblyRole::CaveFloor
+        ) && support.brush.aabb().is_ok_and(|(_, max)| max.2 == actual.2)
+            && crate::enhanced_v3::richness::geometry::has_positive_area_contact(
+                &actual_brush,
+                &support.brush,
+            )
+    });
+    Ok((!floor_supported).then_some("no_positive_area_floor_support"))
 }
 
 fn wall_edges(room: (i128, i128, i128, i128, i128, i128)) -> [(i128, i128, i128, i128); 4] {
@@ -168,15 +290,21 @@ pub(crate) fn emit_prop(
     prop: u32,
     theme: RichnessTheme,
     origin: (i128, i128, i128),
+    room_bounds: (i128, i128, i128, i128, i128, i128),
     owner: &SemanticAttribution,
 ) -> Result<Vec<BrushAssemblyId>, RichnessError> {
+    if let Some(reason) =
+        prop_enclosure_reason(ir, owner.reservation_id, room_bounds, prop, theme, origin)?
+    {
+        return Err(prop_error("enclosure", reason));
+    }
     let pieces = PROP_CONVEX_PIECES[prop as usize] as usize;
     let theme_idx = theme_ordinal(theme);
     let dims = PROP_THEME_DIMENSIONS[prop as usize][theme_idx];
     let collision = PROP_THEME_COLLISION_OVERRIDE[prop as usize][theme_idx]
         .unwrap_or(PROP_COLLISION[prop as usize]);
     let (dx, dy, dz) = (dims[0] as i128, dims[1] as i128, dims[2] as i128);
-    let mut ids = Vec::with_capacity(pieces);
+    let mut assembled = Vec::with_capacity(pieces);
     // Quantize to the 16-unit grid (conservative: floor minima, ceil
     // maxima) so every emitted brush is quantum-aligned regardless of
     // authored theme dimensions.
@@ -200,24 +328,42 @@ pub(crate) fn emit_prop(
             crate::enhanced_v3::geometry::ConvexBrush::make_box((x0, x1), (y0, y1), (z0, z1))
                 .map_err(|error| prop_error("box", format!("{error}")))?;
         validate_brush(&brush)?;
-        // Overlap check against every existing brush.
+        assembled.push(brush);
+    }
+
+    // Preflight the complete assembly before assigning IDs so a rejected
+    // multi-piece prop cannot leave partial geometry behind. In addition to
+    // solid overlap, preserve the full 80-unit standing volume above every
+    // authored vertical traversal surface.
+    for brush in &assembled {
+        if overlaps_vertical_clearance(ir, brush)? {
+            return Err(prop_error(
+                "vertical_clearance",
+                format!("prop {prop} at {origin:?} blocks vertical traversal"),
+            ));
+        }
         for existing in ir.brushes.values() {
-            if crate::enhanced_v3::richness::geometry::brushes_overlap(&existing.brush, &brush)? {
+            if crate::enhanced_v3::richness::geometry::brushes_overlap(&existing.brush, brush)? {
                 return Err(prop_error(
                     "overlap",
                     format!("prop {prop} at {origin:?} overlaps brush {:?}", existing.id),
                 ));
             }
         }
+    }
+
+    let role = if collision == CollisionBehavior::Collidable {
+        BrushAssemblyRole::InteriorMass
+    } else {
+        BrushAssemblyRole::InteriorColumn
+    };
+    let mut ids = Vec::with_capacity(pieces);
+    for brush in assembled {
         let id = ir.alloc_brush_id();
         ir.insert_brush(BrushAssembly {
             id,
             brush,
-            role: if collision == CollisionBehavior::Collidable {
-                BrushAssemblyRole::InteriorMass
-            } else {
-                BrushAssemblyRole::InteriorColumn
-            },
+            role,
             owner: owner.clone(),
             cost: CostSource {
                 dimension: crate::enhanced_v3::richness::assembly::BudgetDimension::SourceFaces,
@@ -227,7 +373,6 @@ pub(crate) fn emit_prop(
         });
         ids.push(id);
     }
-    let _ = (theme, collision);
     Ok(ids)
 }
 
@@ -281,7 +426,7 @@ pub(crate) fn place_room_props(
         if placed >= max_props {
             break;
         }
-        let prop = prop_refs[(seed as usize + idx) % prop_refs.len()];
+        let prop = prop_refs[((seed % prop_refs.len() as u64) as usize + idx) % prop_refs.len()];
         let cell_class = classify_cell(cx as i128, cy as i128, room_bounds, &protected);
         if cell_class == FloorCellClass::Protected {
             continue;
@@ -309,9 +454,30 @@ pub(crate) fn place_room_props(
             beat_id: None,
             zone_id: None,
         };
-        let brush_ids = match emit_prop(ir, prop, theme, origin, &owner) {
+        let brush_ids = match emit_prop(ir, prop, theme, origin, room_bounds, &owner) {
             Ok(ids) => ids,
-            Err(_) => continue,
+            Err(error) => {
+                let reason = match error.path.as_str() {
+                    "enclosure" => match error.context.as_str() {
+                        "intentionally_open_slab_volume" => "intentionally_open_slab_volume",
+                        "swept_volume_outside_room_band" => "swept_volume_outside_room_band",
+                        "no_positive_area_floor_support" => "no_positive_area_floor_support",
+                        _ => "no_solid_enclosure_within_room_band",
+                    },
+                    "vertical_clearance" => "vertical_traversal_clearance",
+                    "overlap" => "solid_geometry_overlap",
+                    _ => "unsafe_prop_assembly",
+                };
+                if presentation.skipped.len() < max_props {
+                    presentation.skipped.push(SkippedProp {
+                        prop,
+                        attempted_origin: origin,
+                        room,
+                        reason,
+                    });
+                }
+                continue;
+            }
         };
         presentation.props.push(PlacedProp {
             prop,
@@ -374,6 +540,62 @@ mod tests {
         (256, 256, 0, 768, 768, 176)
     }
 
+    fn enclosed_room_ir(owner: &SemanticAttribution) -> AssemblyIR {
+        let mut ir = AssemblyIR::new();
+        for (x, y, z, role) in [
+            (
+                (256, 768),
+                (256, 768),
+                (0, 16),
+                BrushAssemblyRole::FloorSlab,
+            ),
+            (
+                (256, 768),
+                (256, 768),
+                (160, 176),
+                BrushAssemblyRole::CeilingSlab,
+            ),
+            (
+                (256, 768),
+                (256, 272),
+                (16, 160),
+                BrushAssemblyRole::SouthWall,
+            ),
+            (
+                (256, 768),
+                (752, 768),
+                (16, 160),
+                BrushAssemblyRole::NorthWall,
+            ),
+            (
+                (256, 272),
+                (272, 752),
+                (16, 160),
+                BrushAssemblyRole::WestWall,
+            ),
+            (
+                (752, 768),
+                (272, 752),
+                (16, 160),
+                BrushAssemblyRole::EastWall,
+            ),
+        ] {
+            let id = ir.alloc_brush_id();
+            ir.insert_brush(BrushAssembly {
+                id,
+                brush: crate::enhanced_v3::geometry::ConvexBrush::make_box(x, y, z).unwrap(),
+                role,
+                owner: owner.clone(),
+                cost: CostSource {
+                    dimension: crate::enhanced_v3::richness::assembly::BudgetDimension::SourceFaces,
+                    face_count: 6,
+                },
+                support: SupportTarget::World,
+            });
+        }
+        ir
+    }
+
     #[test]
     fn classify_cell_kinds() {
         let room = room_bounds();
@@ -426,7 +648,6 @@ mod tests {
 
     #[test]
     fn emit_prop_places_convex_pieces() {
-        let mut ir = AssemblyIR::new();
         let owner = SemanticAttribution {
             reservation_id: ReservationId::new(0),
             request_id: None,
@@ -434,15 +655,26 @@ mod tests {
             beat_id: None,
             zone_id: None,
         };
-        let ids = emit_prop(&mut ir, 0, RichnessTheme::Ancient, (400, 400, 16), &owner)
-            .expect("emit altar");
+        let mut ir = enclosed_room_ir(&owner);
+        let shell_count = ir.brushes.len();
+        let ids = emit_prop(
+            &mut ir,
+            0,
+            RichnessTheme::Ancient,
+            (400, 400, 16),
+            room_bounds(),
+            &owner,
+        )
+        .expect("emit altar");
         assert!(!ids.is_empty());
-        assert_eq!(ir.brushes.len(), PROP_CONVEX_PIECES[0] as usize);
+        assert_eq!(
+            ir.brushes.len() - shell_count,
+            PROP_CONVEX_PIECES[0] as usize
+        );
     }
 
     #[test]
     fn emit_prop_rejects_overlap() {
-        let mut ir = AssemblyIR::new();
         let owner = SemanticAttribution {
             reservation_id: ReservationId::new(0),
             request_id: None,
@@ -450,9 +682,92 @@ mod tests {
             beat_id: None,
             zone_id: None,
         };
-        emit_prop(&mut ir, 0, RichnessTheme::Ancient, (400, 400, 16), &owner).unwrap();
-        let result = emit_prop(&mut ir, 0, RichnessTheme::Ancient, (400, 400, 16), &owner);
+        let mut ir = enclosed_room_ir(&owner);
+        emit_prop(
+            &mut ir,
+            0,
+            RichnessTheme::Ancient,
+            (400, 400, 16),
+            room_bounds(),
+            &owner,
+        )
+        .unwrap();
+        let result = emit_prop(
+            &mut ir,
+            0,
+            RichnessTheme::Ancient,
+            (400, 400, 16),
+            room_bounds(),
+            &owner,
+        );
         assert!(result.is_err(), "overlapping prop must be rejected");
+    }
+
+    #[test]
+    fn emit_prop_rejects_unenclosed_room_without_partial_geometry() {
+        let owner = SemanticAttribution {
+            reservation_id: ReservationId::new(0),
+            request_id: None,
+            archetype: Some(ArchetypeIndex::new(0)),
+            beat_id: None,
+            zone_id: None,
+        };
+        let mut ir = AssemblyIR::new();
+        let error = emit_prop(
+            &mut ir,
+            0,
+            RichnessTheme::Ancient,
+            (400, 400, 16),
+            room_bounds(),
+            &owner,
+        )
+        .unwrap_err();
+        assert_eq!(error.path, "enclosure");
+        assert_eq!(error.context, "no_solid_enclosure_within_room_band");
+        assert!(ir.brushes.is_empty());
+    }
+
+    #[test]
+    fn unenclosed_room_prop_skips_are_explicit_and_deterministic() {
+        let mut journal = ReservationJournal::new(2048, 8000);
+        journal
+            .try_reserve(
+                ReservationKind::StandardRoom,
+                Footprint3D::single_layer(32, 32, 96, 96, 0),
+                None,
+                None,
+                None,
+                0,
+                0,
+                0,
+                0,
+            )
+            .unwrap();
+        journal.commit_all();
+        let room = *journal.reservations.keys().next().unwrap();
+        let run = || {
+            place_room_props(
+                &mut AssemblyIR::new(),
+                room,
+                room_bounds(),
+                ArchetypeIndex::new(0),
+                RichnessTheme::Ancient,
+                42,
+                &journal,
+                2,
+                false,
+            )
+            .unwrap()
+        };
+        let first = run();
+        let second = run();
+        assert!(first.props.is_empty());
+        assert!(!first.skipped.is_empty());
+        assert_eq!(first.skipped, second.skipped);
+        assert!(first
+            .skipped
+            .iter()
+            .all(|skip| skip.reason == "no_solid_enclosure_within_room_band"));
     }
 
     #[test]

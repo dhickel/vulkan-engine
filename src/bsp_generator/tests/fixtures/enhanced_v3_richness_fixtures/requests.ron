@@ -1,0 +1,465 @@
+// Canonical Richness V1 request fixture inventory — frozen.
+//
+// Covers every: archetype (30), portal style (3 themes' portal constructions),
+// vertical primitive (grand shell, balcony/mezzanine, catwalk/bridge, overlook,
+// pit/chasm, ladder shaft, spiral stair, drop shaft, stairwell/open-stairwell,
+// vertical arena), cave construction, prop family, lighting recipe, compiler
+// convention (from phase-05 fixtures), theme role set, stable error, and
+// controller traversal path.
+//
+// Fixtures are authored as RichnessDocumentV1 canonical byte vectors
+// (9-field frozen schema: seed, extent, preset, theme, landmarks, zones,
+// cave_mode, vertical_openings, budget), all revisions pinned to V1.
+// The canonical format defines the field order; this inventory provides
+// human-readable metadata and the canonical representation.
+
+{
+    // ── Schema version marker ───────────────────────────────────────────
+    "schema": "enhanced-v3-richness-fixtures/v1",
+
+    // ── Frozen inventory: one entry per fixture class ───────────────────
+    "fixtures": {
+        // ═══════════════════════════════════════════════════════════════
+        // Archetype unit fixtures (30)
+        // ═══════════════════════════════════════════════════════════════
+        "archetype_ambush_cross": (
+            description: "ambush_cross archetype — chamfer shape, legendary rarity",
+            request: "seed:42\nextent:2048\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_antechamber": (
+            description: "antechamber archetype — rectangle shape, common rarity",
+            request: "seed:42\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_arena": (
+            description: "arena archetype — octagon shape, common rarity",
+            request: "seed:42\nextent:3072\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_barracks": (
+            description: "barracks archetype — rectangle shape, common rarity",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_bridge_crossing": (
+            description: "bridge_crossing archetype — rectangle shape, both-layer occupancy",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_cistern": (
+            description: "cistern archetype — octagon shape, drop-hole vertical recipe",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_crossroads": (
+            description: "crossroads archetype — octagon shape, common rarity",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_entrance_hall": (
+            description: "entrance_hall archetype — rectangle, lower layer",
+            request: "seed:42\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_flooded_crypt": (
+            description: "flooded_crypt archetype — rectangle shape, lower layer",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_foundry": (
+            description: "foundry archetype — chamfer shape, buttruss support",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_gallery": (
+            description: "gallery archetype — rectangle shape, uncommon rarity",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_grand_arena": (
+            description: "grand_arena archetype — octagon shape, both-layer, uncommon rarity",
+            request: "seed:42\nextent:3072\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_grand_stair_hall": (
+            description: "grand_stair_hall — stairwell vertical recipe, both-layer",
+            request: "seed:42\nextent:2048\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_grotto": (
+            description: "grotto archetype — composite partition shape, cave host",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_guard_hall": (
+            description: "guard_hall archetype — rectangle shape, buttruss support",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_hypostyle_hall": (
+            description: "hypostyle_hall archetype — rectangle shape, common rarity",
+            request: "seed:42\nextent:3072\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_kill_court": (
+            description: "kill_court archetype — octagon shape, legendary rarity",
+            request: "seed:42\nextent:3072\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_ladder_hub": (
+            description: "ladder_hub archetype — ladder shaft vertical recipe, both-layer",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_observatory": (
+            description: "observatory archetype — octagon shape, open stairwell, uncommon",
+            request: "seed:42\nextent:3072\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_ossuary": (
+            description: "ossuary archetype — rectangle shape, uncommon rarity",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_overlook_hall": (
+            description: "overlook_hall archetype — both-layer, balcony/mezzanine",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_pit_room": (
+            description: "pit_room archetype — both-layer, drop-hole, pit/chasm",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_reliquary": (
+            description: "reliquary archetype — chamfer shape, rare rarity",
+            request: "seed:42\nextent:2048\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_shrine": (
+            description: "shrine archetype — octagon shape, common rarity",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_spiral_tower": (
+            description: "spiral_tower archetype — octagon shape, spiral stair, rare",
+            request: "seed:42\nextent:2048\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_throne_hall": (
+            description: "throne_hall archetype — chamfer shape, both-layer, common",
+            request: "seed:42\nextent:3072\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_trapped_gallery": (
+            description: "trapped_gallery archetype — rectangle shape, common rarity",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_treasury": (
+            description: "treasury archetype — rectangle shape, uncommon rarity",
+            request: "seed:42\nextent:2048\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_vault": (
+            description: "vault archetype — rectangle shape, uncommon rarity",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "archetype_vestibule": (
+            description: "vestibule archetype — rectangle shape, smallest span",
+            request: "seed:42\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+
+        // ═══════════════════════════════════════════════════════════════
+        // Portal style fixtures (3 themes' portal constructions)
+        // ═══════════════════════════════════════════════════════════════
+        "portal_ancient_post_lintel": (
+            description: "Ancient post-and-lintel portal construction",
+            request: "seed:42\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "portal_egyptian_stepped_surround": (
+            description: "Egyptian stepped portal surround construction",
+            request: "seed:42\nextent:2048\npreset:sparse\ntheme:egyptian\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "portal_brutalist_reveal_surround": (
+            description: "Brutalist reveal/surround portal construction",
+            request: "seed:42\nextent:2048\npreset:sparse\ntheme:brutalist\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+
+        // ═══════════════════════════════════════════════════════════════
+        // Vertical primitive fixtures (10 classes)
+        // ═══════════════════════════════════════════════════════════════
+        "vertical_grand_shell": (
+            description: "Grand shell — entrance_hall both-layer archetype",
+            request: "seed:42\nextent:3072\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "vertical_balcony_mezzanine": (
+            description: "Balcony/mezzanine — overlook_hall archetype",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "vertical_catwalk_bridge": (
+            description: "Catwalk/bridge — bridge_crossing archetype",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "vertical_overlook": (
+            description: "Overlook — overlook_hall archetype vertical",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "vertical_pit_chasm": (
+            description: "Pit/chasm — pit_room archetype with drop-hole",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "vertical_ladder_shaft": (
+            description: "Ladder shaft — ladder_hub archetype",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "vertical_spiral_stair": (
+            description: "Spiral stair — spiral_tower archetype",
+            request: "seed:42\nextent:2048\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "vertical_drop_shaft": (
+            description: "Drop shaft — cistern archetype with drop-hole",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "vertical_stairwell": (
+            description: "Stairwell/open stairwell — grand_stair_hall archetype",
+            request: "seed:42\nextent:2048\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "vertical_arena": (
+            description: "Vertical arena — grand_arena archetype with both-layer occupancy",
+            request: "seed:42\nextent:3072\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+
+        // ═══════════════════════════════════════════════════════════════
+        // Cave construction fixture
+        // ═══════════════════════════════════════════════════════════════
+        "cave_grotto_construction": (
+            description: "Cave construction — grotto archetype with preferred cave mode",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:explicit:preferred\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "cave_required_mode": (
+            description: "Cave construction — required cave mode with sufficient extent",
+            request: "seed:42\nextent:3072\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:explicit:3\nzones:inherited\ncave_mode:explicit:required\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+
+        // ═══════════════════════════════════════════════════════════════
+        // Prop family fixtures (15 props, grouped by family)
+        // ═══════════════════════════════════════════════════════════════
+        "prop_family_altar": (
+            description: "Altar prop family — shrine_archetype reference",
+            request: "seed:42\nextent:2048\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "prop_family_furniture": (
+            description: "Furniture props — bench, shelf, chest families",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "prop_family_lighting": (
+            description: "Lighting props — brazier, sconce families",
+            request: "seed:42\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "prop_family_industrial": (
+            description: "Industrial props — chain, cage, foundry families",
+            request: "seed:42\nextent:2048\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+
+        // ═══════════════════════════════════════════════════════════════
+        // Lighting recipe fixtures (12 recipes grouped)
+        // ═══════════════════════════════════════════════════════════════
+        "lighting_recipe_dim_beam": (
+            description: "dim_beam — ceiling, linear falloff, 100 intensity",
+            request: "seed:42\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "lighting_recipe_warm_hall": (
+            description: "warm_hall — ceiling, linear falloff, 220 intensity",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "lighting_recipe_cold_crypt": (
+            description: "cold_crypt — wall, linear falloff, 150 intensity",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "lighting_recipe_grand_hall_grid": (
+            description: "grand_hall_grid — ceiling, linear falloff, 280 intensity",
+            request: "seed:42\nextent:3072\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "lighting_recipe_shrine_focus": (
+            description: "shrine_focus — pendant, linear falloff, 200 intensity",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "lighting_recipe_entrance_torch": (
+            description: "entrance_torch — wall, linear falloff, 300 intensity",
+            request: "seed:42\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "lighting_recipe_foundry_fire": (
+            description: "foundry_fire — floor, inverse-square, 350 intensity",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "lighting_recipe_cistern_cool": (
+            description: "cistern_cool — ambient, inverse-square, 120 intensity",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "lighting_recipe_cavern_gloom": (
+            description: "cavern_gloom — ambient, inverse-square, 80 intensity",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "lighting_recipe_treasury_glint": (
+            description: "treasury_glint — pendant, linear falloff, 180 intensity",
+            request: "seed:42\nextent:2048\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "lighting_recipe_egyptian_amber": (
+            description: "egyptian_amber — wall, linear falloff, 250 intensity",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:egyptian\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "lighting_recipe_brutalist_flood": (
+            description: "brutalist_flood — ceiling, linear falloff, 300 intensity",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:brutalist\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+
+        // ═══════════════════════════════════════════════════════════════
+        // Compiler convention fixtures (from phase-05 fixtures)
+        // ═══════════════════════════════════════════════════════════════
+        "convention_hint_skip": (
+            description: "Hint/skip brush convention — compiler hint and skip texture usage",
+            request: "seed:42\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "convention_detail_brushes": (
+            description: "Detail brush convention — non-structural detail faces",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "convention_clip": (
+            description: "Clip brush convention — player-clip volumes",
+            request: "seed:42\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "convention_colored_light": (
+            description: "Colored light convention — styled light entities",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:brutalist\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+
+        // ═══════════════════════════════════════════════════════════════
+        // Theme role set fixtures
+        // ═══════════════════════════════════════════════════════════════
+        "theme_roles_ancient": (
+            description: "Ancient theme: 6 semantic material roles (wall_stone, floor_flagstone, ceiling_rough, pillar_square, trim_carved, accent_band)",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "theme_roles_egyptian": (
+            description: "Egyptian theme: 6 semantic material roles (wall_sandstone, floor_flagstone, ceiling_painted, pillar_lotus, trim_painted, accent_gilded)",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:egyptian\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "theme_roles_brutalist": (
+            description: "Brutalist theme: 6 semantic material roles (wall_concrete, floor_slab, ceiling_beamgrid, pillar_square, trim_steel, accent_dark)",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:brutalist\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+
+        // ═══════════════════════════════════════════════════════════════
+        // Stable error path fixtures
+        // ═══════════════════════════════════════════════════════════════
+        "error_extent_below_min": (
+            description: "ValueOutOfRange: extent below minimum",
+            request: "seed:0\nextent:512\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+            expect_error: "ValueOutOfRange",
+        ),
+        "error_extent_above_max": (
+            description: "ValueOutOfRange: extent above maximum",
+            request: "seed:0\nextent:4096\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+            expect_error: "ValueOutOfRange",
+        ),
+        "error_not_quantum_aligned": (
+            description: "NotQuantumAligned: extent not multiple of 16",
+            request: "seed:0\nextent:2047\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+            expect_error: "NotQuantumAligned",
+        ),
+        "error_landmark_too_low": (
+            description: "ValueOutOfRange: landmarks below minimum",
+            request: "seed:0\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:explicit:0\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+            expect_error: "ValueOutOfRange",
+        ),
+        "error_landmark_too_high": (
+            description: "ValueOutOfRange: landmarks above maximum",
+            request: "seed:0\nextent:2048\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:explicit:6\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+            expect_error: "ValueOutOfRange",
+        ),
+        "error_zone_out_of_range": (
+            description: "ValueOutOfRange: zone_count above maximum",
+            request: "seed:0\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:explicit:7\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+            expect_error: "ValueOutOfRange",
+        ),
+        "error_vertical_exceeds_max": (
+            description: "ValueOutOfRange: vertical_openings above maximum",
+            request: "seed:0\nextent:2048\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:explicit:13\nbudget:inherited\n",
+            expect_error: "ValueOutOfRange",
+        ),
+        "error_budget_below_min": (
+            description: "ValueOutOfRange: budget below minimum",
+            request: "seed:0\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:explicit:500\n",
+            expect_error: "ValueOutOfRange",
+        ),
+        "error_budget_above_preset_ceiling": (
+            description: "BudgetInfeasible: budget above preset ceiling",
+            request: "seed:0\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:explicit:8000\n",
+            expect_error: "BudgetInfeasible",
+        ),
+        "error_cave_required_insufficient_landmarks": (
+            description: "CaveInfeasible: required cave with insufficient landmarks",
+            request: "seed:0\nextent:3072\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:explicit:required\nvertical_openings:inherited\nbudget:inherited\n",
+            expect_error: "CaveInfeasible",
+        ),
+        "error_unsupported_richness_gate": (
+            description: "UnsupportedRichnessGate: gate not richness-v1",
+            request: "seed:0\nextent:2048\npreset:sparse\ntheme:ancient\ngate:m3\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+            expect_error: "UnsupportedRichnessGate",
+        ),
+
+        // ═══════════════════════════════════════════════════════════════
+        // Controller traversal path fixtures
+        // ═══════════════════════════════════════════════════════════════
+        "traversal_spawn_to_first_room": (
+            description: "Spawn to first room traversal — entrance hall path",
+            request: "seed:42\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "traversal_ladder_climb": (
+            description: "Ladder climb traversal — ladder_hub archetype",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "traversal_drop_non_return": (
+            description: "One-way drop non-return — cistern/pit_room path",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "traversal_bridge_crossing": (
+            description: "Bridge crossing traversal — bridge_crossing archetype",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+
+        // ═══════════════════════════════════════════════════════════════
+        // Broad deterministic sweep request templates
+        // ═══════════════════════════════════════════════════════════════
+        "sweep_seed_0_sparse": (
+            description: "Broad sweep: seed 0, Sparse preset",
+            request: "seed:0\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "sweep_seed_42_moderate": (
+            description: "Broad sweep: seed 42, Moderate preset",
+            request: "seed:42\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "sweep_seed_99_rich": (
+            description: "Broad sweep: seed 99, Rich preset",
+            request: "seed:99\nextent:3072\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "sweep_seed_255_sparse": (
+            description: "Broad sweep: seed 255, Sparse preset",
+            request: "seed:255\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "sweep_seed_max_moderate": (
+            description: "Broad sweep: seed u64::MAX, Moderate preset",
+            request: "seed:18446744073709551615\nextent:2048\npreset:moderate\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "sweep_boundary_extent_min": (
+            description: "Boundary sweep: extent at minimum (1024)",
+            request: "seed:42\nextent:1024\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "sweep_boundary_extent_max": (
+            description: "Boundary sweep: extent at maximum (3072)",
+            request: "seed:42\nextent:3072\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "sweep_boundary_budget_min": (
+            description: "Boundary sweep: budget at minimum (1000)",
+            request: "seed:42\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:explicit:1\nzones:explicit:1\ncave_mode:inherited\nvertical_openings:explicit:0\nbudget:explicit:1000\n",
+        ),
+        "sweep_boundary_landmarks_min": (
+            description: "Boundary sweep: landmarks at minimum (1)",
+            request: "seed:42\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:explicit:1\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "sweep_boundary_landmarks_max": (
+            description: "Boundary sweep: landmarks at maximum (5) for 3072 extent",
+            request: "seed:42\nextent:3072\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:explicit:5\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "sweep_boundary_zones_min": (
+            description: "Boundary sweep: zones at minimum (1)",
+            request: "seed:42\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:explicit:1\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "sweep_boundary_zones_max": (
+            description: "Boundary sweep: zones at maximum (6)",
+            request: "seed:42\nextent:3072\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:explicit:6\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        ),
+        "sweep_boundary_vertical_zero": (
+            description: "Boundary sweep: vertical openings at minimum (0)",
+            request: "seed:42\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:explicit:0\nbudget:inherited\n",
+        ),
+        "sweep_boundary_vertical_max": (
+            description: "Boundary sweep: vertical openings at maximum (12)",
+            request: "seed:42\nextent:3072\npreset:rich\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:explicit:12\nbudget:inherited\n",
+        ),
+    },
+}

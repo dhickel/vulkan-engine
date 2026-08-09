@@ -291,6 +291,14 @@ pub(crate) fn materialize_vertical_features(
                 }
                 _ => {}
             }
+            if attr.archetype_id_str() == Some("grand_arena") {
+                result.push(build_vertical_arena(
+                    composite,
+                    &attr,
+                    ir,
+                    &mut next_feature,
+                )?);
+            }
             // Multi-storey rooms whose catalog contract carries a traversal
             // recipe (grand stair hall, spiral tower, ladder hub, observatory)
             // consume the COMPLETE recipe with the room as its own host.
@@ -304,21 +312,33 @@ pub(crate) fn materialize_vertical_features(
                 })
                 .unwrap_or(VerticalRecipe::None);
             let feature = match recipe {
-                VerticalRecipe::Stairwell => {
-                    build_stairwell(composite, room, &attr, false, ir, &mut next_feature)?
-                }
-                VerticalRecipe::OpenStairwell => {
-                    build_stairwell(composite, room, &attr, true, ir, &mut next_feature)?
-                }
+                VerticalRecipe::Stairwell => Some(build_stairwell(
+                    composite,
+                    room,
+                    &attr,
+                    false,
+                    ir,
+                    &mut next_feature,
+                )?),
+                VerticalRecipe::OpenStairwell => Some(build_stairwell(
+                    composite,
+                    room,
+                    &attr,
+                    true,
+                    ir,
+                    &mut next_feature,
+                )?),
                 VerticalRecipe::LadderShaft => {
-                    build_ladder_shaft(composite, &attr, ir, &mut next_feature)?
+                    Some(build_ladder_shaft(composite, &attr, ir, &mut next_feature)?)
                 }
                 VerticalRecipe::SpiralStair => {
-                    build_spiral_stair(composite, &attr, ir, &mut next_feature)?
+                    Some(build_spiral_stair(composite, &attr, ir, &mut next_feature)?)
                 }
-                _ => continue,
+                _ => None,
             };
-            result.push(feature);
+            if let Some(feature) = feature {
+                result.push(feature);
+            }
             continue;
         }
 
@@ -522,7 +542,10 @@ fn build_arena_balcony(
     next_feature: &mut u32,
 ) -> Result<VerticalFeature, RichnessError> {
     let (x0, y0, x1, _) = room_bounds(composite);
-    let span = (x0 + 64, x1 - 64);
+    // Arena rooms are octagonal: the diagonal corner walls occupy the first
+    // 96 units of each cardinal span. Start at their exact tangent boundary
+    // so the balcony touches, but never positively overlaps, the chamfers.
+    let span = (x0 + 96, x1 - 96);
     let data = build_balcony_mezzanine(
         BrushAssemblyRole::NorthWall,
         y0 + 16,
@@ -1522,7 +1545,14 @@ fn build_ladder_shaft(
     let inner_y0 = outer_y0 + LADDER_WALL;
     let inner_y1 = outer_y1 - LADDER_WALL;
 
-    let lower_entry = (outer_x0, inner_y0, 32, outer_x0 + 16, inner_y1, 112);
+    let lower_entry = (
+        outer_x0,
+        inner_y0,
+        LOWER_FLOOR_TOP,
+        outer_x0 + 16,
+        inner_y1,
+        LOWER_FLOOR_TOP + HEADROOM,
+    );
     let upper_entry = (
         outer_x1 - 16,
         inner_y0,
@@ -1604,12 +1634,16 @@ fn build_ladder_shaft(
         z = z1;
     }
 
-    let lower_landing = insert_box(
+    // The lower landing replaces a floor patch instead of rising into the
+    // exact 64x80 room-portal throat. Its top remains at the frozen floor
+    // elevation and the shaft opening begins immediately above it.
+    let lower_landing = replace_floor_patch(
         ir,
-        (total_x0, outer_y0, LOWER_FLOOR_TOP, outer_x0, outer_y1, 32),
+        (total_x0, outer_y0, 0, outer_x0, outer_y1, LOWER_FLOOR_TOP),
         BrushAssemblyRole::LadderLanding,
         attr,
     )?;
+    let mut landing_ids = vec![lower_landing];
     let upper_landing = insert_box(
         ir,
         (
@@ -1623,7 +1657,7 @@ fn build_ladder_shaft(
         BrushAssemblyRole::LadderLanding,
         attr,
     )?;
-    let mut landing_ids = vec![lower_landing, upper_landing];
+    landing_ids.push(upper_landing);
     let upper_supports = [
         (
             outer_x1,
@@ -1643,12 +1677,30 @@ fn build_ladder_shaft(
         ),
     ];
     for support in upper_supports {
-        landing_ids.push(insert_box(
-            ir,
-            support,
-            BrushAssemblyRole::VerticalSupport,
-            attr,
-        )?);
+        let base_z = ir
+            .brushes
+            .values()
+            .filter_map(|candidate| candidate.brush.aabb().ok())
+            .filter(|(min, max)| {
+                max.2 <= support.5
+                    && min.0 < support.3
+                    && max.0 > support.0
+                    && min.1 < support.4
+                    && max.1 > support.1
+            })
+            .map(|(_, max)| max.2)
+            .max()
+            .unwrap_or(support.2);
+        if base_z < support.5 {
+            landing_ids.push(insert_box(
+                ir,
+                (
+                    support.0, support.1, base_z, support.3, support.4, support.5,
+                ),
+                BrushAssemblyRole::VerticalSupport,
+                attr,
+            )?);
+        }
     }
 
     let paired_hole_upper = (
@@ -1660,7 +1712,7 @@ fn build_ladder_shaft(
         UPPER_FLOOR.1,
     );
     let partition_upper = (
-        total_x0,
+        total_x0.max(x0 + Q),
         outer_y0,
         UPPER_FLOOR.0,
         outer_x1 + LADDER_UPPER_LANDING,
@@ -1920,7 +1972,30 @@ fn build_spiral_stair(
             UPPER_FLOOR.0,
         ),
     ] {
-        insert_box(ir, support, BrushAssemblyRole::VerticalSupport, attr)?;
+        let base_z = ir
+            .brushes
+            .values()
+            .filter_map(|candidate| candidate.brush.aabb().ok())
+            .filter(|(min, max)| {
+                max.2 <= support.5
+                    && min.0 < support.3
+                    && max.0 > support.0
+                    && min.1 < support.4
+                    && max.1 > support.1
+            })
+            .map(|(_, max)| max.2)
+            .max()
+            .unwrap_or(support.2);
+        if base_z < support.5 {
+            insert_box(
+                ir,
+                (
+                    support.0, support.1, base_z, support.3, support.4, support.5,
+                ),
+                BrushAssemblyRole::VerticalSupport,
+                attr,
+            )?;
+        }
     }
 
     let partition_upper = (cx - 96, cy - 80, UPPER_FLOOR.0, ex1, cy, UPPER_FLOOR.1);
@@ -2176,13 +2251,14 @@ fn build_vertical_arena(
         stair_y1,
         LOWER_FLOOR_TOP + HEADROOM,
     );
-    let (_, lower_entry_ids) = insert_partition_with_openings(
+    let (lower_gate_ids, lower_entry_ids) = insert_partition_with_openings(
         ir,
         lower_partition,
         BrushAssemblyRole::ArenaGateWall,
         attr,
         &[lower_entry],
     )?;
+    ensure_tread_floor_supports(ir, &lower_gate_ids, attr)?;
     let upper_partition = (
         stair_x0,
         stair_y0,
@@ -2199,13 +2275,52 @@ fn build_vertical_arena(
         stair_y1,
         UPPER_FLOOR.1 + HEADROOM,
     );
-    let (_, upper_entry_ids) = insert_partition_with_openings(
+    let (upper_gate_ids, upper_entry_ids) = insert_partition_with_openings(
         ir,
         upper_partition,
         BrushAssemblyRole::ArenaGateWall,
         attr,
         &[upper_entry],
     )?;
+    for gate_id in &upper_gate_ids {
+        let (bounds, supported) = {
+            let gate = ir
+                .brushes
+                .get(gate_id)
+                .ok_or_else(|| vertical_error("arena.gate", "upper gate disappeared"))?;
+            (brush_bounds(gate)?, touches_floor(ir, gate)?)
+        };
+        if !supported {
+            let extended = (
+                bounds.0,
+                bounds.1,
+                LOWER_FLOOR_TOP,
+                bounds.3,
+                bounds.4,
+                bounds.5,
+            );
+            if bounds_overlap_any(ir, extended, &[*gate_id])? {
+                return Err(vertical_error(
+                    "arena.gate.support",
+                    format!(
+                        "upper gate {} cannot extend to lower-floor support",
+                        gate_id.raw()
+                    ),
+                ));
+            }
+            let brush = ConvexBrush::make_box(
+                (extended.0, extended.3),
+                (extended.1, extended.4),
+                (extended.2, extended.5),
+            )
+            .map_err(|error| vertical_error("arena.gate.support", format!("{error}")))?;
+            richness_geom::validate_brush(&brush)?;
+            ir.brushes
+                .get_mut(gate_id)
+                .ok_or_else(|| vertical_error("arena.gate", "upper gate disappeared"))?
+                .brush = brush;
+        }
+    }
 
     let balcony_ids = ir
         .brushes
@@ -3774,14 +3889,24 @@ fn insert_movement_descriptor(
         keys.insert("entry_normal".to_string(), normal_text);
         keys.insert("one_way".to_string(), "1".to_string());
     }
+    // The brush model remains at its authored traversal volume, while qbsp
+    // uses the entity origin as a fill seed.  Anchor that seed in the adjacent
+    // lower landing rather than at the center of an open shaft/pit volume.
+    // Both recipes therefore retain their exact runtime bounds without ever
+    // introducing a point entity into the inter-layer void.
+    let origin = match kind {
+        "climb" => (
+            bounds.0 - 48,
+            (bounds.1 + bounds.4) / 2,
+            LOWER_FLOOR_TOP + 24,
+        ),
+        "one_way_drop" => (bounds.3, (bounds.1 + bounds.4) / 2, LOWER_FLOOR_TOP + 24),
+        _ => unreachable!("kind checked above"),
+    };
     ir.insert_entity(EntityAssembly {
         id,
         classname: "trigger_multiple".to_string(),
-        origin: (
-            (bounds.0 + bounds.3) / 2,
-            (bounds.1 + bounds.4) / 2,
-            (bounds.2 + bounds.5) / 2,
-        ),
+        origin,
         owner: owner.clone(),
         cost: brush_cost(),
         keys,

@@ -14,7 +14,7 @@ use crate::enhanced_v3::richness::{
     generated_content::{
         ARCHETYPE_THEME_LIGHT_REFS, LIGHT_COLOR, LIGHT_COUNT, LIGHT_ENTITY_KEYS,
         LIGHT_ENTITY_KEY_SPANS, LIGHT_ENTITY_VALUES, LIGHT_FALLOFF, LIGHT_INTENSITY,
-        LIGHT_PLACEMENT_CLASS, LIGHT_READABILITY_FLOOR, LIGHT_RECIPE_IDS, SCHEMA_VERSION,
+        LIGHT_PLACEMENT_CLASS, LIGHT_READABILITY_FLOOR, SCHEMA_VERSION,
     },
     ids::{ArchetypeIndex, ReservationId},
     request::RichnessTheme,
@@ -33,11 +33,67 @@ pub(crate) struct PlacedLight {
     pub entity_id: crate::enhanced_v3::richness::ids::EntityAssemblyId,
 }
 
+/// One light recipe candidate skipped because no safe enclosed origin exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SkippedLight {
+    pub recipe: u32,
+    pub attempted_origin: (i128, i128, i128),
+    pub room: ReservationId,
+    pub reason: &'static str,
+}
+
 /// Light placement summary for one room.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RoomLights {
     pub lights: Vec<PlacedLight>,
+    pub skipped: Vec<SkippedLight>,
     pub focal_count: usize,
+}
+
+fn point_inside_solid(ir: &AssemblyIR, point: (i128, i128, i128)) -> bool {
+    let point = crate::enhanced_v3::geometry::Point3 {
+        x: crate::enhanced_v3::geometry::Rational::from_int(point.0),
+        y: crate::enhanced_v3::geometry::Rational::from_int(point.1),
+        z: crate::enhanced_v3::geometry::Rational::from_int(point.2),
+    };
+    ir.brushes.values().any(|brush| {
+        brush
+            .brush
+            .faces
+            .iter()
+            .all(|face| face.plane.contains_point_rational(&point).unwrap_or(false))
+    })
+}
+
+/// A ray contact must be inside a structural brush, not merely exactly on one
+/// of its faces.  Treating a portal lintel's lower edge as a wall made the old
+/// six-ray test accept origins that qbsp classified as part of the opening.
+fn point_strictly_inside_brush(
+    brush: &crate::enhanced_v3::richness::assembly::BrushAssembly,
+    point: (i128, i128, i128),
+) -> bool {
+    [
+        (0, 0, 0),
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
+    ]
+    .into_iter()
+    .all(|(dx, dy, dz)| {
+        let point = crate::enhanced_v3::geometry::Point3 {
+            x: crate::enhanced_v3::geometry::Rational::from_int(point.0 + dx),
+            y: crate::enhanced_v3::geometry::Rational::from_int(point.1 + dy),
+            z: crate::enhanced_v3::geometry::Rational::from_int(point.2 + dz),
+        };
+        brush
+            .brush
+            .faces
+            .iter()
+            .all(|face| face.plane.contains_point_rational(&point).unwrap_or(false))
+    })
 }
 
 /// Verify an origin has a protected clear volume (16 units around it) inside
@@ -54,22 +110,108 @@ fn origin_clear(
     if origin.2 < rz0 + 16 || origin.2 >= rz1 - 16 {
         return false;
     }
-    let point = crate::enhanced_v3::geometry::Point3 {
-        x: crate::enhanced_v3::geometry::Rational::from_int(origin.0),
-        y: crate::enhanced_v3::geometry::Rational::from_int(origin.1),
-        z: crate::enhanced_v3::geometry::Rational::from_int(origin.2),
-    };
-    for brush in ir.brushes.values() {
-        let inside = brush
-            .brush
-            .faces
-            .iter()
-            .all(|face| face.plane.contains_point_rational(&point).unwrap_or(false));
-        if inside {
-            return false;
+    !point_inside_solid(ir, origin)
+}
+
+fn solid_on_segment(
+    ir: &AssemblyIR,
+    origin: (i128, i128, i128),
+    direction: (i128, i128, i128),
+    max_distance: i128,
+) -> bool {
+    // Eight-unit probes cannot skip the 14-unit strict interior of a
+    // grid-quantized 16-unit wall when an origin is not grid-aligned.
+    let mut distance = 4;
+    while distance <= max_distance {
+        let point = (
+            origin.0 + direction.0 * distance,
+            origin.1 + direction.1 * distance,
+            origin.2 + direction.2 * distance,
+        );
+        if ir.brushes.values().any(|brush| {
+            let structural_enclosure = brush.role.is_wall()
+                || brush.role.is_slab()
+                || matches!(
+                    brush.role,
+                    super::assembly::BrushAssemblyRole::PortalPost
+                        | super::assembly::BrushAssemblyRole::PortalLintel
+                        | super::assembly::BrushAssemblyRole::PortalSurround
+                );
+            structural_enclosure && point_strictly_inside_brush(brush, point)
+        }) {
+            return true;
         }
+        distance += 8;
     }
-    true
+    false
+}
+
+/// Reject point entities in authored open volumes. A valid origin must see
+/// solid assembly geometry above and below within 96 units, plus in all four
+/// cardinal directions before leaving its owning room's XY span.
+pub(crate) fn origin_enclosed(
+    ir: &AssemblyIR,
+    room: ReservationId,
+    origin: (i128, i128, i128),
+    room_bounds: (i128, i128, i128, i128, i128, i128),
+) -> bool {
+    // A slab omission joins bands into an authored open volume. Local rays
+    // beside its rim can still encounter floor/ceiling solids while the
+    // point belongs to the exterior-connected void, so point entities are
+    // conservatively omitted from the entire owning room.
+    if ir.openings.values().any(|opening| {
+        opening.owner.reservation_id == room
+            && opening.portal_id.is_none()
+            && opening.wall_role.is_slab()
+    }) || !origin_clear(ir, origin, room_bounds)
+    {
+        return false;
+    }
+    let (x0, y0, z0, x1, y1, z1) = room_bounds;
+    [
+        ((0, 0, 1), (z1 - origin.2).min(96)),
+        ((0, 0, -1), (origin.2 - z0).min(96)),
+        ((1, 0, 0), x1 - origin.0),
+        ((-1, 0, 0), origin.0 - x0),
+        ((0, 1, 0), y1 - origin.1),
+        ((0, -1, 0), origin.1 - y0),
+    ]
+    .into_iter()
+    .all(|(direction, distance)| solid_on_segment(ir, origin, direction, distance))
+}
+
+/// Validate an emitted point-entity origin against the completed structural
+/// shell.  This is the final shared safety net for spawn, lights, and
+/// movement descriptors after all route, vertical, cave, and presentation
+/// geometry has been materialized.
+pub(crate) fn origin_airtight(ir: &AssemblyIR, origin: (i128, i128, i128)) -> bool {
+    if point_inside_solid(ir, origin) {
+        return false;
+    }
+    let Some((min, max)) = ir
+        .brushes
+        .values()
+        .filter_map(|brush| brush.brush.aabb().ok())
+        .fold(None, |bounds, (min, max)| match bounds {
+            None => Some((min, max)),
+            Some((lo, hi)) => Some((
+                (lo.0.min(min.0), lo.1.min(min.1), lo.2.min(min.2)),
+                (hi.0.max(max.0), hi.1.max(max.1), hi.2.max(max.2)),
+            )),
+        })
+    else {
+        return false;
+    };
+    [
+        ((0, 0, 1), max.2 - origin.2),
+        ((0, 0, -1), origin.2 - min.2),
+        ((1, 0, 0), max.0 - origin.0),
+        ((-1, 0, 0), origin.0 - min.0),
+        ((0, 1, 0), max.1 - origin.1),
+        ((0, -1, 0), origin.1 - min.1),
+    ]
+    .into_iter()
+    .all(|(direction, distance)| distance > 0 && solid_on_segment(ir, origin, direction, distance))
 }
 
 /// Place the lights referenced by one room's theme light list.
@@ -112,10 +254,10 @@ pub(crate) fn place_room_lights(
                 break;
             }
             let placement = LIGHT_PLACEMENT_CLASS[recipe as usize];
-            let (origin, key) = match placement {
+            let (origin, _placement_key) = match placement {
                 crate::enhanced_v3::richness::content_types::PlacementClass::Wall => {
                     // Alternate walls deterministically by light index.
-                    let wall = (seed as usize + light_idx + idx) % 4;
+                    let wall = ((seed % 4) as usize + light_idx + idx) % 4;
                     let (ox, oy) = match wall {
                         0 => (center_x, y0 + 24),
                         1 => (center_x, y1 - 24),
@@ -165,15 +307,15 @@ pub(crate) fn place_room_lights(
             let resolved = offsets
                 .iter()
                 .map(|&(ox, oy, oz)| (origin.0 + ox, origin.1 + oy, origin.2 + oz))
-                .find(|&candidate| origin_clear(ir, candidate, room_bounds));
+                .find(|&candidate| origin_enclosed(ir, room, candidate, room_bounds));
             let Some(origin) = resolved else {
-                return Err(lighting_error(
-                    "origin.blocked",
-                    format!(
-                        "light recipe {} has no protected clear volume in room {room:?}",
-                        LIGHT_RECIPE_IDS[recipe as usize]
-                    ),
-                ));
+                lights.skipped.push(SkippedLight {
+                    recipe,
+                    attempted_origin: origin,
+                    room,
+                    reason: "no_solid_enclosure_within_room_band",
+                });
+                continue;
             };
             let entity_id = ir.alloc_entity_id();
             let mut keys = BTreeMap::new();
@@ -238,7 +380,7 @@ pub(crate) fn readability_floor_satisfied(
     // a light meeting that recipe's readability floor (one focal light).
     let theme_idx = theme_ordinal(theme);
     let light_refs = ARCHETYPE_THEME_LIGHT_REFS[archetype.raw() as usize][theme_idx];
-    if light_refs.is_empty() {
+    if light_refs.is_empty() || (placed.lights.is_empty() && !placed.skipped.is_empty()) {
         return true;
     }
     light_refs.iter().any(|&recipe| {
@@ -281,24 +423,112 @@ pub(crate) fn lighting_error(path: &str, context: impl Into<String>) -> Richness
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::enhanced_v3::richness::{assembly::AssemblyIR, ids::ArchetypeIndex};
+    use crate::enhanced_v3::richness::{
+        assembly::{
+            AssemblyIR, BrushAssembly, BrushAssemblyRole, CostSource, SemanticAttribution,
+            SupportTarget,
+        },
+        ids::ArchetypeIndex,
+    };
 
     fn bounds() -> (i128, i128, i128, i128, i128, i128) {
         (256, 256, 0, 768, 768, 176)
     }
 
+    fn room_ir(include_ceiling: bool) -> AssemblyIR {
+        let mut ir = AssemblyIR::new();
+        let owner = SemanticAttribution {
+            reservation_id: ReservationId::new(0),
+            request_id: None,
+            archetype: Some(ArchetypeIndex::new(0)),
+            beat_id: None,
+            zone_id: None,
+        };
+        let mut insert = |x, y, z, role| {
+            let id = ir.alloc_brush_id();
+            ir.insert_brush(BrushAssembly {
+                id,
+                brush: crate::enhanced_v3::geometry::ConvexBrush::make_box(x, y, z)
+                    .expect("test room brush"),
+                role,
+                owner: owner.clone(),
+                cost: CostSource {
+                    dimension: crate::enhanced_v3::richness::assembly::BudgetDimension::SourceFaces,
+                    face_count: 6,
+                },
+                support: SupportTarget::World,
+            });
+        };
+        insert(
+            (256, 768),
+            (256, 768),
+            (0, 16),
+            BrushAssemblyRole::FloorSlab,
+        );
+        if include_ceiling {
+            insert(
+                (256, 768),
+                (256, 768),
+                (160, 176),
+                BrushAssemblyRole::CeilingSlab,
+            );
+        }
+        insert(
+            (256, 768),
+            (256, 272),
+            (16, 160),
+            BrushAssemblyRole::NorthWall,
+        );
+        insert(
+            (256, 768),
+            (752, 768),
+            (16, 160),
+            BrushAssemblyRole::SouthWall,
+        );
+        insert(
+            (256, 272),
+            (272, 752),
+            (16, 160),
+            BrushAssemblyRole::WestWall,
+        );
+        insert(
+            (752, 768),
+            (272, 752),
+            (16, 160),
+            BrushAssemblyRole::EastWall,
+        );
+        ir
+    }
+
     #[test]
     fn origin_clear_rejects_outside_and_inside_brushes() {
-        let ir = AssemblyIR::new();
+        let ir = room_ir(true);
         let room = bounds();
         assert!(origin_clear(&ir, (512, 512, 96), room));
+        assert!(origin_enclosed(
+            &ir,
+            ReservationId::new(0),
+            (512, 512, 96),
+            room
+        ));
         assert!(!origin_clear(&ir, (240, 512, 96), room), "outside x");
         assert!(!origin_clear(&ir, (512, 512, 4), room), "below floor");
     }
 
     #[test]
+    fn enclosedness_rejects_an_open_ceiling() {
+        let ir = room_ir(false);
+        assert!(!origin_enclosed(
+            &ir,
+            ReservationId::new(0),
+            (512, 512, 96),
+            bounds()
+        ));
+    }
+
+    #[test]
     fn place_room_lights_emits_recipe_entities() {
-        let mut ir = AssemblyIR::new();
+        let mut ir = room_ir(true);
         let lights = place_room_lights(
             &mut ir,
             ReservationId::new(0),
@@ -320,7 +550,7 @@ mod tests {
 
     #[test]
     fn per_room_light_cap_is_four() {
-        let mut ir = AssemblyIR::new();
+        let mut ir = room_ir(true);
         let lights = place_room_lights(
             &mut ir,
             ReservationId::new(0),
@@ -335,7 +565,7 @@ mod tests {
 
     #[test]
     fn light_origins_are_inside_room() {
-        let mut ir = AssemblyIR::new();
+        let mut ir = room_ir(true);
         let room = bounds();
         let lights = place_room_lights(
             &mut ir,
@@ -351,6 +581,38 @@ mod tests {
             assert!(x >= room.0 + 16 && x < room.3 - 16, "x in room");
             assert!(y >= room.1 + 16 && y < room.4 - 16, "y in room");
             assert!(z >= room.2 + 16 && z < room.5 - 16, "z in room");
+            assert!(origin_enclosed(
+                &ir,
+                ReservationId::new(0),
+                light.origin,
+                room
+            ));
         }
+    }
+
+    #[test]
+    fn no_enclosed_origin_is_skipped_with_evidence() {
+        let mut ir = AssemblyIR::new();
+        let lights = place_room_lights(
+            &mut ir,
+            ReservationId::new(0),
+            bounds(),
+            ArchetypeIndex::new(0),
+            RichnessTheme::Ancient,
+            7,
+        )
+        .expect("open room candidates are skipped, not errors");
+        assert!(lights.lights.is_empty());
+        assert!(!lights.skipped.is_empty());
+        assert!(ir.entities.is_empty());
+        assert!(lights
+            .skipped
+            .iter()
+            .all(|skip| skip.reason == "no_solid_enclosure_within_room_band"));
+        assert!(readability_floor_satisfied(
+            ArchetypeIndex::new(0),
+            RichnessTheme::Ancient,
+            &lights
+        ));
     }
 }

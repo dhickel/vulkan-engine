@@ -549,6 +549,24 @@ impl PlacementSolver {
         false
     }
 
+    /// Select the lower canonical centre cell so the spawn is at least 32
+    /// units from the interior wall faces of every legal (>= 7-cell) room.
+    /// This keeps the qbsp hull-2 fill seed out of the prior one-cell north
+    /// offset, which was too close to the entry room boundary.
+    fn spawn_footprint(room: &Footprint3D, layer: u8) -> Footprint3D {
+        debug_assert!(room.grid_width() >= 7 && room.grid_depth() >= 7);
+        let x0 = room.x0 + (room.grid_width() - 1) / 2;
+        let y0 = room.y0 + (room.grid_depth() - 1) / 2;
+        Footprint3D {
+            x0,
+            y0,
+            x1: x0 + 1,
+            y1: y0 + 1,
+            occupies_lower: layer == 0,
+            occupies_upper: layer == 1,
+        }
+    }
+
     /// Reserve owner-bearing spawn, light, and support cells inside the
     /// committed room envelopes before topology claims exterior route space.
     fn reserve_room_occupants(&mut self) -> Result<(), RichnessError> {
@@ -582,11 +600,22 @@ impl PlacementSolver {
                 let layer = if room.footprint.occupies_lower { 0 } else { 1 };
                 let center_x = (room.footprint.x0 + room.footprint.x1) / 2;
                 let center_y = (room.footprint.y0 + room.footprint.y1) / 2;
+                let spawn = Self::spawn_footprint(&room.footprint, layer);
+                // For an odd-span entry room, the centred light reservation
+                // shares the only hull-2-safe centre cell with the spawn.
+                // Shift only that bookkeeping reservation one quantum east;
+                // presentation independently derives actual light origins.
+                let (light_x, light_y) =
+                    if room.id == spawn_parent && center_x == spawn.x0 && center_y == spawn.y0 {
+                        (center_x + 1, center_y)
+                    } else {
+                        (center_x, center_y)
+                    };
                 let light = Footprint3D {
-                    x0: center_x,
-                    y0: center_y,
-                    x1: center_x + 1,
-                    y1: center_y + 1,
+                    x0: light_x,
+                    y0: light_y,
+                    x1: light_x + 1,
+                    y1: light_y + 1,
                     occupies_lower: layer == 0,
                     occupies_upper: layer == 1,
                 };
@@ -660,16 +689,7 @@ impl PlacementSolver {
             } else {
                 1
             };
-            let spawn_center_x = (spawn_room.footprint.x0 + spawn_room.footprint.x1) / 2;
-            let spawn_center_y = (spawn_room.footprint.y0 + spawn_room.footprint.y1) / 2;
-            let spawn = Footprint3D {
-                x0: spawn_center_x,
-                y0: spawn_center_y + 1,
-                x1: spawn_center_x + 1,
-                y1: spawn_center_y + 2,
-                occupies_lower: layer == 0,
-                occupies_upper: layer == 1,
-            };
+            let spawn = Self::spawn_footprint(&spawn_room.footprint, layer);
             if let Some(parent_id) = self.journal.composite_parent_of(spawn_parent) {
                 self.journal.try_reserve_composite_child(
                     parent_id,

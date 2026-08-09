@@ -299,8 +299,8 @@ pub(crate) fn compute_support_contact(
     let slab_side_carry = contact.plane.nz == 0
         && slab_like
         && (parent.role.is_wall()
-            || parent.role.is_slab()
-            || parent.role.is_vertical_architecture())
+            || parent.role.is_vertical_architecture()
+            || parent.role.is_slab())
         && parent_min_z <= child_min_z;
     // Decorative guard/lip/corbel members are carried by whatever positive-
     // area structure supports their base (the acyclic DAG validator keeps the
@@ -381,22 +381,16 @@ pub(crate) fn derive_support_records(ir: &mut AssemblyIR) -> Result<(), Richness
                 })
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
+    type Candidate = (BrushAssemblyId, Rational, bool);
     let mut targets = BTreeMap::new();
-
+    let mut candidates: BTreeMap<BrushAssemblyId, Vec<Candidate>> = BTreeMap::new();
     for child_id in &brush_ids {
         let child = &ir.brushes[child_id];
         if child.role == BrushAssemblyRole::FloorSlab {
             targets.insert(*child_id, SupportTarget::World);
             continue;
         }
-
-        // Support resolution: prefer a positive-area GRAVITY contact (the
-        // supporting brush's top face below this brush's bottom face), and
-        // fall back to the best positive-area side contact. The support DAG
-        // validator proves the transitive path to world support; exposed
-        // bottom faces are legitimate for pit frames, cave walls, and
-        // hanging props.
-        let parent = brush_ids
+        let child_candidates = brush_ids
             .iter()
             .filter(|parent_id| *parent_id != child_id)
             .filter(|parent_id| aabbs_may_touch(bounds[child_id], bounds[parent_id]))
@@ -409,26 +403,65 @@ pub(crate) fn derive_support_records(ir: &mut AssemblyIR) -> Result<(), Richness
                         contact.contact_plane.2 < 0,
                     ))
             })
-            .max_by(
-                |(left_id, left_area, left_gravity), (right_id, right_area, right_gravity)| {
-                    left_gravity
-                        .cmp(right_gravity)
-                        .then_with(|| left_area.cmp(right_area))
-                        .then_with(|| right_id.cmp(left_id))
-                },
-            )
-            .map(|(parent_id, _, _)| parent_id)
-            .ok_or_else(|| {
-                support_error(
-                    "support.derive",
-                    format!(
-                        "brush {} ({}) has no positive-area gravity or side support contact",
-                        child_id.raw(),
-                        child.role.tag()
-                    ),
+            .collect::<Vec<_>>();
+        candidates.insert(*child_id, child_candidates);
+    }
+
+    // Resolve only against parents already known to reach World. This permits
+    // same-elevation slab chains in either brush-ID direction while making a
+    // cycle impossible by construction.
+    let mut unresolved = candidates.keys().copied().collect::<BTreeSet<_>>();
+    while !unresolved.is_empty() {
+        let mut progress = false;
+        for child_id in unresolved.iter().copied().collect::<Vec<_>>() {
+            let parent = candidates[&child_id]
+                .iter()
+                .filter(|(parent_id, _, _)| targets.contains_key(parent_id))
+                .max_by(
+                    |(left_id, left_area, left_gravity), (right_id, right_area, right_gravity)| {
+                        left_gravity
+                            .cmp(right_gravity)
+                            .then_with(|| left_area.cmp(right_area))
+                            .then_with(|| right_id.cmp(left_id))
+                    },
                 )
-            })?;
-        targets.insert(*child_id, SupportTarget::Brush(parent));
+                .map(|(parent_id, _, _)| *parent_id);
+            if let Some(parent) = parent {
+                targets.insert(child_id, SupportTarget::Brush(parent));
+                unresolved.remove(&child_id);
+                progress = true;
+            }
+        }
+        if progress {
+            continue;
+        }
+        let child_id = *unresolved.iter().next().expect("unresolved is non-empty");
+        let child = &ir.brushes[&child_id];
+        let face_contacts = ir
+            .brushes
+            .values()
+            .filter(|candidate| candidate.id != child_id)
+            .filter(|candidate| {
+                super::geometry::has_positive_area_contact(&child.brush, &candidate.brush)
+            })
+            .map(|candidate| {
+                (
+                    candidate.id.raw(),
+                    candidate.role.tag(),
+                    candidate.brush.aabb().ok(),
+                    targets.contains_key(&candidate.id),
+                )
+            })
+            .collect::<Vec<_>>();
+        return Err(support_error(
+            "support.derive",
+            format!(
+                "brush {} ({}, {:?}) has no support path to World; face contacts={face_contacts:?}",
+                child_id.raw(),
+                child.role.tag(),
+                child.brush.aabb().ok()
+            ),
+        ));
     }
 
     ir.supports.clear();

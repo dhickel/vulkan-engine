@@ -61,6 +61,14 @@ pub struct CliArgs {
     /// overbright 2.0, style 0, animation 0.0). Only available in headless
     /// acceptance mode; rejected in ordinary windowed launches.
     pub acceptance_camera: Option<String>,
+    /// Phase 17: explicit acceptance camera origin (x y z) for headless
+    /// capture at arbitrary poses (grand-volume / prop evidence).
+    pub acceptance_camera_origin: Option<(f32, f32, f32)>,
+    /// Phase 17: explicit acceptance camera look-at target (x y z).
+    pub acceptance_camera_look_at: Option<(f32, f32, f32)>,
+    /// Phase 17: windowed WSI lifecycle test (resize -> minimize -> restore)
+    /// exercised from inside the app when scriptable WM control is absent.
+    pub wsi_lifecycle_test: bool,
     /// Phase B: Generate an EnhancedV3 dungeon map from scratch.
     pub m3_generate: bool,
     /// Phase B: Path to ericw-tools bin directory.
@@ -237,6 +245,9 @@ impl Default for CliArgs {
             all_visible: false,
             corpus_identity: None,
             acceptance_camera: None,
+            acceptance_camera_origin: None,
+            acceptance_camera_look_at: None,
+            wsi_lifecycle_test: false,
             m3_generate: false,
             ericw_tools_dir: None,
             m3_seed: system_time_seed(),
@@ -354,6 +365,20 @@ pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<C
                 opts.acceptance_camera = Some(label);
                 i += 2;
             }
+            "--acceptance-camera-origin" => {
+                let triple = parse_f32_triple(&args, i, "--acceptance-camera-origin")?;
+                opts.acceptance_camera_origin = Some(triple);
+                i += 4;
+            }
+            "--acceptance-camera-look-at" => {
+                let triple = parse_f32_triple(&args, i, "--acceptance-camera-look-at")?;
+                opts.acceptance_camera_look_at = Some(triple);
+                i += 4;
+            }
+            "--wsi-lifecycle-test" => {
+                opts.wsi_lifecycle_test = true;
+                i += 1;
+            }
             "--m3-generate" => {
                 opts.m3_generate = true;
                 i += 1;
@@ -468,6 +493,31 @@ fn invalid_m3_value(flag: &'static str, value: &str, expected: &'static str) -> 
         value: value.to_string(),
         expected,
     }
+}
+
+fn parse_f32_value(args: &[String], i: usize, flag: &'static str) -> Result<f32, CliError> {
+    let value = next_value(args, i, flag)?;
+    value
+        .parse()
+        .map_err(|_| invalid_m3_value(flag, value, "a 32-bit float"))
+}
+
+fn parse_f32_triple(
+    args: &[String],
+    i: usize,
+    flag: &'static str,
+) -> Result<(f32, f32, f32), CliError> {
+    let mut out = [0.0_f32; 3];
+    for slot in 0..3 {
+        out[slot] = parse_f32_value(args, i + slot, flag)?;
+    }
+    if !out.iter().all(|v| v.is_finite()) {
+        return Err(CliError::InvalidScale(format!(
+            "{flag} requires three finite numbers, got {:?}",
+            out
+        )));
+    }
+    Ok((out[0], out[1], out[2]))
 }
 
 fn parse_u64_value(args: &[String], i: usize, flag: &'static str) -> Result<u64, CliError> {

@@ -1152,6 +1152,12 @@ pub(crate) fn derive_interface_kind(
         | (BrushAssemblyRole::CeilingSlab, BrushAssemblyRole::UpperShellWall) => {
             Some(InterfaceKind::WallToCeiling)
         }
+        // Grand-arena monoliths are structural floor-supported massing even
+        // though ordinary monoliths are not classified as vertical roles.
+        (BrushAssemblyRole::MonolithSolid, BrushAssemblyRole::FloorSlab)
+        | (BrushAssemblyRole::FloorSlab, BrushAssemblyRole::MonolithSolid) => {
+            Some(InterfaceKind::MassToFloor)
+        }
         // Vertical architecture is assembled from exact, non-overlapping
         // gravity contacts. Keep those contacts explicit without pretending
         // every tread/landing/support combination is a baseline room joint.

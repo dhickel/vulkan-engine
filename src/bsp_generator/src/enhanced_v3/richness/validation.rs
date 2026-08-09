@@ -19,7 +19,7 @@
 //! - Validators may call each other internally.
 //! - Crate-private; canonical ordering; no baseline changes.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::assembly::{AssemblyIR, BrushAssemblyRole};
 use super::complexity::{BudgetReservation, ComplexityPlan};
@@ -485,14 +485,6 @@ pub(crate) fn validate_protected_routes(ir: &AssemblyIR) -> Result<(), RichnessE
                 })?;
             for brush in ir.brushes.values() {
                 if richness_geom::brushes_overlap(&brush.brush, &throat)? {
-                    eprintln!(
-                        "DBG-THROAT: opening {} bounds {:?} intruder {} ({}) aabb={:?}",
-                        opening.id.raw(),
-                        opening.bounds,
-                        brush.id.raw(),
-                        brush.role.tag(),
-                        brush.brush.aabb().ok()
-                    );
                     return Err(validation_error(
                         RichnessErrorCode::SemanticInfeasible,
                         RichnessErrorCategory::SemanticInfeasibility,
@@ -661,13 +653,17 @@ pub(crate) fn validate_actual_vs_reserved_cost(
     };
 
     if !plan.assert_dominates(&actual) {
+        let mut role_counts = BTreeMap::new();
+        for brush in ir.brushes.values() {
+            *role_counts.entry(brush.role.tag()).or_insert(0u32) += 1;
+        }
         return Err(RichnessError::new(
             RichnessErrorCode::BudgetOverrun, 0,
             "?", "?", "?", "?", "?", "?", "?",
             "validation.cost",
             RichnessErrorCategory::BudgetOverrun,
             format!(
-                "actual costs exceed reserved: faces actual={} reserved={}, brushes actual={} reserved={}, support actual={} reserved={}",
+                "actual costs exceed reserved: faces actual={} reserved={}, brushes actual={} reserved={}, support actual={} reserved={}, roles={role_counts:?}",
                 actual.faces, plan.total_reserved.faces,
                 actual.brushes, plan.total_reserved.brushes,
                 actual.support_contacts, plan.total_reserved.support_contacts,
@@ -690,6 +686,7 @@ fn actual_support_budget_units(ir: &AssemblyIR) -> u32 {
     let mut floor_owners = BTreeSet::new();
     let mut ceiling_owners = BTreeSet::new();
     let mut cave_owners = BTreeSet::new();
+    let mut vertical_shells = BTreeSet::new();
     let mut independent = 0u32;
 
     for brush in ir.brushes.values() {
@@ -709,6 +706,16 @@ fn actual_support_budget_units(ir: &AssemblyIR) -> u32 {
             | BrushAssemblyRole::CaveCeiling => {
                 cave_owners.insert(brush.owner.clone());
             }
+            // Split vertical shell partitions are one authored support
+            // assembly per owner/role. Their individual geometric contacts
+            // remain mandatory in the exact support DAG.
+            BrushAssemblyRole::UpperShellWall
+            | BrushAssemblyRole::LadderShaftWall
+            | BrushAssemblyRole::DropShaftWall
+            | BrushAssemblyRole::SpiralShellWall
+            | BrushAssemblyRole::ArenaGateWall => {
+                vertical_shells.insert((brush.owner.clone(), brush.role));
+            }
             BrushAssemblyRole::NorthWall
             | BrushAssemblyRole::SouthWall
             | BrushAssemblyRole::EastWall
@@ -727,6 +734,7 @@ fn actual_support_budget_units(ir: &AssemblyIR) -> u32 {
     (floor_owners.len() as u32)
         .saturating_add(ceiling_owners.len() as u32)
         .saturating_add(cave_owners.len() as u32)
+        .saturating_add(vertical_shells.len() as u32)
         .saturating_add(ir.portal_assemblies.len() as u32)
         .saturating_add(independent)
 }

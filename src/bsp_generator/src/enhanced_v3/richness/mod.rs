@@ -42,6 +42,7 @@ pub(crate) mod pacing;
 pub(crate) mod pipeline;
 pub(crate) mod presentation;
 pub(crate) mod props;
+pub(crate) mod qualification;
 pub(crate) mod request;
 pub(crate) mod reservation;
 pub(crate) mod sampling;
