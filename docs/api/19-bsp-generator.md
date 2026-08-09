@@ -1242,7 +1242,7 @@ pub enum GenerationProfile {
 
 `from_tag("m3-richness-v1")` returns `Some(EnhancedV3RichnessV1)`.
 The `dungeon_gen` CLI uses `--class m3-richness-v1`; `engine_pack` uses
-`enhanced-dungeon-v3-richness`; `dungeon_explore.sh --richness` launches
+`enhanced-dungeon-v3-richness-v1`; `dungeon_explore.sh --richness` launches
 the in-game explorer GUI.
 
 ## See Also

@@ -908,7 +908,7 @@ and package manifests remain frozen and unchanged.
 | production tag | `"m3-richness-v1"` |
 | profile variant | `GenerationProfile::EnhancedV3RichnessV1` — active enum member |
 | dispatch | `dungeon_gen --class m3-richness-v1` — production CLI |
-| packaging | `engine_pack enhanced-dungeon-v3-richness` — production package command |
+| packaging | `engine_pack enhanced-dungeon-v3-richness-v1` — production package command |
 | explorer | `dungeon_explore.sh --richness` or `--m3-richness-v1` |
 | Rust API | `bsp_generator::generate_richness_v1(doc: RichnessDocumentV1)` |
 | implementation domain | `src/bsp_generator/src/enhanced_v3/richness/` (34 source modules) |
@@ -1025,7 +1025,7 @@ and blocks publication.
 | `GenerationProfile::EnhancedV3RichnessV1` | **EXPOSED** — active in `GenerationProfile` enum |
 | `from_tag("m3-richness-v1")` | returns `Some(EnhancedV3RichnessV1)` |
 | CLI dispatch | `dungeon_gen --class m3-richness-v1` — active production CLI |
-| package command | `engine_pack enhanced-dungeon-v3-richness` — active production package command |
+| package command | `engine_pack enhanced-dungeon-v3-richness-v1` — active production package command |
 | explorer GUI | `bsp_beta --m3-richness-v1` — active explorer GUI |
 | explorer script | `dungeon_explore.sh --richness` / `--m3-richness-v1` |
 | public API surface | `RichnessDocumentV1`, `ResolvedRichnessRequestV1`, `generate_richness_v1()`, `RichnessError`, 7 revision enums, `RichnessPreset`, `RichnessTheme`, `RichnessCaveMode`, `InheritedOr<T>`, `ResolvedField<T>`, `RichnessGateIdentity`, `RichnessMetadataV1`, `RichnessGenerationMetadata`, `RichnessPipelineOutput`, `ActualCounts`, qualification helpers — all re-exported from `bsp_generator::lib.rs` |
@@ -1100,9 +1100,9 @@ successful-parent/inherited-pipe case.
 | Profile identity | **PASS** | `GenerationProfile::EnhancedV3RichnessV1` with tag `"m3-richness-v1"` |
 | Public Rust API | **PASS** | `generate_richness_v1()`, `RichnessDocumentV1`, `ResolvedRichnessRequestV1`, 7 revision enums, `RichnessError` (22 error codes), `RichnessMetadataV1`, `RichnessGenerationMetadata`, `RichnessPipelineOutput`, `ActualCounts`, `RichnessPreset`, `RichnessTheme`, `RichnessCaveMode`, `InheritedOr<T>`, `ResolvedField<T>`, `RichnessGateIdentity` — all re-exported from `bsp_generator::lib.rs` |
 | CLI integration | **PASS** | `dungeon_gen --class m3-richness-v1` with all options (preset, theme, extent, landmarks, zones, cave-mode, vertical, budget) |
-| Package publication | **PASS** | `engine_pack enhanced-dungeon-v3-richness` with transactional staging, atomic no-replace publication, compiler verification, theme asset closure, and manifest/hash recording |
+| Package publication | **PASS** | `engine_pack enhanced-dungeon-v3-richness-v1` with transactional staging, atomic no-replace publication, compiler verification, theme asset closure, and manifest/hash recording |
 | Explorer GUI | **PASS** | `bsp_beta --m3-richness-v1` with F1/F2 mode-exclusive overlay; source-level GUI, routing, pipeline, and binary tests pass |
-| Explorer script | **PASS** | `dungeon_explore.sh --richness` / `--m3-richness-v1` — cache identity covers generator/content/tool/assets/compiler/profile/script |
+| Explorer script | **PASS** | `dungeon_explore.sh --richness` / `--m3-richness-v1` is cache-backed: `verify_richness_cache` checks BSP2/QLIT magic, generator version, a content+tool+profile+script fingerprint (`richness_fingerprint`), asset hashes, and artifact hashes; `--cache-only` honored; baseline modes retain their existing fingerprints. Verified live: seed 42 sparse/ancient built once, second run reused the cache, launch path started clean. |
 | 36-entry corpus (release) | **PASS** | 3 presets × 4 seeds × 3 themes: warning-free compilation, strict reload, deterministic replay, budget compliance |
 | Theme assets (3 themes) | **PASS** | cc0_richness_ancient, cc0_richness_egyptian, cc0_richness_brutalist — all project-authored CC0, deterministic build, WAD + palette + companion PNGs |
 | Theme invariance | **PASS** | Identical geometry bytes across themes for same (seed, extent, preset) |

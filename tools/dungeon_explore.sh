@@ -16,14 +16,21 @@ M2_TEXTURES="src/bsp_generator/themes/cc0_dungeon_v2/textures"
 DEFAULT_TOOL_PATH="${DUNGEON_TOOL_PATH:-$HOME/.local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin}"
 PROFILE_PATH="${DUNGEON_PROFILE_PATH:-tools/bsp_authoring/ericw-q1-bsp2-generated-profile.toml}"
 
-RICHNESS_WAD_ANCIENT="src/bsp_generator/themes/richness_ancient/cc0_richness_ancient.wad"
-RICHNESS_PALETTE_ANCIENT="src/bsp_generator/themes/richness_ancient/palette.lmp"
-RICHNESS_TEXTURES_ANCIENT="src/bsp_generator/themes/richness_ancient/textures"
+RICHNESS_WAD_ANCIENT="src/bsp_generator/themes/richness_ancient_v1/richness_ancient_v1.wad"
+RICHNESS_PALETTE_ANCIENT="src/bsp_generator/themes/richness_ancient_v1/palette.lmp"
+RICHNESS_WAD_EGYPTIAN="src/bsp_generator/themes/richness_egyptian_v1/richness_egyptian_v1.wad"
+RICHNESS_PALETTE_EGYPTIAN="src/bsp_generator/themes/richness_egyptian_v1/palette.lmp"
+RICHNESS_WAD_BRUTALIST="src/bsp_generator/themes/richness_brutalist_v1/richness_brutalist_v1.wad"
+RICHNESS_PALETTE_BRUTALIST="src/bsp_generator/themes/richness_brutalist_v1/palette.lmp"
+RICHNESS_CONTENT_ROOT="src/bsp_generator/content/richness_v1"
+RICHNESS_THEME_ROOT="src/bsp_generator/themes"
+RICHNESS_DEFAULT_THEME="ancient"
 
 # ── defaults ───────────────────────────────────────────────────────────────
 MODE="architectural"
 SEED=""
 PRESET="moderate"
+THEME="$RICHNESS_DEFAULT_THEME"
 ROOMS=""
 CORRIDORS=""
 LOOPS=""
@@ -228,6 +235,7 @@ while [[ $# -gt 0 ]]; do
     --richness|--m3-richness-v1) MODE="richness"; shift ;;
     --seed)               SEED="$2"; shift 2 ;;
     --preset)             PRESET="$2"; shift 2 ;;
+    --theme)              THEME="$2"; shift 2 ;;
     --rooms)              ROOMS="$2"; shift 2 ;;
     --corridors)          CORRIDORS="$2"; shift 2 ;;
     --loops)              LOOPS="$2"; shift 2 ;;
@@ -278,15 +286,90 @@ if [[ "$MODE" == "classic" || "$MODE" == "enhanced" ]]; then
   exec cargo run -p bsp_beta -- "${LAUNCH_ARGS[@]}"
 fi
 
-# ── richness: direct GUI launch via --m3-richness-v1 ──────────────────────
-if [[ "$MODE" == "richness" ]]; then
-  RICHNESS_MODE="--development"
-  [[ -n "$DEVELOPMENT" ]] && RICHNESS_MODE="$DEVELOPMENT"
-  RICHNESS_ARGS=("$RICHNESS_MODE" "--m3-richness-v1")
-  [[ -n "$SEED" ]] && RICHNESS_ARGS+=(--richness-seed "$SEED")
-  [[ -n "$PRESET" ]] && RICHNESS_ARGS+=(--richness-preset "$PRESET")
+# Richness-specific cache verification: BSP2/QLIT magic, generator version,
+# content+tool+profile+script fingerprint, asset hashes, and artifact hashes.
+verify_richness_cache() {
+  local bsp="$1" lit="$2" manifest="$3" wad="$4" palette="$5" fingerprint="$6"
+  [[ -f "$bsp" && -f "$lit" && -f "$manifest" ]] || return 1
+  [[ "$(head -c 4 "$bsp" 2>/dev/null || true)" == "BSP2" ]] || return 1
+  [[ "$(head -c 4 "$lit" 2>/dev/null || true)" == "QLIT" ]] || return 1
+  local stored_version; stored_version="$(grep '^generator_version' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
+  [[ "$stored_version" == "$(generator_version)" ]] || return 1
+  grep -q "^content_fingerprint[[:space:]]*=.*$fingerprint" "$manifest" 2>/dev/null || return 1
+  local stored_bsp; stored_bsp="$(grep '^bsp.sha256' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
+  local stored_lit; stored_lit="$(grep '^lit.sha256' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
+  [[ "$stored_bsp" == "$(calc_sha256 "$bsp")" ]] || return 1
+  [[ "$stored_lit" == "$(calc_sha256 "$lit")" ]] || return 1
+  [[ "$(grep '^palette.sha256' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')" == "$(calc_sha256 "$palette")" ]] || return 1
+  [[ "$(grep '^wad.sha256' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')" == "$(calc_sha256 "$wad")" ]] || return 1
+  return 0
+}
 
-  echo "$(green "✓") Launching $(bold "richness") (m3-richness-v1) with GUI explorer..."
+# ── richness: cache-backed launch via engine_pack + --m3-richness-v1 ──────
+if [[ "$MODE" == "richness" ]]; then
+  SEED="${SEED:-42}"
+  case "$THEME" in
+    ancient)   RICHNESS_WAD="$RICHNESS_WAD_ANCIENT";   RICHNESS_PALETTE="$RICHNESS_PALETTE_ANCIENT" ;;
+    egyptian)  RICHNESS_WAD="$RICHNESS_WAD_EGYPTIAN";  RICHNESS_PALETTE="$RICHNESS_PALETTE_EGYPTIAN" ;;
+    brutalist) RICHNESS_WAD="$RICHNESS_WAD_BRUTALIST"; RICHNESS_PALETTE="$RICHNESS_PALETTE_BRUTALIST" ;;
+    *) die "unknown richness theme: $THEME (ancient|egyptian|brutalist)" ;;
+  esac
+
+  # Cache identity covers generator + authored content + theme assets +
+  # compiler profile + pinned tools + this script: any change rebuilds.
+  richness_fingerprint() {
+    local content_sha tool_sha profile_sha script_sha
+    content_sha="$(find "$RICHNESS_CONTENT_ROOT" "$RICHNESS_THEME_ROOT" -type f -print0 2>/dev/null | sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | awk '{print $1}')"
+    tool_sha="$(sha256sum "$DEFAULT_TOOL_PATH/qbsp" "$DEFAULT_TOOL_PATH/vis" "$DEFAULT_TOOL_PATH/light" 2>/dev/null | sha256sum | awk '{print $1}')"
+    profile_sha="$(sha256sum "$PROFILE_PATH" 2>/dev/null | awk '{print $1}')"
+    script_sha="$(sha256sum "${BASH_SOURCE[0]}" 2>/dev/null | awk '{print $1}')"
+    printf '%s%s%s%s' "$content_sha" "$tool_sha" "$profile_sha" "$script_sha" | sha256sum | awk '{print $1}'
+  }
+
+  RICHNESS_LABEL="richness-${PRESET}-${THEME}-seed-${SEED}"
+  BSP="$CACHE_ROOT/${RICHNESS_LABEL}.bsp"
+  LIT="$CACHE_ROOT/${RICHNESS_LABEL}.lit"
+  MANIFEST="$CACHE_ROOT/${RICHNESS_LABEL}.manifest.toml"
+  FINGERPRINT="$(richness_fingerprint)"
+
+  [[ -n "$BUST" ]] && bust_cache "$SEED" "$RICHNESS_LABEL"
+
+  if ! verify_richness_cache "$BSP" "$LIT" "$MANIFEST" "$RICHNESS_WAD" "$RICHNESS_PALETTE" "$FINGERPRINT"; then
+    echo ""
+    echo "$(bold "Building richness cache...")"
+    local_tmp="$(mktemp -d -t dungeon-explore-richness-XXXXXX)"
+    trap 'rm -rf "$local_tmp"' RETURN
+    out_dir="$local_tmp/out"
+    pub_args=(run -q -p engine_pack -- enhanced-dungeon-v3-richness-v1 --seed "$SEED" --preset "$PRESET" --theme "$THEME" --out "$out_dir" --name "${RICHNESS_LABEL}")
+    [[ -x "$DEFAULT_TOOL_PATH/qbsp" && -x "$DEFAULT_TOOL_PATH/vis" && -x "$DEFAULT_TOOL_PATH/light" ]] && pub_args+=(--tool-path "$DEFAULT_TOOL_PATH")
+    cargo "${pub_args[@]}" || { echo "  $(red "✗") richness package build failed" >&2; return 1; }
+    mkdir -p "$CACHE_ROOT"
+    cp -f "$out_dir/${RICHNESS_LABEL}.bsp" "$BSP"
+    cp -f "$out_dir/${RICHNESS_LABEL}.lit" "$LIT"
+    {
+      echo "generator_version = \"$(generator_version)\""
+      echo "generator = \"engine_pack:enhanced-dungeon-v3-richness-v1\""
+      echo "content_fingerprint = \"$FINGERPRINT\""
+      echo "bsp.sha256 = \"$(calc_sha256 "$BSP")\""
+      echo "lit.sha256 = \"$(calc_sha256 "$LIT")\""
+      echo "palette.sha256 = \"$(calc_sha256 "$RICHNESS_PALETTE")\""
+      echo "wad.sha256 = \"$(calc_sha256 "$RICHNESS_WAD")\""
+      grep -E "^(request|semantic_identity|qbsp_sha256|vis_sha256|light_sha256)" "$out_dir/${RICHNESS_LABEL}.manifest.toml" 2>/dev/null || true
+    } > "$MANIFEST"
+    echo "  $(green "✓") cached $(bold "$(basename "$BSP")")"
+  else
+    echo "$(green "✓") using cached $(basename "$BSP")"
+  fi
+
+  [[ -n "$CACHE_ONLY" ]] && { echo "$(green "✓") cache ready: $BSP"; exit 0; }
+
+  IMPORT_MODE="--strict"
+  [[ -n "$DEVELOPMENT" ]] && IMPORT_MODE="$DEVELOPMENT"
+  RICHNESS_ARGS=("$IMPORT_MODE" "--bsp" "$BSP" "--palette" "$RICHNESS_PALETTE" "--wad" "$RICHNESS_WAD")
+  [[ -f "$LIT" ]] && RICHNESS_ARGS+=(--lit "$LIT")
+
+  echo ""
+  echo "  $(bold "Launching") $(green "richness") ${PRESET}/${THEME} seed $(bold "$SEED")..."
   exec cargo run -p bsp_beta -- "${RICHNESS_ARGS[@]}"
 fi
 

@@ -511,7 +511,7 @@ manifests remain frozen and unchanged.
 | production tag | `"m3-richness-v1"` |
 | dispatch | `GenerationProfile::from_tag("m3-richness-v1")` → `Some(EnhancedV3RichnessV1)` |
 | CLI | `dungeon_gen --class m3-richness-v1` |
-| packaging | `engine_pack enhanced-dungeon-v3-richness` |
+| packaging | `engine_pack enhanced-dungeon-v3-richness-v1` |
 | explorer | `dungeon_explore.sh --richness` or `--m3-richness-v1` |
 
 ### Key Features
@@ -607,18 +607,18 @@ variant). Current frozen revisions:
 
 # With explicit preset, theme, and extent
 ./tools/dungeon_gen --class m3-richness-v1 --seed 42 \
-  --richness-preset moderate --richness-theme egyptian \
-  --richness-extent 2048
+  --preset moderate --theme egyptian \
+  --extent 2048
 
 # With all inherited controls overridden
 ./tools/dungeon_gen --class m3-richness-v1 --seed 99 \
-  --richness-preset rich --richness-theme brutalist \
-  --richness-extent 3072 --richness-landmarks 3 \
-  --richness-zones 3 --richness-cave-mode required \
-  --richness-vertical 4
+  --preset rich --theme brutalist \
+  --extent 3072 --landmarks 3 \
+  --zones 3 --cave-mode required \
+  --vertical-openings 4
 
 # Publish through engine_pack
-engine_pack enhanced-dungeon-v3-richness \
+engine_pack enhanced-dungeon-v3-richness-v1 \
   --seed 42 --preset moderate --theme ancient --out /tmp/pkg
 
 # Launch the in-game Richness explorer GUI

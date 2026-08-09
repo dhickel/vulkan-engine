@@ -592,7 +592,7 @@ The Richness V1 pipeline operates in two independent transaction domains:
    `tools/richness_content_codegen` into checked-in Rust source;
    the generator reads only checked-in constants.
 
-2. **Publication domain (Domain B)**: `engine_pack enhanced-dungeon-v3-richness`
+2. **Publication domain (Domain B)**: `engine_pack enhanced-dungeon-v3-richness-v1`
    invokes `generate_richness_v1()`, then compiles through ericw-tools with
    the pinned BSP2 profile. Uses transactional staging: preflight validation,
    sibling staging directory, atomic rename to target. Existing targets are
@@ -683,7 +683,7 @@ upload, and frame recording.
 | pacing/variation controls | none | UI-only non-canonical controls |
 | entry point | `generate_v3(&config)` | `generate_richness_v1(doc)` |
 | CLI | `--class m3` | `--class m3-richness-v1` |
-| package | `enhanced-dungeon-v3` | `enhanced-dungeon-v3-richness` |
+| package | `enhanced-dungeon-v3` | `enhanced-dungeon-v3-richness-v1` |
 
 ## 19. See Also
 
