@@ -63,7 +63,8 @@ const FROZEN_GOLDEN_DIGEST_HEX: &str =
 ///
 /// This covers each identity, canonical request, request identity, map,
 /// metadata record, and the authored generated constants.
-const FROZEN_CROSS_ARCH_IDENTITY_DIGEST_HEX: &str = "REPLACE_WITH_FULL_36_ENTRY_DIGEST";
+const FROZEN_CROSS_ARCH_IDENTITY_DIGEST_HEX: &str =
+    "4577d71e1318b742d5d690ac851ee2c8f13e5617c368d032cffb8e497155c5d1";
 
 // ── Golden vectors ─────────────────────────────────────────────────────────
 
@@ -793,60 +794,113 @@ fn cross_arch_36_entry_identity_digest() {
 
     let constants = include_bytes!("generated_content.rs");
     let constants_sha256 = sha256_hex(constants);
-    let mut hasher = Sha256::new();
-    hash_frame(&mut hasher, b"richness-cross-arch-identity-v2");
+    let hardware_threads = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(2);
+    let worker_count = std::env::var("RICHNESS_VECTOR_WORKERS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_else(|| hardware_threads.saturating_mul(2))
+        .clamp(2, 8)
+        .min(entries.len());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let (send, receive) = std::sync::mpsc::channel();
 
-    for ((preset, theme, seed), frozen) in entries.into_iter().zip(&manifest.entries) {
-        let identity = format!("{}/{}/seed:{seed}", preset.tag(), theme.tag());
-        assert_eq!(frozen.identity, identity, "non-canonical manifest order");
-        assert_eq!(frozen.seed, seed, "{identity}: seed drifted");
-        assert_eq!(frozen.preset, preset.tag(), "{identity}: preset drifted");
-        assert_eq!(frozen.theme, theme.tag(), "{identity}: theme drifted");
+    eprintln!(
+        "generating {} Richness identities with {worker_count} workers",
+        entries.len()
+    );
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let send = send.clone();
+            let entries = &entries;
+            let frozen_entries = &manifest.entries;
+            let constants_sha256 = &constants_sha256;
+            let next = &next;
+            scope.spawn(move || loop {
+                let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(&(preset, theme, seed)) = entries.get(index) else {
+                    break;
+                };
+                let frozen = &frozen_entries[index];
+                let identity = format!("{}/{}/seed:{seed}", preset.tag(), theme.tag());
+                let started = std::time::Instant::now();
+                assert_eq!(frozen.identity, identity, "non-canonical manifest order");
+                assert_eq!(frozen.seed, seed, "{identity}: seed drifted");
+                assert_eq!(frozen.preset, preset.tag(), "{identity}: preset drifted");
+                assert_eq!(frozen.theme, theme.tag(), "{identity}: theme drifted");
 
-        let extent = preset_extent(preset);
-        assert_eq!(frozen.extent, extent, "{identity}: extent drifted");
-        let request_bytes = build_cross_arch_request(seed, extent, preset.tag(), theme.tag());
-        let resolved = resolve_from_bytes(&request_bytes)
-            .unwrap_or_else(|e| panic!("{identity}: resolve failed: {e:?}"));
-        let output = pipeline_output(&resolved)
-            .unwrap_or_else(|e| panic!("{identity}: pipeline failed: {e:?}"));
-        let canonical_request = output.request_metadata.canonical_request();
-        let request_identity = output.request_metadata.request_identity();
-        let metadata = output.generation_metadata.to_canonical_bytes();
+                let extent = preset_extent(preset);
+                assert_eq!(frozen.extent, extent, "{identity}: extent drifted");
+                let request_bytes =
+                    build_cross_arch_request(seed, extent, preset.tag(), theme.tag());
+                let resolved = resolve_from_bytes(&request_bytes)
+                    .unwrap_or_else(|e| panic!("{identity}: resolve failed: {e:?}"));
+                let output = pipeline_output(&resolved)
+                    .unwrap_or_else(|e| panic!("{identity}: pipeline failed: {e:?}"));
+                let canonical_request = output.request_metadata.canonical_request();
+                let request_identity = output.request_metadata.request_identity();
+                let metadata = output.generation_metadata.to_canonical_bytes();
 
-        assert_eq!(
-            frozen.request_sha256,
-            sha256_hex(canonical_request),
-            "{identity}: canonical request hash drifted"
-        );
-        assert_eq!(
-            frozen.request_identity_sha256,
-            sha256_hex(&request_identity),
-            "{identity}: request identity hash drifted"
-        );
-        assert_eq!(
-            frozen.map_sha256,
-            sha256_hex(output.map_text.as_bytes()),
-            "{identity}: map hash drifted"
-        );
-        assert_eq!(
-            frozen.metadata_sha256,
-            sha256_hex(&metadata),
-            "{identity}: metadata hash drifted"
-        );
-        assert_eq!(
-            frozen.constants_sha256, constants_sha256,
-            "{identity}: generated constants hash drifted"
-        );
+                assert_eq!(
+                    frozen.request_sha256,
+                    sha256_hex(canonical_request),
+                    "{identity}: canonical request hash drifted"
+                );
+                assert_eq!(
+                    frozen.request_identity_sha256,
+                    sha256_hex(&request_identity),
+                    "{identity}: request identity hash drifted"
+                );
+                assert_eq!(
+                    frozen.map_sha256,
+                    sha256_hex(output.map_text.as_bytes()),
+                    "{identity}: map hash drifted"
+                );
+                assert_eq!(
+                    frozen.metadata_sha256,
+                    sha256_hex(&metadata),
+                    "{identity}: metadata hash drifted"
+                );
+                assert_eq!(
+                    frozen.constants_sha256, *constants_sha256,
+                    "{identity}: generated constants hash drifted"
+                );
 
-        hash_frame(&mut hasher, identity.as_bytes());
-        hash_frame(&mut hasher, canonical_request);
-        hash_frame(&mut hasher, &request_identity);
-        hash_frame(&mut hasher, output.map_text.as_bytes());
-        hash_frame(&mut hasher, &metadata);
-        hash_frame(&mut hasher, constants);
+                let mut entry_hasher = Sha256::new();
+                hash_frame(&mut entry_hasher, identity.as_bytes());
+                hash_frame(&mut entry_hasher, canonical_request);
+                hash_frame(&mut entry_hasher, &request_identity);
+                hash_frame(&mut entry_hasher, output.map_text.as_bytes());
+                hash_frame(&mut entry_hasher, &metadata);
+                hash_frame(&mut entry_hasher, constants);
+                let entry_digest: [u8; 32] = entry_hasher.finalize().into();
+                send.send((index, entry_digest))
+                    .expect("identity digest receiver must remain connected");
+                eprintln!(
+                    "[{}/36] {identity} ({:.1}s)",
+                    index + 1,
+                    started.elapsed().as_secs_f64()
+                );
+            });
+        }
+    });
+
+    let mut entry_digests = vec![None; entries.len()];
+    for _ in 0..entries.len() {
+        let (index, digest) = receive
+            .recv()
+            .expect("every Richness identity must produce a digest");
+        entry_digests[index] = Some(digest);
     }
-
+    let mut hasher = Sha256::new();
+    hash_frame(&mut hasher, b"richness-cross-arch-identity-v3");
+    for entry_digest in entry_digests {
+        hash_frame(
+            &mut hasher,
+            &entry_digest.expect("canonical identity digest missing"),
+        );
+    }
     let digest = format!("{:x}", hasher.finalize());
     println!("\n>>> CROSS-ARCH 36-ENTRY IDENTITY DIGEST: {digest} <<<\n");
     assert_eq!(

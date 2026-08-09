@@ -34,9 +34,29 @@ fn m3_richness_conflicts_with_m3_generate() {
 }
 
 #[test]
-fn m3_richness_conflicts_with_bsp() {
-    let err = parse_from(["--m3-richness-v1", "--bsp", "maps/test.bsp"]).unwrap_err();
-    assert!(matches!(err, cli::CliError::M3RichnessBspConflict));
+fn m3_richness_accepts_complete_prebuilt_closure() {
+    let args = parse_from([
+        "--m3-richness-v1",
+        "--bsp",
+        "maps/test.bsp",
+        "--palette",
+        "gfx/palette.lmp",
+        "--lit",
+        "maps/test.lit",
+        "--wad",
+        "maps/test.wad",
+        "--textures",
+        "textures",
+        "--richness-seed",
+        "42",
+    ])
+    .unwrap();
+    assert!(args.m3_richness);
+    assert_eq!(
+        args.bsp_path,
+        Some(std::path::PathBuf::from("maps/test.bsp"))
+    );
+    assert_eq!(args.import_mode, Some(cli::ImportMode::Strict));
 }
 
 #[test]
@@ -64,12 +84,18 @@ fn m3_richness_rejects_textures() {
 }
 
 #[test]
-fn baseline_parse_from_skips_richness_overrides() {
-    // --richness-* overrides are accepted-and-skipped by parse_from (they are
-    // consumed by parse_richness_launch_token from the raw args); they never
-    // enable the richness launch by themselves.
-    let args = parse_from(["--strict", "--richness-preset", "sparse"]).unwrap();
-    assert!(!args.m3_richness);
+fn richness_override_requires_exact_mode_gate() {
+    let error = parse_from(["--strict", "--richness-preset", "sparse"]).unwrap_err();
+    assert_eq!(
+        error,
+        cli::CliError::RichnessOptionRequiresRichness("--richness-preset")
+    );
+}
+
+#[test]
+fn baseline_m3_option_is_not_silently_used_by_richness() {
+    let error = parse_from(["--m3-richness-v1", "--seed", "42"]).unwrap_err();
+    assert_eq!(error, cli::CliError::M3OptionRequiresGenerate("--seed"));
 }
 
 // ── Draft-to-document conversion parity ────────────────────────────────────

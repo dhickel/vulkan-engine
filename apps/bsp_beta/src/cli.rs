@@ -717,19 +717,36 @@ pub(crate) fn usage_text() -> String {
         out,
         "  --richness-variation <name>  restrained|moderate|wild"
     );
-    let _ = writeln!(out, "  --richness-landmarks|zones|vertical-openings <u32>");
+    let _ = writeln!(out, "  --richness-landmarks <u32>  Critical-path landmarks");
+    let _ = writeln!(out, "  --richness-zones <u32>      Semantic zone count");
+    let _ = writeln!(
+        out,
+        "  --richness-vertical-openings <u32>  Vertical opening count"
+    );
     let _ = writeln!(
         out,
         "  --richness-cave-mode <name>  disabled|allowed|required"
     );
+    let _ = writeln!(out, "  --richness-prop-density <u32>   UI prop density");
+    let _ = writeln!(out, "  --richness-light-density <u32>  UI light density");
+    let _ = writeln!(out, "  --richness-budget-ceiling <u32> Complexity ceiling");
     let _ = writeln!(
         out,
-        "  --richness-prop-density|light-density|budget-ceiling <u32>"
+        "  --richness-landmarks-inherited|--richness-zones-inherited"
     );
     let _ = writeln!(
         out,
-        "  --richness-<field>-inherited  Clear an inherited-or-explicit override"
+        "  --richness-cave-mode-inherited|--richness-vertical-openings-inherited"
     );
+    let _ = writeln!(
+        out,
+        "  --richness-pacing-inherited|--richness-variation-inherited"
+    );
+    let _ = writeln!(
+        out,
+        "  --richness-prop-density-inherited|--richness-light-density-inherited"
+    );
+    let _ = writeln!(out, "  --richness-budget-ceiling-inherited");
     let _ = writeln!(
         out,
         "  --seed <u64>           Generation seed (default: current system time)"

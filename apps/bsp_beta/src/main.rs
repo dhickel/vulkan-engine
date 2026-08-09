@@ -508,16 +508,21 @@ fn build_richness_startup_package(
 fn authorize_prebuilt_richness_closure(
     args: &cli::CliArgs,
 ) -> Result<package::AuthorizedBspImport, AppError> {
-    let required = |path: Option<&std::path::Path>, flag: &str| {
-        path.ok_or_else(|| {
-            AppError::BridgeProof(format!("prebuilt Richness closure requires {flag} <path>"))
-        })
-    };
-    let bsp = required(args.bsp_path.as_deref(), "--bsp")?;
-    let palette = required(args.palette_path.as_deref(), "--palette")?;
-    let lit = required(args.lit_path.as_deref(), "--lit")?;
-    let wad = required(args.wad_path.as_deref(), "--wad")?;
-    let textures = required(args.textures_dir.as_deref(), "--textures")?;
+    let bsp = args.bsp_path.as_deref().ok_or_else(|| {
+        AppError::BridgeProof("prebuilt Richness closure requires --bsp <path>".into())
+    })?;
+    let palette = args.palette_path.as_deref().ok_or_else(|| {
+        AppError::BridgeProof("prebuilt Richness closure requires --palette <path>".into())
+    })?;
+    let lit = args.lit_path.as_deref().ok_or_else(|| {
+        AppError::BridgeProof("prebuilt Richness closure requires --lit <path>".into())
+    })?;
+    let wad = args.wad_path.as_deref().ok_or_else(|| {
+        AppError::BridgeProof("prebuilt Richness closure requires --wad <path>".into())
+    })?;
+    let textures = args.textures_dir.as_deref().ok_or_else(|| {
+        AppError::BridgeProof("prebuilt Richness closure requires --textures <path>".into())
+    })?;
     let wad_paths = vec![wad.to_path_buf()];
 
     package::authorize_direct_import(
@@ -923,9 +928,10 @@ fn run_richness_windowed(
 
     // ── Richness GUI setup ──────────────────────────────────────────────
     let gui: Rc<RefCell<RichnessGui>> = Rc::new(RefCell::new({
-        let mut g = RichnessGui::new();
-        g.mode = RichnessGuiMode::None;
-        g
+        let mut gui = RichnessGui::new();
+        gui.draft = initial_draft;
+        gui.mode = RichnessGuiMode::None;
+        gui
     }));
     loop_state.gameplay_input_enabled = true;
 

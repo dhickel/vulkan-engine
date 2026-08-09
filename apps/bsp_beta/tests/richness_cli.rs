@@ -1,10 +1,8 @@
-//! CLI parser tests for the unregistered Richness V1 launch token parser.
+//! CLI parser tests for the registered Richness V1 launch token parser.
 //!
 //! These tests verify that `parse_richness_launch_token` correctly parses
-//! all RichnessDraft fields with their `--richness-` prefix options and
-//! inherited markers, that it rejects invalid values, that it does NOT
-//! appear in the ordinary `parse_from` dispatch, and that baseline CLI
-//! tests remain byte-compatible.
+//! every RichnessDraft control, that the primary parser enforces the exact
+//! mode gate, and that baseline CLI behavior remains compatible.
 
 // Include cli.rs directly to access the unregistered parser + all types.
 #[path = "../src/cli.rs"]
@@ -136,18 +134,28 @@ fn baseline_m3_generate_parse_unchanged() {
 }
 
 #[test]
-fn baseline_no_richness_help_text() {
-    // Richness overrides are consumed by parse_richness_launch_token from the
-    // raw process args; parse_from skips them so a richness launch parses,
-    // but they never appear in the help text.
-    let args = parse_from(["--strict", "--richness-preset", "sparse"]).unwrap();
-    assert!(args.import_mode == Some(cli::ImportMode::Strict));
-    // The overrides never leak into the usage/help text.
+fn registered_richness_gate_and_help_text() {
+    let args = parse_from([
+        "--m3-richness-v1",
+        "--richness-preset",
+        "sparse",
+        "--richness-theme",
+        "ancient",
+    ])
+    .unwrap();
+    assert!(args.m3_richness);
+    assert_eq!(args.import_mode, Some(cli::ImportMode::Strict));
+
     let usage = cli::usage_text();
-    assert!(
-        !usage.contains("--richness-"),
-        "richness flags leaked into usage"
-    );
+    for flag in [
+        "--m3-richness-v1",
+        "--richness-preset",
+        "--richness-theme",
+        "--richness-seed",
+        "--richness-budget-ceiling",
+    ] {
+        assert!(usage.contains(flag), "registered help missing {flag}");
+    }
 }
 
 #[test]
@@ -591,12 +599,8 @@ fn inherited_flag_overrides_explicit_value() {
 // ── Baseline byte compatibility with CLI ───────────────────────────────────
 
 #[test]
-fn richness_flags_not_in_parse_from() {
-    // parse_from accepts-and-skips the override flags (they carry values and
-    // are consumed by parse_richness_launch_token from the raw args); the
-    // dispatch surface itself stays clean: no m3_richness behavior is
-    // triggered by the overrides alone.
-    for flag in &[
+fn richness_flags_require_exact_mode_gate() {
+    for &flag in &[
         "--richness-preset",
         "--richness-theme",
         "--richness-extent",
@@ -611,10 +615,11 @@ fn richness_flags_not_in_parse_from() {
         "--richness-light-density",
         "--richness-budget-ceiling",
     ] {
-        let args = parse_from(["--strict", flag, "1"]).unwrap();
-        assert!(
-            !args.m3_richness,
-            "flag '{flag}' must not enable the richness launch by itself"
+        let error = parse_from(["--strict", flag, "1"]).unwrap_err();
+        assert_eq!(
+            error,
+            CliError::RichnessOptionRequiresRichness(flag),
+            "wrong gate error for {flag}"
         );
     }
 }
