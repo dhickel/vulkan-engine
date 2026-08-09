@@ -1,6 +1,178 @@
 use std::path::PathBuf;
 
-use bsp_generator::{ArchType, FeatureFlags, GrammarMode, V3Config, V3Preset};
+use bsp_generator::{
+    ArchType, FeatureFlags, GrammarMode, InheritedOr, RichnessCaveMode, RichnessDocumentV1,
+    RichnessPreset, RichnessTheme, V3Config, V3Preset,
+};
+
+#[derive(Default)]
+/// Richness V1 CLI options (for --class m3-richness-v1).
+struct RichnessOptions {
+    preset: Option<String>,
+    theme: Option<String>,
+    extent: Option<u32>,
+    landmarks: Option<u32>,
+    zones: Option<u32>,
+    cave_mode: Option<String>,
+    vertical_openings: Option<u32>,
+    budget: Option<u32>,
+}
+
+impl RichnessOptions {
+    fn first_used_flag(&self) -> Option<&'static str> {
+        [
+            self.preset.as_ref().map(|_| "--preset"),
+            self.theme.as_ref().map(|_| "--theme"),
+            self.extent.as_ref().map(|_| "--extent"),
+            self.landmarks.as_ref().map(|_| "--landmarks"),
+            self.zones.as_ref().map(|_| "--zones"),
+            self.cave_mode.as_ref().map(|_| "--cave-mode"),
+            self.vertical_openings
+                .as_ref()
+                .map(|_| "--vertical-openings"),
+            self.budget.as_ref().map(|_| "--budget"),
+        ]
+        .into_iter()
+        .flatten()
+        .next()
+    }
+
+    fn into_document(self, seed: u64) -> Result<RichnessDocumentV1, String> {
+        let preset_tag = self.preset.as_deref().unwrap_or("sparse");
+        let preset = RichnessPreset::from_tag(preset_tag).ok_or_else(|| {
+            format!("unknown --preset '{preset_tag}'. Use sparse, moderate, or rich")
+        })?;
+        let theme_tag = self.theme.as_deref().unwrap_or("ancient");
+        let theme = RichnessTheme::from_tag(theme_tag).ok_or_else(|| {
+            format!("unknown --theme '{theme_tag}'. Use ancient, egyptian, or brutalist")
+        })?;
+        let extent = self.extent.unwrap_or(2048);
+
+        let mut doc = RichnessDocumentV1::new(seed, extent, preset, theme)
+            .map_err(|err| format!("richness config invalid: {err}"))?;
+
+        if let Some(v) = self.landmarks {
+            doc = RichnessDocumentV1::with_all_explicit(
+                doc.seed(),
+                doc.extent(),
+                doc.preset(),
+                doc.theme(),
+                doc.request_schema_revision(),
+                doc.algorithm_revision(),
+                doc.content_revision(),
+                doc.preset_revision(),
+                doc.theme_revision(),
+                doc.asset_revision(),
+                doc.convention_revision(),
+                InheritedOr::Explicit(v),
+                doc.zone_count(),
+                doc.cave_mode(),
+                doc.vertical_openings(),
+                doc.budget_ceiling(),
+            )
+            .map_err(|err| format!("richness config invalid: {err}"))?;
+        }
+
+        if let Some(v) = self.zones {
+            let prev = doc.clone();
+            doc = RichnessDocumentV1::with_all_explicit(
+                prev.seed(),
+                prev.extent(),
+                prev.preset(),
+                prev.theme(),
+                prev.request_schema_revision(),
+                prev.algorithm_revision(),
+                prev.content_revision(),
+                prev.preset_revision(),
+                prev.theme_revision(),
+                prev.asset_revision(),
+                prev.convention_revision(),
+                prev.critical_path_landmarks(),
+                InheritedOr::Explicit(v),
+                prev.cave_mode(),
+                prev.vertical_openings(),
+                prev.budget_ceiling(),
+            )
+            .map_err(|err| format!("richness config invalid: {err}"))?;
+        }
+
+        if let Some(ref mode_tag) = self.cave_mode {
+            let mode = RichnessCaveMode::from_tag(mode_tag).ok_or_else(|| {
+                format!("unknown --cave-mode '{mode_tag}'. Use required, preferred, or omitted")
+            })?;
+            let prev = doc.clone();
+            doc = RichnessDocumentV1::with_all_explicit(
+                prev.seed(),
+                prev.extent(),
+                prev.preset(),
+                prev.theme(),
+                prev.request_schema_revision(),
+                prev.algorithm_revision(),
+                prev.content_revision(),
+                prev.preset_revision(),
+                prev.theme_revision(),
+                prev.asset_revision(),
+                prev.convention_revision(),
+                prev.critical_path_landmarks(),
+                prev.zone_count(),
+                InheritedOr::Explicit(mode),
+                prev.vertical_openings(),
+                prev.budget_ceiling(),
+            )
+            .map_err(|err| format!("richness config invalid: {err}"))?;
+        }
+
+        if let Some(v) = self.vertical_openings {
+            let prev = doc.clone();
+            doc = RichnessDocumentV1::with_all_explicit(
+                prev.seed(),
+                prev.extent(),
+                prev.preset(),
+                prev.theme(),
+                prev.request_schema_revision(),
+                prev.algorithm_revision(),
+                prev.content_revision(),
+                prev.preset_revision(),
+                prev.theme_revision(),
+                prev.asset_revision(),
+                prev.convention_revision(),
+                prev.critical_path_landmarks(),
+                prev.zone_count(),
+                prev.cave_mode(),
+                InheritedOr::Explicit(v),
+                prev.budget_ceiling(),
+            )
+            .map_err(|err| format!("richness config invalid: {err}"))?;
+        }
+
+        if let Some(v) = self.budget {
+            let prev = doc.clone();
+            doc = RichnessDocumentV1::with_all_explicit(
+                prev.seed(),
+                prev.extent(),
+                prev.preset(),
+                prev.theme(),
+                prev.request_schema_revision(),
+                prev.algorithm_revision(),
+                prev.content_revision(),
+                prev.preset_revision(),
+                prev.theme_revision(),
+                prev.asset_revision(),
+                prev.convention_revision(),
+                prev.critical_path_landmarks(),
+                prev.zone_count(),
+                prev.cave_mode(),
+                prev.vertical_openings(),
+                InheritedOr::Explicit(v),
+            )
+            .map_err(|err| format!("richness config invalid: {err}"))?;
+        }
+
+        doc.validate_raw_fields()
+            .map_err(|err| format!("richness config invalid: {err}"))?;
+        Ok(doc)
+    }
+}
 
 #[derive(Default)]
 struct M3Options {
@@ -114,6 +286,7 @@ fn run() -> Result<(), String> {
     let mut class: Option<String> = None;
     let mut out: Option<PathBuf> = None;
     let mut m3 = M3Options::default();
+    let mut richness = RichnessOptions::default();
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -121,8 +294,24 @@ fn run() -> Result<(), String> {
             "--seed" => seed = Some(parse_u64(&mut args, "--seed")?),
             "--class" => class = Some(next_value(&mut args, "--class")?),
             "--out" => out = Some(PathBuf::from(next_value(&mut args, "--out")?)),
-            "--preset" => m3.preset = Some(next_value(&mut args, "--preset")?),
-            "--extent" => m3.extent = Some(parse_u32(&mut args, "--extent")?),
+            "--preset" => {
+                let val = next_value(&mut args, "--preset")?;
+                m3.preset = Some(val.clone());
+                richness.preset = Some(val);
+            }
+            "--extent" => {
+                let val = parse_u32(&mut args, "--extent")?;
+                m3.extent = Some(val);
+                richness.extent = Some(val);
+            }
+            "--theme" => richness.theme = Some(next_value(&mut args, "--theme")?),
+            "--landmarks" => richness.landmarks = Some(parse_u32(&mut args, "--landmarks")?),
+            "--zones" => richness.zones = Some(parse_u32(&mut args, "--zones")?),
+            "--cave-mode" => richness.cave_mode = Some(next_value(&mut args, "--cave-mode")?),
+            "--vertical-openings" => {
+                richness.vertical_openings = Some(parse_u32(&mut args, "--vertical-openings")?)
+            }
+            "--budget" => richness.budget = Some(parse_u32(&mut args, "--budget")?),
             "--rooms" => m3.rooms = Some(parse_u32(&mut args, "--rooms")?),
             "--corridors" => m3.corridors = Some(parse_u32(&mut args, "--corridors")?),
             "--loops" => m3.loops = Some(parse_u32(&mut args, "--loops")?),
@@ -158,6 +347,7 @@ fn run() -> Result<(), String> {
     match class.as_deref().unwrap_or("m1") {
         "m1" => {
             reject_m3_options(&m3, "m1")?;
+            reject_richness_options_for_baseline(&richness, "m1")?;
             let config = bsp_generator::DungeonConfig::nominal_m1();
             let (map_text, meta) = bsp_generator::generate(seed, config)
                 .map_err(|err| format!("generation failed: {err:?}"))?;
@@ -172,6 +362,7 @@ fn run() -> Result<(), String> {
         }
         "m2" => {
             reject_m3_options(&m3, "m2")?;
+            reject_richness_options_for_baseline(&richness, "m2")?;
             let config = bsp_generator::enhanced::config::EnhancedConfig::nominal();
             let (map_text, meta) = bsp_generator::generate_enhanced(seed, config)
                 .map_err(|err| format!("enhanced generation failed: {err}"))?;
@@ -185,6 +376,7 @@ fn run() -> Result<(), String> {
             )?;
         }
         "m3" => {
+            reject_richness_options_for_baseline(&richness, "m3")?;
             let config = m3.into_config(seed)?;
             let (map_text, meta) = bsp_generator::generate_enhanced_v3(&config)
                 .map_err(|err| format!("v3 generation failed: {err}"))?;
@@ -197,7 +389,29 @@ fn run() -> Result<(), String> {
                 out,
             )?;
         }
-        other => return Err(format!("--class must be m1, m2, or m3, got {other}")),
+        "m3-richness-v1" => {
+            let doc = richness.into_document(seed)?;
+            let output = bsp_generator::generate_richness_v1(&doc)
+                .map_err(|err| format!("richness generation failed: {err}"))?;
+            let meta_bytes = output.generation_metadata.to_canonical_bytes();
+            let meta_str =
+                std::str::from_utf8(&meta_bytes).map_err(|e| format!("metadata not utf-8: {e}"))?;
+            let rooms = extract_fact_u32(meta_str, "rooms").unwrap_or(0);
+            let routes = extract_fact_u32(meta_str, "routes").unwrap_or(0);
+            write_output(
+                output.map_text,
+                rooms,
+                routes,
+                output.actual.faces as u32,
+                seed,
+                out,
+            )?;
+        }
+        other => {
+            return Err(format!(
+                "--class must be m1, m2, m3, or m3-richness-v1, got {other}"
+            ))
+        }
     }
 
     Ok(())
@@ -206,6 +420,18 @@ fn run() -> Result<(), String> {
 fn reject_m3_options(options: &M3Options, class: &str) -> Result<(), String> {
     if let Some(flag) = options.first_used_flag() {
         return Err(format!("{flag} is not valid for class {class}"));
+    }
+    Ok(())
+}
+
+fn reject_richness_options_for_baseline(
+    options: &RichnessOptions,
+    class: &str,
+) -> Result<(), String> {
+    if let Some(flag) = options.first_used_flag() {
+        return Err(format!(
+            "{flag} is a richness-only option and is not valid for class {class}"
+        ));
     }
     Ok(())
 }
@@ -274,6 +500,16 @@ fn parse_feature_flags(value: &str) -> Result<FeatureFlags, String> {
     Ok(flags)
 }
 
+fn extract_fact_u32(meta_str: &str, key: &str) -> Option<u32> {
+    let prefix = format!("{key}: ");
+    for line in meta_str.lines() {
+        if let Some(rest) = line.strip_prefix(&prefix) {
+            return rest.parse::<u32>().ok();
+        }
+    }
+    None
+}
+
 fn write_output(
     map_text: String,
     rooms: u32,
@@ -300,10 +536,11 @@ fn write_output(
 }
 
 fn print_usage() {
-    eprintln!("Usage: dungeon_gen [--seed <u64>] [--class m1|m2|m3] [--out <path>] [M3 OPTIONS]");
+    eprintln!("Usage: dungeon_gen [--seed <u64>] [--class m1|m2|m3|m3-richness-v1] [--out <path>] [OPTIONS]");
     eprintln!("  m1: Legacy v1 single-layer dungeon");
     eprintln!("  m2: Enhanced v2 two-layer dungeon with stairs");
     eprintln!("  m3: Enhanced v3 two-layer generation explorer");
+    eprintln!("  m3-richness-v1: Enhanced V3 Richness V1 with archetypes, props, and themes");
     eprintln!();
     eprintln!("M3 options:");
     eprintln!("  --preset sparse|moderate|rich       Density preset (default: sparse)");
@@ -325,4 +562,14 @@ fn print_usage() {
     eprintln!("  --feature-density <0.0..1.0>       Feature-bearing room density");
     eprintln!("  --minlight <0..255>                Worldspawn _minlight");
     eprintln!("  --light-count <0..rooms>           Exact baked light entity count");
+    eprintln!();
+    eprintln!("M3 Richness V1 options (--class m3-richness-v1 only):");
+    eprintln!("  --preset sparse|moderate|rich       Richness density preset");
+    eprintln!("  --theme ancient|egyptian|brutalist  Visual theme (default: ancient)");
+    eprintln!("  --extent <1024|2048|3072>          XY extent (multiple of 16)");
+    eprintln!("  --landmarks <1..5>                 Critical-path landmark count");
+    eprintln!("  --zones <1..6>                     Semantic zone count");
+    eprintln!("  --cave-mode required|preferred|omitted  Cave eligibility");
+    eprintln!("  --vertical-openings <0..12>        Vertical feature count");
+    eprintln!("  --budget <1000..8000>              Budget ceiling in source faces");
 }

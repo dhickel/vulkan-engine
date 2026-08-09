@@ -77,6 +77,11 @@ pub use topology::build_topology;
 
 pub use enhanced::pipeline::{generate_enhanced, EnhancedMetadata};
 
+// ── Profile identity ──────────────────────────────────────────────────────
+
+pub use enhanced::profile::GenerationProfile;
+pub use enhanced::profile::GenerationRequest;
+
 // ── Enhanced v3 public API ────────────────────────────────────────────────
 
 pub use enhanced_v3::config::{ArchType, FeatureFlags, GrammarMode, V3Config, V3Preset};
@@ -84,6 +89,26 @@ pub use enhanced_v3::error::V3Error;
 pub use enhanced_v3::generate_v3;
 pub use enhanced_v3::metadata::EnhancedV3Metadata;
 pub use enhanced_v3::pipeline::{run_pipeline, V3PipelineOutput};
+
+// ── Enhanced v3 Richness V1 public API ────────────────────────────────────
+
+pub use enhanced_v3::richness::error::{RichnessError, RichnessErrorCategory, RichnessErrorCode};
+pub use enhanced_v3::richness::metadata::{RichnessGenerationMetadata, RichnessMetadataV1};
+pub use enhanced_v3::richness::pipeline::{
+    generate_richness_v1, ActualCounts, RichnessPipelineOutput,
+};
+pub use enhanced_v3::richness::qualification::{
+    archetype_ids, corpus_entries, light_recipe_ids, preset_extent, prop_ids, resolve_from_bytes,
+    sha256_hex, theme_asset_paths, theme_ids, vertical_recipe_variants, CorpusManifest,
+    CorpusManifestEntry,
+};
+pub use enhanced_v3::richness::request::{
+    InheritedOr, ResolvedField, ResolvedRichnessRequestV1, RichnessAlgorithmRevision,
+    RichnessAssetRevision, RichnessCaveMode, RichnessContentRevision, RichnessConventionRevision,
+    RichnessDocumentV1, RichnessGateIdentity, RichnessPreset, RichnessPresetRevision,
+    RichnessRequestSchemaRevision, RichnessTheme, RichnessThemeRevision, ValueSource,
+    RICHNESS_EXTENT_MAX, RICHNESS_EXTENT_MIN, RICHNESS_QUANTUM,
+};
 
 /// Generate a canonical `.map` string and metadata from an Enhanced V3
 /// configuration.

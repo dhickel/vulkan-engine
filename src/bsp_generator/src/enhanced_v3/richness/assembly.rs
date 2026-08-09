@@ -489,6 +489,9 @@ pub(crate) enum InterfaceKind {
     WallToWallCorner,
     /// Cardinal wall meets diagonal wall at a chamfer joint.
     WallToDiagJoint,
+    /// Two diagonal walls of the same chamfered corner meet (positive-area
+    /// contact when the chamfer is small).
+    WallToDiagCorner,
     /// Column bottom contacts floor top or slab.
     ColumnToFloor,
     /// Massing contacts wall.

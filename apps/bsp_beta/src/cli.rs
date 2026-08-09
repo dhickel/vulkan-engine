@@ -71,6 +71,8 @@ pub struct CliArgs {
     pub wsi_lifecycle_test: bool,
     /// Phase B: Generate an EnhancedV3 dungeon map from scratch.
     pub m3_generate: bool,
+    /// Phase C: Launch the Richness V1 explorer GUI.
+    pub m3_richness: bool,
     /// Phase B: Path to ericw-tools bin directory.
     pub ericw_tools_dir: Option<PathBuf>,
     /// EnhancedV3 generation seed. Defaults to the current system time.
@@ -111,8 +113,12 @@ pub enum CliError {
     ConflictingImportMode,
     /// No import mode selected; --strict or --development required.
     NoImportMode,
+    /// --m3-generate and --m3-richness-v1 are mutually exclusive.
+    M3GenerateRichnessConflict,
     /// --m3-generate conflicts with --bsp.
     M3GenerateBspConflict,
+    /// --m3-richness-v1 conflicts with --bsp.
+    M3RichnessBspConflict,
     /// --m3-generate conflicts with explicit --palette.
     M3GeneratePaletteConflict,
     /// --m3-generate conflicts with explicit --lit.
@@ -161,8 +167,17 @@ impl fmt::Display for CliError {
             CliError::NoImportMode => {
                 write!(f, "no import mode selected; use --strict or --development")
             }
+            CliError::M3GenerateRichnessConflict => {
+                write!(
+                    f,
+                    "--m3-generate and --m3-richness-v1 are mutually exclusive"
+                )
+            }
             CliError::M3GenerateBspConflict => {
                 write!(f, "--m3-generate and --bsp are mutually exclusive")
+            }
+            CliError::M3RichnessBspConflict => {
+                write!(f, "--m3-richness-v1 and --bsp are mutually exclusive")
             }
             CliError::M3GeneratePaletteConflict => {
                 write!(f, "--m3-generate and --palette are mutually exclusive")
@@ -249,6 +264,7 @@ impl Default for CliArgs {
             acceptance_camera_look_at: None,
             wsi_lifecycle_test: false,
             m3_generate: false,
+            m3_richness: false,
             ericw_tools_dir: None,
             m3_seed: system_time_seed(),
             m3_preset: V3Preset::Moderate,
@@ -383,6 +399,29 @@ pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<C
                 opts.m3_generate = true;
                 i += 1;
             }
+            "--m3-richness-v1" => {
+                opts.m3_richness = true;
+                i += 1;
+            }
+            // Richness overrides are consumed by parse_richness_launch_token
+            // from the raw process args; parse_from skips them so ordinary
+            // dispatch does not reject a richness launch.
+            "--richness-preset"
+            | "--richness-theme"
+            | "--richness-extent"
+            | "--richness-seed"
+            | "--richness-pacing"
+            | "--richness-landmarks"
+            | "--richness-zones"
+            | "--richness-cave-mode"
+            | "--richness-vertical-openings"
+            | "--richness-budget"
+            | "--richness-budget-ceiling"
+            | "--richness-prop-density"
+            | "--richness-light-density"
+            | "--richness-variation" => {
+                i += 2;
+            }
             "--seed" => {
                 opts.m3_seed = parse_u64_value(&args, i, "--seed")?;
                 m3_option_used = Some("--seed");
@@ -444,8 +483,30 @@ pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<C
         }
     }
 
-    // ── m3-generate conflict checks ──────────────────────────────
-    if !opts.m3_generate {
+    // ── m3-generate / m3-richness-v1 conflict checks ────────────
+    if opts.m3_generate && opts.m3_richness {
+        return Err(CliError::M3GenerateRichnessConflict);
+    }
+    if opts.m3_richness {
+        if opts.bsp_path.is_some() {
+            return Err(CliError::M3RichnessBspConflict);
+        }
+        if opts.palette_path.is_some() {
+            return Err(CliError::M3GeneratePaletteConflict);
+        }
+        if opts.lit_path.is_some() {
+            return Err(CliError::M3GenerateLitConflict);
+        }
+        if opts.wad_path.is_some() {
+            return Err(CliError::M3GenerateWadConflict);
+        }
+        if opts.textures_dir.is_some() {
+            return Err(CliError::M3GenerateTexturesConflict);
+        }
+        if opts.import_mode.is_none() {
+            opts.import_mode = Some(ImportMode::Strict);
+        }
+    } else if !opts.m3_generate {
         if let Some(flag) = m3_option_used {
             return Err(CliError::M3OptionRequiresGenerate(flag));
         }
@@ -573,53 +634,152 @@ fn next_value<'a>(
     Ok(value)
 }
 
-fn print_usage() {
-    eprintln!();
-    eprintln!("BSP Beta — Maintained Load-Query-Physics-Behavior-Reload Proof");
-    eprintln!();
-    eprintln!("Usage:");
-    eprintln!("  Direct BSP launch:   bsp_beta --strict|--development --bsp <path> [OPTIONS]");
-    eprintln!("  Generate & launch:    bsp_beta --m3-generate [--strict|--development] [OPTIONS]");
-    eprintln!();
-    eprintln!("Options:");
-    eprintln!("  --strict               Strict import mode");
-    eprintln!("  --development          Development import mode");
-    eprintln!("  --bsp <path>           Path to compiled .bsp file");
-    eprintln!("  --m3-generate          Generate EnhancedV3 dungeon from scratch");
-    eprintln!("  --seed <u64>           Generation seed (default: current system time)");
-    eprintln!("  --preset <name>        sparse|moderate|rich (default: moderate)");
-    eprintln!("  --rooms <n>            Exact room-count override");
-    eprintln!("  --corridors <n>        Exact corridor-count override");
-    eprintln!("  --loops <n>            Exact same-layer loop-count override");
-    eprintln!("  --chamfer              Enable chamfered rooms (default)");
-    eprintln!("  --no-chamfer           Disable chamfered rooms");
-    eprintln!("  --arch-type <name>     none|pointed|segmented (default: pointed)");
-    eprintln!("  --grammar-families <csv|all>  Grammar allowlist (default: all six)");
-    eprintln!("  --ericw-tools <dir>    Path to ericw-tools bin directory");
-    eprintln!("  --scale <float>        Quake→engine scale factor (default: 0.0254)");
-    eprintln!("  --headless             Run headless (no window, renders N frames)");
-    eprintln!("  --mcp                  Run headless MCP JSON-RPC server over stdio");
-    eprintln!("  --capture-frames <n>   Frame count for headless capture (default: 0)");
-    eprintln!("  --lights               Log all imported light descriptors at startup");
-    eprintln!("  --palette <path>       Path to 768-byte palette .lmp file");
-    eprintln!("  --lit <path>           Path to .lit colored-light companion file");
-    eprintln!("  --wad <path>           Path to WAD file for texture resolution");
-    eprintln!("  --textures <dir>       Textures directory for PBR companion discovery");
-    eprintln!("  --stats                Print draw evidence report after mount (headless)");
-    eprintln!("  --all-visible          Use all-visible evidence mode (with --stats)");
-    eprintln!("  --corpus <name>        Corpus identity for evidence report");
-    eprintln!("  --acceptance-camera <label>  Phase 09 frozen camera: spawn|corridor|junction");
-    eprintln!();
-    eprintln!("Hotkeys (live windowed m3-generate mode):");
-    eprintln!("  F5                     Increment seed & regenerate");
-    eprintln!("  F6                     Cycle Sparse→Moderate→Rich→Sparse");
-    eprintln!("  F7                     Toggle chamfer & regenerate");
-    eprintln!("  F8                     Cycle Pointed→Segmented→None→Pointed");
-    eprintln!("  F9                     Toggle stairs & regenerate");
-    eprintln!("  Ctrl+R                 Regenerate with unchanged config");
-    eprintln!();
+/// Full usage text (testable; the printer routes it to stderr).
+pub(crate) fn usage_text() -> String {
+    let mut out = String::new();
+    use std::fmt::Write as _;
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "BSP Beta — Maintained Load-Query-Physics-Behavior-Reload Proof"
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Usage:");
+    let _ = writeln!(
+        out,
+        "  Direct BSP launch:   bsp_beta --strict|--development --bsp <path> [OPTIONS]"
+    );
+    let _ = writeln!(
+        out,
+        "  Generate & launch:    bsp_beta --m3-generate [--strict|--development] [OPTIONS]
+  Richness explorer:    bsp_beta --m3-richness-v1 [--strict|--development] [OPTIONS]"
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Options:");
+    let _ = writeln!(out, "  --strict               Strict import mode");
+    let _ = writeln!(out, "  --development          Development import mode");
+    let _ = writeln!(out, "  --bsp <path>           Path to compiled .bsp file");
+    let _ = writeln!(
+        out,
+        "  --m3-generate          Generate EnhancedV3 dungeon from scratch"
+    );
+    let _ = writeln!(out, "  --m3-richness-v1       Launch Richness V1 explorer");
+    let _ = writeln!(
+        out,
+        "  --seed <u64>           Generation seed (default: current system time)"
+    );
+    let _ = writeln!(
+        out,
+        "  --preset <name>        sparse|moderate|rich (default: moderate)"
+    );
+    let _ = writeln!(out, "  --rooms <n>            Exact room-count override");
+    let _ = writeln!(
+        out,
+        "  --corridors <n>        Exact corridor-count override"
+    );
+    let _ = writeln!(
+        out,
+        "  --loops <n>            Exact same-layer loop-count override"
+    );
+    let _ = writeln!(
+        out,
+        "  --chamfer              Enable chamfered rooms (default)"
+    );
+    let _ = writeln!(out, "  --no-chamfer           Disable chamfered rooms");
+    let _ = writeln!(
+        out,
+        "  --arch-type <name>     none|pointed|segmented (default: pointed)"
+    );
+    let _ = writeln!(
+        out,
+        "  --grammar-families <csv|all>  Grammar allowlist (default: all six)"
+    );
+    let _ = writeln!(
+        out,
+        "  --ericw-tools <dir>    Path to ericw-tools bin directory"
+    );
+    let _ = writeln!(
+        out,
+        "  --scale <float>        Quake→engine scale factor (default: 0.0254)"
+    );
+    let _ = writeln!(
+        out,
+        "  --headless             Run headless (no window, renders N frames)"
+    );
+    let _ = writeln!(
+        out,
+        "  --mcp                  Run headless MCP JSON-RPC server over stdio"
+    );
+    let _ = writeln!(
+        out,
+        "  --capture-frames <n>   Frame count for headless capture (default: 0)"
+    );
+    let _ = writeln!(
+        out,
+        "  --lights               Log all imported light descriptors at startup"
+    );
+    let _ = writeln!(
+        out,
+        "  --palette <path>       Path to 768-byte palette .lmp file"
+    );
+    let _ = writeln!(
+        out,
+        "  --lit <path>           Path to .lit colored-light companion file"
+    );
+    let _ = writeln!(
+        out,
+        "  --wad <path>           Path to WAD file for texture resolution"
+    );
+    let _ = writeln!(
+        out,
+        "  --textures <dir>       Textures directory for PBR companion discovery"
+    );
+    let _ = writeln!(
+        out,
+        "  --stats                Print draw evidence report after mount (headless)"
+    );
+    let _ = writeln!(
+        out,
+        "  --all-visible          Use all-visible evidence mode (with --stats)"
+    );
+    let _ = writeln!(
+        out,
+        "  --corpus <name>        Corpus identity for evidence report"
+    );
+    let _ = writeln!(
+        out,
+        "  --acceptance-camera <label>  Phase 09 frozen camera: spawn|corridor|junction"
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Hotkeys (live windowed m3-generate mode):");
+    let _ = writeln!(out, "  F1                     Toggle keyboard GUI");
+    let _ = writeln!(out, "  F2                     Toggle mouse GUI");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Hotkeys (live windowed m3-richness-v1 mode):");
+    let _ = writeln!(out, "  F3                     Toggle keyboard GUI");
+    let _ = writeln!(out, "  F4                     Toggle mouse GUI");
+    let _ = writeln!(out, "  F5                     Increment seed & regenerate");
+    let _ = writeln!(
+        out,
+        "  F6                     Cycle Sparse→Moderate→Rich→Sparse"
+    );
+    let _ = writeln!(out, "  F7                     Toggle chamfer & regenerate");
+    let _ = writeln!(
+        out,
+        "  F8                     Cycle Pointed→Segmented→None→Pointed"
+    );
+    let _ = writeln!(out, "  F9                     Toggle stairs & regenerate");
+    let _ = writeln!(
+        out,
+        "  Ctrl+R                 Regenerate with unchanged config"
+    );
+    let _ = writeln!(out);
+    out
 }
 
+fn print_usage() {
+    eprint!("{}", usage_text());
+}
 // ── Richness V1 unregistered CLI parser ───────────────────────────────────
 //
 // The `parse_richness_launch_token` function mirrors every RichnessDraft

@@ -351,6 +351,142 @@ pub fn enhanced_dungeon_v3_schema() -> &'static [CliOption] {
     ]
 }
 
+/// Schema for `enhanced-dungeon-v3-richness-v1 --seed <u64> --preset <sparse|moderate|rich> --theme <ancient|egyptian|brutalist> --out <dir> [--extent <n>] [--landmarks <n>] [--zones <n>] [--cave-mode <mode>] [--vertical-openings <n>] [--budget <n>] [--tool-path <dir>] [--name <name>]`
+pub fn enhanced_dungeon_v3_richness_v1_schema() -> &'static [CliOption] {
+    &[
+        CliOption {
+            name: "--seed",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Master seed for deterministic generation",
+            value_placeholder: Some("<u64>"),
+        },
+        CliOption {
+            name: "--preset",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Richness density preset: sparse, moderate, or rich",
+            value_placeholder: Some("<preset>"),
+        },
+        CliOption {
+            name: "--theme",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Visual theme: ancient, egyptian, or brutalist",
+            value_placeholder: Some("<theme>"),
+        },
+        CliOption {
+            name: "--extent",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "XY extent per axis (1024, 2048, 3072; default: 2048)",
+            value_placeholder: Some("<n>"),
+        },
+        CliOption {
+            name: "--landmarks",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Critical-path landmark count (1-5; inherited from preset)",
+            value_placeholder: Some("<n>"),
+        },
+        CliOption {
+            name: "--zones",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Semantic zone count (1-6; inherited from preset)",
+            value_placeholder: Some("<n>"),
+        },
+        CliOption {
+            name: "--cave-mode",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Cave eligibility: required, preferred, or omitted (inherited from preset)",
+            value_placeholder: Some("<mode>"),
+        },
+        CliOption {
+            name: "--vertical-openings",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Vertical feature count (0-12; inherited from preset)",
+            value_placeholder: Some("<n>"),
+        },
+        CliOption {
+            name: "--budget",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Budget ceiling in source faces (1000-8000; inherited from preset)",
+            value_placeholder: Some("<n>"),
+        },
+        CliOption {
+            name: "--out",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Output directory for published artifact set",
+            value_placeholder: Some("<dir>"),
+        },
+        CliOption {
+            name: "--tool-path",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Directory containing qbsp, vis, light executables",
+            value_placeholder: Some("<dir>"),
+        },
+        CliOption {
+            name: "--name",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Base name for output files (default: 'enhanced_v3_richness')",
+            value_placeholder: Some("<name>"),
+        },
+        CliOption {
+            name: "--profile",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Compiler profile TOML (default: bundled ericw-q1-bsp2-generated)",
+            value_placeholder: Some("<profile.toml>"),
+        },
+    ]
+}
+
 /// Schema for `pack <engine.project.toml> --out <dir>`
 pub fn pack_schema() -> &'static [CliOption] {
     &[CliOption {
@@ -460,7 +596,7 @@ pub struct CommandSchema {
     pub options: &'static [CliOption],
 }
 
-pub fn command_schemas() -> [CommandSchema; 13] {
+pub fn command_schemas() -> [CommandSchema; 14] {
     [
         CommandSchema {
             name: "validate-package",
@@ -539,6 +675,12 @@ pub fn command_schemas() -> [CommandSchema; 13] {
             usage: "engine_pack enhanced-dungeon --seed <u64> --out <dir> [--tool-path <dir>] [--rooms <n>] [--loops <n>] [--vertical-edges <n>] [--name <name>]",
             description: "Generate, compile, and publish an Enhanced v2 dungeon.",
             options: enhanced_dungeon_schema(),
+        },
+        CommandSchema {
+            name: "enhanced-dungeon-v3-richness-v1",
+            usage: "engine_pack enhanced-dungeon-v3-richness-v1 --seed <u64> --preset <preset> --theme <theme> --out <dir> [--extent <n>] [--landmarks <n>] [--zones <n>] [--cave-mode <mode>] [--vertical-openings <n>] [--budget <n>] [--tool-path <dir>] [--name <name>]",
+            description: "Generate, compile, and publish an Enhanced V3 Richness V1 dungeon.",
+            options: enhanced_dungeon_v3_richness_v1_schema(),
         },
     ]
 }
@@ -649,6 +791,7 @@ mod tests {
             "pack",
             "enhanced-dungeon",
             "enhanced-dungeon-v3",
+            "enhanced-dungeon-v3-richness-v1",
         ] {
             assert!(help.contains(cmd), "help missing command: {cmd}");
         }

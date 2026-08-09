@@ -111,6 +111,12 @@ fn room_inputs(
 /// well below it and leaves headroom for future stages).
 pub(crate) const PRESENTATION_LIGHT_BUDGET: usize = 64;
 
+/// Global presentation prop budget: bounds the map-wide prop count so the
+/// actual support-contacts stay within the frozen complexity reservation
+/// (support_contacts ceiling 128; each prop contributes 1-2 supports).
+/// Excess is truncated deterministically per room order, like lights.
+pub(crate) const PRESENTATION_PROP_BUDGET: usize = 32;
+
 pub(crate) fn apply_presentation(
     ir: &mut AssemblyIR,
     journal: &ReservationJournal,
@@ -122,6 +128,7 @@ pub(crate) fn apply_presentation(
     seed: u64,
 ) -> Result<Presentation, RichnessError> {
     let mut presentation = Presentation::default();
+    let mut prop_budget = PRESENTATION_PROP_BUDGET;
     let mut light_budget = PRESENTATION_LIGHT_BUDGET;
     let inputs = room_inputs(journal, request_archetypes);
     if inputs.is_empty() {
@@ -155,6 +162,9 @@ pub(crate) fn apply_presentation(
         } else {
             3
         };
+        // The dense set piece is exempt from the quiet no-scatter rule so it
+        // can use its full explicit prop budget. The global prop budget
+        // truncates deterministically so support contacts stay reserved.
         let room_props = place_room_props(
             ir,
             *room,
@@ -163,9 +173,10 @@ pub(crate) fn apply_presentation(
             theme,
             seed ^ room.raw() as u64,
             journal,
-            max_props,
-            quiet,
+            max_props.min(prop_budget),
+            quiet && !is_dense,
         )?;
+        prop_budget = prop_budget.saturating_sub(room_props.props.len());
         if !room_props.skipped.is_empty() {
             presentation
                 .skipped_room_props

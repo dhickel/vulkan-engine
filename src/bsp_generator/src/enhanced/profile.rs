@@ -70,6 +70,10 @@ pub enum GenerationProfile {
     EnhancedV2,
     /// Enhanced v3 — semantic-core pipeline with exact i128 geometry.
     EnhancedV3,
+    /// Enhanced v3 Richness V1 — additive gameplay content profile with
+    /// 30 archetypes, 15 props, 12 lighting recipes, 3 themes, cave cells,
+    /// and vertical openings. Uses tag `m3-richness-v1`.
+    EnhancedV3RichnessV1,
 }
 
 impl GenerationProfile {
@@ -79,6 +83,7 @@ impl GenerationProfile {
             Self::LegacyV1 => "legacy-v1",
             Self::EnhancedV2 => "enhanced-v2",
             Self::EnhancedV3 => "m3",
+            Self::EnhancedV3RichnessV1 => "m3-richness-v1",
         }
     }
 
@@ -88,6 +93,7 @@ impl GenerationProfile {
             "legacy-v1" => Some(Self::LegacyV1),
             "enhanced-v2" => Some(Self::EnhancedV2),
             "m3" => Some(Self::EnhancedV3),
+            "m3-richness-v1" => Some(Self::EnhancedV3RichnessV1),
             _ => None,
         }
     }
@@ -142,6 +148,7 @@ mod tests {
             GenerationProfile::LegacyV1,
             GenerationProfile::EnhancedV2,
             GenerationProfile::EnhancedV3,
+            GenerationProfile::EnhancedV3RichnessV1,
         ] {
             let tag = p.tag();
             let back = GenerationProfile::from_tag(tag).unwrap();
@@ -159,9 +166,66 @@ mod tests {
     }
 
     #[test]
+    fn m3_richness_v1_tag_is_recognized() {
+        assert_eq!(
+            GenerationProfile::from_tag("m3-richness-v1"),
+            Some(GenerationProfile::EnhancedV3RichnessV1)
+        );
+        assert_eq!(
+            GenerationProfile::EnhancedV3RichnessV1.tag(),
+            "m3-richness-v1"
+        );
+    }
+
+    #[test]
+    fn baseline_tags_unchanged() {
+        // Baseline m1/m2/m3 tags must remain exactly as before
+        assert_eq!(GenerationProfile::LegacyV1.tag(), "legacy-v1");
+        assert_eq!(GenerationProfile::EnhancedV2.tag(), "enhanced-v2");
+        assert_eq!(GenerationProfile::EnhancedV3.tag(), "m3");
+
+        assert_eq!(
+            GenerationProfile::from_tag("legacy-v1"),
+            Some(GenerationProfile::LegacyV1)
+        );
+        assert_eq!(
+            GenerationProfile::from_tag("enhanced-v2"),
+            Some(GenerationProfile::EnhancedV2)
+        );
+        assert_eq!(
+            GenerationProfile::from_tag("m3"),
+            Some(GenerationProfile::EnhancedV3)
+        );
+    }
+
+    #[test]
+    fn richness_tag_not_overloaded_on_m3() {
+        // The richness tag must NOT be the same as m3 baseline
+        assert_ne!(
+            GenerationProfile::EnhancedV3.tag(),
+            GenerationProfile::EnhancedV3RichnessV1.tag()
+        );
+        // m3 must not parse as richness
+        assert_eq!(
+            GenerationProfile::from_tag("m3"),
+            Some(GenerationProfile::EnhancedV3)
+        );
+        assert_ne!(
+            GenerationProfile::from_tag("m3"),
+            Some(GenerationProfile::EnhancedV3RichnessV1)
+        );
+    }
+
+    #[test]
     fn v3_and_enhanced_v3_are_unrecognized() {
         assert_eq!(GenerationProfile::from_tag("enhanced-v3"), None);
         assert_eq!(GenerationProfile::from_tag("v3"), None);
+    }
+
+    #[test]
+    fn richness_v1_tag_only() {
+        // The richness-v1 tag without m3- prefix returns None
+        assert_eq!(GenerationProfile::from_tag("richness-v1"), None);
     }
 
     #[test]
@@ -169,5 +233,8 @@ mod tests {
         assert_eq!(GenerationProfile::from_tag("legacy"), None);
         assert_eq!(GenerationProfile::from_tag(""), None);
         assert_eq!(GenerationProfile::from_tag("enhanced"), None);
+        assert_eq!(GenerationProfile::from_tag("m4"), None);
+        assert_eq!(GenerationProfile::from_tag("m3-richness"), None);
+        assert_eq!(GenerationProfile::from_tag("m3-richness-v2"), None);
     }
 }

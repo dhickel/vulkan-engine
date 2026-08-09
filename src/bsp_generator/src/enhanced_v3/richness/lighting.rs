@@ -169,8 +169,11 @@ pub(crate) fn origin_enclosed(
     }
     let (x0, y0, z0, x1, y1, z1) = room_bounds;
     [
-        ((0, 0, 1), (z1 - origin.2).min(96)),
-        ((0, 0, -1), (origin.2 - z0).min(96)),
+        // Vertical rays probe the full band: the ceiling/floor slabs are
+        // always within the room's z span. The former 96-unit cap rejected
+        // floor props in rooms whose ceiling sits higher (silent prop loss).
+        ((0, 0, 1), z1 - origin.2),
+        ((0, 0, -1), origin.2 - z0),
         ((1, 0, 0), x1 - origin.0),
         ((-1, 0, 0), origin.0 - x0),
         ((0, 1, 0), y1 - origin.1),

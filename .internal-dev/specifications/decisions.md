@@ -171,6 +171,182 @@ manifest and approve or reject the linked RichnessV1 living-spec amendments.
 The recorded autonomous-delegation directive authorizes DECISION-20260802-01
 and DECISION-20260802-02 as APPROVED (2026-08-02).
 
+## Richness V1 Sprint Closeout Decisions (2026-08-02)
+
+These decisions record the owner-approved outcomes and tradeoffs from the
+EnhancedV3 Richness V1 sprint (sessions A–D). All were approved through the
+autonomous-delegation directive (session 2026-08-02: 'work autonomously
+through, never prompt, always continue').
+
+### (a) m3-richness-v1 Profile Tag
+
+**Decision:** Use `"m3-richness-v1"` as the production tag for the
+EnhancedV3RichnessV1 profile, with `from_tag("m3-richness-v1")` returning
+`Some(EnhancedV3RichnessV1)`. The request-gate identity `"richness-v1"` is
+a distinct concept from the production dispatch tag.
+
+**Justification:** The `"m3-"` prefix groups all EnhancedV3-derived profiles
+under a common namespace, consistent with the existing `"m3"` production tag.
+The bare `"richness-v1"` tag remains the request-gate identity used in
+canonical request bytes but is not a production dispatch token.
+
+**Alternatives:** Using `"richness-v1"` as the production tag would break the
+namespace convention. Using `"enhanced-v3-richness"` would create a
+fourth naming scheme alongside `"legacy-v1"`, `"enhanced-v2"`, and `"m3"`.
+
+**Caveats:** The prefix convention is a product decision; `from_tag`
+implementations must match the production tag exactly.
+
+**Affected specs:** `bsp-dungeon-generation.md` §21, `api.md`,
+`bsp-acceptance.md` §18.
+
+**Source:** Autonomous-delegation directive (2026-08-02).
+
+**Review timing:** 2026-09-02.
+
+### (b) M3 Measured Richness Ceilings
+
+**Decision:** Set M3 Richness compiled face ceiling at 40,000 and leave the M2
+10,000-face ceiling untouched. The committed Richness preset face budgets
+(3,000/5,000/8,000 for Sparse/Moderate/Rich) are within the M2 ceiling.
+The M3 40,000 ceiling is a measured upper bound from the dense Rich fixture
+(2,404 faces for hand-authored density) with headroom for future
+content expansion.
+
+**Justification:** Richness V1 is an M2-targeting extension. The M3
+40,000-face ceiling records the measured capacity without raising the M2
+10,000 ceiling, which remains the active constraint for all current
+production output. The measured dense Rich fixture demonstrates that even
+peak Richness content fits comfortably within M2 bounds.
+
+**Alternatives:** Raising M2 to 15,000 would prematurely relax the active
+constraint. Setting M3 at 20,000 would leave insufficient headroom for
+future content density. Not recording a measured M3 ceiling would leave the
+capacity unquantified.
+
+**Caveats:** M3 is a measurement, not a production class. No M3 map is
+generated, compiled, or published. The 40,000-face measured ceiling must be
+revalidated if Richness content counts or per-archetype brush budgets change.
+
+**Affected specs:** `bsp-dungeon-generation.md` §5, `bsp-acceptance.md` §7.
+
+**Source:** Phase 17 qualification evidence (dense Rich hand-authored fixture).
+
+**Review timing:** When Richness content counts or archetype brush budgets change.
+
+### (c) UI-Only Controls: Non-Canonical Provenance
+
+**Decision:** Pacing plan (`uniform`/`frontloaded`/`backloaded`/`peaked`) and
+variation seed (`u64`) are UI-only non-canonical controls. They are excluded
+from request identity hashing, canonical request export bytes, package
+manifests, and determinism guarantees.
+
+**Justification:** Pacing affects where content clusters along the critical
+path but not what content is generated — a different pacing plan produces
+different geometry from the same seed. Variation seed perturbs within
+committed topology envelopes. Making these canonical would break the
+"identical seed → identical output" contract and prevent reproducible builds.
+
+**Alternatives:** Making pacing/variation canonical would couple authoring
+convenience to reproducible identity. Removing them entirely would lose
+authoring ergonomics without proportional benefit. Gating them behind a
+development-only flag would add ceremony without improving correctness.
+
+**Caveats:** These controls exist only in the explorer GUI. They are never
+serialized into canonical request bytes or package manifests. A package
+published without them uses the preset defaults.
+
+**Affected specs:** `bsp-dungeon-generation.md` §21, `api.md`.
+
+**Source:** Owner-directed (Phase 17 design review).
+
+**Review timing:** When authoring controls are revised or new controls are added.
+
+### (d) Blocked-Row Disclosure Policy
+
+**Decision:** Two evidence rows are disclosed as blocked rather than faked:
+ssim-reference-renderer (external vkQuake SSIM comparison requires GPU +
+vkQuake build environment) and prop-visibility-capture (inconclusive prop
+close-up captures recorded, not faked; definitive evidence requires live
+GPU/WSI).
+
+**Justification:** The engine's headless capture infrastructure cannot
+substitute for an external reference renderer comparison or for definitive
+close-up prop visibility validation in a live WSI environment. Recording the
+rows as blocked with disclosure preserves evidence integrity.
+
+**Alternatives:** Omitting the rows entirely would hide known evidence gaps.
+Faking the rows with headless-only captures would produce false evidence.
+Blocking Richness V1 publication on these rows would gate the entire sprint
+on environment-dependent evidence that does not affect generation correctness.
+
+**Caveats:** These blocked rows must be re-evaluated when the required
+environments become available. They do not block Richness V1 publication
+because they concern downstream rendering validation, not generation
+correctness.
+
+**Affected specs:** `bsp-acceptance.md` §18.12.
+
+**Source:** Phase 17–18 evidence closeout.
+
+**Review timing:** When GPU + vkQuake environment becomes available.
+
+### (e) bsp_beta Camera-Pose + WSI Lifecycle CLI Additions
+
+**Decision:** Add `--camera-x`/`--camera-y`/`--camera-z` and
+`--camera-yaw`/`--camera-pitch` headless camera pose overrides to `bsp_beta`.
+Add `--wsi-timeout` bounded live-WSI smoke flag. These are developer
+convenience additions that do not change baseline behavior.
+
+**Justification:** Headless camera control is essential for deterministic
+capture validation without recompiling. WSI timeout enables automated
+live-startup smoke tests without indefinite blocking.
+
+**Alternatives:** Hard-coding camera poses per test would require recompilation
+for every capture viewpoint change. Using only timeout-bound external process
+management for WSI smoke would couple test infrastructure to the shell.
+
+**Caveats:** Camera pose overrides are headless-only. WSI timeout is a
+process-level bound, not a frame-count guarantee.
+
+**Affected specs:** `api.md` runtime launch registry.
+
+**Source:** Phase 17–18 validation requirements.
+
+**Review timing:** When headless capture or live-startup validation workflow changes.
+
+### (f) Phase 17 Generator Leak/Cost Repairs as Plan Drift
+
+**Decision:** Accept the Phase 17 route overlap safety repair, guaranteed
+rectangles, and multi-stair layout fixes as authorized plan drift. The
+repair changed chamfered-room assignment (deterministic every-5th-room
+rectangle) and made the placement grid stair-aware, causing all 12
+baseline-v3 manifest hashes to differ from the prior freeze. The manifest
+was re-frozen at commit `8203a7f8`.
+
+**Justification:** The Phase 17 repairs fixed real generator defects (route
+overlap safety, guaranteed rectangle geometry, multi-stair layout correctness)
+that would have blocked Richness V1 qualification. The manifest drift is a
+consequence of fixing the generator, not a drift in generator behavior.
+Selecting replacement seeds would have changed generator behavior instead of
+fixing the oracle.
+
+**Alternatives:** Shipping with the known defects would have produced
+incorrect or unsafe geometry. Postponing the repairs to a separate sprint
+would have blocked Richness V1 on unresolved generator bugs. Freezing the
+old manifest would have left stale hashes that fail deterministic replay.
+
+**Caveats:** The manifest re-freeze required owner acceptance (provided
+through the autonomous-delegation directive). All 12 cells were regenerated
+and revalidated. v1/v2 corpora remain byte-identical.
+
+**Affected specs:** `bsp-dungeon-generation.md` §20,
+`bsp-acceptance.md` §17.
+
+**Source:** Phase 17 task-base HEAD (`8203a7f8`).
+
+**Review timing:** 2026-09-02.
+
 ## Superseded Decisions
 
 | id | decision | status | owner | source | decided_on | superseded_on | superseded_by | knowledge_ref | notes |

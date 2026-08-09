@@ -17,6 +17,7 @@ use std::collections::BTreeSet;
 use super::canonical::RICHNESS_REQUEST_DOMAIN;
 use super::error::{RichnessError, RichnessErrorCategory, RichnessErrorCode};
 use super::generated_content;
+
 use super::pipeline::{run_richness_pipeline, RichnessPipelineOutput};
 use super::request::{
     InheritedOr, ResolvedRichnessRequestV1, RichnessCaveMode, RichnessDocumentV1, RichnessPreset,

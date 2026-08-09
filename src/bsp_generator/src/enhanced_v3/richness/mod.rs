@@ -23,13 +23,13 @@
 //! run. Runtime generation reads only checked-in Rust constants.
 
 pub(crate) mod assembly;
-pub(crate) mod canonical;
+pub mod canonical;
 pub(crate) mod cave;
 pub(crate) mod complexity;
 pub(crate) mod composition;
 pub(crate) mod content_types;
 pub(crate) mod emission;
-pub(crate) mod error;
+pub mod error;
 pub(crate) mod fields;
 pub(crate) mod fixed;
 pub(crate) mod footprint;
@@ -37,13 +37,13 @@ pub(crate) mod generated_content;
 pub(crate) mod geometry;
 pub(crate) mod ids;
 pub(crate) mod lighting;
-pub(crate) mod metadata;
+pub mod metadata;
 pub(crate) mod pacing;
-pub(crate) mod pipeline;
+pub mod pipeline;
 pub(crate) mod presentation;
 pub(crate) mod props;
-pub(crate) mod qualification;
-pub(crate) mod request;
+pub mod qualification;
+pub mod request;
 pub(crate) mod reservation;
 pub(crate) mod sampling;
 pub(crate) mod solver;
@@ -58,6 +58,3 @@ pub(crate) mod zones;
 
 #[cfg(test)]
 mod vectors;
-
-// No public re-exports — richness parent module stays crate-private until
-// the atomic release phase.

@@ -997,6 +997,10 @@ pub(crate) fn derive_interface_kind(
         // cardinal wall. Other diagonal contacts remain undeclared.
         (r1, r2) if is_cardinal_wall(r1) && names_diag(r2) => Some(InterfaceKind::WallToDiagJoint),
         (r1, r2) if names_diag(r1) && is_cardinal_wall(r2) => Some(InterfaceKind::WallToDiagJoint),
+        // Two diagonal walls of the same chamfered corner may meet with
+        // positive-area contact when the chamfer is small; that contact is a
+        // declared structural corner joint, not an error.
+        (r1, r2) if names_diag(r1) && names_diag(r2) => Some(InterfaceKind::WallToDiagCorner),
         // Column/floor
         (BrushAssemblyRole::InteriorColumn, BrushAssemblyRole::FloorSlab) => {
             Some(InterfaceKind::ColumnToFloor)
@@ -1166,6 +1170,10 @@ pub(crate) fn derive_interface_kind(
         }
         _ => None,
     }
+}
+
+pub(crate) fn role_is_diag_wall(r: super::assembly::BrushAssemblyRole) -> bool {
+    names_diag(r)
 }
 
 fn names_diag(r: super::assembly::BrushAssemblyRole) -> bool {

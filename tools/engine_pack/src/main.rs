@@ -70,6 +70,7 @@ fn run(args: Vec<String>) -> CliResult<String> {
         "pack" => pack_cmd(rest),
         "enhanced-dungeon" => enhanced_dungeon_cmd(rest),
         "enhanced-dungeon-v3" => enhanced_dungeon_v3_cmd(rest),
+        "enhanced-dungeon-v3-richness-v1" => enhanced_dungeon_v3_richness_v1_cmd(rest),
         "-h" | "--help" | "help" => Ok(cli::global_help()),
         other => Err(CliError::Usage(format!(
             "unknown command '{other}'\n\n{}",
@@ -943,6 +944,167 @@ fn enhanced_dungeon_v3_cmd(args: &[String]) -> CliResult<String> {
     Ok(match result {
         engine_pack::enhanced_dungeon_v3::BuildV3Result::Published { message, .. } => message,
         engine_pack::enhanced_dungeon_v3::BuildV3Result::Unchanged { message, .. } => message,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// enhanced-dungeon-v3-richness-v1 — generate, compile, publish a Richness V1
+// ---------------------------------------------------------------------------
+
+fn enhanced_dungeon_v3_richness_v1_cmd(args: &[String]) -> CliResult<String> {
+    let parsed = cli::parse_command(
+        "enhanced-dungeon-v3-richness-v1",
+        cli::enhanced_dungeon_v3_richness_v1_schema(),
+        args,
+    );
+    let parsed = parsed.into_result().map_err(CliError::Usage)?;
+
+    let seed_str = require_option("--seed", &parsed)?;
+    let seed: u64 = seed_str
+        .parse()
+        .map_err(|_| CliError::Usage(format!("invalid --seed value: '{seed_str}'")))?;
+
+    let preset_tag = parsed
+        .singleton_value("--preset")
+        .unwrap_or("sparse")
+        .to_string();
+    let preset = bsp_generator::RichnessPreset::from_tag(&preset_tag).ok_or_else(|| {
+        CliError::Usage(format!(
+            "unknown --preset '{preset_tag}'; valid: sparse, moderate, rich"
+        ))
+    })?;
+
+    let theme_tag = parsed
+        .singleton_value("--theme")
+        .unwrap_or("ancient")
+        .to_string();
+    let theme = bsp_generator::RichnessTheme::from_tag(&theme_tag).ok_or_else(|| {
+        CliError::Usage(format!(
+            "unknown --theme '{theme_tag}'; valid: ancient, egyptian, brutalist"
+        ))
+    })?;
+
+    let out_dir = PathBuf::from(require_option("--out", &parsed)?);
+    let tool_path = parsed
+        .singleton_value("--tool-path")
+        .map(PathBuf::from)
+        .or_else(default_ericw_tools_dir);
+    let name = parsed
+        .singleton_value("--name")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "enhanced_v3_richness".to_string());
+    let xy_extent: u32 = parsed
+        .singleton_value("--extent")
+        .map(|s| {
+            s.parse()
+                .map_err(|_| CliError::Usage(format!("invalid --extent: '{s}'")))
+        })
+        .unwrap_or(Ok(2048))?;
+    let profile_override = parsed.singleton_value("--profile");
+
+    // Build the RichnessDocumentV1 with optional controls
+    let mut doc = bsp_generator::RichnessDocumentV1::new(seed, xy_extent, preset, theme)
+        .map_err(|err| CliError::Usage(format!("richness config: {err}")))?;
+
+    // Apply optional controls if explicitly set
+    let has_controls = parsed.singleton_value("--landmarks").is_some()
+        || parsed.singleton_value("--zones").is_some()
+        || parsed.singleton_value("--cave-mode").is_some()
+        || parsed.singleton_value("--vertical-openings").is_some()
+        || parsed.singleton_value("--budget").is_some();
+
+    if has_controls {
+        let landmarks = parsed
+            .singleton_value("--landmarks")
+            .map(|s| {
+                s.parse::<u32>()
+                    .map_err(|_| CliError::Usage(format!("invalid --landmarks: '{s}'")))
+            })
+            .transpose()?;
+        let zones = parsed
+            .singleton_value("--zones")
+            .map(|s| {
+                s.parse::<u32>()
+                    .map_err(|_| CliError::Usage(format!("invalid --zones: '{s}'")))
+            })
+            .transpose()?;
+        let cave_mode = parsed
+            .singleton_value("--cave-mode")
+            .map(|s| {
+                bsp_generator::RichnessCaveMode::from_tag(&s).ok_or_else(|| {
+                    CliError::Usage(format!(
+                        "unknown --cave-mode '{s}'; valid: required, preferred, omitted"
+                    ))
+                })
+            })
+            .transpose()?;
+        let vertical_openings = parsed
+            .singleton_value("--vertical-openings")
+            .map(|s| {
+                s.parse::<u32>()
+                    .map_err(|_| CliError::Usage(format!("invalid --vertical-openings: '{s}'")))
+            })
+            .transpose()?;
+        let budget = parsed
+            .singleton_value("--budget")
+            .map(|s| {
+                s.parse::<u32>()
+                    .map_err(|_| CliError::Usage(format!("invalid --budget: '{s}'")))
+            })
+            .transpose()?;
+
+        doc = bsp_generator::RichnessDocumentV1::with_all_explicit(
+            doc.seed(),
+            doc.extent(),
+            doc.preset(),
+            doc.theme(),
+            doc.request_schema_revision(),
+            doc.algorithm_revision(),
+            doc.content_revision(),
+            doc.preset_revision(),
+            doc.theme_revision(),
+            doc.asset_revision(),
+            doc.convention_revision(),
+            landmarks
+                .map(bsp_generator::InheritedOr::Explicit)
+                .unwrap_or(doc.critical_path_landmarks()),
+            zones
+                .map(bsp_generator::InheritedOr::Explicit)
+                .unwrap_or(doc.zone_count()),
+            cave_mode
+                .map(bsp_generator::InheritedOr::Explicit)
+                .unwrap_or(doc.cave_mode()),
+            vertical_openings
+                .map(bsp_generator::InheritedOr::Explicit)
+                .unwrap_or(doc.vertical_openings()),
+            budget
+                .map(bsp_generator::InheritedOr::Explicit)
+                .unwrap_or(doc.budget_ceiling()),
+        )
+        .map_err(|err| CliError::Usage(format!("richness config: {err}")))?;
+    }
+
+    doc.validate_raw_fields()
+        .map_err(|err| CliError::Usage(format!("richness config: {err}")))?;
+
+    let result = engine_pack::enhanced_dungeon_v3_richness_v1::build_richness_v1_package(
+        &doc,
+        &out_dir,
+        tool_path.as_deref(),
+        &name,
+        profile_override,
+    )
+    .map_err(|err| {
+        CliError::Validation(ValidationError::single(ValidationDiagnostic::new(
+            "enhanced-dungeon-v3-richness-v1",
+            ValidationArea::Project,
+            format!("{err}"),
+        )))
+    })?;
+
+    Ok(match result {
+        engine_pack::BuildRichnessV1Result::Published { message, .. } => message,
+        engine_pack::BuildRichnessV1Result::Unchanged { message, .. } => message,
     })
 }
 

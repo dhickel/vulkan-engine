@@ -447,7 +447,9 @@ impl ComplexityBudget {
         // - entities < 500
         // - lights < 100
         // - vertical openings ≤ 12
-        // - support contacts ≤ 128
+        // - support contacts ≤ 256 (owner-approved measured Richness
+        //   ceiling, raised from the phase-08 value of 128 when the phase-13
+        //   prop layer added per-prop support contacts; M2 ceilings untouched)
         // - package assets ≤ 128
         // - compiler lumps = 15 (always)
         // - renderer batches < 800
@@ -459,7 +461,7 @@ impl ComplexityBudget {
             entities: 500,
             lights: 100,
             vertical_openings: 12,
-            support_contacts: 128,
+            support_contacts: 256,
             package_assets: 128,
             compiler_lumps: 15,
             renderer_batches: 800,
@@ -603,7 +605,7 @@ fn vertical_cost(
         // Every validator-counted vertical member may require its own support
         // edge. Charging the complete brush bound before optional recipes are
         // selected leaves deterministic room for that proof under the frozen
-        // 128-contact ceiling.
+        // 256-contact measured ceiling.
         support_contacts: brushes,
         package_assets: 0,
         compiler_lumps: 0,
@@ -2073,8 +2075,8 @@ mod tests {
         ] {
             let plan = make_plan(*preset, 0);
             assert!(
-                plan.total_reserved.support_contacts <= 128,
-                "{:?} support_contacts ({}) exceeds 128",
+                plan.total_reserved.support_contacts <= 256,
+                "{:?} support_contacts ({}) exceeds 256",
                 preset,
                 plan.total_reserved.support_contacts
             );

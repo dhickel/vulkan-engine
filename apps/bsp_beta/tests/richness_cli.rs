@@ -137,9 +137,17 @@ fn baseline_m3_generate_parse_unchanged() {
 
 #[test]
 fn baseline_no_richness_help_text() {
-    // The ordinary parse_from dispatch must NOT accept --richness-* flags
-    let err = parse_from(["--strict", "--richness-preset", "sparse"]).unwrap_err();
-    assert!(matches!(err, CliError::UnknownArgument(_)));
+    // Richness overrides are consumed by parse_richness_launch_token from the
+    // raw process args; parse_from skips them so a richness launch parses,
+    // but they never appear in the help text.
+    let args = parse_from(["--strict", "--richness-preset", "sparse"]).unwrap();
+    assert!(args.import_mode == Some(cli::ImportMode::Strict));
+    // The overrides never leak into the usage/help text.
+    let usage = cli::usage_text();
+    assert!(
+        !usage.contains("--richness-"),
+        "richness flags leaked into usage"
+    );
 }
 
 #[test]
@@ -584,6 +592,10 @@ fn inherited_flag_overrides_explicit_value() {
 
 #[test]
 fn richness_flags_not_in_parse_from() {
+    // parse_from accepts-and-skips the override flags (they carry values and
+    // are consumed by parse_richness_launch_token from the raw args); the
+    // dispatch surface itself stays clean: no m3_richness behavior is
+    // triggered by the overrides alone.
     for flag in &[
         "--richness-preset",
         "--richness-theme",
@@ -598,20 +610,11 @@ fn richness_flags_not_in_parse_from() {
         "--richness-prop-density",
         "--richness-light-density",
         "--richness-budget-ceiling",
-        "--richness-landmarks-inherited",
-        "--richness-zones-inherited",
-        "--richness-cave-mode-inherited",
-        "--richness-vertical-openings-inherited",
-        "--richness-budget-ceiling-inherited",
-        "--richness-pacing-inherited",
-        "--richness-variation-inherited",
-        "--richness-prop-density-inherited",
-        "--richness-light-density-inherited",
     ] {
-        let err = parse_from(["--strict", flag]).unwrap_err();
+        let args = parse_from(["--strict", flag, "1"]).unwrap();
         assert!(
-            matches!(err, CliError::UnknownArgument(_)),
-            "flag '{flag}' should be rejected"
+            !args.m3_richness,
+            "flag '{flag}' must not enable the richness launch by itself"
         );
     }
 }

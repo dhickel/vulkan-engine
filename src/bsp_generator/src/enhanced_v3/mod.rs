@@ -31,22 +31,26 @@ pub mod intent;
 pub mod metadata;
 pub mod pipeline;
 pub mod reservation;
-pub(crate) mod richness;
+pub mod richness;
 pub mod rng;
 pub mod topology;
 
-// ── Test-only re-exports for integration tests ──────────────────────────
-// These are always compiled so integration tests (separate crate) can access
-// the crate-private Richness types. They are not part of the public release
-// API surface and will be gated or removed at release time.
-#[doc(hidden)]
-pub use richness::pipeline::{ActualCounts, RichnessPipelineOutput};
-#[doc(hidden)]
+// ── Richness V1 public API ────────────────────────────────────────────────
+
+pub use richness::error::{RichnessError, RichnessErrorCategory, RichnessErrorCode};
+pub use richness::metadata::{RichnessGenerationMetadata, RichnessMetadataV1};
+pub use richness::pipeline::{generate_richness_v1, ActualCounts, RichnessPipelineOutput};
 pub use richness::qualification::{
-    archetype_ids, corpus_entries, light_recipe_ids, pipeline_map_text, pipeline_output,
-    pipeline_semantic_identity, preset_extent, prop_ids, qualify_request, resolve_document,
+    archetype_ids, corpus_entries, light_recipe_ids, pipeline_output, preset_extent, prop_ids,
     resolve_from_bytes, sha256_hex, theme_asset_paths, theme_ids, vertical_recipe_variants,
     CorpusManifest, CorpusManifestEntry,
+};
+pub use richness::request::{
+    InheritedOr, ResolvedField, ResolvedRichnessRequestV1, RichnessAlgorithmRevision,
+    RichnessAssetRevision, RichnessCaveMode, RichnessContentRevision, RichnessConventionRevision,
+    RichnessDocumentV1, RichnessGateIdentity, RichnessPreset, RichnessPresetRevision,
+    RichnessRequestSchemaRevision, RichnessTheme, RichnessThemeRevision, ValueSource,
+    RICHNESS_EXTENT_MAX, RICHNESS_EXTENT_MIN, RICHNESS_QUANTUM,
 };
 
 // ── Re-exports ────────────────────────────────────────────────────────────

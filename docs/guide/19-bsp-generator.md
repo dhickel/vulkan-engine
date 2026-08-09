@@ -494,15 +494,295 @@ The following capabilities are deferred and not available in Enhanced v3 product
 - Lattice-slope walls (15°/30°)
 - Third navigation layer
 
+## EnhancedV3 Richness V1 — Gameplay Content Generation
+
+The EnhancedV3 Richness V1 profile (`m3-richness-v1`) extends the baseline
+EnhancedV3 output with gameplay-bearing content: 30 archetypes, 15 props,
+12 lighting recipes, 3 themes, cave cells, and multi-storey vertical openings
+with ladder/drop controller semantics. The profile is an additive extension —
+baseline V3 map geometry, presets, tags, RNG domains, CLI, GUI, and package
+manifests remain frozen and unchanged.
+
+### Profile Identity
+
+| concept | value |
+|---------|-------|
+| profile variant | `GenerationProfile::EnhancedV3RichnessV1` |
+| production tag | `"m3-richness-v1"` |
+| dispatch | `GenerationProfile::from_tag("m3-richness-v1")` → `Some(EnhancedV3RichnessV1)` |
+| CLI | `dungeon_gen --class m3-richness-v1` |
+| packaging | `engine_pack enhanced-dungeon-v3-richness` |
+| explorer | `dungeon_explore.sh --richness` or `--m3-richness-v1` |
+
+### Key Features
+
+- **30 shared semantic archetypes**: gameplay-bearing prefabs (chambers, halls,
+  shrines, groves, vaults) with distinct geometry per family
+- **15 shared semantic props**: decorative non-collidable entities (braziers,
+  pillars, rubble, banners, chains, statuary) placed by the solver
+- **12 shared semantic lighting recipes**: environment-type lighting with
+  authored falloff, intensity, and placement rules
+- **3 CC0 themes**: Ancient (stone), Egyptian (sandstone/hieroglyph), Brutalist
+  (concrete/metal). Theme affects visual presentation only — room IDs, cave
+  decisions, topology, critical path, spawn safety, pacing beats, and landmarks
+  are invariant under theme selection
+- **4 cave cell types**: spawn cave, dead-end gallery, junction grotto,
+  transition tunnel — independent navigable cells with carved subtractive
+  void geometry and unadorned stone trim
+- **4 vertical opening types**: ladder shaft, drop hole, open stairwell,
+  spiral-stair opening — with compiler-preserved explicit brush-AABB descriptors
+  for app-owned climb/drop controller semantics
+- **Same-XY composite reservations**: controlled multi-storey occupancy where
+  composite reservations own both lower and upper layers; ordinary footprints
+  remain projection-exclusive
+- **Theme invariance**: a v3 blueprint regenerated with a different theme
+  produces identical `.map` geometry bytes (compliance gate enforced)
+
+### Content Architecture
+
+The Richness V1 request is a separate immutable contract domain
+`dungeon-gen/v3-richness/v1` that is structurally isolated from baseline V3.
+It never mutates `V3Config`, `V3Preset`, or baseline `V3Error`, and never
+routes v1, v2, or baseline-v3 RNG, serialization, geometry, or metadata
+through richness code.
+
+```text
+RichnessDocumentV1 → resolve → ResolvedRichnessRequestV1
+    → pacing blueprint → zone blueprint → placement + topology
+    → variation plan → complexity plan → composition (archetypes,
+      props, lights, caves, vertical openings, presentation)
+    → cross-stage invariant validation → canonical emission
+    → (.map text, metadata, request export, asset roles)
+```
+
+### Controls and Presets
+
+The authored `RichnessDocumentV1` carries required fields (seed, extent,
+preset, theme) plus inheritable controls where every field preserves whether
+a value was explicitly supplied or inherited from the preset.
+
+| field | type | range | description |
+|-------|------|-------|-------------|
+| `seed` | `u64` | any | master seed for deterministic generation |
+| `extent` | `u32` | 1024–3072, quantum-aligned | XY bounds per axis |
+| `preset` | `RichnessPreset` | `Sparse`, `Moderate`, `Rich` | density preset |
+| `theme` | `RichnessTheme` | `Ancient`, `Egyptian`, `Brutalist` | visual theme |
+| `critical_path_landmarks` | `InheritedOr<u32>` | inherited or 1–5 | landmark nodes on critical path |
+| `zone_count` | `InheritedOr<u32>` | inherited or 1–6 | distinct zone count |
+| `cave_mode` | `InheritedOr<RichnessCaveMode>` | inherited or `Required`/`Preferred`/`Omitted` | cave eligibility |
+| `vertical_openings` | `InheritedOr<u32>` | inherited or 0–12 | vertical feature count |
+| `budget_ceiling` | `InheritedOr<u32>` | inherited or 1000–8000 | source face ceiling |
+
+**Preset defaults:**
+
+| preset | landmarks | min zones | cave mode | vertical openings | face budget |
+|--------|-----------|-----------|-----------|-------------------|-------------|
+| Sparse | 1 | 1 | Preferred | 0 | 3,000 |
+| Moderate | 2 | 1 | Preferred | 2 | 5,000 |
+| Rich | 3 | 1 | Preferred | 4 | 8,000 |
+
+### Revision Envelope
+
+Every request carries seven closed revision tags that identify the exact
+sprint-qualified algorithm, content, preset, theme, asset, and convention
+revisions. Unknown revision tags fail closed with typed
+`RichnessError::UnknownRequestSchemaRevision` (or the specific revision
+variant). Current frozen revisions:
+
+| revision | tag |
+|----------|-----|
+| request schema | `enhanced-v3-richness-request/v1` |
+| algorithm | `enhanced-v3-richness-algorithm/v1` |
+| content | `enhanced-v3-richness-content/v1` |
+| presets | `enhanced-v3-richness-presets/v1` |
+| themes | `enhanced-v3-richness-themes/v1` |
+| assets | `enhanced-v3-richness-assets/v1` |
+| conventions | `enhanced-v3-richness-conventions/v1` |
+
+### CLI Usage
+
+```bash
+# Generate a Richness dungeon through the CLI
+./tools/dungeon_gen --class m3-richness-v1 --seed 42
+
+# With explicit preset, theme, and extent
+./tools/dungeon_gen --class m3-richness-v1 --seed 42 \
+  --richness-preset moderate --richness-theme egyptian \
+  --richness-extent 2048
+
+# With all inherited controls overridden
+./tools/dungeon_gen --class m3-richness-v1 --seed 99 \
+  --richness-preset rich --richness-theme brutalist \
+  --richness-extent 3072 --richness-landmarks 3 \
+  --richness-zones 3 --richness-cave-mode required \
+  --richness-vertical 4
+
+# Publish through engine_pack
+engine_pack enhanced-dungeon-v3-richness \
+  --seed 42 --preset moderate --theme ancient --out /tmp/pkg
+
+# Launch the in-game Richness explorer GUI
+./tools/dungeon_explore.sh --richness --seed 42
+./tools/dungeon_explore.sh --richness --richness-preset rich \
+  --richness-theme egyptian
+```
+
+**Published package layout:**
+
+```text
+richness_package/
+├── richness_dungeon.map          ← generated .map source
+├── richness_dungeon.bsp          ← compiled BSP2
+├── richness_dungeon.lit          ← colored light data
+├── palette.lmp                   ← theme palette
+├── <theme>.wad                   ← theme WAD (e.g., cc0_richness_ancient.wad)
+├── metadata.json                 ← generation evidence + request provenance
+├── request.txt                   ← canonical request export bytes
+└── textures/                     ← PBR companions for referenced miptex identities
+    ├── <identity>_norm.png
+    └── <identity>_gloss.png
+```
+
+### Quick Start
+
+```rust
+use bsp_generator::{
+    generate_richness_v1,
+    RichnessDocumentV1, RichnessPreset, RichnessTheme,
+};
+
+// All-inherited Sparse dungeon (1 landmark, Ancient theme)
+let doc = RichnessDocumentV1::new(
+    42, 2048, RichnessPreset::Sparse, RichnessTheme::Ancient
+)?;
+let output = generate_richness_v1(doc)?;
+println!("Generated {} faces, {} lights",
+    output.actual.faces, output.actual.lights);
+
+// Explicit Rich preset with cave requirement
+let doc = RichnessDocumentV1::with_all_explicit(
+    99, 3072, RichnessPreset::Rich, RichnessTheme::Egyptian,
+    // revision envelope (all V1)
+    Default::default(), // RichnessRequestSchemaRevision::V1
+    Default::default(), // RichnessAlgorithmRevision::V1
+    Default::default(), // RichnessContentRevision::V1
+    Default::default(), // RichnessPresetRevision::V1
+    Default::default(), // RichnessThemeRevision::V1
+    Default::default(), // RichnessAssetRevision::V1
+    Default::default(), // RichnessConventionRevision::V1
+    // controls
+    InheritedOr::Explicit(3),                    // landmarks
+    InheritedOr::Explicit(2),                    // zones
+    InheritedOr::Explicit(RichnessCaveMode::Required), // cave mode
+    InheritedOr::Explicit(4),                    // vertical openings
+    InheritedOr::Inherited,                      // budget (use preset default)
+)?;
+let output = generate_richness_v1(doc)?;
+```
+
+### Determinism and Theme Invariance
+
+- Identical `(seed, extent, preset, theme)` → byte-identical `.map` output
+- Different themes with identical (seed, extent, preset) produce identical
+  geometry bytes — theme affects only visual presentation through WAD/miptex
+  identity selection, not map geometry
+- The RNG domain `"dungeon-gen/v3-richness/v1"` uses SHA-256 framing with
+  length-framed UTF-8 stage tags, fully independent from baseline V3's
+  `"dungeon-gen/v3"` domain
+- Canonical request export bytes include the explicit-versus-inherited
+  provenance markers, making the request identity independently reproducible
+
+### Budgets and Ceilings
+
+| metric | ceiling |
+|--------|--------|
+| compiled faces | < 15,000 (extends M2 baseline of 10,000) |
+| entities | < 500 (extends M2 baseline of 300) |
+| lights | < 100 |
+| static batches | < 800 |
+| per-archetype source brushes | < 64 |
+| per-prop source brushes | < 16 |
+| per-theme WAD miptex identities | < 64 |
+| per-theme companion PNGs | < 128 |
+| total package size | < 128 MiB |
+
+### Stable Errors
+
+All Richness failures return `RichnessError` — never panics, never partial
+output. Key error codes:
+
+| error code | condition |
+|-----------|-----------|
+| `UnknownRequestSchemaRevision` | unknown revision tag (any of 7 revisions) |
+| `UnsupportedRichnessGate` | gate other than `"richness-v1"` |
+| `UnknownPreset` / `UnknownTheme` | unrecognized preset or theme tag |
+| `ValueOutOfRange` | field outside allowed range |
+| `NotQuantumAligned` | field not multiple of 16 |
+| `LandmarkCountInfeasible` | landmarks exceed extent capacity |
+| `ZoneCountInfeasible` | zone count outside preset range |
+| `CaveInfeasible` | cave mode infeasible for seed/layout |
+| `BudgetInfeasible` / `BudgetOverrun` | budget conflict or exceeded |
+| `PlacementExhausted` / `TopologyExhausted` | search exhaustion |
+| `ThemeInvarianceViolated` | theme selection altered blueprint geometry |
+
+### Pacing and Variation Controls
+
+Richness V1 exposes two UI-only non-canonical controls for authoring
+convenience:
+
+- **Pacing plan**: controls the distribution of landmarks, zones, and
+  archetype density along the critical path. Values are `uniform`,
+  `frontloaded`, `backloaded`, or `peaked`. Pacing affects where content
+  clusters, not what content is generated — the same blueprint regenerated
+  with a different pacing plan may produce different geometry.
+- **Variation seed**: a secondary `u64` seed that perturbs within the
+  committed topology envelope without changing room placement or topology.
+  Changes to the variation seed invalidate cached BSP output.
+
+These controls are **not canonical provenance** — they exist for exploration
+and tuning in the explorer GUI only. They are excluded from request identity
+hashing, canonical export, package manifests, and determinism guarantees. A
+package published without them uses the preset defaults.
+
+### In-Game Explorer GUI
+
+The windowed `bsp_beta --m3-richness-v1` path provides a mode-exclusive
+Richness overlay with the same F1 (keyboard) and F2 (mouse) interaction
+model as the baseline M3 GUI. The overlay exposes every public Richness
+control: seed, extent, preset, theme, landmarks, zones, cave mode, vertical
+openings, budget ceiling, pacing plan, and variation seed. Generate snapshots
+the validated draft; Apply & Close commits only after the matching latest
+request succeeds. The pipeline reuses the existing background worker, package
+publication, coordinator validation, and detached-mount retirement paths.
+
+### Archetypes and Props
+
+The 30 archetypes are drawn from 6 grammar descriptor families
+(PortalChamber, ButtressedHall, ColumnGrove, FracturedVault, TerracedShrine,
+MonolithicChamber). Each archetype is a grounded assembly brushwork variant
+that fits within a reserved volume — the solver places them into committed
+room envelopes during the composition stage. The 15 props are decorative
+non-collidable entities placed by the same solver within navigable
+clearance margins.
+
+### Cave Cells and Vertical Openings
+
+Cave cells are carved subtractive voids with unadorned stone trim and
+minimum ambient `_minlight 32`. Eligibility is seed-and-layout-dependent
+(never theme-gated). Vertical openings use compiler-preserved explicit
+brush-AABB descriptors that the app-owned `BspPlayerMovementController`
+interprets for climb/drop state without surface-flag dependencies.
+
 ## Limitations (Beta) and Known Issues
 
 ### Legacy v1 Design Limitations
 
 These limitations apply to the Legacy v1 generator (`bsp_generator::generate`)
 only. The Enhanced v2 profile supports two-layer dungeons with stairs, multiple
-room palettes, and corridor/ceiling/pillar variance. The Enhanced v3 profile
-adds cardinal + 45° chamfered geometry, selectable cardinal portal surrounds,
-and grounded assemblies.
+room palettes, and corridor/ceiling/pillar variance. The Enhanced v3 and
+Richness V1 profiles add cardinal + 45° chamfered geometry, selectable cardinal
+portal surrounds, grounded assemblies, archetypes, props, lighting recipes,
+cave cells, and vertical openings.
 
 - Single-layer Cartesian only (no ramps, stairs, multi-floor)
 - Axis-aligned rectangular rooms only

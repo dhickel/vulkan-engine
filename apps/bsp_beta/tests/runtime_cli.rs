@@ -70,6 +70,7 @@ fn cli_preserves_struct_values() {
         acceptance_camera_look_at: None,
         wsi_lifecycle_test: false,
         m3_generate: false,
+        m3_richness: false,
         ericw_tools_dir: None,
         m3_seed: 42,
         m3_preset: bsp_generator::enhanced_v3::V3Preset::Moderate,

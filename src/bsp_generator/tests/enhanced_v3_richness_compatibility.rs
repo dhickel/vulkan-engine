@@ -15,8 +15,8 @@ use std::collections::BTreeSet;
 
 // ── Import re-exported qualification helpers ──────────────────────────────
 use bsp_generator::enhanced_v3::{
-    archetype_ids, light_recipe_ids, pipeline_semantic_identity, prop_ids, resolve_from_bytes,
-    theme_ids, vertical_recipe_variants,
+    archetype_ids, generate_richness_v1, light_recipe_ids, prop_ids, resolve_from_bytes, theme_ids,
+    vertical_recipe_variants, RichnessDocumentV1,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -318,15 +318,15 @@ fn cross_theme_pipeline_completes_for_all_themes() {
     let mut semantic_ids: Vec<Vec<u8>> = Vec::new();
     for theme_tag in ["ancient", "egyptian", "brutalist"] {
         let themed = sparse_req.replace("theme:ancient", &format!("theme:{theme_tag}"));
-        let resolved = match resolve_from_bytes(themed.as_bytes()) {
-            Ok(r) => r,
+        let doc = match RichnessDocumentV1::from_canonical_bytes(themed.as_bytes()) {
+            Ok(d) => d,
             Err(_) => continue,
         };
-        let semantic = match pipeline_semantic_identity(&resolved) {
-            Ok(s) => s,
+        let output = match generate_richness_v1(&doc) {
+            Ok(o) => o,
             Err(_) => continue,
         };
-        semantic_ids.push(semantic);
+        semantic_ids.push(output.generation_metadata.semantic_identity().to_vec());
     }
 
     // If multiple themes succeeded, all must have identical semantic identity

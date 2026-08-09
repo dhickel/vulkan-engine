@@ -900,6 +900,351 @@ pub fn texture_for_role(role: BrushRole) -> &'static str
 | `Column` | `"bs_accent"` |
 | `Feature` | `"bs_accent"` |
 
+## EnhancedV3 Richness V1 API
+
+The EnhancedV3 Richness V1 profile (`m3-richness-v1`) lives in
+`bsp_generator::enhanced_v3::richness`. It extends baseline V3 output with
+gameplay content: 30 archetypes, 15 props, 12 lighting recipes, 3 themes,
+cave cells, and vertical openings. The API is a separate, structurally
+isolated contract domain that never mutates baseline V3 types or routes.
+
+### `generate_richness_v1()`
+
+```rust
+pub fn generate_richness_v1(
+    doc: RichnessDocumentV1,
+) -> Result<RichnessPipelineOutput, RichnessError>
+```
+
+The sole public entry point. Resolves the authored document into a
+`ResolvedRichnessRequestV1`, then runs the complete pipeline:
+
+```text
+RichnessDocumentV1 → resolve → pacing blueprint → zone blueprint →
+placement + topology → variation plan → complexity plan →
+composition (archetypes, props, lights, caves, vertical,
+presentation) → cross-stage invariant validation →
+canonical emission → (map_text, metadata, request_export, asset_roles)
+```
+
+**Determinism guarantee:** Two calls with identical `RichnessDocumentV1`
+produce byte-identical `.map` output. The RNG domain
+`"dungeon-gen/v3-richness/v1"` is fully independent from baseline V3's
+`"dungeon-gen/v3"`.
+
+### `RichnessPipelineOutput`
+
+```rust
+#[derive(Debug, Clone)]
+pub struct RichnessPipelineOutput {
+    pub map_text: String,
+    pub request_metadata: RichnessMetadataV1,
+    pub generation_metadata: RichnessGenerationMetadata,
+    pub request_export: Vec<u8>,
+    pub asset_roles: Vec<String>,
+    pub actual: ActualCounts,
+}
+```
+
+| field | type | description |
+|-------|------|-------------|
+| `map_text` | `String` | canonical `.map` text (Standard Quake grammar, frozen ordering) |
+| `request_metadata` | `RichnessMetadataV1` | immutable request provenance snapshot |
+| `generation_metadata` | `RichnessGenerationMetadata` | deterministic generation metadata facts |
+| `request_export` | `Vec<u8>` | canonical request export bytes (provenance-preserving) |
+| `asset_roles` | `Vec<String>` | referenced theme asset role identities (fixed order) |
+| `actual` | `ActualCounts` | recomputed brush/face/entity/light counts |
+
+### `ActualCounts`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActualCounts {
+    pub brushes: usize,
+    pub faces: usize,
+    pub entities: usize,
+    pub lights: usize,
+    pub support_contacts: usize,
+    pub openings: usize,
+}
+```
+
+### `RichnessDocumentV1`
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RichnessDocumentV1 { /* private fields */ }
+```
+
+Authored Richness V1 request document. Contains required scalar fields, a
+revision envelope of 7 closed revision tags, and grouped inheritable controls.
+
+**Constructors:**
+
+| constructor | description |
+|-------------|-------------|
+| `RichnessDocumentV1::new(seed, extent, preset, theme)` | all controls inherited from preset |
+| `RichnessDocumentV1::with_all_explicit(...)` | every control and revision explicitly supplied |
+
+**Accessors:**
+
+| accessor | return type |
+|----------|-------------|
+| `seed()` | `u64` |
+| `extent()` | `u32` |
+| `preset()` | `RichnessPreset` |
+| `theme()` | `RichnessTheme` |
+| `request_schema_revision()` | `RichnessRequestSchemaRevision` |
+| `algorithm_revision()` | `RichnessAlgorithmRevision` |
+| `content_revision()` | `RichnessContentRevision` |
+| `preset_revision()` | `RichnessPresetRevision` |
+| `theme_revision()` | `RichnessThemeRevision` |
+| `asset_revision()` | `RichnessAssetRevision` |
+| `convention_revision()` | `RichnessConventionRevision` |
+| `critical_path_landmarks()` | `InheritedOr<u32>` |
+| `zone_count()` | `InheritedOr<u32>` |
+| `cave_mode()` | `InheritedOr<RichnessCaveMode>` |
+| `vertical_openings()` | `InheritedOr<u32>` |
+| `budget_ceiling()` | `InheritedOr<u32>` |
+
+### `ResolvedRichnessRequestV1`
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRichnessRequestV1 { /* private fields */ }
+```
+
+Validated immutable resolved request. Created via
+`ResolvedRichnessRequestV1::resolve(doc)`. Carries both the original
+provenance document and resolved effective values with source tracking.
+
+**Accessors:**
+
+| accessor | return type |
+|----------|-------------|
+| `seed()` | `u64` |
+| `extent()` | `u32` |
+| `preset()` | `RichnessPreset` |
+| `theme()` | `RichnessTheme` |
+| `provenance()` | `&RichnessDocumentV1` |
+| `critical_path_landmarks()` | `ResolvedField<u32>` |
+| `zone_count()` | `ResolvedField<u32>` |
+| `cave_mode()` | `ResolvedField<RichnessCaveMode>` |
+| `vertical_openings()` | `ResolvedField<u32>` |
+| `budget_ceiling()` | `ResolvedField<u32>` |
+
+Each `ResolvedField<T>` provides `.value() -> T` and `.source() -> ValueSource`.
+
+### `RichnessPreset`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RichnessPreset {
+    Sparse,    // tag: "sparse"
+    Moderate,  // tag: "moderate"
+    Rich,      // tag: "rich"
+}
+```
+
+Density preset — independent from baseline `V3Preset`. Methods: `tag()`,
+`from_tag(tag)`. `ALL` returns all three variants in canonical order.
+
+### `RichnessTheme`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RichnessTheme {
+    Ancient,    // tag: "ancient" — stone
+    Egyptian,   // tag: "egyptian" — sandstone/hieroglyph
+    Brutalist,  // tag: "brutalist" — concrete/metal
+}
+```
+
+Visual theme — independent from baseline presets. Theme affects presentation
+only; geometry bytes are invariant under theme selection.
+
+### `RichnessCaveMode`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RichnessCaveMode {
+    Required,   // tag: "required" — hard error if infeasible
+    Preferred,  // tag: "preferred" — generated if seed/layout permits
+    Omitted,    // tag: "omitted" — explicitly skipped
+}
+```
+
+### `InheritedOr<T>`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InheritedOr<T> {
+    Inherited,
+    Explicit(T),
+}
+```
+
+Preserves whether a control value was inherited from the preset or explicitly
+supplied. A same-value explicit override is preserved as `Explicit(value)`.
+Methods: `is_inherited()`, `is_explicit()`, `explicit() -> Option<T>`,
+`resolve(default: T) -> T`, `map(fn)`, `as_ref()`.
+
+### `ResolvedField<T>`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ResolvedField<T> { /* private fields */ }
+```
+
+A resolved control value with provenance tracking. Methods: `value() -> T`,
+`source() -> ValueSource`.
+
+### `ValueSource`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ValueSource {
+    Inherited,  // tag: "inherited"
+    Explicit,   // tag: "explicit"
+}
+```
+
+### `RichnessGateIdentity`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RichnessGateIdentity {
+    V1,  // tag: "richness-v1"
+}
+```
+
+Richness-only request gate, distinct from baseline M3 profile tag.
+`from_tag("richness-v1")` returns `Some(RichnessGateIdentity::V1)`.
+
+### Revision Enums
+
+Seven closed revision enums, each with exactly one variant `V1`:
+
+| type | tag |
+|------|-----|
+| `RichnessRequestSchemaRevision` | `"enhanced-v3-richness-request/v1"` |
+| `RichnessAlgorithmRevision` | `"enhanced-v3-richness-algorithm/v1"` |
+| `RichnessContentRevision` | `"enhanced-v3-richness-content/v1"` |
+| `RichnessPresetRevision` | `"enhanced-v3-richness-presets/v1"` |
+| `RichnessThemeRevision` | `"enhanced-v3-richness-themes/v1"` |
+| `RichnessAssetRevision` | `"enhanced-v3-richness-assets/v1"` |
+| `RichnessConventionRevision` | `"enhanced-v3-richness-conventions/v1"` |
+
+All implement `tag()`, `from_tag(tag)`, `validate()`, `Display`.
+Unknown revision tags return `None` from `from_tag()`.
+
+### `RichnessError`
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RichnessError { /* private fields */ }
+```
+
+Every error carries a stable `code: RichnessErrorCode`, master `seed`,
+all 7 revision tags, the affected request `path`, a `category`, and
+human-readable `context`. Implements `std::error::Error`, `Display`, `Debug`.
+
+### `RichnessErrorCode`
+
+Closed enum of stable error codes:
+
+| category | variants |
+|----------|----------|
+| Schema/revision | `UnknownRequestSchemaRevision`, `UnknownAlgorithmRevision`, `UnknownContentRevision`, `UnknownPresetRevision`, `UnknownThemeRevision`, `UnknownAssetRevision`, `UnknownConventionRevision`, `UnsupportedRichnessGate`, `UnknownPreset`, `UnknownTheme`, `RevisionIncompatible` |
+| Semantic infeasibility | `ValueOutOfRange`, `NotQuantumAligned`, `SemanticInfeasible`, `LandmarkCountInfeasible`, `ZoneCountInfeasible`, `CaveInfeasible`, `VerticalFeaturesInfeasible`, `BudgetInfeasible` |
+| Placement/topology | `PlacementExhausted`, `TopologyExhausted` |
+| Convention/runtime | `UnsupportedConvention` |
+| Budget | `BudgetOverrun` |
+| Cave | `CaveFailure` |
+| Asset | `AssetRoleMissing` |
+| Theme | `ThemeInvarianceViolated` |
+
+### `RichnessErrorCategory`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RichnessErrorCategory {
+    SchemaRevision,
+    SemanticInfeasibility,
+    PlacementExhaustion,
+    CompositionViolation,
+    BudgetViolation,
+    AssetViolation,
+    InvariantViolation,
+}
+```
+
+### `RichnessMetadataV1`
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RichnessMetadataV1 { /* private fields */ }
+```
+
+Immutable request-bound metadata snapshot created from a resolved request.
+
+**Constructor:** `RichnessMetadataV1::from_resolved(request)`
+
+**Accessors:**
+
+| accessor | return type |
+|----------|-------------|
+| `schema_version()` | `&'static str` (always `"richness-v1"`) |
+| `request_identity()` | `[u8; 32]` — authored request identity hash |
+| `resolved_request_identity()` | `[u8; 32]` — resolved request identity hash |
+| `canonical_request()` | `&[u8]` — exact canonical authored request bytes |
+| `canonical_resolved_request()` | `&[u8]` — exact canonical resolved request bytes |
+
+### `RichnessGenerationMetadata`
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RichnessGenerationMetadata { /* private fields */ }
+```
+
+Deterministic generation metadata facts (fixed order). Includes seed, preset,
+theme, extent, room/route/transition/archetype/prop/light/cave/opening counts,
+actual faces/entities, bounds, and budget consumption.
+
+### Constants
+
+```rust
+pub const RICHNESS_QUANTUM: u32 = 16;
+pub const RICHNESS_EXTENT_MIN: u32 = 1024;
+pub const RICHNESS_EXTENT_MAX: u32 = 3072;
+pub const LANDMARKS_MIN: u32 = 1;
+pub const LANDMARKS_MAX: u32 = 5;
+pub const ZONES_MIN: u32 = 1;
+pub const ZONES_MAX: u32 = 6;
+pub const VERTICAL_FEATURES_MIN: u32 = 0;
+pub const VERTICAL_FEATURES_MAX: u32 = 12;
+pub const BUDGET_CEILING_MIN: u32 = 1000;
+pub const BUDGET_CEILING_MAX: u32 = 8000;
+```
+
+### Profile Dispatch
+
+`GenerationProfile` provides the Richness V1 variant:
+
+```rust
+pub enum GenerationProfile {
+    LegacyV1,             // tag: "legacy-v1"
+    EnhancedV2,           // tag: "enhanced-v2"
+    EnhancedV3,           // tag: "m3"
+    EnhancedV3RichnessV1, // tag: "m3-richness-v1"
+}
+```
+
+`from_tag("m3-richness-v1")` returns `Some(EnhancedV3RichnessV1)`.
+The `dungeon_gen` CLI uses `--class m3-richness-v1`; `engine_pack` uses
+`enhanced-dungeon-v3-richness`; `dungeon_explore.sh --richness` launches
+the in-game explorer GUI.
+
 ## See Also
 
 - [BSP Generator Usage Guide](../guide/19-bsp-generator.md) — how to generate and compile dungeons

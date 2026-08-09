@@ -552,6 +552,90 @@ pub struct RichnessDocumentV1 {
 }
 
 impl RichnessDocumentV1 {
+    // ── Public read-only accessors ────────────────────────────────────
+
+    /// The master seed for deterministic generation.
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// The XY extent in Quake units.
+    pub fn extent(&self) -> u32 {
+        self.extent
+    }
+
+    /// The density preset.
+    pub fn preset(&self) -> RichnessPreset {
+        self.preset
+    }
+
+    /// The visual theme.
+    pub fn theme(&self) -> RichnessTheme {
+        self.theme
+    }
+
+    /// The request schema revision.
+    pub fn request_schema_revision(&self) -> RichnessRequestSchemaRevision {
+        self.request_schema_revision
+    }
+
+    /// The algorithm revision.
+    pub fn algorithm_revision(&self) -> RichnessAlgorithmRevision {
+        self.algorithm_revision
+    }
+
+    /// The content revision.
+    pub fn content_revision(&self) -> RichnessContentRevision {
+        self.content_revision
+    }
+
+    /// The preset revision.
+    pub fn preset_revision(&self) -> RichnessPresetRevision {
+        self.preset_revision
+    }
+
+    /// The theme revision.
+    pub fn theme_revision(&self) -> RichnessThemeRevision {
+        self.theme_revision
+    }
+
+    /// The asset revision.
+    pub fn asset_revision(&self) -> RichnessAssetRevision {
+        self.asset_revision
+    }
+
+    /// The convention revision.
+    pub fn convention_revision(&self) -> RichnessConventionRevision {
+        self.convention_revision
+    }
+
+    /// The critical path landmarks control (inherited or explicit).
+    pub fn critical_path_landmarks(&self) -> InheritedOr<u32> {
+        self.critical_path_landmarks
+    }
+
+    /// The zone count control (inherited or explicit).
+    pub fn zone_count(&self) -> InheritedOr<u32> {
+        self.zone_count
+    }
+
+    /// The cave mode control (inherited or explicit).
+    pub fn cave_mode(&self) -> InheritedOr<RichnessCaveMode> {
+        self.cave_mode
+    }
+
+    /// The vertical openings control (inherited or explicit).
+    pub fn vertical_openings(&self) -> InheritedOr<u32> {
+        self.vertical_openings
+    }
+
+    /// The budget ceiling control (inherited or explicit).
+    pub fn budget_ceiling(&self) -> InheritedOr<u32> {
+        self.budget_ceiling
+    }
+
+    // ── Constructors ──────────────────────────────────────────────────
+
     /// Create a new authored document with all controls inherited.
     ///
     /// Returns an error if any required field is out of range.
@@ -1010,45 +1094,45 @@ impl ResolvedRichnessRequestV1 {
     }
 
     /// The immutable authored provenance retained by this resolved request.
-    pub(crate) fn provenance(&self) -> &RichnessDocumentV1 {
+    pub fn provenance(&self) -> &RichnessDocumentV1 {
         &self.provenance
     }
 
     /// Resolved landmark control and its source marker.
-    pub(crate) fn critical_path_landmarks(&self) -> ResolvedField<u32> {
+    pub fn critical_path_landmarks(&self) -> ResolvedField<u32> {
         self.critical_path_landmarks
     }
 
     /// Resolved zone control and its source marker.
-    pub(crate) fn zone_count(&self) -> ResolvedField<u32> {
+    pub fn zone_count(&self) -> ResolvedField<u32> {
         self.zone_count
     }
 
     /// Resolved cave-mode control and its source marker.
     /// Resolved cave mode control (value + provenance source).
-    pub(crate) fn cave_mode(&self) -> ResolvedField<RichnessCaveMode> {
+    pub fn cave_mode(&self) -> ResolvedField<RichnessCaveMode> {
         self.cave_mode
     }
 
     /// Resolved vertical-opening control and its source marker.
-    pub(crate) fn vertical_openings(&self) -> ResolvedField<u32> {
+    pub fn vertical_openings(&self) -> ResolvedField<u32> {
         self.vertical_openings
     }
 
     /// Resolved source-face ceiling and its source marker.
-    pub(crate) fn budget_ceiling(&self) -> ResolvedField<u32> {
+    pub fn budget_ceiling(&self) -> ResolvedField<u32> {
         self.budget_ceiling
     }
 }
 
 impl<T: Copy> ResolvedField<T> {
     /// Immutable effective value.
-    pub(crate) fn value(&self) -> T {
+    pub fn value(&self) -> T {
         self.value
     }
 
     /// Immutable provenance marker for the effective value.
-    pub(crate) fn source(&self) -> ValueSource {
+    pub fn source(&self) -> ValueSource {
         self.source
     }
 }

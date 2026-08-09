@@ -16,6 +16,10 @@ M2_TEXTURES="src/bsp_generator/themes/cc0_dungeon_v2/textures"
 DEFAULT_TOOL_PATH="${DUNGEON_TOOL_PATH:-$HOME/.local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin}"
 PROFILE_PATH="${DUNGEON_PROFILE_PATH:-tools/bsp_authoring/ericw-q1-bsp2-generated-profile.toml}"
 
+RICHNESS_WAD_ANCIENT="src/bsp_generator/themes/richness_ancient/cc0_richness_ancient.wad"
+RICHNESS_PALETTE_ANCIENT="src/bsp_generator/themes/richness_ancient/palette.lmp"
+RICHNESS_TEXTURES_ANCIENT="src/bsp_generator/themes/richness_ancient/textures"
+
 # ── defaults ───────────────────────────────────────────────────────────────
 MODE="architectural"
 SEED=""
@@ -195,6 +199,7 @@ show_help() {
   echo "  --classic (m1)       Legacy v1 single-layer, theme cc0_stone_beta"
   echo "  --enhanced (m2)      Enhanced v2 two-layer, theme cc0_dungeon_v2"
   echo "  --architectural (m3) Enhanced v3 grammar dungeons, theme cc0_dungeon_v2"
+  echo "  --richness (m3-richness-v1) Richness V1 gameplay dungeons"
   echo ""
   echo "Options:"
   echo "  --seed N             Generation seed (default: 0 classic/enhanced,"
@@ -220,6 +225,7 @@ while [[ $# -gt 0 ]]; do
     --classic|--m1)       MODE="classic"; shift ;;
     --enhanced|--m2)      MODE="enhanced"; shift ;;
     --architectural|--m3) MODE="architectural"; shift ;;
+    --richness|--m3-richness-v1) MODE="richness"; shift ;;
     --seed)               SEED="$2"; shift 2 ;;
     --preset)             PRESET="$2"; shift 2 ;;
     --rooms)              ROOMS="$2"; shift 2 ;;
@@ -270,6 +276,18 @@ if [[ "$MODE" == "classic" || "$MODE" == "enhanced" ]]; then
   echo ""
   echo "  $(bold "Launching") $(green "$MODE") seed $(bold "$SEED")..."
   exec cargo run -p bsp_beta -- "${LAUNCH_ARGS[@]}"
+fi
+
+# ── richness: direct GUI launch via --m3-richness-v1 ──────────────────────
+if [[ "$MODE" == "richness" ]]; then
+  RICHNESS_MODE="--development"
+  [[ -n "$DEVELOPMENT" ]] && RICHNESS_MODE="$DEVELOPMENT"
+  RICHNESS_ARGS=("$RICHNESS_MODE" "--m3-richness-v1")
+  [[ -n "$SEED" ]] && RICHNESS_ARGS+=(--richness-seed "$SEED")
+  [[ -n "$PRESET" ]] && RICHNESS_ARGS+=(--richness-preset "$PRESET")
+
+  echo "$(green "✓") Launching $(bold "richness") (m3-richness-v1) with GUI explorer..."
+  exec cargo run -p bsp_beta -- "${RICHNESS_ARGS[@]}"
 fi
 
 # ── architectural: direct GUI launch (default) ─────────────────────────────

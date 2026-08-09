@@ -440,13 +440,34 @@ pub(crate) fn place_room_props(
             (d[0] as i128, d[1] as i128, d[2] as i128)
         };
         // Wall props sit against the nearest wall; floor props rest on the
-        // floor slab.
-        let origin = if cell_class == FloorCellClass::Open {
-            (cx as i128, cy as i128, floor_top)
-        } else {
-            (cx as i128, cy as i128, floor_top)
-        };
+        // floor slab. Both originate at the candidate cell; the origin is
+        // then clamped inward so the prop's swept footprint stays inside
+        // the room band (wall-adjacent candidates otherwise overshoot the
+        // 16-unit inset and are rejected).
+        let mut origin = (cx as i128, cy as i128, floor_top);
         let _ = (dx_p, dy_p, dz_p);
+        let dims = PROP_THEME_DIMENSIONS[prop as usize][theme_idx];
+        let swept = PROP_SWEPT_OCCUPANCY[prop as usize];
+        let ceil16 = |value: i128| value.div_euclid(16) * 16 + if value % 16 == 0 { 0 } else { 16 };
+        let floor16 = |value: i128| value.div_euclid(16) * 16;
+        let span_x = swept[0].max(dims[0]) as i128;
+        let span_y = swept[1].max(dims[1]) as i128;
+        let low_x = room_bounds.0 + 16;
+        let high_x = room_bounds.3 - 16;
+        let low_y = room_bounds.1 + 16;
+        let high_y = room_bounds.4 - 16;
+        if ceil16(origin.0) < low_x {
+            origin.0 = floor16(low_x - span_x);
+        }
+        if ceil16(origin.1) < low_y {
+            origin.1 = floor16(low_y - span_y);
+        }
+        if ceil16(origin.0 + span_x) > high_x {
+            origin.0 = floor16(high_x - span_x);
+        }
+        if ceil16(origin.1 + span_y) > high_y {
+            origin.1 = floor16(high_y - span_y);
+        }
         let owner = SemanticAttribution {
             reservation_id: room,
             request_id: None,

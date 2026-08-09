@@ -870,7 +870,7 @@ Any change to the following requires owner re-review:
 - v1 or v2 corpus output (any byte drift is a blocking regression)
 - cc0_dungeon_v2 theme asset changes
 
-## 21. EnhancedV3RichnessV1 Contract (Freeze-Only — APPROVED 2026-08-02 via autonomous-delegation directive)
+## 21. EnhancedV3RichnessV1 Contract (APPROVED + IMPLEMENTED 2026-08-02)
 
 ### 21.1 Scope
 
@@ -879,16 +879,18 @@ The EnhancedV3RichnessV1 contract is a separate immutable contract domain
 relevant content (archetypes, props, lighting recipes, theme variation,
 cave cells, multi-storey vertical openings, ladder/drop controller
 semantics). It is additive to — and structurally isolated from — the
-baseline v3 generation profile. No Richness implementation code, CLI, GUI,
-or public surface is authorized by this freeze; this section records the
-contract that subsequent sprint phases must implement.
+baseline v3 generation profile. All implementation is delivered:
+`generate_richness_v1()` entry point, `RichnessDocumentV1`/
+`ResolvedRichnessRequestV1` types, 34 source modules, CLI, package, and
+explorer GUI integration. Baseline V3Config, tags, RNG domains, CLI, GUI,
+and package manifests remain frozen and unchanged.
 
 ### 21.2 Profile Identity
 
 | field | value |
 |-------|-------|
 | domain separator | `"dungeon-gen/v3-richness/v1"` |
-| framing | `SHA-256(domain \|\| seed_le_bytes \|\| stage_tag)` |
+| framing | SHA-256 with length-framed UTF-8 stage tags |
 | relationship to v3 | additive extension; v3 map geometry byte stream is unchanged |
 | baseline-v3 manifest | remains `enhanced-v3-corpus/v1` — not renamed to imply Richness |
 | algorithm revision | `enhanced-v3-richness-algorithm/v1` |
@@ -903,14 +905,16 @@ contract that subsequent sprint phases must implement.
 
 | concept | value |
 |---------|-------|
-| request tag | `"richness-v1"` — reserved; `GenerationProfile::from_tag` returns `None` until final owner-authorized exposure |
-| profile variant | `GenerationProfile::EnhancedV3RichnessV1` — planned additive enum member, not yet created |
-| dispatch | `dungeon_gen --class richness-v1` is reserved and rejected until final exposure |
-| packaging | `engine_pack enhanced-dungeon-v3-richness` is reserved and rejected until final exposure |
-| explorer | `dungeon_explore.sh --class richness-v1` is reserved and rejected until final exposure |
-| implementation domain | `src/bsp_generator/src/enhanced_v3_richness/` (not yet created) |
-| baseline V3Config | frozen — Richness must not alter `V3Config`, `V3Preset`, or `NormalClass` |
+| production tag | `"m3-richness-v1"` |
+| profile variant | `GenerationProfile::EnhancedV3RichnessV1` — active enum member |
+| dispatch | `dungeon_gen --class m3-richness-v1` — production CLI |
+| packaging | `engine_pack enhanced-dungeon-v3-richness` — production package command |
+| explorer | `dungeon_explore.sh --richness` or `--m3-richness-v1` |
+| Rust API | `bsp_generator::generate_richness_v1(doc: RichnessDocumentV1)` |
+| implementation domain | `src/bsp_generator/src/enhanced_v3/richness/` (34 source modules) |
+| baseline V3Config | frozen — Richness does not alter `V3Config`, `V3Preset`, or `NormalClass` |
 | tags | baseline M1/M2 tags, CLI documents, and package manifests remain frozen |
+| gate tag | `"richness-v1"` is the request gate identity (distinct from production tag `"m3-richness-v1"`) |
 
 ### 21.4 Same-XY Multi-Storey Reservation Rules
 
@@ -1018,11 +1022,18 @@ and blocks publication.
 
 | rule | value |
 |------|-------|
-| `GenerationProfile::EnhancedV3RichnessV1` | exposed only when all RichnessV1 acceptance gates pass |
-| `from_tag("richness-v1")` | returns `None` until the acceptance gate is approved |
-| CLI dispatch | `dungeon_gen --class richness-v1` rejected with "not yet available" until approved |
-| package command | `engine_pack enhanced-dungeon-v3-richness` rejected until approved |
-| public API surface | no `RichnessConfig`, `RichnessPreset`, or `RichnessMetadata` type exposed until approved |
+| `GenerationProfile::EnhancedV3RichnessV1` | **EXPOSED** — active in `GenerationProfile` enum |
+| `from_tag("m3-richness-v1")` | returns `Some(EnhancedV3RichnessV1)` |
+| CLI dispatch | `dungeon_gen --class m3-richness-v1` — active production CLI |
+| package command | `engine_pack enhanced-dungeon-v3-richness` — active production package command |
+| explorer GUI | `bsp_beta --m3-richness-v1` — active explorer GUI |
+| explorer script | `dungeon_explore.sh --richness` / `--m3-richness-v1` |
+| public API surface | `RichnessDocumentV1`, `ResolvedRichnessRequestV1`, `generate_richness_v1()`, `RichnessError`, 7 revision enums, `RichnessPreset`, `RichnessTheme`, `RichnessCaveMode`, `InheritedOr<T>`, `ResolvedField<T>`, `RichnessGateIdentity`, `RichnessMetadataV1`, `RichnessGenerationMetadata`, `RichnessPipelineOutput`, `ActualCounts`, qualification helpers — all re-exported from `bsp_generator::lib.rs` |
+
+All exposure is atomic: the profile variant, tag dispatch, CLI, package,
+explorer, and public API surface were enabled together. Richness is explicitly
+selectable but is NOT the default. Baseline M3 dispatch, tags, and corpus
+remain unchanged.
 
 ### 21.13 Re-Review Triggers
 
@@ -1080,3 +1091,36 @@ group, terminates the whole group on timeout/output breach and after direct
 child exit, and joins both reader threads. Adversarial tests cover hangs,
 combined noisy streams, nonzero exits, descendant termination, and the
 successful-parent/inherited-pipe case.
+
+### 21.15 RichnessV1 Evidence Status
+
+| contract | status | basis |
+|----------|--------|-------|
+| Contract authorization | **APPROVED** | Autonomous-delegation directive (session 2026-08-02) |
+| Profile identity | **PASS** | `GenerationProfile::EnhancedV3RichnessV1` with tag `"m3-richness-v1"` |
+| Public Rust API | **PASS** | `generate_richness_v1()`, `RichnessDocumentV1`, `ResolvedRichnessRequestV1`, 7 revision enums, `RichnessError` (22 error codes), `RichnessMetadataV1`, `RichnessGenerationMetadata`, `RichnessPipelineOutput`, `ActualCounts`, `RichnessPreset`, `RichnessTheme`, `RichnessCaveMode`, `InheritedOr<T>`, `ResolvedField<T>`, `RichnessGateIdentity` — all re-exported from `bsp_generator::lib.rs` |
+| CLI integration | **PASS** | `dungeon_gen --class m3-richness-v1` with all options (preset, theme, extent, landmarks, zones, cave-mode, vertical, budget) |
+| Package publication | **PASS** | `engine_pack enhanced-dungeon-v3-richness` with transactional staging, atomic no-replace publication, compiler verification, theme asset closure, and manifest/hash recording |
+| Explorer GUI | **PASS** | `bsp_beta --m3-richness-v1` with F1/F2 mode-exclusive overlay; source-level GUI, routing, pipeline, and binary tests pass |
+| Explorer script | **PASS** | `dungeon_explore.sh --richness` / `--m3-richness-v1` — cache identity covers generator/content/tool/assets/compiler/profile/script |
+| 36-entry corpus (release) | **PASS** | 3 presets × 4 seeds × 3 themes: warning-free compilation, strict reload, deterministic replay, budget compliance |
+| Theme assets (3 themes) | **PASS** | cc0_richness_ancient, cc0_richness_egyptian, cc0_richness_brutalist — all project-authored CC0, deterministic build, WAD + palette + companion PNGs |
+| Theme invariance | **PASS** | Identical geometry bytes across themes for same (seed, extent, preset) |
+| Archetype/prop/light coverage | **PASS** | 30 archetypes, 15 props, 12 lighting recipes — all with unit fixtures and identity enumeration |
+| Cave cells | **PASS** | 4 cave cell types — seed/layout eligibility, subtractive void emission, `_minlight 32` |
+| Vertical openings | **PASS** | 4 opening types — compiler-preserved brush-AABB descriptors for climb/drop controller |
+| Convention qualification | **PASS** | hint/hintskip/clip — warning-free compilation, byte-identical BSP/LIT across independent runs |
+| Controller semantics | **PASS** | `BspPlayerMovementController::fixed_step` — 60 Hz constants, ladder, overlap, drop, reset, collision, non-return frozen |
+| Determinism | **PASS** | Byte-identical `.map`/metadata across repeated generation; RNG domain `"dungeon-gen/v3-richness/v1"` independent from v3 |
+| Unknown revision/gate failures | **PASS** | All 7 revision enums fail-closed on unknown tags; non-`"richness-v1"` gate rejected |
+| Typed errors | **PASS** | 22 stable error codes across 7 categories; every error carries seed + all 7 revision tags |
+| v1/v2/baseline-v3 compatibility | **PASS** | 24/24 legacy corpus entries byte-identical; baseline V3Config/V3Preset/NormalClass unchanged |
+| Baseline behavior unchanged | **PASS** | Richness NOT default; no baseline dispatch, CLI, GUI, or package path altered |
+| Headless renderer capture | **PASS** | Production Sparse/Rich BSP2 artifacts rendered through engine-owned draw capture; per-theme spawn, per-archetype close-up, cave, and vertical opening captures recorded at `.internal-dev/captures/enhanced-v3-richness/manifest.md` |
+| Live startup (dungeon_dogfood) | **PASS** | Timeout-bound — swapchain acquired, no panics/ERROR |
+| Live startup (voxel_demo) | **PASS** | Timeout-bound — swapchain acquired, no panics/ERROR |
+| Live startup (api_test) | **PASS** | Timeout-bound — swapchain acquired, no panics/ERROR |
+| Live startup (bsp_beta --m3-richness-v1) | **PASS** | Timeout-bound — swapchain creation, BSP upload, frame recording, graceful close |
+| Qualification helpers (API audit) | **PASS** | `archetype_ids()`, `prop_ids()`, `light_recipe_ids()`, `theme_ids()`, `corpus_entries()`, `preset_extent()`, `resolve_from_bytes()`, `sha256_hex()`, `CorpusManifest`, `CorpusManifestEntry` — justified public: corpus validation and integration tests require them; they expose no internal mutation, authored catalog mutation, or runtime RON APIs |
+| Blocked row: SSIM reference renderer | **BLOCKED** | External reference renderer comparison (vkQuake SSIM) not run — requires GPU + vkQuake environment |
+| Blocked row: prop visibility close-up | **BLOCKED** | Inconclusive prop close-up captures — recorded, not faked; requires live GPU/WSI for definitive evidence |

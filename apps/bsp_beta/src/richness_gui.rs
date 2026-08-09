@@ -3179,6 +3179,121 @@ impl RichnessGui {
         }
         output
     }
+
+    /// Draw the Richness GUI as an imgui overlay. This method only emits
+    /// draw commands and synchronizes viewport data; it performs no I/O or
+    /// state mutation beyond reading the GUI state.
+    pub fn render_imgui(&mut self, ui: &imgui::Ui, _ctx: &renderer::prelude::DebugUiFrameContext) {
+        let display = ui.io().display_size;
+        self.set_viewport(display[0].max(1.0) as u32, display[1].max(1.0) as u32);
+        let background = ui.get_background_draw_list();
+        background
+            .add_rect(
+                [0.0, 0.0],
+                display,
+                imgui::ImColor32::from_rgba(0, 0, 0, 204),
+            )
+            .filled(true)
+            .build();
+        let foreground = ui.get_foreground_draw_list();
+        let layout = self.layout_base();
+        let p = layout.panel;
+        foreground
+            .add_rect(
+                [p.x as f32, p.y as f32],
+                [(p.x + p.w as i32) as f32, (p.y + p.h as i32) as f32],
+                imgui::ImColor32::from_rgba(20, 20, 28, 255),
+            )
+            .filled(true)
+            .build();
+        foreground.with_clip_rect(
+            [p.x as f32, p.y as f32],
+            [(p.x + p.w as i32) as f32, (p.y + p.h as i32) as f32],
+            || {
+                for section in &layout.sections {
+                    let hdr = section.header;
+                    foreground
+                        .add_rect(
+                            [hdr.x as f32, hdr.y as f32],
+                            [(hdr.x + hdr.w as i32) as f32, (hdr.y + hdr.h as i32) as f32],
+                            imgui::ImColor32::from_rgba(48, 52, 64, 255),
+                        )
+                        .filled(true)
+                        .build();
+                    foreground.add_text(
+                        [hdr.x as f32 + 6.0, hdr.y as f32 + 4.0],
+                        imgui::ImColor32::from_rgba(255, 255, 255, 255),
+                        section.group.label(),
+                    );
+                    for row in &section.rows {
+                        let field = &GUI_ITEMS[row.item_index];
+                        let selected = row.item_index == self.selected_item;
+                        let bg = if field.kind == RichnessGuiItemKind::Action {
+                            imgui::ImColor32::from_rgba(46, 64, 82, 255)
+                        } else if selected {
+                            imgui::ImColor32::from_rgba(0, 110, 0, 220)
+                        } else {
+                            imgui::ImColor32::from_rgba(30, 34, 42, 220)
+                        };
+                        foreground
+                            .add_rect(
+                                [row.rect.x as f32, row.rect.y as f32],
+                                [
+                                    (row.rect.x + row.rect.w as i32) as f32,
+                                    (row.rect.y + row.rect.h as i32) as f32,
+                                ],
+                                bg,
+                            )
+                            .filled(true)
+                            .build();
+                        foreground.add_text(
+                            [row.rect.x as f32 + 6.0, row.rect.y as f32 + 3.0],
+                            imgui::ImColor32::from_rgba(255, 255, 255, 255),
+                            field.label,
+                        );
+                        if field.kind != RichnessGuiItemKind::Action {
+                            let value = self.value_text(field);
+                            foreground.add_text(
+                                [
+                                    row.rect.x as f32 + row.rect.w as f32 - 100.0,
+                                    row.rect.y as f32 + 3.0,
+                                ],
+                                imgui::ImColor32::from_rgba(255, 235, 90, 255),
+                                &value,
+                            );
+                        } else {
+                            foreground.add_text(
+                                [
+                                    row.rect.x as f32 + row.rect.w as f32 / 2.0 - 40.0,
+                                    row.rect.y as f32 + 3.0,
+                                ],
+                                imgui::ImColor32::from_rgba(255, 255, 255, 255),
+                                field.label,
+                            );
+                        }
+                    }
+                }
+                for dropdown in &layout.dropdowns {
+                    foreground
+                        .add_rect(
+                            [dropdown.rect.x as f32, dropdown.rect.y as f32],
+                            [
+                                (dropdown.rect.x + dropdown.rect.w as i32) as f32,
+                                (dropdown.rect.y + dropdown.rect.h as i32) as f32,
+                            ],
+                            imgui::ImColor32::from_rgba(32, 36, 46, 255),
+                        )
+                        .filled(true)
+                        .build();
+                    foreground.add_text(
+                        [dropdown.rect.x as f32 + 5.0, dropdown.rect.y as f32 + 3.0],
+                        imgui::ImColor32::from_rgba(255, 235, 90, 255),
+                        dropdown.label,
+                    );
+                }
+            },
+        );
+    }
 }
 
 // ── Keyboard helpers ───────────────────────────────────────────────────────

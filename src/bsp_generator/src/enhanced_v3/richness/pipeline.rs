@@ -17,7 +17,10 @@ use super::{
     generated_content::SCHEMA_VERSION,
     metadata::RichnessMetadataV1,
     pacing::build_pacing_blueprint,
-    request::{ResolvedRichnessRequestV1, RichnessCaveMode, RichnessPreset, RichnessTheme},
+    request::{
+        ResolvedRichnessRequestV1, RichnessCaveMode, RichnessDocumentV1, RichnessPreset,
+        RichnessTheme,
+    },
     solver::solve_placement_and_topology,
     topology::TopologyResult,
 };
@@ -36,7 +39,7 @@ pub struct RichnessPipelineOutput {
     /// Referenced theme asset role identities (fixed order).
     pub asset_roles: Vec<String>,
     /// Structural composition (assembly + visibility + cave + presentation).
-    pub composition: StructuralComposition,
+    pub(crate) composition: StructuralComposition,
     /// Actual brush/entity/light counts recomputed from the assembly.
     pub actual: ActualCounts,
 }
@@ -129,6 +132,7 @@ pub(crate) fn run_richness_pipeline(
 
     // 7. Canonical emission. Validate each point origin after all structure exists.
     let spawn = derive_spawn(&generation.topology);
+    let spawn = hull2_clear_spawn(&composition.assembly, spawn)?;
     validate_entity_origin_safety(&composition.assembly, spawn)?;
     let map_text = super::emission::emit_richness_map(&composition, theme, spawn)?;
 
@@ -207,6 +211,8 @@ pub(crate) fn recompute_actual_counts(composition: &StructuralComposition) -> Ac
     }
 }
 
+/// Validate a point-entity origin is inside a sealed volume (used by
+/// `validate_entity_origin_safety`).
 fn validate_entity_origin_safety(
     ir: &super::assembly::AssemblyIR,
     spawn: (i32, i32, i32),
@@ -231,6 +237,48 @@ fn validate_entity_origin_safety(
         }
     }
     Ok(())
+}
+
+/// Shift the spawn origin so the qbsp hull-2 box (64x64x64 above the origin)
+/// clears every structural brush. The spawn point may be airtight while a
+/// nearby stair tread or landing blocks the hull-2 outside-fill seed, which
+/// makes qbsp emit "No entities in empty space -- no filling performed
+/// (hull 2)". Deterministic offsets; the airtight check runs afterwards.
+fn hull2_clear_spawn(
+    ir: &super::assembly::AssemblyIR,
+    spawn: (i32, i32, i32),
+) -> Result<(i32, i32, i32), RichnessError> {
+    let offsets: [(i32, i32); 9] = [
+        (0, 0),
+        (32, 0),
+        (0, 32),
+        (-32, 0),
+        (0, -32),
+        (64, 0),
+        (0, 64),
+        (-64, 0),
+        (0, -64),
+    ];
+    for (dx, dy) in offsets {
+        let origin = (spawn.0 + dx, spawn.1 + dy, spawn.2);
+        let hull_box = crate::enhanced_v3::geometry::ConvexBrush::make_box(
+            (i128::from(origin.0) - 32, i128::from(origin.0) + 32),
+            (i128::from(origin.1) - 32, i128::from(origin.1) + 32),
+            (i128::from(origin.2), i128::from(origin.2) + 64),
+        )
+        .map_err(|error| pipeline_error("spawn.hull2_box", format!("{error}")))?;
+        let blocked = ir.brushes.values().any(|brush| {
+            crate::enhanced_v3::richness::geometry::brushes_overlap(&hull_box, &brush.brush)
+                .unwrap_or(true)
+        });
+        if !blocked {
+            return Ok(origin);
+        }
+    }
+    Err(pipeline_error(
+        "spawn.hull2_blocked",
+        format!("no hull-2-clear spawn position near {spawn:?}"),
+    ))
 }
 
 fn theme_ordinal(theme: RichnessTheme) -> usize {
@@ -292,6 +340,31 @@ pub(crate) fn pipeline_error(path: &str, context: impl Into<String>) -> Richness
 
 /// Convenience alias for pipeline tests.
 pub(crate) type PipelineResult = Result<RichnessPipelineOutput, RichnessError>;
+
+// ── Public entry point ─────────────────────────────────────────────────────
+
+/// Generate a Richness V1 dungeon from an authored request document.
+///
+/// This is the sole public entry point for Richness V1 generation. It
+/// validates and resolves the request, runs the complete private pipeline,
+/// and returns the canonical map text, metadata, validation witnesses, and
+/// asset roles in a single all-or-nothing bundle.
+///
+/// # Determinism
+///
+/// Two calls with an identical `RichnessDocumentV1` produce byte-identical
+/// `.map` output and field-identical metadata.
+///
+/// # Errors
+///
+/// Returns [`RichnessError`] if validation, placement, topology, composition,
+/// emission, or any other pipeline stage fails. No partial output is returned.
+pub fn generate_richness_v1(
+    request: &RichnessDocumentV1,
+) -> Result<RichnessPipelineOutput, RichnessError> {
+    let resolved = ResolvedRichnessRequestV1::resolve(request.clone())?;
+    run_richness_pipeline(&resolved)
+}
 
 #[cfg(test)]
 mod tests {

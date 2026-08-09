@@ -17,7 +17,13 @@
 //! crate-private. This controller does not depend on it. The production
 //! executor will be provided by `apps/bsp_beta` at wiring time.
 
-use crate::richness_gui::RichnessDraft;
+use crate::richness_gui::{
+    InheritedOr as DraftInheritedOr, RichnessCaveMode, RichnessDraft, RichnessPreset, RichnessTheme,
+};
+use bsp_generator::{
+    InheritedOr, RichnessCaveMode as GeneratorCaveMode, RichnessDocumentV1,
+    RichnessPreset as GeneratorPreset, RichnessTheme as GeneratorTheme,
+};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -444,6 +450,169 @@ fn create_unique_richness_package_root() -> std::io::Result<PathBuf> {
 /// Confined package directory for one Richness request.
 pub fn package_dir_for_richness_request(root: &Path, id: u64) -> PathBuf {
     root.join(format!("richness-request-{id:020}"))
+}
+
+// ── Production executor ────────────────────────────────────────────────────
+
+/// Convert an explorer-side `RichnessDraft` to a generator-side
+/// `RichnessDocumentV1` ready for the generation pipeline.
+///
+/// This is the public bridge between the GUI draft model and the
+/// canonical Richness request format. It produces byte-identical
+/// canonical output to the generator's own serialization.
+pub fn draft_to_richness_document(draft: &RichnessDraft) -> Result<RichnessDocumentV1, String> {
+    let preset = convert_preset(draft.preset);
+    let theme = convert_theme(draft.theme);
+    let mut doc = RichnessDocumentV1::new(draft.seed, draft.extent, preset, theme)
+        .map_err(|e| format!("invalid richness document: {e}"))?;
+
+    // Convert InheritedOr fields using with_all_explicit to set everything
+    doc = RichnessDocumentV1::with_all_explicit(
+        draft.seed,
+        draft.extent,
+        preset,
+        theme,
+        // Revisions are always V1 (frozen)
+        bsp_generator::RichnessRequestSchemaRevision::V1,
+        bsp_generator::RichnessAlgorithmRevision::V1,
+        bsp_generator::RichnessContentRevision::V1,
+        bsp_generator::RichnessPresetRevision::V1,
+        bsp_generator::RichnessThemeRevision::V1,
+        bsp_generator::RichnessAssetRevision::V1,
+        bsp_generator::RichnessConventionRevision::V1,
+        convert_inherited_u32(draft.landmarks),
+        convert_inherited_u32(draft.zones),
+        convert_inherited_cave(draft.cave_mode),
+        convert_inherited_u32(draft.vertical_openings),
+        convert_inherited_u32(draft.budget_ceiling),
+    )
+    .map_err(|e| format!("invalid richness document: {e}"))?;
+
+    Ok(doc)
+}
+
+/// Create a production generation executor that calls the real Richness V1
+/// pipeline via `engine_pack`.
+///
+/// The executor runs on the worker thread and:
+/// 1. Converts the draft to a `RichnessDocumentV1`
+/// 2. Calls `engine_pack::build_richness_v1_package`
+/// 3. Returns `ExecutorOutcome::PackageReady` or `ExecutorOutcome::Failed`
+pub fn production_richness_executor(tools_dir: std::path::PathBuf) -> GenerationExecutor {
+    Box::new(move |req: &RichnessGenerationRequest| {
+        let outcome = execute_richness_request(req, &tools_dir);
+        // validate_executor_outcome ensures the outcome is bound to this request
+        validate_executor_outcome(req, outcome)
+    })
+}
+
+/// Execute a single richness generation request using the real pipeline.
+fn execute_richness_request(
+    req: &RichnessGenerationRequest,
+    tools_dir: &std::path::Path,
+) -> ExecutorOutcome {
+    let fail = |msg: String| ExecutorOutcome::Failed {
+        request_id: req.id,
+        error_message: msg,
+    };
+
+    let doc = match draft_to_richness_document(&req.draft) {
+        Ok(doc) => doc,
+        Err(e) => return fail(format!("invalid richness draft: {e}")),
+    };
+
+    // Verify tools are available
+    if !tools_available(tools_dir) {
+        return fail(format!("ericw-tools not found in {}", tools_dir.display()));
+    }
+
+    // Create the package directory
+    if let Some(parent) = req.package_dir.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return fail(format!("create package root: {e}"));
+        }
+    }
+
+    // Call the real engine_pack Richness V1 package builder
+    match engine_pack::enhanced_dungeon_v3_richness_v1::build_richness_v1_package(
+        &doc,
+        &req.package_dir,
+        Some(tools_dir),
+        &format!("bsp_beta_richness_{}", req.id),
+        None,
+    ) {
+        Ok(result) => {
+            let _ = result; // BuildRichnessV1Result::Published or Unchanged
+            ExecutorOutcome::PackageReady {
+                request_id: req.id,
+                package_dir: req.package_dir.clone(),
+            }
+        }
+        Err(e) => fail(format!("richness package build failed: {e}")),
+    }
+}
+
+/// Check whether `dir` contains executable `qbsp`, `vis`, and `light`.
+/// Duplicated from generation.rs to avoid cross-module dependency in test
+/// contexts where this file is included directly.
+fn tools_available(dir: &std::path::Path) -> bool {
+    ["qbsp", "vis", "light"]
+        .into_iter()
+        .map(|tool| dir.join(tool))
+        .all(|path| is_executable_file(&path))
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        return std::fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false);
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+// ── Draft → Document conversion helpers ────────────────────────────────────
+
+fn convert_preset(p: RichnessPreset) -> GeneratorPreset {
+    match p {
+        RichnessPreset::Sparse => GeneratorPreset::Sparse,
+        RichnessPreset::Moderate => GeneratorPreset::Moderate,
+        RichnessPreset::Rich => GeneratorPreset::Rich,
+    }
+}
+
+fn convert_theme(t: RichnessTheme) -> GeneratorTheme {
+    match t {
+        RichnessTheme::Ancient => GeneratorTheme::Ancient,
+        RichnessTheme::Egyptian => GeneratorTheme::Egyptian,
+        RichnessTheme::Brutalist => GeneratorTheme::Brutalist,
+    }
+}
+
+fn convert_inherited_u32(v: DraftInheritedOr<u32>) -> InheritedOr<u32> {
+    match v {
+        DraftInheritedOr::Inherited => InheritedOr::Inherited,
+        DraftInheritedOr::Explicit(val) => InheritedOr::Explicit(val),
+    }
+}
+
+fn convert_inherited_cave(v: DraftInheritedOr<RichnessCaveMode>) -> InheritedOr<GeneratorCaveMode> {
+    match v {
+        DraftInheritedOr::Inherited => InheritedOr::Inherited,
+        DraftInheritedOr::Explicit(cave) => InheritedOr::Explicit(match cave {
+            RichnessCaveMode::Required => GeneratorCaveMode::Required,
+            RichnessCaveMode::Preferred => GeneratorCaveMode::Preferred,
+            RichnessCaveMode::Omitted => GeneratorCaveMode::Omitted,
+        }),
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

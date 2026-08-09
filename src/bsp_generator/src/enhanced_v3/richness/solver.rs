@@ -567,6 +567,60 @@ impl PlacementSolver {
         }
     }
 
+    /// Pick a spawn cell whose 64x64 hull-2 box clears every reserved
+    /// non-room footprint (vertical hosts, stair frames, pit omissions,
+    /// routes) by at least two cells. The canonical center cell is tried
+    /// first; then deterministic one-cell shifts; the center is the fallback.
+    fn hull2_safe_spawn_cell(&self, room: &Footprint3D, layer: u8) -> Footprint3D {
+        let center = Self::spawn_footprint(room, layer);
+        let candidates = [
+            (center.x0, center.y0),
+            (center.x0 + 1, center.y0),
+            (center.x0, center.y0 + 1),
+            (center.x0 - 1, center.y0),
+            (center.x0, center.y0 - 1),
+        ];
+        for (cx, cy) in candidates {
+            // Hull-2 box: spawn cell center +/- 2 cells (64 units) with a
+            // two-cell safety margin around any other reservation.
+            let box_min_x = cx as i32 - 2;
+            let box_max_x = cx as i32 + 2;
+            let box_min_y = cy as i32 - 2;
+            let box_max_y = cy as i32 + 2;
+            let clear = self.journal.reservations.values().all(|record| {
+                if matches!(
+                    record.kind,
+                    ReservationKind::StandardRoom
+                        | ReservationKind::MultiStoreyRoom
+                        | ReservationKind::CaveHost
+                        | ReservationKind::NegativeSpace
+                ) {
+                    return true;
+                }
+                let fp = &record.footprint;
+                let r_min_x = fp.x0 as i32 - 2;
+                let r_max_x = fp.x1 as i32 + 2;
+                let r_min_y = fp.y0 as i32 - 2;
+                let r_max_y = fp.y1 as i32 + 2;
+                !(box_min_x < r_max_x
+                    && box_max_x > r_min_x
+                    && box_min_y < r_max_y
+                    && box_max_y > r_min_y)
+            });
+            if clear {
+                return Footprint3D {
+                    x0: cx,
+                    y0: cy,
+                    x1: cx + 1,
+                    y1: cy + 1,
+                    occupies_lower: layer == 0,
+                    occupies_upper: layer == 1,
+                };
+            }
+        }
+        center
+    }
+
     /// Reserve owner-bearing spawn, light, and support cells inside the
     /// committed room envelopes before topology claims exterior route space.
     fn reserve_room_occupants(&mut self) -> Result<(), RichnessError> {
@@ -600,7 +654,7 @@ impl PlacementSolver {
                 let layer = if room.footprint.occupies_lower { 0 } else { 1 };
                 let center_x = (room.footprint.x0 + room.footprint.x1) / 2;
                 let center_y = (room.footprint.y0 + room.footprint.y1) / 2;
-                let spawn = Self::spawn_footprint(&room.footprint, layer);
+                let spawn = self.hull2_safe_spawn_cell(&room.footprint, layer);
                 // For an odd-span entry room, the centred light reservation
                 // shares the only hull-2-safe centre cell with the spawn.
                 // Shift only that bookkeeping reservation one quantum east;

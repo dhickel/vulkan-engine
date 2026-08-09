@@ -483,7 +483,209 @@ from Legacy v1's `"dungeon-gen/v1"`. Same seed values produce different output.
 | ceiling height | fixed (config.z_span) | 128/144/176 per room |
 | pillars | none | up to 8 per room, connectivity-verified |
 
-## 15. See Also
+## 18. EnhancedV3 Richness V1 Pipeline
+
+### 18.1 Architecture
+
+The EnhancedV3 Richness V1 profile (`src/bsp_generator/src/enhanced_v3/richness/`)
+is a structurally isolated pipeline from baseline V3, Enhanced V2, and Legacy V1.
+It extends V3 output with gameplay content: 30 archetypes, 15 props, 12 lighting
+recipes, 3 themes, cave cells, and vertical openings. The pipeline never mutates
+baseline `V3Config`, `V3Preset`, or `V3Error`, and never routes v1/v2/v3 RNG,
+serialization, geometry, or metadata through richness code.
+
+```text
+RichnessDocumentV1
+    │  .validate_raw_fields()  →  validates ranges and quantum alignment
+    ▼
+ResolvedRichnessRequestV1  (validates cross-field feasibility)
+    │
+    │  build_pacing_blueprint()     ──►  PacingBlueprint
+    │  build_zone_blueprint()       ──►  ZoneBlueprint
+    │
+    │  solve_placement_and_topology()  ──►  Generation result
+    │    (constrained-Kruskal, same-XY composite reservations)
+    │
+    │  build_variation_plan()       ──►  VariationPlan
+    │  build_complexity_plan()      ──►  ComplexityPlan
+    │
+    │  compose_solved_generation()  ──►  StructuralComposition
+    │    (archetype placement, prop placement, light recipe
+    │     selection, cave carving, vertical opening emission,
+    │     presentation assembly)
+    │
+    │  cross-stage invariant validation  →  invariant checks
+    │  actual-count recompute           →  ActualCounts
+    │
+    ▼
+emit_map_text()  ──►  String  (.map bytes)
+```
+
+### 18.2 Module Map
+
+| module | responsibility | key types |
+|--------|---------------|-----------|
+| `request.rs` | authored/resolved request contract, revision enums, `InheritedOr<T>` | `RichnessDocumentV1`, `ResolvedRichnessRequestV1`, `RichnessPreset`, `RichnessTheme`, `RichnessCaveMode`, 7× `Richness*Revision` |
+| `error.rs` | stable structured errors with seed/revision context | `RichnessError`, `RichnessErrorCode`, `RichnessErrorCategory` |
+| `metadata.rs` | immutable request provenance snapshot | `RichnessMetadataV1`, `RichnessGenerationMetadata` |
+| `canonical.rs` | canonical serialization, identity hashing, RNG domain fr | `RICHNESS_REQUEST_DOMAIN`, length-framed UTF-8 framing |
+| `fields.rs` | RNG domain separator and stage tags | `RICHNESS_DOMAIN`, stage tag constants |
+| `pipeline.rs` | top-level entry point `generate_richness_v1()` | `RichnessPipelineOutput`, `ActualCounts` |
+| `pacing.rs` | semantic pacing blueprint (theme-independent) | `build_pacing_blueprint()` |
+| `zones.rs` | zone blueprint derivation | `build_zone_blueprint()` |
+| `footprint.rs` | two-layer footprint generation with composite reservations | `build_footprints()` |
+| `reservation.rs` | transactional volume reservation for composite occupancy | `ReservationSet` |
+| `topology.rs` | constrained-Kruskal topology with composite-aware placement | `solve_placement_and_topology()` |
+| `solver.rs` | archetype/prop/light recipe placement solver | `solve_placement_and_topology()` (entry) |
+| `variation.rs` | bounded legal variation within committed envelopes | `build_variation_plan()` |
+| `complexity.rs` | complete recipe reservation and budget tracking | `build_complexity_plan()` |
+| `composition.rs` | structural composition of archetypes/props/lights/caves/presentation | `compose_solved_generation()`, `StructuralComposition` |
+| `assembly.rs` | grounded support-graph assembly | `Assembly`, `AssemblyBrush`, `Support` |
+| `geometry.rs` | i128 Rational exact geometry | `Point3`, `Rational`, `Vector3`, `CanonicalPlane`, `ConvexBrush` |
+| `ids.rs` | typed newtype IDs | `RoomId`, `PortalId`, `ArchetypeId`, `PropId`, etc. |
+| `cave.rs` | cave cell geometry and carving | cave cell types, subtractive void emission |
+| `vertical.rs` | vertical opening descriptors and emission | ladder shaft, drop hole, stairwell, spiral stair descriptors |
+| `lighting.rs` | lighting recipe selection and placement | 12 shared semantic recipes |
+| `props.rs` | prop selection and placement | 15 shared semantic props |
+| `presentation.rs` | presentation assembly and theme materialization | theme WAD/miptex identity selection |
+| `theme.rs` | theme asset role resolution | `RichnessTheme` → WAD/palette/companion resolution |
+| `content_types.rs` | archetype and prop type definitions | `ArchetypeKind`, `PropKind` |
+| `fixed.rs` | frozen architectural invariants | ceiling constants, minimum counts |
+| `support.rs` | support graph cycle detection and contact validation | `SupportGraph`, `SupportGraphCycle` |
+| `visibility.rs` | visibility and occlusion helpers | prop visibility, clearance margins |
+| `validation.rs` | cross-stage invariant validation | invariant checks, budget verification |
+| `emission.rs` | canonical .map text emission with theme texture roles | `emit_map_text()` |
+| `sampling.rs` | deterministic candidate sampling | `CandidateSelector` |
+| `generated_content.rs` | checked-in generated Rust content (archetypes/props/lights) | `ARCHETYPE_IDS`, `PROP_IDS`, `LIGHT_RECIPE_IDS` |
+| `qualification.rs` | qualification suite and corpus manifest | `qualify_request()`, `CorpusManifest`, `CorpusManifestEntry` |
+
+### 18.3 RNG Domain and Stage Tags
+
+Richness V1 uses domain separator `"dungeon-gen/v3-richness/v1"` with
+length-framed UTF-8 stage tags. Length framing means each tag is prefixed
+with its length as a single byte (e.g., `\x05rooms`), which prevents tag
+ambiguity and makes the domain forward-extensible.
+
+Frozen stage tags (length-framed):
+
+| tag | stage | stream consumed by |
+|-----|-------|-------------------|
+| `pacing` | pacing blueprint construction | `build_pacing_blueprint()` |
+| `zones` | zone blueprint derivation | `build_zone_blueprint()` |
+| `placement` | room footprint placement | `solve_placement_and_topology()` |
+| `topology` | constrained-Kruskal topology | `solve_placement_and_topology()` |
+| `variation` | within-envelope variation | `build_variation_plan()` |
+| `complexity` | recipe reservation | `build_complexity_plan()` |
+| `archetypes` | archetype instance placement | `compose_solved_generation()` |
+| `props` | prop instance placement | `compose_solved_generation()` |
+| `lights` | light recipe selection | `compose_solved_generation()` |
+| `caves` | cave cell generation | `compose_solved_generation()` |
+| `vertical` | vertical opening placement | `compose_solved_generation()` |
+
+### 18.4 Transaction Domains
+
+The Richness V1 pipeline operates in two independent transaction domains:
+
+1. **Generation domain (Domain A)**: Pure-Rust offline pipeline producing
+   `.map` text. No filesystem access, no network, no platform-sensitive
+   randomization. Authored RON content is compiled by
+   `tools/richness_content_codegen` into checked-in Rust source;
+   the generator reads only checked-in constants.
+
+2. **Publication domain (Domain B)**: `engine_pack enhanced-dungeon-v3-richness`
+   invokes `generate_richness_v1()`, then compiles through ericw-tools with
+   the pinned BSP2 profile. Uses transactional staging: preflight validation,
+   sibling staging directory, atomic rename to target. Existing targets are
+   rejected. WAD, palette, and companion PNGs are validated before publication.
+
+These are the same two domains as baseline V3 — Richness V1 uses them without
+introducing a third transaction domain.
+
+### 18.5 Controller Behavior
+
+The windowed `bsp_beta --m3-richness-v1` path provides an in-game Richness
+configuration overlay. The interaction model is identical to the baseline M3
+GUI (see §20.17 of the dungeon generation specification):
+
+- **F1 Keyboard mode**: arrows navigate, Enter edits, Tab/Shift+Tab move
+  between groups, +/- adjust numeric fields, Escape closes.
+- **F2 Mouse mode**: pointer clicks select fields, dropdowns, steppers,
+  checkboxes, and actions.
+- **Device exclusivity**: keyboard and mouse modes never coexist; when
+  either is open, the other device class and gameplay routing are blocked.
+  Opening queues releases; closing restores without synthesizing presses.
+- **Generate**: snapshots the validated draft and leaves the menu open.
+- **Apply & Close**: closes only after the matching latest request commits.
+
+Work remains off the event thread and follows the same pipeline as baseline
+M3: Richness generation → `.map` staging → ericw compilation → atomic
+package publication → strict authorization → hidden renderer preparation →
+coordinator validation/commit → detached-mount retirement.
+
+The overlay exposes every public Richness control plus two UI-only
+non-canonical controls:
+
+- **Pacing plan** (`uniform`, `frontloaded`, `backloaded`, `peaked`):
+  controls archetype density distribution along the critical path. Affects
+  where content clusters, not what content is generated. Not included in
+  request identity hashing or canonical export.
+- **Variation seed**: a secondary `u64` seed that perturbs within committed
+  topology envelopes. Changes invalidate cached BSP output. Not included in
+  request identity hashing or canonical export.
+
+### 18.6 Evidence Paths
+
+**Qualification suites** (Phase 17):
+- `enhanced_v3_richness_compatibility.rs` — public API parity, canonical
+  identity, revision/gate failures, archetype/prop/light/theme enumeration,
+  determinism, and cross-theme semantic identity
+- `enhanced_v3_richness_vectors.rs` — focused fixture inventory: 30 archetype
+  unit fixtures, 15 prop unit fixtures, 4 cave cell fixtures, 4 vertical
+  opening fixtures, 3 theme-isolation fixtures
+- `enhanced_v3_richness_corpus.rs` — 36-entry compiler corpus (3 presets ×
+  4 seeds × 3 themes): warning-free compilation, strict reload, budget
+  compliance, deterministic replay
+
+**Headless captures**:
+Indexed at `.internal-dev/captures/enhanced-v3-richness/manifest.md`.
+Production Sparse/Rich BSP2 artifacts rendered through engine-owned draw
+capture. Per-theme spawn, per-archetype close-up, cave interior, and
+vertical opening captures recorded.
+
+**Compiler evidence**:
+All 36 corpus entries compiled through pinned ericw-tools 2.0.0-alpha3
+BSP2 profile with zero warnings, zero leaks, and strict load diagnostics.
+Convention fixtures (hint/hintskip/clip) compile twice with byte-identical
+BSP/LIT output.
+
+**Live startup**:
+Timeout-bound `dungeon_dogfood` and `voxel_demo` startups pass. `bsp_beta
+--m3-richness-v1` timeout-bound startup reaches swapchain creation, BSP
+upload, and frame recording.
+
+### 18.7 Key Differences from Baseline V3
+
+| aspect | Baseline V3 | Richness V1 |
+|--------|-------------|-------------|
+| domain | `"dungeon-gen/v3"` | `"dungeon-gen/v3-richness/v1"` |
+| stage tags | 4 tags | 11 tags (length-framed) |
+| theme count | 1 (cc0_dungeon_v2) | 3 (Ancient, Egyptian, Brutalist) |
+| theme invariance | N/A | enforced: identical geometry bytes across themes |
+| archetypes | 6 grammar families (integrated generators) | 30 shared semantic archetypes |
+| props | none | 15 shared semantic props |
+| lighting | minlight + light_count | 12 shared semantic recipes |
+| caves | none | 4 cave cell types |
+| vertical openings | stairs only | 4 opening types + ladder/drop controller semantics |
+| same-XY composite reservations | none | explicit composite occupancy |
+| request model | `V3Config` (public fields) | `RichnessDocumentV1` → `ResolvedRichnessRequestV1` (private fields, revisioned) |
+| error type | `V3Error` (45 variants) | `RichnessError` (22 error codes + category) |
+| inheritable controls | none | `InheritedOr<T>` with source tracking |
+| pacing/variation controls | none | UI-only non-canonical controls |
+| entry point | `generate_v3(&config)` | `generate_richness_v1(doc)` |
+| CLI | `--class m3` | `--class m3-richness-v1` |
+| package | `enhanced-dungeon-v3` | `enhanced-dungeon-v3-richness` |
+
+## 19. See Also
 
 - [BSP Generator Usage Guide](../guide/19-bsp-generator.md) — how to generate and compile
 - [BSP Generator API Reference](../api/19-bsp-generator.md) — public type and function docs
