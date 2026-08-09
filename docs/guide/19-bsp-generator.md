@@ -621,11 +621,15 @@ variant). Current frozen revisions:
 engine_pack enhanced-dungeon-v3-richness-v1 \
   --seed 42 --preset moderate --theme ancient --out /tmp/pkg
 
-# Launch the in-game Richness explorer GUI
+# Launch the cache-backed in-game Richness explorer GUI
 ./tools/dungeon_explore.sh --richness --seed 42
-./tools/dungeon_explore.sh --richness --richness-preset rich \
-  --richness-theme egyptian
+./tools/dungeon_explore.sh --richness --preset rich --theme egyptian
 ```
+
+The launcher verifies or builds the cached BSP/LIT pair, then starts
+`bsp_beta --m3-richness-v1` with that complete prebuilt closure. The initial
+world reuses the cache; later Generate actions still use the production
+Richness worker and atomic mount transaction.
 
 **Published package layout:**
 
@@ -725,33 +729,24 @@ output. Key error codes:
 | `PlacementExhausted` / `TopologyExhausted` | search exhaustion |
 | `ThemeInvarianceViolated` | theme selection altered blueprint geometry |
 
-### Pacing and Variation Controls
+### UI-Only Authoring Preferences
 
-Richness V1 exposes two UI-only non-canonical controls for authoring
-convenience:
-
-- **Pacing plan**: controls the distribution of landmarks, zones, and
-  archetype density along the critical path. Values are `uniform`,
-  `frontloaded`, `backloaded`, or `peaked`. Pacing affects where content
-  clusters, not what content is generated — the same blueprint regenerated
-  with a different pacing plan may produce different geometry.
-- **Variation seed**: a secondary `u64` seed that perturbs within the
-  committed topology envelope without changing room placement or topology.
-  Changes to the variation seed invalidate cached BSP output.
-
-These controls are **not canonical provenance** — they exist for exploration
-and tuning in the explorer GUI only. They are excluded from request identity
-hashing, canonical export, package manifests, and determinism guarantees. A
-package published without them uses the preset defaults.
+The explorer also retains non-canonical authoring preferences for pacing
+(`relaxed`, `normal`, `intense`), variation intensity (`subtle`, `moderate`,
+`wild`), prop density, and light density. They are saved separately from the
+canonical request and affect only the explorer authoring view. They are not
+inputs to `RichnessDocumentV1`, package generation, request identity, or
+manifest hashes. Production generation is controlled by the canonical seed,
+preset, theme, extent, landmarks, zones, cave mode, vertical openings, and
+budget ceiling.
 
 ### In-Game Explorer GUI
 
 The windowed `bsp_beta --m3-richness-v1` path provides a mode-exclusive
-Richness overlay with the same F1 (keyboard) and F2 (mouse) interaction
-model as the baseline M3 GUI. The overlay exposes every public Richness
-control: seed, extent, preset, theme, landmarks, zones, cave mode, vertical
-openings, budget ceiling, pacing plan, and variation seed. Generate snapshots
-the validated draft; Apply & Close commits only after the matching latest
+Richness overlay opened with F3 (keyboard) or F4 (mouse), leaving the baseline
+M3 F1/F2 bindings unchanged. The overlay exposes every canonical Richness
+control plus the separate UI-only authoring preferences described above.
+Generate snapshots the validated draft; Apply & Close commits only after the matching latest
 request succeeds. The pipeline reuses the existing background worker, package
 publication, coordinator validation, and detached-mount retirement paths.
 

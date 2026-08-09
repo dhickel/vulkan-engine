@@ -607,9 +607,9 @@ The windowed `bsp_beta --m3-richness-v1` path provides an in-game Richness
 configuration overlay. The interaction model is identical to the baseline M3
 GUI (see §20.17 of the dungeon generation specification):
 
-- **F1 Keyboard mode**: arrows navigate, Enter edits, Tab/Shift+Tab move
+- **F3 Keyboard mode**: arrows navigate, Enter edits, Tab/Shift+Tab move
   between groups, +/- adjust numeric fields, Escape closes.
-- **F2 Mouse mode**: pointer clicks select fields, dropdowns, steppers,
+- **F4 Mouse mode**: pointer clicks select fields, dropdowns, steppers,
   checkboxes, and actions.
 - **Device exclusivity**: keyboard and mouse modes never coexist; when
   either is open, the other device class and gameplay routing are blocked.
@@ -622,16 +622,12 @@ M3: Richness generation → `.map` staging → ericw compilation → atomic
 package publication → strict authorization → hidden renderer preparation →
 coordinator validation/commit → detached-mount retirement.
 
-The overlay exposes every public Richness control plus two UI-only
-non-canonical controls:
-
-- **Pacing plan** (`uniform`, `frontloaded`, `backloaded`, `peaked`):
-  controls archetype density distribution along the critical path. Affects
-  where content clusters, not what content is generated. Not included in
-  request identity hashing or canonical export.
-- **Variation seed**: a secondary `u64` seed that perturbs within committed
-  topology envelopes. Changes invalidate cached BSP output. Not included in
-  request identity hashing or canonical export.
+The overlay exposes every canonical Richness control plus four UI-only
+non-canonical authoring preferences: pacing (`relaxed`, `normal`, `intense`),
+variation intensity (`subtle`, `moderate`, `wild`), prop density, and light
+density. These preferences are persisted separately for the explorer view.
+They are not generator inputs and are excluded from canonical export, request
+identity, package generation, and manifest hashes.
 
 ### 18.6 Evidence Paths
 
