@@ -5,6 +5,7 @@
 
 ## Git Commit
 
+11c8e95a
 ## Change Summary
 
 Adjusted the BSP beta player movement controller: the player is now a skinnier asymmetric box (narrower sideways than forward), walks faster, slides along walls instead of stopping dead, and supports a no-clip toggle (C to enable, Escape to disable).
