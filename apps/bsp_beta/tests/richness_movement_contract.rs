@@ -9,8 +9,9 @@ use bsp::LoadOptions;
 use bsp_beta::player_navigation::{
     BspMovementState, BspMovementWorld, BspPlayerMovementController, MovementInput,
     AIR_CONTROL_FACTOR, BSP_FIXED_DT, GRAVITY_ENGINE, JUMP_SPEED_ENGINE, LADDER_SPEED_ENGINE,
-    PLAYER_HALF_EXTENTS_ENGINE, PLAYER_HALF_HEIGHT_QUAKE, STEP_HEIGHT_QUAKE,
-    TERMINAL_FALL_SPEED_ENGINE, VOLUME_ENTRY_DOT, WALK_SPEED_ENGINE,
+    NO_CLIP_SPEED_ENGINE, PLAYER_HALF_EXTENTS_ENGINE, PLAYER_HALF_EXTENTS_QUAKE,
+    PLAYER_HALF_HEIGHT_QUAKE, STEP_HEIGHT_QUAKE, TERMINAL_FALL_SPEED_ENGINE, VOLUME_ENTRY_DOT,
+    WALK_SPEED_ENGINE,
 };
 use glam::Vec3;
 use std::path::{Path, PathBuf};
@@ -132,6 +133,64 @@ fn compile_fixture_twice() -> Result<FixtureArtifacts, String> {
     Ok(first)
 }
 
+fn box_brush(x0: i32, x1: i32, y0: i32, y1: i32, z0: i32, z1: i32, texture: &str) -> String {
+    format!(
+        "{{\n\
+( {x0} {y0} {z0} ) ( {x1} {y0} {z0} ) ( {x1} {y1} {z0} ) \"{texture}\" 0 0 0 0.25 0.25\n\
+( {x0} {y0} {z1} ) ( {x0} {y1} {z1} ) ( {x1} {y1} {z1} ) \"{texture}\" 0 0 0 0.25 0.25\n\
+( {x0} {y0} {z0} ) ( {x0} {y0} {z1} ) ( {x1} {y0} {z1} ) \"{texture}\" 0 0 0 0.25 0.25\n\
+( {x0} {y1} {z0} ) ( {x1} {y1} {z0} ) ( {x1} {y1} {z1} ) \"{texture}\" 0 0 0 0.25 0.25\n\
+( {x0} {y0} {z0} ) ( {x0} {y1} {z0} ) ( {x0} {y1} {z1} ) \"{texture}\" 0 0 0 0.25 0.25\n\
+( {x1} {y0} {z0} ) ( {x1} {y0} {z1} ) ( {x1} {y1} {z1} ) \"{texture}\" 0 0 0 0.25 0.25\n\
+}}\n"
+    )
+}
+
+fn compile_gap_fixture() -> Result<FixtureArtifacts, String> {
+    let (profile, tools) = pinned_profile_and_tools()?;
+    let source = tempfile::Builder::new()
+        .prefix("richness-gap-contract-source-")
+        .tempdir()
+        .map_err(|error| format!("source tempdir: {error}"))?;
+    let work = tempfile::Builder::new()
+        .prefix("richness-gap-contract-work-")
+        .tempdir()
+        .map_err(|error| format!("work tempdir: {error}"))?;
+    let map_path = source.path().join("gap_contract.map");
+    let mut map = String::from("{\n\"classname\" \"worldspawn\"\n\"wad\" \"cc0_dungeon_v2.wad\"\n");
+    for brush in [
+        box_brush(0, 256, 0, 256, 0, 16, "bs_floor"),
+        box_brush(0, 256, 0, 256, 128, 144, "bs_ceil"),
+        box_brush(0, 256, 0, 16, 0, 144, "bs_wall"),
+        box_brush(0, 256, 240, 256, 0, 144, "bs_wall"),
+        box_brush(0, 16, 0, 256, 0, 144, "bs_wall"),
+        box_brush(240, 256, 0, 256, 0, 144, "bs_wall"),
+        // X gap: 24 Quake units between x=100 and x=124, passable for ±10 strafe width.
+        box_brush(80, 100, 80, 176, 16, 128, "bs_wall"),
+        box_brush(124, 144, 80, 176, 16, 128, "bs_wall"),
+        // Y gap: 24 Quake units between y=100 and y=124, not passable for ±16 forward length.
+        box_brush(176, 224, 80, 100, 16, 128, "bs_wall"),
+        box_brush(176, 224, 124, 144, 16, 128, "bs_wall"),
+    ] {
+        map.push_str(&brush);
+    }
+    map.push_str("}\n{\n\"classname\" \"info_player_start\"\n\"origin\" \"200 200 64\"\n}\n");
+    std::fs::write(&map_path, map).map_err(|error| format!("write gap map: {error}"))?;
+    let result = engine_pack::compiler::compile_map(
+        &map_path,
+        &profile,
+        work.path(),
+        &palette_path(),
+        Some(&tools),
+        &[wad_path()],
+    )
+    .map_err(|error| format!("gap compile: {error}"))?;
+    Ok(FixtureArtifacts {
+        bsp: result.bsp_data,
+        lit: result.lit_data.ok_or("gap fixture produced no LIT")?,
+    })
+}
+
 fn artifacts() -> &'static FixtureArtifacts {
     FIXTURE
         .get_or_init(compile_fixture_twice)
@@ -140,7 +199,10 @@ fn artifacts() -> &'static FixtureArtifacts {
 }
 
 fn load_world() -> bsp::BspWorld {
-    let artifacts = artifacts();
+    load_artifacts(artifacts(), "enhanced-v3-richness-controller")
+}
+
+fn load_artifacts(artifacts: &FixtureArtifacts, source_identity: &str) -> bsp::BspWorld {
     let options = LoadOptions {
         strict: true,
         palette: Some(std::fs::read(palette_path()).expect("read palette")),
@@ -150,10 +212,10 @@ fn load_world() -> bsp::BspWorld {
             std::fs::read(wad_path()).expect("read WAD"),
         )],
         texture_overrides: Vec::new(),
-        source_identity: "enhanced-v3-richness-controller".into(),
+        source_identity: source_identity.into(),
     };
     let world = bsp::BspLoader::load(&artifacts.bsp, &options)
-        .unwrap_or_else(|report| panic!("strict controller reload failed: {report}"));
+        .unwrap_or_else(|report| panic!("strict reload failed for {source_identity}: {report}"));
     assert!(world.diagnostics.is_empty(), "strict reload diagnostics");
     world
 }
@@ -222,6 +284,67 @@ fn controller_fixture_is_warning_free_deterministic_and_strict() {
     ] {
         assert!(raw.contains(witness), "compiled entities lost '{witness}'");
     }
+}
+
+#[test]
+fn asymmetric_player_box_uses_unexpanded_leaf_contents() {
+    let world = load_world();
+    let qte = QuakeToEngine::default();
+    assert!(
+        !bsp::point_contents_with_transform(
+            engine_pos(48.0, 144.0, 40.0),
+            &world.nodes,
+            &world.leaves,
+            &world.planes,
+            &qte,
+        )
+        .is_solid(),
+        "leaf tree must report empty before the platform face"
+    );
+    assert!(
+        bsp::point_contents_with_transform(
+            engine_pos(64.0, 144.0, 16.0),
+            &world.nodes,
+            &world.leaves,
+            &world.planes,
+            &qte,
+        )
+        .is_solid(),
+        "leaf tree must report the platform brush as solid"
+    );
+
+    let mover = controller(&world, engine_pos(32.0, 144.0, 40.0));
+    for offset in [Vec3::new(10.0, 0.0, 0.0), Vec3::new(0.0, 16.0, 0.0)] {
+        assert!(
+            !bsp::point_contents_with_transform(
+                engine_pos(32.0 + offset.x, 144.0 + offset.y, 40.0 + offset.z),
+                &world.nodes,
+                &world.leaves,
+                &world.planes,
+                &qte,
+            )
+            .is_solid(),
+            "asymmetric box witness point {offset:?} must be clear"
+        );
+    }
+    assert!(
+        mover.player_box_is_clear_at(engine_pos(54.0, 144.0, 40.0)),
+        "sideways half extent must be exactly 10 Quake units at the platform face"
+    );
+
+    let gap_artifacts = compile_gap_fixture().expect("compile gap fixture");
+    let gap_world = load_artifacts(&gap_artifacts, "asymmetric-gap-contract");
+    let gap_movement_world =
+        BspMovementWorld::from_bsp(&gap_world, qte.scale).expect("gap movement world");
+    let gap = BspPlayerMovementController::new(engine_pos(32.0, 32.0, 40.0), gap_movement_world);
+    assert!(
+        gap.player_box_is_clear_at(engine_pos(112.0, 128.0, 40.0)),
+        "24-unit X gap must pass the 20-unit strafe width"
+    );
+    assert!(
+        !gap.player_box_is_clear_at(engine_pos(200.0, 112.0, 40.0)),
+        "24-unit Y gap must reject the 32-unit forward length"
+    );
 }
 
 #[test]
@@ -457,14 +580,42 @@ fn one_way_drop_locks_input_lands_and_cannot_return() {
 }
 
 #[test]
+fn no_clip_state_moves_freely_and_disables_on_request() {
+    let world = load_world();
+    let mut mover = controller(&world, engine_pos(32.0, 144.0, 40.0));
+    assert!(!mover.is_no_clip());
+    assert!(mover.toggle_no_clip());
+    assert!(mover.is_no_clip());
+    let start = mover.position();
+    mover.fixed_step(
+        MovementInput::new(Vec3::new(1.0, 1.0, 0.0), 1.0, true),
+        BSP_FIXED_DT,
+    );
+    let delta = mover.position() - start;
+    assert!(delta.x > 0.0, "no-clip must move horizontally: {delta:?}");
+    assert!(
+        delta.y > 0.0,
+        "no-clip must accept vertical input: {delta:?}"
+    );
+    assert!((mover.velocity().length() - NO_CLIP_SPEED_ENGINE).abs() < 1.0e-5);
+    mover.set_no_clip(false);
+    assert!(!mover.is_no_clip());
+    assert_eq!(mover.velocity(), Vec3::ZERO);
+}
+
+#[test]
 fn frozen_controller_constants_are_decision_ready() {
     let scale = QuakeToEngine::default().scale;
-    assert!((PLAYER_HALF_EXTENTS_ENGINE.x - 16.0 * scale).abs() < 1.0e-6);
+    assert_eq!(PLAYER_HALF_EXTENTS_QUAKE, Vec3::new(10.0, 24.0, 16.0));
+    assert!((PLAYER_HALF_EXTENTS_ENGINE.x - 10.0 * scale).abs() < 1.0e-6);
     assert!((PLAYER_HALF_EXTENTS_ENGINE.y - 24.0 * scale).abs() < 1.0e-6);
     assert!((PLAYER_HALF_EXTENTS_ENGINE.z - 16.0 * scale).abs() < 1.0e-6);
+    assert!(PLAYER_HALF_EXTENTS_QUAKE.x * 2.0 < 24.0);
+    assert!(PLAYER_HALF_EXTENTS_QUAKE.z * 2.0 > 24.0);
     assert_eq!(PLAYER_HALF_HEIGHT_QUAKE, 24.0);
     assert_eq!(BSP_FIXED_DT, 1.0 / 60.0);
-    assert_eq!(WALK_SPEED_ENGINE, 1.0);
+    assert_eq!(WALK_SPEED_ENGINE, 1.8);
+    assert_eq!(NO_CLIP_SPEED_ENGINE, 2.8);
     assert_eq!(STEP_HEIGHT_QUAKE, 24.0);
     assert_eq!(JUMP_SPEED_ENGINE, 4.0);
     assert_eq!(GRAVITY_ENGINE, 9.8);

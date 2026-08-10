@@ -130,6 +130,7 @@ Recurring evidence, assumptions, gotchas, and corrections for the BSP Map Suppor
 - `PlayerMover` existing in `player_navigation.rs` did not mean the BSP beta used it; before Phase 05, `main.rs` translated the camera through `FPSController`. A helper characterization is not active-path evidence. Trace construction from mount data through loop state, input sampling, fixed-step invocation, and camera publication.
 - Maps with revision-qualified Richness descriptors now use `BspPlayerMovementController`; maps without them intentionally retain free-camera translation. Regeneration must replace controller collision/descriptors atomically because compiled entity indexes, model bounds, and stable volume IDs are generation-local.
 - Overlapping ladder volumes do not become safe merely by rejecting unordered iteration. Freeze a total order (priority, compiled entity source order, stable ID) and test the selected ID. One-way drops similarly need a lower-landing threshold and a post-landing jump witness; checking only that the state eventually becomes grounded does not prove non-return.
+- The asymmetric BSP beta player-box change samples movement with app-owned point-hull traces, but existing Richness fixtures still depend on stored player-hull behavior for clip-only vertical/headroom/landing surfaces. If vertical checks are converted wholesale to hull-0 point samples without a compatibility fallback, controller fixture starts can appear start-solid or miss clip-only floors even though the shipped controller previously moved correctly.
 
 ## Engine Relevance
 - The existing engine has all integration foundations (slot+generation handles, fence-aware retirement, neutral geometry DTOs, `SceneBounds::Known`, transactional scene persistence, Rapier collider shapes).
@@ -974,3 +975,10 @@ Recurring evidence, assumptions, gotchas, and corrections for the BSP Map Suppor
 - The patched `imgui-rs-vulkan-renderer` owns Vulkan pipelines, descriptors, textures, and an allocator and destroys them from `Drop`. Calling its explicit `destroy()` and then letting the field drop causes double destruction; leaving the field until after `ash::Device::destroy_device` calls through a dead dispatch table and can SIGSEGV.
 - `VkRenderCore::drop` must `take()` and drop `VkImgui` exactly once after `device_wait_idle` and before any logical-device destruction. On terminal device loss, continue to forget it because no Vulkan-calling destructor is safe.
 - Reproduce lifecycle fixes with a real window close, not only timeout termination: the 2026-07-27 X11/RADV close run handled `WM_DELETE_WINDOW` and exited status 0 after the repair.
+
+### BSP Beta Asymmetric Controller Must Use Leaf Contents for Horizontal Box Collision (2026-08-10)
+
+- In current ericw-compiled fixtures, stored hull 0 and hull 1 can point at the same pre-expanded player clipnode tree. Sampling an app-owned box through `StoredHull::Point` therefore double-expands horizontal collision and makes a nominal 20x32 Quake box wider than the old player hull.
+- Horizontal asymmetric player-box checks must use unexpanded leaf-tree contents via `point_contents_with_transform`; keep stored player-hull traces for vertical landing/headroom/climb/drop compatibility.
+- Step-up near a vertical riser can receive `starts_solid` from the stored player hull even when the unexpanded asymmetric box can step. Probe the stored hull first, then permit the step lift only when the leaf-sampled box destination is clear.
+- Tests that generate temporary `.map` sources for `engine_pack::compiler::compile_map` must keep the source map outside the compiler work directory; the compiler wrapper copies/cleans work files. Quake brush planes also require the classic spaced `( x y z )` syntax for this profile.

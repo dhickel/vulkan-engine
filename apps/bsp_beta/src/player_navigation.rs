@@ -3,9 +3,10 @@
 //! [`PlayerMover`] is the legacy point-trace helper retained for existing
 //! direct navigation tests. [`BspPlayerMovementController`] is the active
 //! Richness boundary used by the BSP beta frame loop when a map contains
-//! qualified climb/drop descriptors. It traces the player origin through the
-//! compiler-preexpanded player hull and owns gravity, stepping, jumping,
-//! ladder, overlap, reset, and one-way-drop state.
+//! qualified climb/drop descriptors. It keeps vertical checks on the stored
+//! player hull, but resolves horizontal movement with an app-owned asymmetric
+//! box sampled against the unexpanded leaf tree. The controller owns gravity,
+//! stepping, jumping, ladder, overlap, reset, and one-way-drop state.
 
 use bsp::coords::QuakeToEngine;
 use bsp::{self, StoredHull, TraceResult};
@@ -14,11 +15,17 @@ use std::collections::BTreeSet;
 
 /// Player hull half-height in Quake units.
 pub const PLAYER_HALF_HEIGHT_QUAKE: f32 = 24.0;
+/// Asymmetric app-owned player half-extents in Quake units.
+///
+/// Engine X is the player's sideways strafe width, engine Z is forward/back,
+/// and engine Y is up. The BSP stored hull contracts remain unchanged; active
+/// horizontal movement samples this box against unexpanded leaf contents.
+pub const PLAYER_HALF_EXTENTS_QUAKE: Vec3 = Vec3::new(10.0, PLAYER_HALF_HEIGHT_QUAKE, 16.0);
 /// Player hull half-extents at the default 0.0254 scale.
 pub const PLAYER_HALF_EXTENTS_ENGINE: Vec3 = Vec3::new(
-    16.0 * 0.0254,
-    PLAYER_HALF_HEIGHT_QUAKE * 0.0254, // Z extent → engine Y (up)
-    16.0 * 0.0254,                     // Y extent → engine -Z
+    PLAYER_HALF_EXTENTS_QUAKE.x * 0.0254,
+    PLAYER_HALF_EXTENTS_QUAKE.y * 0.0254,
+    PLAYER_HALF_EXTENTS_QUAKE.z * 0.0254,
 );
 
 /// Fixed-step player mover using BSP clipnode traces.
@@ -153,8 +160,10 @@ impl PlayerMover {
 
 /// Active-controller fixed step.
 pub const BSP_FIXED_DT: f32 = 1.0 / 60.0;
-/// Existing BSP beta horizontal speed, retained for Richness movement.
-pub const WALK_SPEED_ENGINE: f32 = 1.0;
+/// BSP beta horizontal walk speed.
+pub const WALK_SPEED_ENGINE: f32 = 1.8;
+/// Free-fly speed used while no-clip is active.
+pub const NO_CLIP_SPEED_ENGINE: f32 = 2.8;
 /// Maximum automatic step height.
 pub const STEP_HEIGHT_QUAKE: f32 = 24.0;
 /// Upward jump impulse.
@@ -173,12 +182,16 @@ pub const VOLUME_ENTRY_DOT: f32 = 0.5;
 const CONVENTION_REVISION: &str = "enhanced-v3-richness-conventions/v1";
 const GROUND_PROBE_QUAKE: f32 = 2.0;
 const DROP_LANDING_MIN_QUAKE: f32 = 32.0;
+const TRACE_BACKOFF: f32 = 0.001;
+const BOX_SEARCH_ITERATIONS: usize = 8;
 
 /// Input sampled once per display frame and replayed at the fixed-step boundary.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MovementInput {
     /// Camera-relative horizontal intent transformed into engine world space.
     pub wish_direction: Vec3,
+    /// Up/down no-clip intent.
+    pub vertical_axis: f32,
     /// Forward/backward axis. Positive forward climbs up; negative climbs down.
     pub forward_axis: f32,
     /// Initial press of the jump action.
@@ -187,12 +200,14 @@ pub struct MovementInput {
 
 impl MovementInput {
     pub fn new(wish_direction: Vec3, forward_axis: f32, jump_pressed: bool) -> Self {
+        let vertical_axis = wish_direction.y.clamp(-1.0, 1.0);
         let mut wish_direction = Vec3::new(wish_direction.x, 0.0, wish_direction.z);
         if wish_direction.length_squared() > 1.0 {
             wish_direction = wish_direction.normalize();
         }
         Self {
             wish_direction,
+            vertical_axis,
             forward_axis: forward_axis.clamp(-1.0, 1.0),
             jump_pressed,
         }
@@ -406,6 +421,7 @@ pub struct BspPlayerMovementController {
     velocity: Vec3,
     state: BspMovementState,
     diagnostics: Vec<BspMovementDiagnostic>,
+    no_clip: bool,
 }
 
 impl BspPlayerMovementController {
@@ -416,6 +432,7 @@ impl BspPlayerMovementController {
             velocity: Vec3::ZERO,
             state: BspMovementState::Airborne,
             diagnostics: Vec::new(),
+            no_clip: false,
         }
     }
 
@@ -431,6 +448,27 @@ impl BspPlayerMovementController {
         self.velocity
     }
 
+    pub fn is_no_clip(&self) -> bool {
+        self.no_clip
+    }
+
+    pub fn set_no_clip(&mut self, enabled: bool) {
+        if self.no_clip == enabled {
+            return;
+        }
+        self.no_clip = enabled;
+        self.velocity = Vec3::ZERO;
+        if enabled {
+            self.state = BspMovementState::Airborne;
+        }
+    }
+
+    pub fn toggle_no_clip(&mut self) -> bool {
+        let enabled = !self.no_clip;
+        self.set_no_clip(enabled);
+        enabled
+    }
+
     pub fn state(&self) -> &BspMovementState {
         &self.state
     }
@@ -444,8 +482,7 @@ impl BspPlayerMovementController {
     }
 
     pub fn validate_position(&self) -> bool {
-        let trace = self.trace(Vec3::ZERO);
-        !trace.starts_solid && !trace.all_solid
+        self.box_is_clear(self.position)
     }
 
     pub fn take_diagnostics(&mut self) -> Vec<BspMovementDiagnostic> {
@@ -458,6 +495,7 @@ impl BspPlayerMovementController {
         self.position = position;
         self.velocity = Vec3::ZERO;
         self.state = BspMovementState::Airborne;
+        self.no_clip = false;
         self.diagnostics.clear();
     }
 
@@ -477,7 +515,14 @@ impl BspPlayerMovementController {
     }
 
     pub fn fixed_step(&mut self, input: MovementInput, dt: f32) {
-        if !self.is_active() || !dt.is_finite() || dt <= 0.0 {
+        if !dt.is_finite() || dt <= 0.0 {
+            return;
+        }
+        if self.no_clip {
+            self.step_no_clip(input, dt);
+            return;
+        }
+        if !self.is_active() {
             return;
         }
 
@@ -509,7 +554,75 @@ impl BspPlayerMovementController {
         }
     }
 
-    fn trace(&self, delta: Vec3) -> TraceResult {
+    fn player_half_extents(&self) -> Vec3 {
+        PLAYER_HALF_EXTENTS_QUAKE * self.world.qte.scale
+    }
+
+    fn box_sample_offsets(&self) -> [Vec3; 14] {
+        let e = (self.player_half_extents() - Vec3::splat(TRACE_BACKOFF)).max(Vec3::ZERO);
+        [
+            // Eight corners prove the actual asymmetric extents against the
+            // unexpanded leaf tree; six face centers catch thin slabs that pass
+            // between corners without reintroducing compiler-expanded hulls.
+            Vec3::new(-e.x, -e.y, -e.z),
+            Vec3::new(-e.x, -e.y, e.z),
+            Vec3::new(e.x, -e.y, -e.z),
+            Vec3::new(e.x, -e.y, e.z),
+            Vec3::new(-e.x, e.y, -e.z),
+            Vec3::new(-e.x, e.y, e.z),
+            Vec3::new(e.x, e.y, -e.z),
+            Vec3::new(e.x, e.y, e.z),
+            Vec3::new(-e.x, 0.0, 0.0),
+            Vec3::new(e.x, 0.0, 0.0),
+            Vec3::new(0.0, -e.y, 0.0),
+            Vec3::new(0.0, e.y, 0.0),
+            Vec3::new(0.0, 0.0, -e.z),
+            Vec3::new(0.0, 0.0, e.z),
+        ]
+    }
+
+    fn leaf_point_is_clear(&self, position: Vec3) -> bool {
+        !bsp::point_contents_with_transform(
+            position,
+            &self.world.nodes,
+            &self.world.leaves,
+            &self.world.planes,
+            &self.world.qte,
+        )
+        .is_solid()
+    }
+
+    fn box_is_clear(&self, position: Vec3) -> bool {
+        self.box_sample_offsets()
+            .into_iter()
+            .all(|offset| self.leaf_point_is_clear(position + offset))
+    }
+
+    fn clear_horizontal_fraction(&self, delta: Vec3) -> f32 {
+        if delta.length_squared() <= 1.0e-10 {
+            return 1.0;
+        }
+        if self.box_is_clear(self.position + delta) {
+            return 1.0;
+        }
+        if !self.box_is_clear(self.position) {
+            return 0.0;
+        }
+
+        let mut low = 0.0;
+        let mut high = 1.0;
+        for _ in 0..BOX_SEARCH_ITERATIONS {
+            let mid = (low + high) * 0.5;
+            if self.box_is_clear(self.position + delta * mid) {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        low
+    }
+
+    fn trace_player_hull(&self, delta: Vec3) -> TraceResult {
         bsp::trace_line(
             self.position,
             self.position + delta,
@@ -522,18 +635,64 @@ impl BspPlayerMovementController {
     }
 
     fn grounded(&self) -> bool {
-        let trace = self.trace(Vec3::NEG_Y * self.world.qte.scale * GROUND_PROBE_QUAKE);
+        let trace = self.trace_player_hull(Vec3::NEG_Y * self.world.qte.scale * GROUND_PROBE_QUAKE);
         !trace.no_hit && !trace.starts_solid && trace.plane_normal.y > 0.5
     }
 
-    fn move_fraction(&mut self, delta: Vec3) -> TraceResult {
-        let trace = self.trace(delta);
+    fn box_grounded(&self) -> bool {
+        let e = (self.player_half_extents() - Vec3::splat(TRACE_BACKOFF)).max(Vec3::ZERO);
+        let probe = self.world.qte.scale * GROUND_PROBE_QUAKE;
+        [
+            Vec3::new(-e.x, -e.y - probe, -e.z),
+            Vec3::new(-e.x, -e.y - probe, e.z),
+            Vec3::new(e.x, -e.y - probe, -e.z),
+            Vec3::new(e.x, -e.y - probe, e.z),
+            Vec3::new(0.0, -e.y - probe, 0.0),
+        ]
+        .into_iter()
+        .any(|offset| !self.leaf_point_is_clear(self.position + offset))
+    }
+
+    fn move_vertical_fraction(&mut self, delta: Vec3) -> TraceResult {
+        let trace = self.trace_player_hull(delta);
         if trace.no_hit {
             self.position += delta;
         } else if !trace.starts_solid && trace.hit_fraction > 1.0e-6 {
-            self.position += delta * (trace.hit_fraction - 0.001).max(0.0);
+            self.position += delta * (trace.hit_fraction - TRACE_BACKOFF).max(0.0);
         }
         trace
+    }
+
+    fn move_box_fraction(&mut self, delta: Vec3) -> f32 {
+        let fraction = self.clear_horizontal_fraction(delta);
+        self.position += delta * fraction;
+        fraction
+    }
+
+    fn move_slide(&mut self, delta: Vec3) -> bool {
+        let start = self.position;
+        let fraction = self.move_box_fraction(delta);
+        if fraction >= 1.0 {
+            return true;
+        }
+
+        let remaining = delta * (1.0 - fraction);
+        for axis_delta in [
+            Vec3::new(remaining.x, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, remaining.z),
+        ] {
+            if axis_delta.length_squared() > 1.0e-10 {
+                self.move_box_fraction(axis_delta);
+            }
+        }
+        self.position.distance_squared(start) > 1.0e-10
+    }
+
+    fn step_no_clip(&mut self, input: MovementInput, dt: f32) {
+        let direction = (input.wish_direction + Vec3::Y * input.vertical_axis).normalize_or_zero();
+        self.velocity = direction * NO_CLIP_SPEED_ENGINE;
+        self.position += self.velocity * dt;
+        self.state = BspMovementState::Airborne;
     }
 
     fn try_enter_volume(&mut self, input: MovementInput) {
@@ -580,7 +739,7 @@ impl BspPlayerMovementController {
     }
 
     fn step_standard(&mut self, input: MovementInput, dt: f32) {
-        let was_grounded = self.grounded();
+        let was_grounded = self.grounded() || self.box_grounded();
         let desired = input.wish_direction * WALK_SPEED_ENGINE;
         if was_grounded {
             self.velocity.x = desired.x;
@@ -605,7 +764,7 @@ impl BspPlayerMovementController {
 
         let vertical = Vec3::Y * self.velocity.y * dt;
         if vertical.length_squared() > 1.0e-10 {
-            let trace = self.move_fraction(vertical);
+            let trace = self.move_vertical_fraction(vertical);
             if !trace.no_hit {
                 if self.velocity.y < 0.0 && trace.plane_normal.y > 0.5 {
                     self.velocity.y = 0.0;
@@ -619,7 +778,7 @@ impl BspPlayerMovementController {
             }
         }
 
-        self.state = if self.grounded() && self.velocity.y <= 0.0 {
+        self.state = if (self.grounded() || self.box_grounded()) && self.velocity.y <= 0.0 {
             BspMovementState::Grounded
         } else {
             BspMovementState::Airborne
@@ -628,27 +787,46 @@ impl BspPlayerMovementController {
 
     fn move_horizontal(&mut self, delta: Vec3, allow_step: bool) {
         let start = self.position;
-        let direct = self.move_fraction(delta);
-        if direct.no_hit || direct.starts_solid || !allow_step {
+        let direct_fraction = self.clear_horizontal_fraction(delta);
+        if direct_fraction >= 1.0 {
+            self.position += delta;
+            return;
+        }
+        if !allow_step || direct_fraction <= 0.0 && !self.box_is_clear(self.position) {
+            self.move_slide(delta);
             return;
         }
 
-        self.position = start;
         let step = self.world.qte.scale * STEP_HEIGHT_QUAKE;
-        let up = self.move_fraction(Vec3::Y * step);
-        if !up.no_hit {
-            self.position = start;
-            return;
+        let up_start = self.position;
+        let up = self.move_vertical_fraction(Vec3::Y * step);
+        let stepped_up = if up.no_hit {
+            true
+        } else if up.starts_solid && self.box_is_clear(up_start + Vec3::Y * step) {
+            // The stored player hull can report start-solid beside a step
+            // because the compiler-expanded hull is wider than this controller's
+            // asymmetric box. Keep the stored-hull probe first, then allow the
+            // app-owned box to lift when the unexpanded destination is clear.
+            self.position = up_start + Vec3::Y * step;
+            true
+        } else {
+            false
+        };
+        if stepped_up {
+            let stepped = self.position;
+            let moved_across = self.move_slide(delta);
+            if moved_across {
+                let down = self.move_vertical_fraction(Vec3::NEG_Y * (step + self.world.qte.scale));
+                if !down.starts_solid && !down.no_hit && down.plane_normal.y > 0.5 {
+                    return;
+                }
+            } else {
+                self.position = stepped;
+            }
         }
-        let across = self.move_fraction(delta);
-        if !across.no_hit {
-            self.position = start;
-            return;
-        }
-        let down = self.move_fraction(Vec3::NEG_Y * (step + self.world.qte.scale));
-        if down.starts_solid || down.no_hit || down.plane_normal.y <= 0.5 {
-            self.position = start;
-        }
+
+        self.position = start;
+        self.move_slide(delta);
     }
 
     fn step_climbing(
@@ -681,7 +859,7 @@ impl BspPlayerMovementController {
         }
 
         self.velocity = Vec3::Y * input.forward_axis * LADDER_SPEED_ENGINE;
-        let trace = self.move_fraction(self.velocity * dt);
+        let trace = self.move_vertical_fraction(self.velocity * dt);
         if !trace.no_hit {
             if input.forward_axis > 0.0 && trace.plane_normal.y < -0.5 {
                 // The ladder shaft is capped by solid structure: the climb is
@@ -722,8 +900,8 @@ impl BspPlayerMovementController {
         self.velocity.z = retained_horizontal.z;
         self.velocity.y = (self.velocity.y - GRAVITY_ENGINE * dt).max(-TERMINAL_FALL_SPEED_ENGINE);
         let horizontal = Vec3::new(self.velocity.x * dt, 0.0, self.velocity.z * dt);
-        self.move_fraction(horizontal);
-        let trace = self.move_fraction(Vec3::Y * self.velocity.y * dt);
+        self.move_slide(horizontal);
+        let trace = self.move_vertical_fraction(Vec3::Y * self.velocity.y * dt);
         let minimum_descent = self.world.qte.scale * DROP_LANDING_MIN_QUAKE;
         if !trace.no_hit
             && self.velocity.y < 0.0
@@ -741,17 +919,15 @@ impl BspPlayerMovementController {
         }
     }
 
-    /// Point contents remains an independent strict-world witness; movement
-    /// collision itself always uses the compiler-preexpanded player hull.
+    /// Point contents remains an independent strict-world witness; horizontal
+    /// movement collision samples an app-owned asymmetric box against the same
+    /// unexpanded leaf tree.
     pub fn point_is_clear(&self) -> bool {
-        !bsp::point_contents_with_transform(
-            self.position,
-            &self.world.nodes,
-            &self.world.leaves,
-            &self.world.planes,
-            &self.world.qte,
-        )
-        .is_solid()
+        self.leaf_point_is_clear(self.position)
+    }
+
+    pub fn player_box_is_clear_at(&self, position: Vec3) -> bool {
+        self.box_is_clear(position)
     }
 }
 

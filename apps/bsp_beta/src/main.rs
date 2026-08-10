@@ -24,6 +24,7 @@ use bsp_beta::m3_gui::{Action as M3Action, GuiAction, GuiMode, M3Gui};
 use bsp_beta::physics_bridge::PhysicsBridge;
 use bsp_beta::player_navigation::{
     BspMovementWorld, BspPlayerMovementController, MovementInput, BSP_FIXED_DT,
+    NO_CLIP_SPEED_ENGINE, WALK_SPEED_ENGINE,
 };
 use bsp_beta::richness_generation::{
     self, production_richness_executor, ExecutorOutcome, RichnessGenerationController,
@@ -1028,6 +1029,15 @@ fn run_richness_windowed(
                             shutdown(coordinator, &mut renderer, &mut scene);
                             elwt.exit();
                             return;
+                        }
+                        if let Some(key) = initial_physical_key(&event) {
+                            if let Some(action) = no_clip_hotkey_from_key(
+                                key,
+                                ElementState::Pressed,
+                                false,
+                            ) {
+                                loop_state.handle_no_clip_hotkey(action);
+                            }
                         }
                     }
                     RichnessGuiMode::None => {}
@@ -2167,7 +2177,7 @@ fn capture_staged_app_state(
 
 fn apply_mounted_app_state(loop_state: &mut AppLoopState, mounted: MountedAppState) {
     loop_state.camera = Camera::new(mounted.spawn);
-    loop_state.fps_controller = FPSController::new(0.002, 1.0);
+    loop_state.fps_controller = FPSController::new(0.002, WALK_SPEED_ENGINE);
     loop_state
         .movement_controller
         .reset_for_regeneration(mounted.spawn, mounted.movement_world);
@@ -2674,6 +2684,26 @@ fn mode_hotkey_from_key(key: KeyCode, state: ElementState, repeat: bool) -> Opti
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoClipHotkey {
+    Toggle,
+    Disable,
+}
+
+fn no_clip_hotkey_from_key(
+    key: KeyCode,
+    state: ElementState,
+    repeat: bool,
+) -> Option<NoClipHotkey> {
+    (state == ElementState::Pressed && !repeat)
+        .then(|| match key {
+            KeyCode::KeyC => Some(NoClipHotkey::Toggle),
+            KeyCode::Escape => Some(NoClipHotkey::Disable),
+            _ => None,
+        })
+        .flatten()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum M3InputClass {
     Keyboard,
     Mouse,
@@ -2962,6 +2992,11 @@ fn run_m3_generate_windowed(
                             return;
                         }
                         if let Some(key) = initial_physical_key(&event) {
+                            if let Some(action) =
+                                no_clip_hotkey_from_key(key, ElementState::Pressed, false)
+                            {
+                                loop_state.handle_no_clip_hotkey(action);
+                            }
                             let snapshot = match gui.try_borrow() {
                                 Ok(gui) => hotkey_generation_snapshot(key, ctrl_held, &gui.config),
                                 Err(_) => Err("M3 GUI is busy; hotkey was not applied".into()),
@@ -3754,6 +3789,7 @@ struct AppLoopState {
     entity_node_map: EntityNodeMap,
     /// When false, FPS controller update and gameplay input are skipped.
     pub gameplay_input_enabled: bool,
+    no_clip: bool,
 }
 
 impl AppLoopState {
@@ -3766,7 +3802,7 @@ impl AppLoopState {
             BspPlayerMovementController::new(camera.get_position(), movement_world);
         Self {
             camera,
-            fps_controller: FPSController::new(0.002, 1.0),
+            fps_controller: FPSController::new(0.002, WALK_SPEED_ENGINE),
             movement_controller,
             input: InputSystem::new(),
             action_events: InputActionEventEmitter::new(),
@@ -3784,6 +3820,32 @@ impl AppLoopState {
             entity_source_models: std::collections::HashMap::new(),
             entity_node_map: EntityNodeMap::default(),
             gameplay_input_enabled: true,
+            no_clip: false,
+        }
+    }
+
+    fn set_no_clip(&mut self, enabled: bool) {
+        if self.no_clip == enabled {
+            return;
+        }
+        self.no_clip = enabled;
+        self.movement_controller.set_no_clip(enabled);
+        let speed = if enabled {
+            NO_CLIP_SPEED_ENGINE
+        } else {
+            WALK_SPEED_ENGINE
+        };
+        self.fps_controller = FPSController::new(0.002, speed);
+        log::info!(
+            "BSP no-clip {}",
+            if enabled { "enabled" } else { "disabled" }
+        );
+    }
+
+    fn handle_no_clip_hotkey(&mut self, action: NoClipHotkey) {
+        match action {
+            NoClipHotkey::Toggle => self.set_no_clip(!self.no_clip),
+            NoClipHotkey::Disable => self.set_no_clip(false),
         }
     }
 }
@@ -3791,6 +3853,7 @@ impl AppLoopState {
 fn active_movement_input(
     snapshot: &engine::input::InputSnapshot,
     camera: &Camera,
+    no_clip: bool,
 ) -> MovementInput {
     let forward_axis = snapshot.action_value(&ActionId::new("move.forward"))
         - snapshot.action_value(&ActionId::new("move.backward"));
@@ -3801,11 +3864,17 @@ fn active_movement_input(
     forward.y = 0.0;
     forward = forward.normalize_or_zero();
     let right = forward.cross(Vec3::Y).normalize_or_zero();
-    let wish_direction = forward * forward_axis + right * right_axis;
+    let up_axis = if no_clip {
+        snapshot.action_value(&ActionId::new("move.up"))
+            - snapshot.action_value(&ActionId::new("move.down"))
+    } else {
+        0.0
+    };
+    let wish_direction = forward * forward_axis + right * right_axis + Vec3::Y * up_axis;
     MovementInput::new(
         wish_direction,
         forward_axis,
-        snapshot.action_just_pressed(&ActionId::new("move.up")),
+        !no_clip && snapshot.action_just_pressed(&ActionId::new("move.up")),
     )
 }
 
@@ -3845,8 +3914,11 @@ fn render_app_frame(
                 0.0,
                 &mut state.camera,
             );
-            fixed_movement_input =
-                Some(active_movement_input(state.input.snapshot(), &state.camera));
+            fixed_movement_input = Some(active_movement_input(
+                state.input.snapshot(),
+                &state.camera,
+                state.movement_controller.is_no_clip(),
+            ));
         } else {
             // Direct/baseline maps without qualified Richness descriptors keep
             // the existing free-camera behavior unchanged.
@@ -4136,6 +4208,26 @@ mod m3_integration_tests {
         );
         assert_eq!(
             mode_hotkey_from_key(KeyCode::F2, ElementState::Pressed, true),
+            None
+        );
+    }
+
+    #[test]
+    fn no_clip_hotkey_accepts_c_and_escape_initial_presses() {
+        assert_eq!(
+            no_clip_hotkey_from_key(KeyCode::KeyC, ElementState::Pressed, false),
+            Some(NoClipHotkey::Toggle)
+        );
+        assert_eq!(
+            no_clip_hotkey_from_key(KeyCode::Escape, ElementState::Pressed, false),
+            Some(NoClipHotkey::Disable)
+        );
+        assert_eq!(
+            no_clip_hotkey_from_key(KeyCode::KeyC, ElementState::Pressed, true),
+            None
+        );
+        assert_eq!(
+            no_clip_hotkey_from_key(KeyCode::KeyC, ElementState::Released, false),
             None
         );
     }
