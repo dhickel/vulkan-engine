@@ -437,8 +437,13 @@ pub(crate) fn validate_textures(
 
 // ── 6. Protected routes ─────────────────────────────────────────────────
 
+/// Frozen clear approach depth on each side of a portal wall.
+const PORTAL_APPROACH_DEPTH: i128 = 64;
+
 /// 64×80 route witnesses must be unobstructed by any brush geometry.
-/// Every portal throat must have a clear 64×80 opening.
+/// Every portal throat and its 64-unit approach on both sides of the owning
+/// wall must remain clear of late free-form cave, prop, and wall-treatment
+/// geometry after those layers have been materialized.
 pub(crate) fn validate_protected_routes(ir: &AssemblyIR) -> Result<(), RichnessError> {
     // For each opening that is a portal (has portal_id), verify the throat
     // is exactly 64 wide and 80 tall and no other brush intrudes.
@@ -494,6 +499,71 @@ pub(crate) fn validate_protected_routes(ir: &AssemblyIR) -> Result<(), RichnessE
                             brush.id.raw(),
                             brush.role.tag(),
                             opening.id.raw()
+                        ),
+                    ));
+                }
+            }
+
+            let approach_bounds = match opening.wall_role {
+                BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => (
+                    ox0,
+                    oy0 - PORTAL_APPROACH_DEPTH,
+                    oz0,
+                    ox1,
+                    oy1 + PORTAL_APPROACH_DEPTH,
+                    oz1,
+                ),
+                BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => (
+                    ox0 - PORTAL_APPROACH_DEPTH,
+                    oy0,
+                    oz0,
+                    ox1 + PORTAL_APPROACH_DEPTH,
+                    oy1,
+                    oz1,
+                ),
+                _ => {
+                    return Err(validation_error(
+                        RichnessErrorCode::SemanticInfeasible,
+                        RichnessErrorCategory::SemanticInfeasibility,
+                        "validation.protected_routes",
+                        format!(
+                            "portal opening {} has non-cardinal wall role {}",
+                            opening.id.raw(),
+                            opening.wall_role.tag()
+                        ),
+                    ));
+                }
+            };
+            let approach = ConvexBrush::make_box(
+                (approach_bounds.0, approach_bounds.3),
+                (approach_bounds.1, approach_bounds.4),
+                (approach_bounds.2, approach_bounds.5),
+            )
+            .map_err(|error| {
+                validation_error(
+                    RichnessErrorCode::SemanticInfeasible,
+                    RichnessErrorCategory::SemanticInfeasibility,
+                    "validation.protected_routes",
+                    format!("invalid portal approach solid: {error}"),
+                )
+            })?;
+            for brush in ir.brushes.values() {
+                if richness_geom::brushes_overlap(&brush.brush, &approach)? {
+                    return Err(validation_error(
+                        RichnessErrorCode::SemanticInfeasible,
+                        RichnessErrorCategory::SemanticInfeasibility,
+                        "validation.protected_routes",
+                        format!(
+                            "brush {} ({}, reservation {}, {:?}) blocks the 64-unit approach {:?} for opening {} / portal {:?} (reservation {}, {:?})",
+                            brush.id.raw(),
+                            brush.role.tag(),
+                            brush.owner.reservation_id.raw(),
+                            brush.brush.aabb().ok(),
+                            approach_bounds,
+                            opening.id.raw(),
+                            opening.portal_id.map(|portal| portal.raw()),
+                            opening.owner.reservation_id.raw(),
+                            opening.bounds,
                         ),
                     ));
                 }
@@ -1353,7 +1423,8 @@ mod tests {
     };
     use crate::enhanced_v3::richness::generated_content;
     use crate::enhanced_v3::richness::ids::{
-        ArchetypeIndex, ArchetypeRequestId, BeatId, OpeningAssemblyId, ReservationId, ZoneId,
+        ArchetypeIndex, ArchetypeRequestId, BeatId, OpeningAssemblyId, PortalId, ReservationId,
+        ZoneId,
     };
     use crate::enhanced_v3::richness::theme::THEME_ANCIENT;
 
@@ -1463,6 +1534,42 @@ mod tests {
         let (ir, _) = make_simple_assembly();
         // No openings = no portal throats to check = passes
         assert!(validate_protected_routes(&ir).is_ok());
+    }
+
+    #[test]
+    fn validate_protected_routes_rejects_approach_blocker_outside_throat() {
+        let mut ir = AssemblyIR::new();
+        let attr = make_attr();
+        let blocker_id = ir.alloc_brush_id();
+        ir.insert_brush(BrushAssembly {
+            id: blocker_id,
+            // The portal throat occupies x=0..16. This cave wall starts 32
+            // units beyond its inner face: outside the throat, but inside the
+            // required 64-unit room-side approach.
+            brush: ConvexBrush::make_box((48, 64), (0, 64), (16, 96)).unwrap(),
+            role: BrushAssemblyRole::CaveWall,
+            owner: attr.clone(),
+            cost: make_cost(),
+            support: SupportTarget::World,
+        });
+        ir.openings.insert(
+            OpeningAssemblyId::new(0),
+            OpeningRecord {
+                id: OpeningAssemblyId::new(0),
+                owner_brush_id: BrushAssemblyId::new(99),
+                wall_segment_ids: vec![BrushAssemblyId::new(99)],
+                owner_partition_bounds: (0, 0, 16, 16, 64, 160),
+                wall_role: BrushAssemblyRole::WestWall,
+                owner: attr,
+                bounds: (0, 0, 16, 16, 64, 96),
+                portal_id: Some(PortalId::new(0)),
+                frame_brush_ids: Vec::new(),
+                portal_style: None,
+            },
+        );
+
+        let error = validate_protected_routes(&ir).unwrap_err();
+        assert!(error.context.contains("blocks the 64-unit approach"));
     }
 
     #[test]

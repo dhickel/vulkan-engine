@@ -677,7 +677,7 @@ upload, and frame recording.
 | error type | `V3Error` (45 variants) | `RichnessError` (22 error codes + category) |
 | inheritable controls | none | `InheritedOr<T>` with source tracking |
 | pacing/variation controls | none | UI-only non-canonical controls |
-| entry point | `generate_v3(&config)` | `generate_richness_v1(doc)` |
+| entry point | `generate_v3(&config)` | `generate_richness_v1(&doc)` |
 | CLI | `--class m3` | `--class m3-richness-v1` |
 | package | `enhanced-dungeon-v3` | `enhanced-dungeon-v3-richness-v1` |
 

@@ -912,7 +912,7 @@ isolated contract domain that never mutates baseline V3 types or routes.
 
 ```rust
 pub fn generate_richness_v1(
-    doc: RichnessDocumentV1,
+    doc: &RichnessDocumentV1,
 ) -> Result<RichnessPipelineOutput, RichnessError>
 ```
 

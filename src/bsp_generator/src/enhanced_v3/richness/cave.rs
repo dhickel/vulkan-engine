@@ -47,6 +47,10 @@ pub(crate) const CAVE_SHELL_UNITS: i32 = 16;
 pub(crate) const CAVE_MAX_CANDIDATES: u32 = 16;
 /// Frozen empty threshold: a cell is EMPTY iff density >= this value.
 pub(crate) const CAVE_EMPTY_THRESHOLD: i64 = 0;
+/// Minimum horizontal cave clearance in lattice cells (2 × 32 = 64 units).
+const CAVE_MIN_HORIZONTAL_CLEAR_CELLS: i32 = 2;
+/// Minimum vertical cave clearance in lattice cells (3 × 32 = 96 units ≥ 80).
+const CAVE_MIN_VERTICAL_CLEAR_CELLS: i32 = 3;
 
 /// Canonical cave eligibility decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -521,51 +525,38 @@ fn finish_cave(
     for &(i, j, k) in &component {
         solid[lattice.index(i, j, k)] = false;
     }
-    // A density-field island entirely enclosed by the cave void would become
-    // a floating column after box partitioning. Carve every such disconnected
-    // island into the already-connected empty component. The remaining solid
-    // lattice is therefore retained only where it has a gravity path to the
-    // interior floor before it becomes brush geometry.
-    let mut grounded = vec![false; solid.len()];
-    let mut stack = Vec::new();
+    // A connected point-cell cave can still leave 32-unit slots between
+    // complement boxes. Widen every bounded empty run to the player passage
+    // contract before materializing solids: two horizontal cells give the
+    // exact 64-unit minimum, while three vertical cells give 96 units and
+    // therefore exceed the 80-unit headroom minimum. Widening can detach a
+    // formerly supported solid island, while removing such an island can
+    // expose another short run, so close both rules to a fixed point.
+    loop {
+        let widened = widen_narrow_empty_runs(&lattice, &mut solid);
+        let unsupported_removed = remove_unsupported_solids(&lattice, &mut solid);
+        if !widened && !unsupported_removed {
+            break;
+        }
+    }
+
+    // The final empty-cell list describes the complete carved component,
+    // including clearance cells and unsupported islands removed above.
+    component.clear();
     for k in 0..nz {
         for j in 0..ny {
             for i in 0..nx {
-                let index = lattice.index(i, j, k);
-                if solid[index] && k == 0 {
-                    grounded[index] = true;
-                    stack.push((i, j, k));
-                }
-            }
-        }
-    }
-    while let Some((i, j, k)) = stack.pop() {
-        for (di, dj, dk) in [(0, 0, 1)] {
-            let (ni, nj, nk) = (i + di, j + dj, k + dk);
-            if lattice.in_bounds(ni, nj, nk) {
-                let neighbor = lattice.index(ni, nj, nk);
-                if solid[neighbor] && !grounded[neighbor] {
-                    grounded[neighbor] = true;
-                    stack.push((ni, nj, nk));
-                }
-            }
-        }
-    }
-    for k in 0..nz {
-        for j in 0..ny {
-            for i in 0..nx {
-                let index = lattice.index(i, j, k);
-                if solid[index] && !grounded[index] {
-                    solid[index] = false;
+                if !solid[lattice.index(i, j, k)] {
                     component.push((i, j, k));
                 }
             }
         }
     }
     component.sort_unstable();
-    // Unreachable pockets (empty cells outside the witness component) are
-    // re-solidified: their lattice state flips to solid so the emitted
-    // complement owns every cell exactly once.
+
+    // Unreachable pockets (empty cells outside the witness component) were
+    // re-solidified before clearance widening. Preserve forced witnesses
+    // while recording every widened cell as ordinary empty space.
     for (idx, cell) in solid.iter().enumerate() {
         lattice.cells[idx] = if *cell {
             0
@@ -650,6 +641,207 @@ fn finish_cave(
         solid_boxes,
         candidate_key,
     }
+}
+
+/// Carve short empty runs until every cave opening is at least 64 units wide
+/// in X/Y and at least 80 units high. Runs at the lattice boundary are bounded
+/// by the retained 16-unit host shell and therefore need the same treatment as
+/// runs between two cave solids.
+fn widen_narrow_empty_runs(lattice: &CaveLattice, solid: &mut [bool]) -> bool {
+    let mut widened = false;
+    loop {
+        let mut carve = vec![false; solid.len()];
+        for axis in 0..3 {
+            let (extent, outer_a, outer_b, minimum) = match axis {
+                0 => (
+                    lattice.nx,
+                    lattice.ny,
+                    lattice.nz,
+                    CAVE_MIN_HORIZONTAL_CLEAR_CELLS,
+                ),
+                1 => (
+                    lattice.ny,
+                    lattice.nx,
+                    lattice.nz,
+                    CAVE_MIN_HORIZONTAL_CLEAR_CELLS,
+                ),
+                _ => (
+                    lattice.nz,
+                    lattice.nx,
+                    lattice.ny,
+                    CAVE_MIN_VERTICAL_CLEAR_CELLS,
+                ),
+            };
+            for b in 0..outer_b {
+                for a in 0..outer_a {
+                    let index_at = |position: i32| {
+                        let (i, j, k) = match axis {
+                            0 => (position, a, b),
+                            1 => (a, position, b),
+                            _ => (a, b, position),
+                        };
+                        lattice.index(i, j, k)
+                    };
+                    let mut position = 0;
+                    while position < extent {
+                        if solid[index_at(position)] {
+                            position += 1;
+                            continue;
+                        }
+                        let start = position;
+                        while position < extent && !solid[index_at(position)] {
+                            position += 1;
+                        }
+                        let end = position;
+                        let mut needed = minimum - (end - start);
+                        if needed <= 0 {
+                            continue;
+                        }
+
+                        // Prefer widening in the positive canonical direction;
+                        // then use the negative side if the boundary or an
+                        // earlier carve leaves more clearance necessary.
+                        let mut high = end;
+                        while needed > 0 && high < extent {
+                            let index = index_at(high);
+                            if solid[index] {
+                                carve[index] = true;
+                                needed -= 1;
+                            }
+                            high += 1;
+                        }
+                        let mut low = start - 1;
+                        while needed > 0 && low >= 0 {
+                            let index = index_at(low);
+                            if solid[index] && !carve[index] {
+                                carve[index] = true;
+                                needed -= 1;
+                            }
+                            low -= 1;
+                        }
+                    }
+                }
+            }
+        }
+        if !carve.iter().any(|cell| *cell) {
+            break;
+        }
+        widened = true;
+        for (cell, remove) in solid.iter_mut().zip(carve) {
+            if remove {
+                *cell = false;
+            }
+        }
+    }
+    widened
+}
+
+/// Remove complement islands that no longer have a cell-face support path to
+/// the cave floor. Side contacts are valid support transfers, so the lattice
+/// proof uses all six face-adjacent directions, matching `cave_support_ok`.
+fn remove_unsupported_solids(lattice: &CaveLattice, solid: &mut [bool]) -> bool {
+    let mut supported = vec![false; solid.len()];
+    let mut stack = Vec::new();
+    for j in 0..lattice.ny {
+        for i in 0..lattice.nx {
+            let index = lattice.index(i, j, 0);
+            if solid[index] {
+                supported[index] = true;
+                stack.push((i, j, 0));
+            }
+        }
+    }
+    while let Some((i, j, k)) = stack.pop() {
+        for (di, dj, dk) in [
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ] {
+            let (ni, nj, nk) = (i + di, j + dj, k + dk);
+            if !lattice.in_bounds(ni, nj, nk) {
+                continue;
+            }
+            let neighbor = lattice.index(ni, nj, nk);
+            if solid[neighbor] && !supported[neighbor] {
+                supported[neighbor] = true;
+                stack.push((ni, nj, nk));
+            }
+        }
+    }
+
+    let mut removed = false;
+    for (cell, is_supported) in solid.iter_mut().zip(supported) {
+        if *cell && !is_supported {
+            *cell = false;
+            removed = true;
+        }
+    }
+    removed
+}
+
+fn validate_cave_passage_clearance(result: &CaveResult) -> Result<(), RichnessError> {
+    for axis in 0..3 {
+        let (extent, outer_a, outer_b, minimum, units) = match axis {
+            0 => (
+                result.lattice.nx,
+                result.lattice.ny,
+                result.lattice.nz,
+                CAVE_MIN_HORIZONTAL_CLEAR_CELLS,
+                64,
+            ),
+            1 => (
+                result.lattice.ny,
+                result.lattice.nx,
+                result.lattice.nz,
+                CAVE_MIN_HORIZONTAL_CLEAR_CELLS,
+                64,
+            ),
+            _ => (
+                result.lattice.nz,
+                result.lattice.nx,
+                result.lattice.ny,
+                CAVE_MIN_VERTICAL_CLEAR_CELLS,
+                80,
+            ),
+        };
+        for b in 0..outer_b {
+            for a in 0..outer_a {
+                let state_at = |position: i32| {
+                    let (i, j, k) = match axis {
+                        0 => (position, a, b),
+                        1 => (a, position, b),
+                        _ => (a, b, position),
+                    };
+                    result.lattice.cell_state(i, j, k)
+                };
+                let mut position = 0;
+                while position < extent {
+                    if state_at(position) == 0 {
+                        position += 1;
+                        continue;
+                    }
+                    let start = position;
+                    while position < extent && state_at(position) != 0 {
+                        position += 1;
+                    }
+                    let clear_cells = position - start;
+                    if clear_cells < minimum {
+                        return Err(cave_error(
+                            "clearance.passage",
+                            format!(
+                                "axis {axis} line ({a}, {b}) has {}-unit clear run; requires at least {units}",
+                                clear_cells * CAVE_LATTICE_UNITS
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Emit the cave solids into the assembly with roles, attribution, and
@@ -834,6 +1026,7 @@ fn cave_boxes_support_contact(a: &SolidBox, b: &SolidBox) -> bool {
 /// - solid boxes are non-overlapping and jointly cover every non-empty cell;
 /// - every emitted box is within the host interior.
 pub(crate) fn validate_cave_result(result: &CaveResult) -> Result<(), RichnessError> {
+    validate_cave_passage_clearance(result)?;
     let nx = result.lattice.nx;
     let ny = result.lattice.ny;
     let nz = result.lattice.nz;
@@ -966,6 +1159,47 @@ mod tests {
         assert_eq!(lattice.ny, 23);
         // Both bands: 0..368 shelled -> 16..352 -> 10 cells.
         assert_eq!(lattice.nz, 10);
+    }
+
+    #[test]
+    fn narrow_lattice_opening_is_widened_to_player_clearance() {
+        let mut lattice = CaveLattice {
+            x0: 0,
+            y0: 0,
+            z0: 16,
+            nx: 4,
+            ny: 4,
+            nz: 4,
+            cells: vec![0; 4 * 4 * 4],
+            witnesses: Vec::new(),
+        };
+        let opening = lattice.index(0, 1, 0);
+        let mut solid = vec![true; lattice.cells.len()];
+        solid[opening] = false;
+
+        widen_narrow_empty_runs(&lattice, &mut solid);
+        for (index, is_solid) in solid.iter().enumerate() {
+            lattice.cells[index] = if *is_solid { 0 } else { 1 };
+        }
+
+        let x_clear = (0..lattice.nx)
+            .filter(|i| lattice.cell_state(*i, 1, 0) != 0)
+            .count();
+        let y_clear = (0..lattice.ny)
+            .filter(|j| lattice.cell_state(0, *j, 0) != 0)
+            .count();
+        let z_clear = (0..lattice.nz)
+            .filter(|k| lattice.cell_state(0, 1, *k) != 0)
+            .count();
+        assert!(
+            x_clear >= 2,
+            "horizontal X opening must be at least 64 units"
+        );
+        assert!(
+            y_clear >= 2,
+            "horizontal Y opening must be at least 64 units"
+        );
+        assert!(z_clear >= 3, "vertical opening must be at least 80 units");
     }
 
     #[test]

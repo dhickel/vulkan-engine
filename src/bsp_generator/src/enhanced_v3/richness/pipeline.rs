@@ -369,7 +369,9 @@ pub fn generate_richness_v1(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::enhanced_v3::richness::request::{RichnessDocumentV1, RichnessPreset};
+    use crate::enhanced_v3::richness::request::{
+        InheritedOr, RichnessCaveMode, RichnessDocumentV1, RichnessPreset,
+    };
 
     fn resolved(
         seed: u64,
@@ -381,6 +383,43 @@ mod tests {
             RichnessDocumentV1::new(seed, extent, preset, theme).unwrap(),
         )
         .unwrap()
+    }
+
+    fn assert_all_portal_approaches_clear(output: &RichnessPipelineOutput) {
+        use super::super::assembly::BrushAssemblyRole;
+        let ir = &output.composition.assembly;
+        for opening in ir
+            .openings
+            .values()
+            .filter(|opening| opening.portal_id.is_some())
+        {
+            let (x0, y0, z0, x1, y1, z1) = opening.bounds;
+            let bounds = match opening.wall_role {
+                BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => {
+                    (x0, y0 - 64, z0, x1, y1 + 64, z1)
+                }
+                BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => {
+                    (x0 - 64, y0, z0, x1 + 64, y1, z1)
+                }
+                role => panic!("portal opening has non-cardinal role {role:?}"),
+            };
+            let approach = crate::enhanced_v3::geometry::ConvexBrush::make_box(
+                (bounds.0, bounds.3),
+                (bounds.1, bounds.4),
+                (bounds.2, bounds.5),
+            )
+            .unwrap();
+            let blocker = ir.brushes.values().find(|brush| {
+                super::super::geometry::brushes_overlap(&brush.brush, &approach).unwrap()
+            });
+            assert!(
+                blocker.is_none(),
+                "opening {} approach {:?} blocked by {:?}",
+                opening.id.raw(),
+                bounds,
+                blocker.map(|brush| (brush.id.raw(), brush.role, brush.brush.aabb().ok()))
+            );
+        }
     }
 
     #[test]
@@ -487,6 +526,64 @@ mod tests {
             outcome.is_err(),
             "tiny-extent Rich must fail atomically at request validation"
         );
+    }
+
+    #[test]
+    fn seed_99_inherited_and_explicit_keep_portals_and_passages_clear() {
+        let inherited_doc =
+            RichnessDocumentV1::new(99, 2048, RichnessPreset::Sparse, RichnessTheme::Ancient)
+                .expect("inherited seed 99 request");
+        let corpus_doc = RichnessDocumentV1::from_canonical_bytes(
+            b"seed:99\nextent:2048\npreset:sparse\ntheme:ancient\ngate:richness-v1\nrequest_schema:enhanced-v3-richness-request/v1\nalgorithm:enhanced-v3-richness-algorithm/v1\ncontent:enhanced-v3-richness-content/v1\npreset_revision:enhanced-v3-richness-presets/v1\ntheme_revision:enhanced-v3-richness-themes/v1\nasset:enhanced-v3-richness-assets/v1\nconvention:enhanced-v3-richness-conventions/v1\nlandmarks:inherited\nzones:inherited\ncave_mode:inherited\nvertical_openings:inherited\nbudget:inherited\n",
+        )
+        .expect("explicit corpus seed 99 request bytes");
+        assert_eq!(
+            inherited_doc, corpus_doc,
+            "CLI defaults and explicit corpus bytes must resolve from the same authored request"
+        );
+        let explicit_doc = RichnessDocumentV1::with_all_explicit(
+            inherited_doc.seed(),
+            inherited_doc.extent(),
+            inherited_doc.preset(),
+            inherited_doc.theme(),
+            inherited_doc.request_schema_revision(),
+            inherited_doc.algorithm_revision(),
+            inherited_doc.content_revision(),
+            inherited_doc.preset_revision(),
+            inherited_doc.theme_revision(),
+            inherited_doc.asset_revision(),
+            inherited_doc.convention_revision(),
+            InheritedOr::Explicit(1),
+            InheritedOr::Explicit(1),
+            InheritedOr::Explicit(RichnessCaveMode::Preferred),
+            InheritedOr::Explicit(0),
+            InheritedOr::Explicit(3000),
+        )
+        .expect("explicit seed 99 request");
+
+        let inherited = generate_richness_v1(&inherited_doc).expect("inherited seed 99 pipeline");
+        let explicit = generate_richness_v1(&explicit_doc).expect("explicit seed 99 pipeline");
+        assert_eq!(
+            inherited.map_text, explicit.map_text,
+            "same effective controls must retain geometry identity"
+        );
+
+        for output in [&inherited, &explicit] {
+            let ir = &output.composition.assembly;
+            assert!(
+                ir.openings
+                    .values()
+                    .any(|opening| opening.portal_id.is_some()),
+                "seed 99 must materialize portal openings"
+            );
+            super::super::validation::validate_protected_routes(ir)
+                .expect("every seed 99 throat and 64-unit approach must be clear");
+            assert_all_portal_approaches_clear(output);
+            if let Some(cave) = &output.composition.cave {
+                super::super::cave::validate_cave_result(cave)
+                    .expect("every cave passage must retain 64x80 clearance");
+            }
+        }
     }
 
     #[test]

@@ -910,7 +910,7 @@ and package manifests remain frozen and unchanged.
 | dispatch | `dungeon_gen --class m3-richness-v1` — production CLI |
 | packaging | `engine_pack enhanced-dungeon-v3-richness-v1` — production package command |
 | explorer | `dungeon_explore.sh --richness` or `--m3-richness-v1` |
-| Rust API | `bsp_generator::generate_richness_v1(doc: RichnessDocumentV1)` |
+| Rust API | `bsp_generator::generate_richness_v1(doc: &RichnessDocumentV1)` |
 | implementation domain | `src/bsp_generator/src/enhanced_v3/richness/` (34 source modules) |
 | baseline V3Config | frozen — Richness does not alter `V3Config`, `V3Preset`, or `NormalClass` |
 | tags | baseline M1/M2 tags, CLI documents, and package manifests remain frozen |

@@ -203,6 +203,7 @@ pub(crate) fn compose_solved_generation(
             &mut assembly,
         )?;
     }
+    prune_portal_approach_decorations(&mut assembly)?;
     let route_shell_ids = materialize_route_shells(
         &generation.topology.routes,
         reservations,
@@ -243,6 +244,9 @@ pub(crate) fn compose_solved_generation(
         theme,
         seed,
     )?;
+    // Presentation props are placed after route shells, so enforce the same
+    // approach exclusion again before the final sealed boundary is built.
+    prune_portal_approach_decorations(&mut assembly)?;
 
     materialize_map_boundary_shell(
         reservations,
@@ -289,6 +293,63 @@ pub(crate) fn compose_solved_generation(
 /// ceiling slab, and the two long side walls spanning the route envelope.
 /// The portal frames sit at the room boundaries; the shells connect to them
 /// and carry the portal posts (which extend into the corridor).
+/// Remove optional room/prop mass that would obstruct a portal's protected
+/// room-side or route-side approach. These assemblies are presentation detail;
+/// retaining one is never permitted to narrow the frozen 64×80 route.
+fn prune_portal_approach_decorations(ir: &mut AssemblyIR) -> Result<(), RichnessError> {
+    let approaches = ir
+        .openings
+        .values()
+        .filter(|opening| opening.portal_id.is_some())
+        .map(|opening| {
+            let (x0, y0, z0, x1, y1, z1) = opening.bounds;
+            let bounds = match opening.wall_role {
+                BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => {
+                    (x0, y0 - 64, z0, x1, y1 + 64, z1)
+                }
+                BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => {
+                    (x0 - 64, y0, z0, x1 + 64, y1, z1)
+                }
+                _ => {
+                    return Err(composition_error(
+                        "pipeline.portal_approach",
+                        format!("portal opening {} has non-cardinal wall", opening.id.raw()),
+                    ));
+                }
+            };
+            ConvexBrush::make_box(
+                (bounds.0, bounds.3),
+                (bounds.1, bounds.4),
+                (bounds.2, bounds.5),
+            )
+            .map_err(|error| composition_error("pipeline.portal_approach", error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let removable = ir
+        .brushes
+        .values()
+        .filter(|brush| {
+            matches!(
+                brush.role,
+                BrushAssemblyRole::InteriorMass
+                    | BrushAssemblyRole::InteriorColumn
+                    | BrushAssemblyRole::VaultRib
+                    | BrushAssemblyRole::MonolithSolid
+            )
+        })
+        .filter(|brush| {
+            approaches.iter().any(|approach| {
+                richness_geom::brushes_overlap(&brush.brush, approach).unwrap_or(true)
+            })
+        })
+        .map(|brush| brush.id)
+        .collect::<Vec<_>>();
+    for id in removable {
+        ir.remove_brush(id);
+    }
+    Ok(())
+}
+
 fn materialize_route_shells(
     routes: &[super::topology::CommittedRoute],
     reservations: &BTreeMap<ReservationId, ReservationRecord>,
@@ -388,6 +449,15 @@ fn materialize_route_shells(
         }
     }
 
+    // A route's portal throat has a frozen 64-unit clear approach on each
+    // side of the endpoint wall. Other route shells can share its owner and
+    // cross that approach, so suppress their boundary cells here rather than
+    // letting a later route wall pinch the already-materialized opening.
+    // Floors and ceilings remain owned by the room or route clear union; only
+    // wall cells are removed from the protected swept volume.
+    let protected_approach_cells = portal_approach_cells(ir)?;
+    wall_cells.retain(|cell, _| !protected_approach_cells.contains(cell));
+
     let mut shell_ids = Vec::new();
     emit_route_cell_groups(
         &floor_cells,
@@ -408,6 +478,47 @@ fn materialize_route_shells(
         ir,
     )?;
     Ok(shell_ids)
+}
+
+fn portal_approach_cells(ir: &AssemblyIR) -> Result<BTreeSet<(u8, i32, i32)>, RichnessError> {
+    let mut cells = BTreeSet::new();
+    for opening in ir
+        .openings
+        .values()
+        .filter(|opening| opening.portal_id.is_some())
+    {
+        let (x0, y0, z0, x1, y1, _z1) = opening.bounds;
+        let (ax0, ay0, ax1, ay1) = match opening.wall_role {
+            BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => {
+                (x0, y0 - 64, x1, y1 + 64)
+            }
+            BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => (x0 - 64, y0, x1 + 64, y1),
+            _ => {
+                return Err(composition_error(
+                    "pipeline.route.portal_approach",
+                    format!("portal opening {} has non-cardinal wall", opening.id.raw()),
+                ));
+            }
+        };
+        let layer = if z0 >= i128::from(super::footprint::UPPER_FLOOR_Z) {
+            1
+        } else {
+            0
+        };
+        let quantum = richness_geom::QUANTUM;
+        for x in ax0.div_euclid(quantum)..(ax1 - 1).div_euclid(quantum) + 1 {
+            for y in ay0.div_euclid(quantum)..(ay1 - 1).div_euclid(quantum) + 1 {
+                let x = i32::try_from(x).map_err(|_| {
+                    composition_error("pipeline.route.portal_approach", "X cell exceeds i32")
+                })?;
+                let y = i32::try_from(y).map_err(|_| {
+                    composition_error("pipeline.route.portal_approach", "Y cell exceeds i32")
+                })?;
+                cells.insert((layer, x, y));
+            }
+        }
+    }
+    Ok(cells)
 }
 
 fn emit_route_cell_groups(
@@ -1124,17 +1235,20 @@ fn find_portal_wall(
     }) {
         return Ok((brush.id, requested_role));
     }
-    if let Some(chain) = ir.shared_wall_chains.values().find(|chain| {
-        chain.owner_reservation_id == portal.endpoint_reservation_id
-            || chain.sharing_reservation_id == portal.endpoint_reservation_id
-    }) {
+    for chain in ir.shared_wall_chains.values() {
         let brush = ir.brushes.get(&chain.owner_brush_id).ok_or_else(|| {
             composition_error(
                 "pipeline.portal.wall",
                 format!("shared wall chain {} lost its owner brush", chain.id.raw()),
             )
         })?;
-        return Ok((brush.id, brush.role));
+        let serves_endpoint = (chain.owner_reservation_id == portal.endpoint_reservation_id
+            && brush.role == requested_role)
+            || (chain.sharing_reservation_id == portal.endpoint_reservation_id
+                && opposite_cardinal_wall(brush.role) == Some(requested_role));
+        if serves_endpoint {
+            return Ok((brush.id, brush.role));
+        }
     }
     Err(composition_error(
         "pipeline.portal.wall",
@@ -1153,6 +1267,16 @@ fn wall_role_for_dir(direction: Dir) -> BrushAssemblyRole {
         Dir::South => BrushAssemblyRole::SouthWall,
         Dir::East => BrushAssemblyRole::EastWall,
         Dir::West => BrushAssemblyRole::WestWall,
+    }
+}
+
+fn opposite_cardinal_wall(role: BrushAssemblyRole) -> Option<BrushAssemblyRole> {
+    match role {
+        BrushAssemblyRole::NorthWall => Some(BrushAssemblyRole::SouthWall),
+        BrushAssemblyRole::SouthWall => Some(BrushAssemblyRole::NorthWall),
+        BrushAssemblyRole::EastWall => Some(BrushAssemblyRole::WestWall),
+        BrushAssemblyRole::WestWall => Some(BrushAssemblyRole::EastWall),
+        _ => None,
     }
 }
 
@@ -3456,9 +3580,11 @@ fn compose_chamfered_north_wall(
     // NE diagonal: wall side: x + y <= ne_diag_d → -x - y >= -ne_diag_d
     planes.push(mk(-1, -1, 0, -ne_diag_d)?);
 
+    // Project-wide cardinal convention: North is the footprint's y-min
+    // boundary and South is y-max. This helper constructs the y-max wall.
     build_and_insert_wall(
         planes,
-        BrushAssemblyRole::NorthWall,
+        BrushAssemblyRole::SouthWall,
         attr,
         cost,
         floor_id,
@@ -3506,9 +3632,11 @@ fn compose_chamfered_south_wall(
     // SE diagonal (wall side: -x + y >= se_diag_d, complementary to SE diag wall which has x - y >= -se_diag_d)
     planes.push(mk(-1, 1, 0, se_diag_d)?);
 
+    // This helper constructs the y-min wall, which is North under the
+    // cardinal convention used by topology and rectangular composition.
     build_and_insert_wall(
         planes,
-        BrushAssemblyRole::SouthWall,
+        BrushAssemblyRole::NorthWall,
         attr,
         cost,
         floor_id,
@@ -4455,6 +4583,37 @@ mod tests {
 
         // Verify no overlaps
         validate_no_overlaps(&ir).unwrap();
+    }
+
+    #[test]
+    fn chamfered_cardinal_roles_match_topology_direction_convention() {
+        let fp = make_test_fp(20, 20);
+        let attr = make_test_attr();
+        let cost = CostSource {
+            dimension: BudgetDimension::SourceFaces,
+            face_count: 6,
+        };
+        let mut ir = AssemblyIR::new();
+        compose_chamfered(&fp, &attr, cost, 0, &mut ir).unwrap();
+        let (_, qy0, _, qy1) = richness_geom::footprint_quake_bounds(&fp);
+        let north = ir
+            .brushes
+            .values()
+            .find(|brush| brush.role == BrushAssemblyRole::NorthWall)
+            .unwrap()
+            .brush
+            .aabb()
+            .unwrap();
+        let south = ir
+            .brushes
+            .values()
+            .find(|brush| brush.role == BrushAssemblyRole::SouthWall)
+            .unwrap()
+            .brush
+            .aabb()
+            .unwrap();
+        assert_eq!(north.0 .1, qy0, "North must be the y-min boundary");
+        assert_eq!(south.1 .1, qy1, "South must be the y-max boundary");
     }
 
     #[test]

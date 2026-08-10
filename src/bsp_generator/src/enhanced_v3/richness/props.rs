@@ -254,17 +254,18 @@ fn protected_regions(
             continue;
         }
         let bounds = footprint_quake_bounds(&record.footprint);
-        // Route/portal/turn regions are dilated by 32 units so props never
-        // block route mouths or portal approaches.
+        // Route/portal/turn regions are dilated by the full 64-unit passage
+        // minimum so props cannot sit in a portal throat approach or pinch a
+        // route mouth below player-clear width.
         let (mut qx0, mut qy0, mut qx1, mut qy1) = (bounds.0, bounds.1, bounds.2, bounds.3);
         if matches!(
             record.kind,
             ReservationKind::Route | ReservationKind::PortalThroat | ReservationKind::Turn
         ) {
-            qx0 -= 32;
-            qy0 -= 32;
-            qx1 += 32;
-            qy1 += 32;
+            qx0 -= 64;
+            qy0 -= 64;
+            qx1 += 64;
+            qy1 += 64;
         }
         let x0 = qx0.max(rx0);
         let y0 = qy0.max(ry0);

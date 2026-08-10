@@ -635,13 +635,15 @@ Richness worker and atomic mount transaction.
 
 ```text
 richness_package/
-├── richness_dungeon.map          ← generated .map source
-├── richness_dungeon.bsp          ← compiled BSP2
-├── richness_dungeon.lit          ← colored light data
-├── palette.lmp                   ← theme palette
-├── <theme>.wad                   ← theme WAD (e.g., cc0_richness_ancient.wad)
+├── <name>.map                    ← generated .map source
+├── <name>.bsp                    ← compiled BSP2
+├── <name>.lit                    ← colored light data
+├── <name>.request.json           ← canonical Richness request bytes
+├── <name>.generation.txt         ← canonical generation metadata
+├── <name>.manifest.toml          ← package closure and artifact hashes
 ├── metadata.json                 ← generation evidence + request provenance
-├── request.txt                   ← canonical request export bytes
+├── palette.lmp                   ← theme palette
+├── richness_<theme>_v1.wad       ← selected theme WAD
 └── textures/                     ← PBR companions for referenced miptex identities
     ├── <identity>_norm.png
     └── <identity>_gloss.png
@@ -651,15 +653,18 @@ richness_package/
 
 ```rust
 use bsp_generator::{
-    generate_richness_v1,
-    RichnessDocumentV1, RichnessPreset, RichnessTheme,
+    generate_richness_v1, InheritedOr, RichnessAlgorithmRevision,
+    RichnessAssetRevision, RichnessCaveMode, RichnessContentRevision,
+    RichnessConventionRevision, RichnessDocumentV1, RichnessPreset,
+    RichnessPresetRevision, RichnessRequestSchemaRevision, RichnessTheme,
+    RichnessThemeRevision,
 };
 
 // All-inherited Sparse dungeon (1 landmark, Ancient theme)
 let doc = RichnessDocumentV1::new(
     42, 2048, RichnessPreset::Sparse, RichnessTheme::Ancient
 )?;
-let output = generate_richness_v1(doc)?;
+let output = generate_richness_v1(&doc)?;
 println!("Generated {} faces, {} lights",
     output.actual.faces, output.actual.lights);
 
@@ -667,13 +672,13 @@ println!("Generated {} faces, {} lights",
 let doc = RichnessDocumentV1::with_all_explicit(
     99, 3072, RichnessPreset::Rich, RichnessTheme::Egyptian,
     // revision envelope (all V1)
-    Default::default(), // RichnessRequestSchemaRevision::V1
-    Default::default(), // RichnessAlgorithmRevision::V1
-    Default::default(), // RichnessContentRevision::V1
-    Default::default(), // RichnessPresetRevision::V1
-    Default::default(), // RichnessThemeRevision::V1
-    Default::default(), // RichnessAssetRevision::V1
-    Default::default(), // RichnessConventionRevision::V1
+    RichnessRequestSchemaRevision::V1,
+    RichnessAlgorithmRevision::V1,
+    RichnessContentRevision::V1,
+    RichnessPresetRevision::V1,
+    RichnessThemeRevision::V1,
+    RichnessAssetRevision::V1,
+    RichnessConventionRevision::V1,
     // controls
     InheritedOr::Explicit(3),                    // landmarks
     InheritedOr::Explicit(2),                    // zones
@@ -681,7 +686,7 @@ let doc = RichnessDocumentV1::with_all_explicit(
     InheritedOr::Explicit(4),                    // vertical openings
     InheritedOr::Inherited,                      // budget (use preset default)
 )?;
-let output = generate_richness_v1(doc)?;
+let output = generate_richness_v1(&doc)?;
 ```
 
 ### Determinism and Theme Invariance
