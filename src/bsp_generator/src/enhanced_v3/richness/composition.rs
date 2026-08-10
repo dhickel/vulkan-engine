@@ -244,9 +244,12 @@ pub(crate) fn compose_solved_generation(
         theme,
         seed,
     )?;
-    // Presentation props are placed after route shells, so enforce the same
-    // approach exclusion again before the final sealed boundary is built.
+    // Presentation and vertical structures materialize after portal fitting.
+    // Drop optional mass first, then carve any remaining structural partition
+    // around the committed approach volumes before closing the exterior
+    // boundary; the frozen route contract outranks every later treatment.
     prune_portal_approach_decorations(&mut assembly)?;
+    carve_portal_approach_blockers(&mut assembly)?;
 
     materialize_map_boundary_shell(
         reservations,
@@ -346,6 +349,132 @@ fn prune_portal_approach_decorations(ir: &mut AssemblyIR) -> Result<(), Richness
         .collect::<Vec<_>>();
     for id in removable {
         ir.remove_brush(id);
+    }
+    Ok(())
+}
+
+/// Split any later axis-aligned partition that crosses a protected portal
+/// approach. The omitted volume becomes part of the route's traversable union;
+/// preserving an intact blocker would violate the frozen 64×80 clearance.
+fn carve_portal_approach_blockers(ir: &mut AssemblyIR) -> Result<(), RichnessError> {
+    let approaches = ir
+        .openings
+        .values()
+        .filter(|opening| opening.portal_id.is_some())
+        .map(|opening| {
+            let (x0, y0, z0, x1, y1, z1) = opening.bounds;
+            match opening.wall_role {
+                BrushAssemblyRole::NorthWall | BrushAssemblyRole::SouthWall => {
+                    Ok((x0, y0 - 64, z0, x1, y1 + 64, z1))
+                }
+                BrushAssemblyRole::EastWall | BrushAssemblyRole::WestWall => {
+                    Ok((x0 - 64, y0, z0, x1 + 64, y1, z1))
+                }
+                _ => Err(composition_error(
+                    "pipeline.portal_approach",
+                    format!("portal opening {} has non-cardinal wall", opening.id.raw()),
+                )),
+            }
+        })
+        .collect::<Result<Vec<RouteBounds>, _>>()?;
+    let blockers = ir
+        .brushes
+        .values()
+        .filter(|brush| !brush.role.is_slab())
+        .filter(|brush| {
+            approaches.iter().any(|bounds| {
+                ConvexBrush::make_box(
+                    (bounds.0, bounds.3),
+                    (bounds.1, bounds.4),
+                    (bounds.2, bounds.5),
+                )
+                .is_ok_and(|approach| {
+                    richness_geom::brushes_overlap(&brush.brush, &approach).unwrap_or(true)
+                })
+            })
+        })
+        .map(|brush| brush.id)
+        .collect::<Vec<_>>();
+
+    for id in blockers {
+        let original =
+            ir.brushes.get(&id).cloned().ok_or_else(|| {
+                composition_error("pipeline.portal_approach", "blocker disappeared")
+            })?;
+        if original.brush.faces.len() != 6 {
+            return Err(composition_error(
+                "pipeline.portal_approach",
+                format!(
+                    "non-box {} {} intersects a protected portal approach",
+                    id.raw(),
+                    original.role.tag()
+                ),
+            ));
+        }
+        let (min, max) = original
+            .brush
+            .aabb()
+            .map_err(|error| composition_error("pipeline.portal_approach", error.to_string()))?;
+        let mut pieces = vec![(min.0, min.1, min.2, max.0, max.1, max.2)];
+        for approach in &approaches {
+            pieces = pieces
+                .into_iter()
+                .flat_map(|piece| subtract_route_bounds(piece, *approach))
+                .collect();
+        }
+        if pieces.is_empty() {
+            return Err(composition_error(
+                "pipeline.portal_approach",
+                format!(
+                    "protected portal approach would remove complete {} {}",
+                    id.raw(),
+                    original.role.tag()
+                ),
+            ));
+        }
+        ir.remove_brush(id);
+        let mut replacements = Vec::new();
+        for piece in pieces {
+            replacements.push(build_and_insert_box(
+                (piece.0, piece.3),
+                (piece.1, piece.4),
+                (piece.2, piece.5),
+                original.role,
+                &original.owner,
+                original.cost,
+                ir,
+            )?);
+        }
+        replace_brush_references(ir, id, &replacements)?;
+    }
+    Ok(())
+}
+
+fn replace_brush_references(
+    ir: &mut AssemblyIR,
+    old_id: BrushAssemblyId,
+    replacements: &[BrushAssemblyId],
+) -> Result<(), RichnessError> {
+    for opening in ir.openings.values_mut() {
+        if opening.owner_brush_id == old_id {
+            opening.owner_brush_id = *replacements.first().ok_or_else(|| {
+                composition_error("pipeline.portal_approach", "portal owner wall was removed")
+            })?;
+        }
+        if opening.wall_segment_ids.contains(&old_id) {
+            opening.wall_segment_ids.retain(|id| *id != old_id);
+            opening
+                .wall_segment_ids
+                .extend(replacements.iter().copied());
+            opening.wall_segment_ids.sort_unstable();
+            opening.wall_segment_ids.dedup();
+        }
+        if opening.frame_brush_ids.contains(&old_id) {
+            return Err(composition_error(
+                "pipeline.portal_approach",
+                "portal frame intersects its own protected approach",
+            ));
+        }
     }
     Ok(())
 }

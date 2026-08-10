@@ -438,12 +438,32 @@ impl GenConfig {
                 features |= flag;
             }
         }
+        // Mixed-mode intent assigns one family per participating room. Keep
+        // randomized allowlists within that allocation capacity rather than
+        // asking the sealed planner to satisfy more distinct identities than
+        // the selected preset exposes.
+        let grammar_capacity = if grammar_mode == GrammarMode::Mixed {
+            rooms as usize
+        } else {
+            GRAMMAR_FAMILIES.len()
+        };
         let grammar_families = GRAMMAR_FAMILIES
             .iter()
             .filter(|family| features.enables_family(family))
+            .take(grammar_capacity)
             .map(|tag| (*tag).to_owned())
             .collect();
         let feature_density = 0.50 + pick(next()?, 51) as f32 / 100.0;
+        // Rich's constrained, explicitly configured composition can safely
+        // commit ten independently placed assemblies. Higher randomized
+        // densities ask its protected-volume planner for an eleventh identity
+        // that is not universally placeable, so keep this UI preset inside its
+        // proven allocation envelope.
+        let feature_density = if preset == V3Preset::Rich {
+            feature_density.min(0.59)
+        } else {
+            feature_density
+        };
         let minlight = pick(next()?, 128) as u32;
         let light_count = pick(next()?, rooms as u64 + 1) as u32;
 

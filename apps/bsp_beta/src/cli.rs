@@ -713,10 +713,7 @@ pub(crate) fn usage_text() -> String {
     let _ = writeln!(out, "  --richness-seed <u64>     Richness generation seed");
     let _ = writeln!(out, "  --richness-extent <u32>   Richness XY extent");
     let _ = writeln!(out, "  --richness-pacing <name>  relaxed|normal|intense");
-    let _ = writeln!(
-        out,
-        "  --richness-variation <name>  subtle|moderate|wild"
-    );
+    let _ = writeln!(out, "  --richness-variation <name>  subtle|moderate|wild");
     let _ = writeln!(out, "  --richness-landmarks <u32>  Critical-path landmarks");
     let _ = writeln!(out, "  --richness-zones <u32>      Semantic zone count");
     let _ = writeln!(
